@@ -1,5 +1,8 @@
 # CMS Compliance Framework — Schema Design
 
+> **Note:** the CRC / Override design here has since evolved — CRC lost its `Batch_Version` (it's current-state, one row per source/table/date, updated in place, never versioned) and gained batch close, and a new `ComplianceExtractControl` table plus `Override_Ty` on Override now cover late arrival, correction, and reuse together. See [`reuse-and-late-arrival.md`](reuse-and-late-arrival.md) for the current design and worked examples.
+
+
 ## Purpose
 A reusable, metadata-driven framework for CMS compliance data submissions
 (Program Audit ODAG/CDAG, Part C ODR, Part C SLIDA, etc.), replacing and
