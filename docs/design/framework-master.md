@@ -47,11 +47,14 @@ kept for history — both are superseded by this document.
   - Approval **requires** `Reuse_Valid_Thru_Dt_Key` — how long the anchor
     may govern before it must be re-approved, even if never revoked.
 - **Late arrival / correction reopen** — a file landing after its CRC row
-  is closed. `Override_Ty` distinguishes `LATE_ARRIVAL_REOPEN` (prior state
-  was `MISSING`) from `CORRECTION_REOPEN` (prior state was `NEW_FILE`, data
-  was wrong). Fully automatic detection (file naming pattern resolves the
-  reporting date) — no `ComplianceRequestInTake` row for this path; that
-  table stays reserved for genuinely business-initiated asks.
+  is closed. `Override_Ty` is set **mechanically**, not by any business
+  input at that moment — it's just whatever `Resolution_Ty` the CRC row
+  already held before the reopen touches it: `LATE_ARRIVAL_REOPEN` if it
+  was `MISSING`, `CORRECTION_REOPEN` if it was `NEW_FILE` (data was
+  wrong). Fully automatic detection (file naming pattern resolves the
+  reporting date) — no `ComplianceRequestInTake` row for *this* path;
+  that table is for the separate, genuinely human step of flagging a
+  problem before the fix exists (§3 step 8, §6 G4).
 - **Files that were never expected are rejected before they reach CRC or
   Override at all** — unrecognized source, unscheduled date, or an exact
   duplicate of what's on file. Quarantined, audit-logged only.
@@ -63,6 +66,24 @@ kept for history — both are superseded by this document.
 ## 2. Tables & final DDLs
 
 ```sql
+CREATE TABLE ComplianceRequestInTake (
+    -- The one table a human writes to directly. Reserved for genuinely
+    -- business-initiated asks — a data-quality flag raised after
+    -- reviewing an extract, an ad-hoc pull, a new cycle's setup. NOT
+    -- touched by the automated file pipeline (see §3, §6 G4).
+    Intake_ID       VARCHAR(50)  PRIMARY KEY,
+    Project_Cd      VARCHAR(50)  NOT NULL,
+    Table_Nm        VARCHAR(50)  NOT NULL,
+    Src_Cd          VARCHAR(50),
+    Req_Dt_Key      DATE,                    -- the business date this ask concerns
+    Req_Ty          VARCHAR(30)  NOT NULL,   -- CORRECTION_REQUEST / CYCLE_INIT / ADHOC_PULL
+    Requested_By    VARCHAR(100) NOT NULL,
+    Requested_Dtts  TIMESTAMP    NOT NULL DEFAULT now(),
+    Rsn             TEXT,
+    Processed_Ind   SMALLINT     NOT NULL DEFAULT 0,
+    Processed_Dtts  TIMESTAMP
+);
+
 CREATE TABLE ComplianceSourceSystem (
     Src_Cd        VARCHAR(50)  PRIMARY KEY,
     Src_Nm        VARCHAR(100) NOT NULL,
@@ -107,6 +128,10 @@ CREATE TABLE ComplianceRequestControl (
     Resolution_Ty         VARCHAR(20)  NOT NULL,   -- NEW_FILE / CARRIED_FORWARD / MISSING
     Used_Btch_ID          VARCHAR(120),
     Late_Arrival_Ind       SMALLINT     NOT NULL DEFAULT 0,
+    Flagged_For_Correction_Ind SMALLINT NOT NULL DEFAULT 0,  -- set by a human ask, not the pipeline (see G4, §6)
+    Flagged_By             VARCHAR(100),
+    Flagged_Dtts            TIMESTAMP,
+    Flag_Rsn                TEXT,
     Batch_Close_Ind        SMALLINT     NOT NULL DEFAULT 0,
     Batch_Closed_Dtts       TIMESTAMP,
     Batch_Closed_By         VARCHAR(100),
@@ -240,6 +265,17 @@ discussion is a piece of this one flow:
    `today > Reuse_Valid_Thru_Dt_Key`, flip that row to `EXPIRED` (audit
    `CARRY_FORWARD_ANCHOR_EXPIRED`) before any resolution logic runs, so no
    run can use a stale-but-still-`APPROVED`-looking anchor.
+8. **Manual data-quality flag** — runs independently of the above, on a
+   business user's action, not a file event. Someone reviewing an extract
+   (or a downstream CMS rejection) decides a submitted batch's *data* is
+   wrong, even though it passed structural validation at load time. They
+   insert a `ComplianceRequestInTake` row (`Req_Ty=CORRECTION_REQUEST`).
+   A lightweight sync sets `Flagged_For_Correction_Ind=Y` on the target
+   CRC row (visibility only — this does **not** touch Override or the
+   extract), logs `DATA_QUALITY_ISSUE_FLAGGED`, and marks the intake row
+   processed. This is purely a marker that a correction is expected;
+   nothing downstream changes until step 5's actual reopen fires when the
+   corrected file arrives, which clears the flag back to `N`.
 
 ## 4. Worked examples
 
@@ -294,6 +330,28 @@ it, silently recreating the exact Jan-vs-May staleness problem the column
 exists to prevent. **Fix:** `ck_override_valid_thru_required` — a `CHECK`
 constraint, not a UI reminder — makes it impossible for a row to reach
 `APPROVED` without one.
+
+**G4 — nothing captured the moment a human decides submitted data is
+wrong, before a fix exists.** `Override_Ty=CORRECTION_REOPEN` correctly
+tells you *after the fact* that a correction happened, by snapshotting
+whatever `Resolution_Ty` was already on the CRC row — but that snapshot
+only fires once the corrected file physically lands. The gap is
+everything before that: a business user reviewing an extract (often days
+or weeks later, sometimes after a CMS rejection) is the *only* one who
+can know the data is wrong — the pipeline validated it as structurally
+fine at load time and has no way to know otherwise. Left unaddressed,
+that discovery had nowhere to go except an ad-hoc conversation with the
+vendor, with no record until the fix eventually arrived. **Fix:**
+`ComplianceRequestInTake` (`Req_Ty=CORRECTION_REQUEST`) is the one table a
+human writes to directly — logging *why* a correction is being chased
+down, before it exists. A lightweight sync sets
+`Flagged_For_Correction_Ind=Y` on the CRC row purely for visibility (it
+does not touch Override or the extract — nothing downstream reacts to a
+flag alone) and logs `DATA_QUALITY_ISSUE_FLAGGED`. The flag clears back to
+`N` only when step 5's real reopen mechanism eventually fires on the
+actual corrected file — so there's now a continuous, queryable trail from
+"we noticed this was wrong" through "here's the fix" instead of a silent
+gap between the two.
 
 **Considered and intentionally left as-is:**
 - *Retroactive correction of already-closed, already-extracted dates

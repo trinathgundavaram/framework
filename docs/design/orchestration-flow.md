@@ -46,6 +46,28 @@ sequenceDiagram
     SF->>EXT: Close extract (Extract_Close_Ind=Y)
 ```
 
+## 1a. The manual flag path (independent of the sequence above)
+
+```mermaid
+sequenceDiagram
+    participant BIZ as Business user
+    participant IT as ComplianceRequestInTake
+    participant SYNC as Sync (Lambda, event-driven off IT inserts)
+    participant CRC as ComplianceRequestControl
+    participant AUD as CMS_ComplianceExceptionsAudit
+    participant VEND as Vendor
+
+    Note over BIZ: Reviews an extract (or a CMS rejection),<br/>decides a submitted batch's DATA is wrong -<br/>the pipeline validated it as structurally fine at load time<br/>and has no way to know otherwise (G4)
+    BIZ->>IT: Insert row, Req_Ty=CORRECTION_REQUEST
+    IT->>SYNC: New row event
+    SYNC->>CRC: Flagged_For_Correction_Ind=Y (visibility only)
+    SYNC->>AUD: Log DATA_QUALITY_ISSUE_FLAGGED
+    SYNC->>IT: Processed_Ind=Y
+    BIZ->>VEND: Chase corrected file (outside the system)
+    VEND-->>CRC: Corrected file eventually lands -> normal §2 flow (F=Yes branch)
+    Note over CRC: Flag clears to N only when the REAL reopen<br/>(CORRECTION_REOPEN) actually fires and is approved -<br/>the flag alone never changes Override or the extract
+```
+
 ## 2. Per-file decision flow (the logic inside the Step Functions workflow)
 
 ```mermaid
@@ -95,6 +117,7 @@ stateDiagram-v2
 | Step | Service | Notes |
 |---|---|---|
 | Daily row creation, expiry sweep | Lambda, triggered by EventBridge | Runs once per `Run_Ty` cadence, before any file processing for the day |
+| Manual data-quality flag sync (§1a) | Lambda, triggered by `ComplianceRequestInTake` insert event | The one part of the pipeline started by a human write, not a file or schedule |
 | File-landed trigger | S3 event notification → Lambda | Starts the per-file Step Functions execution |
 | Per-file decision flow (§2) | Step Functions | One execution per file; each decision node is a Lambda task or a Choice state reading `ComplianceDataSetSourceXwalk` / `ComplianceRequestControl` / `ComplianceBatchOverride` |
 | Rules validation / staging load | Glue job, invoked from the Step Functions workflow | Runs regardless of whether the file will be promoted (G1) — a loaded-but-not-promoted file still passes through this |
@@ -107,6 +130,11 @@ stateDiagram-v2
 - **§1 (sequence)** — the daily rhythm: what's scheduled versus what's
   event-driven, and where the expiry sweep sits relative to file
   processing (before, always).
+- **§1a (sequence)** — the one path in the whole system that starts with
+  a human typing something in, not a file or a clock: flagging that
+  already-submitted data is wrong, days or weeks before any fix exists
+  (G4). Deliberately kept separate from Override — a flag alone changes
+  nothing downstream.
 - **§2 (flowchart)** — the exact branch every file takes, including the
   two fixes from `framework-master.md` §6 inline at the nodes where they
   apply (G1 at the "loaded but not promoted" node, G2 at the "update the
