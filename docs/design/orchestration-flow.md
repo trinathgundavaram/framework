@@ -225,40 +225,44 @@ until a human explicitly revokes it.
 ## 4. Worked example — reopen creation and approval, step by step
 
 Concrete before/after values, using the actual mock-data case: FDR 1003,
-`PARTCODR/ROPENS`, `Req_Dt_Key=2026-01-12`, `Run_Ty=DAILY`. The Jan-13
-file passed validation but was later found to contain incorrect data.
+`PARTCODR/ROPENS`, `Req_Dt_Key=2026-01-10`, `Run_Ty=DAILY`. The file
+arrived on time and passed validation, but was later found to contain
+incorrect data. Note `Btch_ID` throughout: it's built from `Req_Dt_Key`
+(§5 of `framework-master.md`), so it stays **the same value across every
+step** — identity, not a timestamp of when it was last touched.
 
-**Step 0 — state before anything happens (post Jan-13 close)**
+**Step 0 — state before anything happens (post Jan-10 close)**
 
 | Table | Row |
 |---|---|
-| CRC (`Req_ID=9`, say) | `Btch_ID=20260113_PARTCODR_ROPENS_1003_DAILY_2026_1`, `Resolution_Ty=NEW_FILE`, `Used_Btch_ID`=itself, `Batch_Close_Ind=Y` |
+| CRC (`Req_ID=27`, say) | `Btch_ID=20260110_PARTCODR_ROPENS_1003_DAILY_2026_1`, `Resolution_Ty=NEW_FILE`, `Used_Btch_ID`=itself, `Batch_Close_Ind=Y` |
 | Override | *(no row for this grouping — nothing to reopen yet)* |
-| ExtractControl (`Req_Dt_Key=2026-01-12`) | `Extract_Stat=COMPLETE`, `Included_Src_Cds=[1001,1002,1003]`, `Extract_Close_Ind=Y` |
+| ExtractControl (`Req_Dt_Key=2026-01-10`) | `Extract_Stat=COMPLETE`, `Included_Src_Cds=[1001,1002,1003]`, `Extract_Close_Ind=Y` |
 
-**Step 1 — Jan 14: business flags it (§1a, independent of the reopen itself)**
+**Step 1 — Jan 12: business flags it (§1a, independent of the reopen itself)**
 
 `ComplianceRequestInTake` gets a row (`Req_Ty=CORRECTION_REQUEST`,
 `Requested_By=mgarcia`). Sync writes a `ComplianceRequestFileDetail` row
-(`Event_Ty=CORRECTION_FLAGGED`) against `Req_ID=9`. **Nothing else
+(`Event_Ty=CORRECTION_FLAGGED`) against `Req_ID=27`. **Nothing else
 changes** — CRC, Override, and the extract are all still exactly as in
-Step 0. This step exists purely so the gap between "we noticed" and "it's
-fixed" is on record.
+Step 0, including `Btch_ID`. This step exists purely so the gap between
+"we noticed" and "it's fixed" is on record.
 
-**Step 2 — Jan 16: corrected file arrives, gets intercepted at the "closed?" check**
+**Step 2 — Jan 14: corrected file arrives, gets intercepted at the "closed?" check**
 
-Intake resolves the file to `Req_Dt_Key=2026-01-12`, looks up CRC
-`Req_ID=9`, sees `Batch_Close_Ind=Y`. Per §2/§3, this routes to reopen,
+Intake resolves the file to `Req_Dt_Key=2026-01-10`, looks up CRC
+`Req_ID=27`, sees `Batch_Close_Ind=Y`. Per §2/§3, this routes to reopen,
 not normal processing. Since `Resolution_Ty` was `NEW_FILE` (not
 `MISSING`), `Override_Ty=CORRECTION_REOPEN` — a mechanical read, not a
 decision.
 
 | Table | Row written |
 |---|---|
-| Override (new row) | `Req_ID=9`, `Btch_ID=20260116_PARTCODR_ROPENS_1003_DAILY_2026_1`, `Override_Ty=CORRECTION_REOPEN`, `Prior_Btch_ID=20260113_..._1003..._1` (Jan 13's batch, snapshotted), `Prior_Resolution_Ty=NEW_FILE`, `Apprvl_Stat=PENDING_REVIEW` |
-| FileDetail | `Event_Ty=FILE_RECEIVED`, `Received_File_Ref=s3://.../1003/20260116.dat` |
+| Override (new row) | `Req_ID=27`, `Btch_ID=20260110_PARTCODR_ROPENS_1003_DAILY_2026_1` (same value as CRC's — it's the same batch identity, not a new one), `Override_Ty=CORRECTION_REOPEN`, `Prior_Btch_ID=20260110_..._1003..._1`, `Prior_Resolution_Ty=NEW_FILE`, `Apprvl_Stat=PENDING_REVIEW` |
+| FileDetail | `Event_Ty=FILE_RECEIVED`, `Received_File_Ref=s3://.../1003/20260114-corrected.dat`, `Event_Dtts=2026-01-14 09:10:00` — this is where "when it actually arrived" now lives, since `Btch_ID` no longer carries it |
 
-CRC row `Req_ID=9` is **not touched yet** — still shows the Jan-13 batch.
+CRC row `Req_ID=27` is **not touched yet** — still shows the original
+(incorrect) file as current.
 
 **Step 3 — same day: `jsmith` reviews and approves**
 
@@ -267,15 +271,16 @@ writes in one transaction:
 
 | Table | Before → After |
 |---|---|
-| Override | `Apprvl_Stat`: `PENDING_REVIEW` → `APPROVED`, `Apprvd_By=jsmith`, `Apprvd_Dtts=2026-01-16 10:15:00`, `History` appended |
-| CRC (`Req_ID=9`) | `Btch_ID`: `20260113_..._1` → `20260116_..._1`. `Used_Btch_ID` → itself (the new batch). `Batch_Close_Ind`: `Y` → `N`, then back to `Y` once the row closes again (still same `Req_ID` — never a new row) |
+| Override | `Apprvl_Stat`: `PENDING_REVIEW` → `APPROVED`, `Apprvd_By=jsmith`, `Apprvd_Dtts=2026-01-14 10:15:00`, `History` appended |
+| CRC (`Req_ID=27`) | `Btch_ID` **unchanged** — still `20260110_PARTCODR_ROPENS_1003_DAILY_2026_1`. What moves: `Used_Btch_ID` re-points at that same identity (now backed by the corrected file), `Batch_Close_Ind`: `Y` → `N`, then back to `Y` once the row closes again (still same `Req_ID` — never a new row) |
 | FileDetail | new row, `Event_Ty=CORRECTION_FLAG_CLEARED` — closes the loop opened in Step 1 |
-| ExtractControl (`Req_Dt_Key=2026-01-12`) | `Reopen_Ind`: `N`→`Y`, `Reopened_By=jsmith`. Regenerates: `Included_Src_Cds` still `[1001,1002,1003]` but now referencing the Jan-16 batch for 1003. `Extract_Close_Ind`: `Y`→`N`→`Y` again once regeneration completes |
-| Audit | `CORRECTION_REOPEN_APPROVED` logged, referencing both the old and new `Btch_ID` |
+| ExtractControl (`Req_Dt_Key=2026-01-10`) | `Reopen_Ind`: `N`→`Y`, `Reopened_By=jsmith`. Regenerates: `Included_Src_Cds` still `[1001,1002,1003]`, now backed by the corrected 1003 data. `Extract_Close_Ind`: `Y`→`N`→`Y` again once regeneration completes |
+| Audit | `CORRECTION_REOPEN_APPROVED` logged, referencing `Btch_ID=20260110_..._1` throughout — there's only ever one batch identity for this date, so the audit trail never has to reconcile two different IDs for the same thing |
 
 **What this example demonstrates that the abstract rules don't**: the CRC
-row's `Req_ID` never changes across all three steps — it's the same
-control-table row from Jan 13 through Jan 16, just updated twice
+row's `Req_ID` *and* its `Btch_ID` never change across all three steps —
+it's the same control-table row, identified the same way, from Jan 10
+through Jan 14, just updated twice
 (Step 0's initial write, Step 3's reopen). Everything that *did* need
 more than one record — the flag, the file arrival, the approval, the
 extract regeneration — lives in a different table each time, which is

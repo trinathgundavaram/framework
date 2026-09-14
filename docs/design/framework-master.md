@@ -342,14 +342,19 @@ color-codes three things the tables alone don't make visually obvious
   `N`: created once, current-state, never touched again, which is the
   entire point of keeping CRC current-state rather than versioned (§1).
 
-## 5. Naming & conventions (unchanged)
+## 5. Naming & conventions
 
 `PascalCase_With_Underscores`, `_Ind` booleans, `_Dtts`/`_Dt_Tm`
 timestamps, `_Ty` types, `_Stat` status, `_Rsn` reasons. `Btch_ID`:
-`{load-date}_{Project_Code}_{Table_Nm}_{Src_Cd}_{Run_Ty}_{Cmplnc_Vrsn}_{Seq}`
-— the leading date is *when the row was last loaded*, which is why it
-naturally changes on every in-place update without needing a version
-suffix.
+`{Req_Dt_Key}_{Project_Code}_{Table_Nm}_{Src_Cd}_{Run_Ty}_{Cmplnc_Vrsn}_{Seq}`
+— the leading date is the **request date the batch represents**, not
+when it was loaded. This makes `Btch_ID` a stable identity: it does
+**not** change when a reopen updates the row (Req_Dt_Key never changes
+for a given CRC row, so neither does its Btch_ID) — only `Req_Stat`,
+`Resolution_Ty`, and `Used_Btch_ID` move. *When* the row was last loaded
+lives in `ComplianceRequestFileDetail.Event_Dtts` instead (§2), which is
+exactly where that kind of "what happened and when" detail belongs under
+G5 — Btch_ID identifies *which date's batch this is*, full stop.
 
 ## 6. Failure points found reviewing every scenario together
 
