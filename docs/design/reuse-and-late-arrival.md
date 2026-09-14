@@ -31,16 +31,27 @@ non-carry-forward table under `Run_Ty=DAILY` (5 days, 3 FDRs).
 ### 1. Carry-forward reuse
 Some sources are allowed to let one approved file stand in for several
 days' worth of data (`Carry_Fwd_Elig_Ind = Y` on the crosswalk table).
-**Every time a complete file load lands for such a source** — not only the
-first one ever — an Override row is auto-created (`PENDING_REVIEW`),
-because the pipeline can't know on its own whether *this* file should
-become the new anchor; that's a judgment call. Future days are **blocked
-from reusing an anchor** until a human approves it. Approval unlocks
-reuse; revocation cuts it off going forward (past days already carried are
-not rewritten). If a *different* anchor for the same (project, table,
-source, run type, reporting period) is later approved, the previously
-approved one is **automatically flipped to `SUPERSEDED`** as part of that
-same approval — see §5 below for exactly how that's enforced.
+Every daily run resolves a source's batch in a strict priority order:
+
+1. **Did a file arrive today?** → use it. `Resolution_Ty=NEW_FILE`,
+   `Used_Btch_ID=self` — this always wins, regardless of whether an
+   already-`APPROVED` anchor exists elsewhere in the grouping. A file
+   that physically showed up today is never set aside in favor of an
+   older one.
+2. **No file today — is there a currently-`APPROVED` anchor in this
+   grouping?** → carry it forward, `Used_Btch_ID` = that anchor's batch.
+3. **Neither** → `MISSING`.
+
+**Every time step 1 fires for such a source** — not only the first file
+ever — an Override row is auto-created (`PENDING_REVIEW`), because the
+pipeline can't know on its own whether *this* file should become the new
+anchor; that's a judgment call. Until a human approves it, it plays no
+part in *other* days' step-2 checks (though it still governs its own
+day's extract via step 1, unconditionally). If a *different* anchor for
+the same (project, table, source, run type, reporting period) is later
+approved, the previously approved one is **automatically flipped to
+`SUPERSEDED`** as part of that same approval — see §5 below for exactly
+how that's enforced.
 
 ### 2. Batch close
 Waiting indefinitely for a file that may never come isn't viable for daily
