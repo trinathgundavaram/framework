@@ -30,7 +30,9 @@ kept for history — both are superseded by this document.
 - **Resolution priority**, evaluated fresh every run:
   1. A currently-`APPROVED`, still-valid anchor exists for the grouping →
      use it (`CARRIED_FORWARD`), **even if a file also arrived today**. The
-     arriving file is received and logged, not promoted.
+     arriving file is loaded — validated and staged like any other file —
+     but never feeds the extract; the extract keeps drawing from the
+     anchor's batch until a human revokes it.
   2. No active/valid anchor, but a file arrived today → use it (`NEW_FILE`).
   3. Neither → `MISSING`.
 - **Override (`ComplianceBatchOverride`) creation and update rules:**
@@ -100,7 +102,8 @@ CREATE TABLE ComplianceRequestControl (
     Cmplnc_Vrsn           VARCHAR(10),
     Req_Stat             VARCHAR(30)  NOT NULL,
     File_Received_Ind     SMALLINT     NOT NULL DEFAULT 0,
-    Received_File_Ref      VARCHAR(500),           -- S3 path of whatever arrived, even if NOT promoted (see G1, §6)
+    Received_File_Ref      VARCHAR(500),           -- S3 path of whatever arrived, even if not used for the extract (see G1, §6)
+    Received_File_Loaded_Ind SMALLINT   NOT NULL DEFAULT 0,  -- Y = passed intake/rules validation and is sitting ready in staging, even though NOT wired into Used_Btch_ID (see G1, §6)
     Resolution_Ty         VARCHAR(20)  NOT NULL,   -- NEW_FILE / CARRIED_FORWARD / MISSING
     Used_Btch_ID          VARCHAR(120),
     Late_Arrival_Ind       SMALLINT     NOT NULL DEFAULT 0,
@@ -216,8 +219,14 @@ discussion is a piece of this one flow:
        reopens/regenerates/recloses (as in Worked Example B).
    - **No (open)** → run the resolution priority from §1:
      1. Active, valid `APPROVED` anchor in the grouping? → `CARRIED_FORWARD`
-        from it; if a file also arrived, log it via `Received_File_Ref`
-        and audit `FILE_RECEIVED_ANCHOR_ACTIVE`, do not promote.
+        from it. If a file also arrived: it is **loaded** — pulled through
+        intake and rules validation into staging like any other file,
+        `Received_File_Ref` and `Received_File_Loaded_Ind=Y` set, audit
+        `FILE_RECEIVED_ANCHOR_ACTIVE` — but it is **not used for the
+        extract**. `Used_Btch_ID` and the extract both keep pointing at
+        the anchor's batch, not the newly loaded one, until a human
+        revokes the anchor and this file (or a later one) is promoted
+        through the normal path.
      2. No active/valid anchor, file arrived → `NEW_FILE`, use it. If the
         source is `Carry_Fwd_Elig_Ind=Y`, this also drives the Override
         create/update-in-place rule from §1.
@@ -252,16 +261,19 @@ suffix.
 Three real gaps surfaced only once every scenario was considered as one
 system, not in isolation. All three are reflected in §1/§2/§3 above.
 
-**G1 — an ignored file had nowhere to go.** Step 5's "file arrives while
-an approved anchor is active → not promoted" was correct, but earlier
-drafts never said where that file *went*. Left unaddressed, recovering it
-after a revoke would mean asking the vendor to resend — needless, since
-the file is already sitting in S3. **Fix:** `Received_File_Ref` on CRC
-records the path of *whatever* arrived, promoted or not. On revoke, the
-recovery step can re-run rules validation against that stored path
-immediately rather than waiting on a fresh send — closing the gap between
-"anchor revoked" and "new anchor available" instead of leaving the source
-stuck in `MISSING` indefinitely.
+**G1 — an ignored file had nowhere to go, and "not promoted" needed to be
+more precise than "not touched."** Step 5's "file arrives while an
+approved anchor is active" case is real: the file **is loaded** — it goes
+through the same intake and rules validation as any other file, and sits
+validated in staging — but it must **never feed the extract**. The extract
+for that date keeps drawing from the previous approved anchor's batch,
+full stop, until a human revokes that anchor. **Fix:** two columns, not
+one — `Received_File_Ref` (where it landed) and `Received_File_Loaded_Ind`
+(whether it actually passed validation and is sitting ready), while
+`Used_Btch_ID` and the extract's `Included_Src_Cds` never move off the
+anchor's batch. On revoke, recovery re-uses the already-loaded file
+directly (skipping re-validation, since `Received_File_Loaded_Ind=Y`
+already confirms it's clean) rather than waiting on a fresh vendor send.
 
 **G2 — a second correction to an already-reopened date had no path.**
 The original reopen design only covered one reopen per date. Since the
