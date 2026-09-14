@@ -326,7 +326,21 @@ discussion is a piece of this one flow:
 
 Unchanged from `reuse-and-late-arrival.md` §"Worked example A/B" — both
 remain accurate under this design and aren't repeated here. The mock data
-in `mock-data/cms_compliance_framework_tables.xlsx` implements them.
+in `mock-data/cms_compliance_framework_tables.xlsx` implements them, and
+color-codes three things the tables alone don't make visually obvious
+(legend on its `0_Legend` tab):
+
+- **AUTO vs MANUAL** — `ComplianceRequestFileDetail.Entry_Ty` and
+  `ComplianceBatchOverride.Created_By_Ty`/`Current_State_By_Ty` are
+  derived, not new facts: `AUTO` wherever `Actor=SYSTEM`, `MANUAL`
+  wherever a real approval/revocation/flag happened. Every Override row's
+  `Created_By_Ty` is always `AUTO` — that's the point of §1: a human never
+  creates the candidate, only ever decides on one already sitting there.
+- **Updated since creation** — `ComplianceRequestControl.Row_Updated_Since_Creation_Ind`
+  flags the (small) set of CRC rows that were genuinely written to twice —
+  once at creation, again by a later reopen. Everything else in CRC is
+  `N`: created once, current-state, never touched again, which is the
+  entire point of keeping CRC current-state rather than versioned (§1).
 
 ## 5. Naming & conventions (unchanged)
 
