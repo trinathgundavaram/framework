@@ -1,5 +1,8 @@
 # Reuse, late arrival, correction, and batch close — concept guide
 
+> **Note:** superseded by [`framework-master.md`](framework-master.md), which is now the authoritative reference (final DDLs, the full pipeline, and a failure-points review). The two worked examples below are still accurate and are referenced from there directly.
+
+
 This is the plain-language + DDL reference for how `ComplianceRequestControl`,
 `ComplianceBatchOverride`, and `ComplianceExtractControl` work together. Two
 compact worked examples cover every scenario discussed: a carry-forward
