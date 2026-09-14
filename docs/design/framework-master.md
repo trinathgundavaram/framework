@@ -58,6 +58,13 @@ kept for history — both are superseded by this document.
 - **Files that were never expected are rejected before they reach CRC or
   Override at all** — unrecognized source, unscheduled date, or an exact
   duplicate of what's on file. Quarantined, audit-logged only.
+- **CRC stays minimal by design** — only columns the pipeline reads to
+  decide something (`Req_Stat`, `Resolution_Ty`, `Used_Btch_ID`,
+  `Batch_Close_Ind`, plus the grain/reporting-period keys). Everything
+  about *how* a batch physically arrived — file refs, late-arrival flags,
+  who closed or flagged it and when — lives in the append-only
+  `ComplianceRequestFileDetail` table, joined on `Req_ID` only when
+  needed (§6 G5).
 - **Governance grouping key**: `(Project_Cd, Table_Nm, Src_Cd, Run_Ty,
   Rpt_Start_Dt_Key, Rpt_End_Dt_Key)`. At most one *active* Override row
   (`PENDING_REVIEW` or `APPROVED`) per grouping, enforced by a partial
@@ -111,6 +118,11 @@ CREATE TABLE ComplianceDataSetSourceXwalk (
 );
 
 CREATE TABLE ComplianceRequestControl (
+    -- Deliberately minimal: only what the pipeline reads to DECIDE
+    -- something on every run. Everything about *how* a batch arrived —
+    -- file refs, late-arrival/loaded flags, who closed or flagged it and
+    -- when — lives in ComplianceRequestFileDetail instead (see §1, §6 G5)
+    -- and is pulled in with a join only when someone needs it.
     Req_ID              BIGINT       GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     Project_Cd           VARCHAR(50)  NOT NULL,
     Table_Nm             VARCHAR(50)  NOT NULL,
@@ -120,24 +132,52 @@ CREATE TABLE ComplianceRequestControl (
     Rpt_Start_Dt_Key      DATE         NOT NULL,
     Rpt_End_Dt_Key        DATE         NOT NULL,
     Btch_ID              VARCHAR(120) NOT NULL,
-    Cmplnc_Vrsn           VARCHAR(10),
     Req_Stat             VARCHAR(30)  NOT NULL,
-    File_Received_Ind     SMALLINT     NOT NULL DEFAULT 0,
-    Received_File_Ref      VARCHAR(500),           -- S3 path of whatever arrived, even if not used for the extract (see G1, §6)
-    Received_File_Loaded_Ind SMALLINT   NOT NULL DEFAULT 0,  -- Y = passed intake/rules validation and is sitting ready in staging, even though NOT wired into Used_Btch_ID (see G1, §6)
     Resolution_Ty         VARCHAR(20)  NOT NULL,   -- NEW_FILE / CARRIED_FORWARD / MISSING
     Used_Btch_ID          VARCHAR(120),
-    Late_Arrival_Ind       SMALLINT     NOT NULL DEFAULT 0,
-    Flagged_For_Correction_Ind SMALLINT NOT NULL DEFAULT 0,  -- set by a human ask, not the pipeline (see G4, §6)
-    Flagged_By             VARCHAR(100),
-    Flagged_Dtts            TIMESTAMP,
-    Flag_Rsn                TEXT,
-    Batch_Close_Ind        SMALLINT     NOT NULL DEFAULT 0,
-    Batch_Closed_Dtts       TIMESTAMP,
-    Batch_Closed_By         VARCHAR(100),
+    Batch_Close_Ind        SMALLINT     NOT NULL DEFAULT 0,  -- the one gate every write checks — stays here, nowhere else
     Created_Dtts          TIMESTAMP    NOT NULL DEFAULT now(),
     Updated_Dtts          TIMESTAMP    NOT NULL DEFAULT now(),
     UNIQUE (Project_Cd, Table_Nm, Src_Cd, Run_Ty, Req_Dt_Key)
+);
+
+CREATE TABLE ComplianceRequestFileDetail (
+    -- Append-only. One row per file-related event against a CRC row's
+    -- Req_ID — every physical thing that happened, in order, without
+    -- CRC itself having to carry a column for each one. "Current status"
+    -- questions (is this row currently flagged? was it ever late?) are
+    -- answered by the latest matching row for that Req_ID, not a column.
+    Detail_ID               BIGINT       GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    Req_ID                   BIGINT       NOT NULL REFERENCES ComplianceRequestControl(Req_ID),
+    Btch_ID                  VARCHAR(120) NOT NULL,   -- the batch this specific event concerns
+    Event_Ty                 VARCHAR(30)  NOT NULL,   -- FILE_RECEIVED / FILE_LOADED_NOT_PROMOTED / LATE_ARRIVAL /
+                                                        -- BATCH_CLOSED / CORRECTION_FLAGGED / CORRECTION_FLAG_CLEARED
+    Received_File_Ref         VARCHAR(500),            -- S3 path, for FILE_RECEIVED / FILE_LOADED_NOT_PROMOTED / LATE_ARRIVAL
+    Batch_Closed_By           VARCHAR(100),            -- for BATCH_CLOSED
+    Flagged_By                VARCHAR(100),            -- for CORRECTION_FLAGGED
+    Flag_Rsn                  TEXT,                    -- for CORRECTION_FLAGGED
+    Actor                    VARCHAR(100),             -- SYSTEM or a username, regardless of event type
+    Event_Dtts                TIMESTAMP    NOT NULL DEFAULT now()
+);
+
+CREATE INDEX ix_file_detail_req_id ON ComplianceRequestFileDetail (Req_ID, Event_Dtts);
+
+-- Convenience view for the two "is this row currently X?" questions that
+-- used to be plain CRC columns — now a join, computed from the latest
+-- matching event per Req_ID rather than stored redundantly.
+CREATE VIEW vw_crc_current_flags AS
+SELECT
+    c.Req_ID,
+    EXISTS (
+        SELECT 1 FROM ComplianceRequestFileDetail d
+        WHERE d.Req_ID = c.Req_ID AND d.Event_Ty = 'LATE_ARRIVAL'
+    ) AS Was_Late_Arrival,
+    (
+        SELECT d.Event_Ty FROM ComplianceRequestFileDetail d
+        WHERE d.Req_ID = c.Req_ID AND d.Event_Ty IN ('CORRECTION_FLAGGED','CORRECTION_FLAG_CLEARED')
+        ORDER BY d.Event_Dtts DESC LIMIT 1
+    ) = 'CORRECTION_FLAGGED' AS Currently_Flagged_For_Correction
+FROM ComplianceRequestControl c;
 );
 
 CREATE TABLE ComplianceBatchOverride (
@@ -225,9 +265,9 @@ discussion is a piece of this one flow:
 3. **Check 2 — expected date?** A CRC row must already exist for this key
    (the scheduler creates rows ahead of time; a file never creates one).
    No → quarantine, audit `UNEXPECTED_DATE`. Stop.
-4. **Check 3 — genuine duplicate?** File checksum matches
-   `Received_File_Ref`'s content already on that CRC row → quarantine,
-   audit `DUPLICATE_FILE_IGNORED`. Stop.
+4. **Check 3 — genuine duplicate?** File checksum matches the most recent
+   `ComplianceRequestFileDetail` row's `Received_File_Ref` content for
+   this `Req_ID` → quarantine, audit `DUPLICATE_FILE_IGNORED`. Stop.
 5. **Is the target CRC row closed (`Batch_Close_Ind=Y`)?**
    - **Yes** → this is a **reopen**, not ordinary processing. Look at the
      grouping's current Override row (if any):
@@ -245,21 +285,24 @@ discussion is a piece of this one flow:
    - **No (open)** → run the resolution priority from §1:
      1. Active, valid `APPROVED` anchor in the grouping? → `CARRIED_FORWARD`
         from it. If a file also arrived: it is **loaded** — pulled through
-        intake and rules validation into staging like any other file,
-        `Received_File_Ref` and `Received_File_Loaded_Ind=Y` set, audit
-        `FILE_RECEIVED_ANCHOR_ACTIVE` — but it is **not used for the
-        extract**. `Used_Btch_ID` and the extract both keep pointing at
-        the anchor's batch, not the newly loaded one, until a human
-        revokes the anchor and this file (or a later one) is promoted
-        through the normal path.
-     2. No active/valid anchor, file arrived → `NEW_FILE`, use it. If the
-        source is `Carry_Fwd_Elig_Ind=Y`, this also drives the Override
-        create/update-in-place rule from §1.
+        intake and rules validation into staging like any other file, a
+        `ComplianceRequestFileDetail` row logs it
+        (`Event_Ty=FILE_LOADED_NOT_PROMOTED`, `Received_File_Ref` set),
+        audit `FILE_RECEIVED_ANCHOR_ACTIVE` — but it is **not used for the
+        extract**. `Used_Btch_ID` on the CRC row and the extract both keep
+        pointing at the anchor's batch, not the newly loaded one, until a
+        human revokes the anchor and this file (or a later one) is
+        promoted through the normal path.
+     2. No active/valid anchor, file arrived → `NEW_FILE`, use it. A
+        `ComplianceRequestFileDetail` row logs `Event_Ty=FILE_RECEIVED`.
+        If the source is `Carry_Fwd_Elig_Ind=Y`, this also drives the
+        Override create/update-in-place rule from §1.
      3. Neither → `MISSING`.
 6. **At the date's SLA cutoff** (independent of the above, runs on a
-   schedule): every open CRC row for that date closes (`Batch_Close_Ind=Y`),
-   `PARTIAL` or not. `ComplianceExtractControl` generates/regenerates from
-   whatever's closed, then closes itself.
+   schedule): every open CRC row for that date closes (`Batch_Close_Ind=Y`
+   on CRC; a `ComplianceRequestFileDetail` row logs `Event_Ty=BATCH_CLOSED`
+   with `Batch_Closed_By`), `PARTIAL` or not. `ComplianceExtractControl`
+   generates/regenerates from whatever's closed, then closes itself.
 7. **Anchor expiry check** — runs at the start of each day's processing,
    before step 5, for every grouping with an `APPROVED` row: if
    `today > Reuse_Valid_Thru_Dt_Key`, flip that row to `EXPIRED` (audit
@@ -270,12 +313,14 @@ discussion is a piece of this one flow:
    (or a downstream CMS rejection) decides a submitted batch's *data* is
    wrong, even though it passed structural validation at load time. They
    insert a `ComplianceRequestInTake` row (`Req_Ty=CORRECTION_REQUEST`).
-   A lightweight sync sets `Flagged_For_Correction_Ind=Y` on the target
-   CRC row (visibility only — this does **not** touch Override or the
-   extract), logs `DATA_QUALITY_ISSUE_FLAGGED`, and marks the intake row
-   processed. This is purely a marker that a correction is expected;
-   nothing downstream changes until step 5's actual reopen fires when the
-   corrected file arrives, which clears the flag back to `N`.
+   A lightweight sync writes a `ComplianceRequestFileDetail` row
+   (`Event_Ty=CORRECTION_FLAGGED`, `Flagged_By`, `Flag_Rsn`) against the
+   target `Req_ID` — visibility only, via `vw_crc_current_flags` (this
+   does **not** touch CRC, Override, or the extract), logs
+   `DATA_QUALITY_ISSUE_FLAGGED`, and marks the intake row processed. This
+   is purely a marker that a correction is expected; nothing downstream
+   changes until step 5's actual reopen fires when the corrected file
+   arrives, which logs a matching `CORRECTION_FLAG_CLEARED` event.
 
 ## 4. Worked examples
 
@@ -303,12 +348,12 @@ approved anchor is active" case is real: the file **is loaded** — it goes
 through the same intake and rules validation as any other file, and sits
 validated in staging — but it must **never feed the extract**. The extract
 for that date keeps drawing from the previous approved anchor's batch,
-full stop, until a human revokes that anchor. **Fix:** two columns, not
-one — `Received_File_Ref` (where it landed) and `Received_File_Loaded_Ind`
-(whether it actually passed validation and is sitting ready), while
-`Used_Btch_ID` and the extract's `Included_Src_Cds` never move off the
-anchor's batch. On revoke, recovery re-uses the already-loaded file
-directly (skipping re-validation, since `Received_File_Loaded_Ind=Y`
+full stop, until a human revokes that anchor. **Fix:** a
+`ComplianceRequestFileDetail` row (`Event_Ty=FILE_LOADED_NOT_PROMOTED`,
+`Received_File_Ref` set) records where it landed and that it passed
+validation, while `Used_Btch_ID` and the extract's `Included_Src_Cds`
+never move off the anchor's batch. On revoke, recovery re-uses the
+already-loaded file directly (no re-validation needed — the detail row
 already confirms it's clean) rather than waiting on a fresh vendor send.
 
 **G2 — a second correction to an already-reopened date had no path.**
@@ -340,18 +385,36 @@ everything before that: a business user reviewing an extract (often days
 or weeks later, sometimes after a CMS rejection) is the *only* one who
 can know the data is wrong — the pipeline validated it as structurally
 fine at load time and has no way to know otherwise. Left unaddressed,
-that discovery had nowhere to go except an ad-hoc conversation with the
+that discovery had nowhere to go except an informal conversation with the
 vendor, with no record until the fix eventually arrived. **Fix:**
 `ComplianceRequestInTake` (`Req_Ty=CORRECTION_REQUEST`) is the one table a
 human writes to directly — logging *why* a correction is being chased
-down, before it exists. A lightweight sync sets
-`Flagged_For_Correction_Ind=Y` on the CRC row purely for visibility (it
-does not touch Override or the extract — nothing downstream reacts to a
-flag alone) and logs `DATA_QUALITY_ISSUE_FLAGGED`. The flag clears back to
-`N` only when step 5's real reopen mechanism eventually fires on the
-actual corrected file — so there's now a continuous, queryable trail from
-"we noticed this was wrong" through "here's the fix" instead of a silent
-gap between the two.
+down, before it exists. A lightweight sync writes a
+`ComplianceRequestFileDetail` row (`Event_Ty=CORRECTION_FLAGGED`,
+`Flagged_By`, `Flag_Rsn`) — visible via `vw_crc_current_flags` (it does
+not touch Override or the extract — nothing downstream reacts to a flag
+alone) and logs `DATA_QUALITY_ISSUE_FLAGGED`. A matching
+`CORRECTION_FLAG_CLEARED` detail row is written only when step 5's real
+reopen mechanism eventually fires on the actual corrected file — so
+there's now a continuous, queryable trail from "we noticed this was
+wrong" through "here's the fix" instead of a silent gap between the two.
+
+**G5 — CRC had accumulated columns it never actually reads to decide
+anything.** `File_Received_Ind`, `Received_File_Ref`,
+`Received_File_Loaded_Ind`, `Late_Arrival_Ind`, the four
+`Flagged_For_Correction_*` columns, and `Batch_Closed_Dtts`/
+`Batch_Closed_By` all answer "what happened to this row," not "what
+should happen next" — the resolution priority in §1 and the pipeline in
+§3 never branch on any of them. Left on CRC, every read of the table
+(and CRC is read on *every* run, for every source) carried that weight
+for no operational benefit. **Fix:** moved to `ComplianceRequestFileDetail`
+— append-only, one row per event, joined on `Req_ID` only when someone
+actually needs the detail. CRC keeps exactly the columns the pipeline
+reads to decide something: `Req_Stat`, `Resolution_Ty`, `Used_Btch_ID`,
+and `Batch_Close_Ind` (the one gate every write still checks, so it stays
+put). `vw_crc_current_flags` covers the two "is this row currently X?"
+lookups that used to be plain columns, computed from the latest matching
+detail row instead of stored redundantly.
 
 **Considered and intentionally left as-is:**
 - *Retroactive correction of already-closed, already-extracted dates

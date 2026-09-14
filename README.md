@@ -9,12 +9,14 @@ ODAG/CDAG, Part C ODR, Part C SLIDA, etc.) on AWS.
   **current, authoritative design.** Consolidated requirements, final
   DDLs for all five tables, the full file-to-extract pipeline end to end,
   and a dedicated review of failure points found across every scenario
-  (four real gaps identified and closed: a file loaded while an anchor
+  (five real gaps identified and closed: a file loaded while an anchor
   is active must never feed the extract, a second correction to an
   already-reopened date had no path, an approved anchor could be
-  created with no real expiry (now a hard `CHECK` constraint), and a
+  created with no real expiry (now a hard `CHECK` constraint), a
   business flag on suspect data had nowhere to go before a fix exists
-  (`ComplianceRequestInTake` + `Flagged_For_Correction_Ind`).
+  (`ComplianceRequestInTake`), and CRC had accumulated columns it never
+  actually reads to decide anything (now split into the append-only
+  `ComplianceRequestFileDetail` table, joined only when needed).
 - [`docs/design/orchestration-flow.md`](docs/design/orchestration-flow.md) —
   **process view.** Daily orchestration sequence, the full per-file
   decision flowchart, the Override row's state machine, and the AWS
