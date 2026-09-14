@@ -224,8 +224,8 @@ until a human explicitly revokes it.
 
 ## 4. Worked example — reopen creation and approval, step by step
 
-Concrete before/after values, using the actual mock-data case: FDR 1003,
-`PARTCODR/ROPENS`, `Req_Dt_Key=2026-01-10`, `Run_Ty=DAILY`. The file
+Concrete before/after values, using the actual mock-data case: ESI (Src_Cd `64`),
+`ODR/ROPENS`, `Req_Dt_Key=2026-01-10`, `Run_Ty=DAILY`. The file
 arrived on time and passed validation, but was later found to contain
 incorrect data. Note `Btch_ID` throughout: it's built from `Req_Dt_Key`
 (§5 of `framework-master.md`), so it stays **the same value across every
@@ -235,9 +235,9 @@ step** — identity, not a timestamp of when it was last touched.
 
 | Table | Row |
 |---|---|
-| CRC (`Req_ID=27`, say) | `Btch_ID=20260110_PARTCODR_ROPENS_1003_DAILY_2026_1`, `Resolution_Ty=NEW_FILE`, `Used_Btch_ID`=itself, `Batch_Close_Ind=Y` |
+| CRC (`Req_ID=27`, say) | `Btch_ID=20260110_ODR_ROPENS_64_DAILY_2026_1`, `Resolution_Ty=NEW_FILE`, `Used_Btch_ID`=itself, `Batch_Close_Ind=Y` |
 | Override | *(no row for this grouping — nothing to reopen yet)* |
-| ExtractControl (`Req_Dt_Key=2026-01-10`) | `Extract_Stat=COMPLETE`, `Included_Src_Cds=[1001,1002,1003]`, `Extract_Close_Ind=Y` |
+| ExtractControl (`Req_Dt_Key=2026-01-10`) | `Extract_Stat=COMPLETE`, `Included_Src_Cds=[50,51,64]`, `Extract_Close_Ind=Y` |
 
 **Step 1 — Jan 12: business flags it (§1a, independent of the reopen itself)**
 
@@ -258,8 +258,8 @@ decision.
 
 | Table | Row written |
 |---|---|
-| Override (new row) | `Req_ID=27`, `Btch_ID=20260110_PARTCODR_ROPENS_1003_DAILY_2026_1` (same value as CRC's — it's the same batch identity, not a new one), `Override_Ty=CORRECTION_REOPEN`, `Prior_Btch_ID=20260110_..._1003..._1`, `Prior_Resolution_Ty=NEW_FILE`, `Apprvl_Stat=PENDING_REVIEW` |
-| FileDetail | `Event_Ty=FILE_RECEIVED`, `Received_File_Ref=s3://.../1003/20260114-corrected.dat`, `Event_Dtts=2026-01-14 09:10:00` — this is where "when it actually arrived" now lives, since `Btch_ID` no longer carries it |
+| Override (new row) | `Req_ID=27`, `Btch_ID=20260110_ODR_ROPENS_64_DAILY_2026_1` (same value as CRC's — it's the same batch identity, not a new one), `Override_Ty=CORRECTION_REOPEN`, `Prior_Btch_ID=20260110_..._64..._1`, `Prior_Resolution_Ty=NEW_FILE`, `Apprvl_Stat=PENDING_REVIEW` |
+| FileDetail | `Event_Ty=FILE_RECEIVED`, `Received_File_Ref=s3://.../64/20260114-corrected.dat`, `Event_Dtts=2026-01-14 09:10:00` — this is where "when it actually arrived" now lives, since `Btch_ID` no longer carries it |
 
 CRC row `Req_ID=27` is **not touched yet** — still shows the original
 (incorrect) file as current.
@@ -272,9 +272,9 @@ writes in one transaction:
 | Table | Before → After |
 |---|---|
 | Override | `Apprvl_Stat`: `PENDING_REVIEW` → `APPROVED`, `Apprvd_By=jsmith`, `Apprvd_Dtts=2026-01-14 10:15:00`, `History` appended |
-| CRC (`Req_ID=27`) | `Btch_ID` **unchanged** — still `20260110_PARTCODR_ROPENS_1003_DAILY_2026_1`. What moves: `Used_Btch_ID` re-points at that same identity (now backed by the corrected file), `Batch_Close_Ind`: `Y` → `N`, then back to `Y` once the row closes again (still same `Req_ID` — never a new row) |
+| CRC (`Req_ID=27`) | `Btch_ID` **unchanged** — still `20260110_ODR_ROPENS_64_DAILY_2026_1`. What moves: `Used_Btch_ID` re-points at that same identity (now backed by the corrected file), `Batch_Close_Ind`: `Y` → `N`, then back to `Y` once the row closes again (still same `Req_ID` — never a new row) |
 | FileDetail | new row, `Event_Ty=CORRECTION_FLAG_CLEARED` — closes the loop opened in Step 1 |
-| ExtractControl (`Req_Dt_Key=2026-01-10`) | `Reopen_Ind`: `N`→`Y`, `Reopened_By=jsmith`. Regenerates: `Included_Src_Cds` still `[1001,1002,1003]`, now backed by the corrected 1003 data. `Extract_Close_Ind`: `Y`→`N`→`Y` again once regeneration completes |
+| ExtractControl (`Req_Dt_Key=2026-01-10`) | `Reopen_Ind`: `N`→`Y`, `Reopened_By=jsmith`. Regenerates: `Included_Src_Cds` still `[50,51,64]`, now backed by the corrected ESI data. `Extract_Close_Ind`: `Y`→`N`→`Y` again once regeneration completes |
 | Audit | `CORRECTION_REOPEN_APPROVED` logged, referencing `Btch_ID=20260110_..._1` throughout — there's only ever one batch identity for this date, so the audit trail never has to reconcile two different IDs for the same thing |
 
 **What this example demonstrates that the abstract rules don't**: the CRC

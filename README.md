@@ -27,6 +27,10 @@ ODAG/CDAG, Part C ODR, Part C SLIDA, etc.) on AWS.
   worked examples (still accurate) and history.
 - [`docs/design/schema-design.md`](docs/design/schema-design.md) — earliest
   draft; superseded, kept for history.
+- [`interactive/odr-daily-stepper.html`](interactive/odr-daily-stepper.html) —
+  **click-through walkthrough**, standalone (no chat host dependency,
+  works in any browser). Steps through Jan 5-14 one day at a time for
+  the ODR project's three sources.
 - [`mock-data/cms_compliance_framework_tables.xlsx`](mock-data/cms_compliance_framework_tables.xlsx) —
   reference tables plus `ComplianceRequestControl`, `ComplianceBatchOverride`,
   `ComplianceExtractControl`, and `CMS_ComplianceExceptionsAudit`, matching
