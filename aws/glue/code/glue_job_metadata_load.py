@@ -1,7 +1,7 @@
 """
 glue_job_metadata_load.py
 =============================================================================
-CMS Compliance Framework — single Glue job to load / update all "supporting
+CMS Compliance Framework - single Glue job to load / update all "supporting
 metadata" tables in PostgreSQL:
 
     compliance_source_system         (reference, one-time seed)
@@ -11,8 +11,14 @@ metadata" tables in PostgreSQL:
     cms_compliance_exceptions_audit  (append-only narrative log)
 
 These are the tables docs/design/schema-design.md calls out as "one-time seed
-or ad-hoc updates" — as opposed to ComplianceRequestControl / BatchOverride /
+or ad-hoc updates" - as opposed to ComplianceRequestControl / BatchOverride /
 FileDetail / ExtractControl, which the orchestration pipeline itself writes.
+
+Connection pattern
+-------------------
+Uses the same RdsClient (Secrets Manager -> pg8000) helper as the team's
+glue-jobs/code/rds_conn.py, imported from rds_conn.py alongside this script
+(see aws/glue/glue-job.tf for how both files land in S3 next to each other).
 
 DESIGN
 ------
@@ -22,41 +28,42 @@ One job, driven entirely by TABLE_CONFIG below. Each run:
      "<table_key>.csv" under --S3_INPUT_PATH.
   3. Loads it into Postgres using the mode configured for that table:
        - "upsert"      INSERT ... ON CONFLICT (pk) DO UPDATE  (reference /
-                       intake tables — first run inserts, later runs with an
+                       intake tables - first run inserts, later runs with an
                        edited CSV update the same rows in place)
        - "insert_only" INSERT ... ON CONFLICT (pk) DO NOTHING (append-only
-                       audit log — rows are never modified once written)
+                       audit log - rows are never modified once written)
 
 This lets ONE job handle the initial one-time load and every later manual /
 ad-hoc update: re-running it with a refreshed CSV (add a row, correct a row,
-flip Active_Ind to N, mark an intake row Processed_Ind='Y', append new
-exception events) is the update mechanism — no separate "load" vs "update"
+flip active_ind to N, mark an intake row processed_ind='Y', append new
+exception events) is the update mechanism - no separate "load" vs "update"
 jobs to maintain.
 
-This is a Glue **Python Shell** job (not Spark) — these are small
-metadata/reference tables, so a lightweight pandas + psycopg2 job is the
+This is a Glue **Python Shell** job (not Spark) - these are small
+metadata/reference tables, so a lightweight pandas + pg8000 job is the
 right tool: faster startup, cheaper, and simpler upsert semantics than
 going through a Spark DataFrame write.
 
 JOB PARAMETERS (set as Glue job arguments, all as --KEY VALUE)
   --S3_INPUT_PATH   s3://<bucket>/<prefix>/            (folder holding the CSVs)
-  --SECRET_NAME     <Secrets Manager secret id>         (Postgres credentials)
+  --RDS_SECRET_NM   <Secrets Manager secret id>         (Postgres credentials)
+  --RDS_DATABASE_NM Postgres database name RdsClient connects to
+  --REGION          (optional) AWS region for the Secrets Manager lookup, default us-east-1
   --TABLES          (optional) comma-separated subset of table keys to run;
                      default = all five tables
-  --RUN_DDL         (optional) "true"/"false", default "true" — applies
+  --RUN_DDL         (optional) "true"/"false", default "true" - applies
                      ddl/create_metadata_tables.sql (also uploaded to S3
                      alongside the CSVs, see --DDL_S3_PATH)
   --DDL_S3_PATH     (optional) s3://<bucket>/<prefix>/create_metadata_tables.sql
                      required only when --RUN_DDL is true
 
-Glue job setup notes:
-  - Job type: Python Shell, Python 3.9+
-  - Additional python modules (--additional-python-modules):
-        psycopg2-binary,pandas
+Glue job setup notes (see aws/glue/glue-job.tf):
+  - Job type: Python Shell, Python 3.9
+  - --additional-python-modules: pg8000,pandas
   - IAM role needs: s3:GetObject on the input path, and
-        secretsmanager:GetSecretValue on SECRET_NAME
-  - The Secrets Manager secret should be a JSON object:
-        {"host": "...", "port": 5432, "dbname": "...", "user": "...", "password": "..."}
+        secretsmanager:GetSecretValue on RDS_SECRET_NM
+  - The Secrets Manager secret is a JSON object:
+        {"host": "...", "port": 5432, "dbname": "...", "username": "...", "password": "..."}
   - Schedule via a Glue trigger (on-demand for one-time loads, or a schedule
     for recurring ad-hoc-update runs) as needed.
 =============================================================================
@@ -68,15 +75,15 @@ import logging
 
 import boto3
 import pandas as pd
-import psycopg2
-import psycopg2.extras
 from awsglue.utils import getResolvedOptions
+
+from rds_conn import RdsClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("cms_metadata_load")
 
 # -----------------------------------------------------------------------------
-# Table registry — the single source of truth for what this job loads and how.
+# Table registry - the single source of truth for what this job loads and how.
 # -----------------------------------------------------------------------------
 TABLE_CONFIG = {
     "compliance_source_system": {
@@ -119,24 +126,6 @@ TABLE_CONFIG = {
 DB_SCHEMA = "cms_compliance"
 
 
-def get_db_connection(secret_name: str):
-    """Fetch Postgres credentials from Secrets Manager and open a connection."""
-    import json
-
-    sm = boto3.client("secretsmanager")
-    secret = json.loads(sm.get_secret_value(SecretId=secret_name)["SecretString"])
-    conn = psycopg2.connect(
-        host=secret["host"],
-        port=secret.get("port", 5432),
-        dbname=secret["dbname"],
-        user=secret["user"],
-        password=secret["password"],
-        connect_timeout=10,
-    )
-    conn.autocommit = False
-    return conn
-
-
 def read_csv_from_s3(s3_input_path: str, table_key: str) -> pd.DataFrame:
     """Read s3://.../<table_key>.csv into a DataFrame. Empty file -> empty frame."""
     s3 = boto3.client("s3")
@@ -155,9 +144,18 @@ def apply_ddl(conn, s3_ddl_path: str):
     bucket, _, key = s3_ddl_path.replace("s3://", "").partition("/")
     logger.info("Applying DDL from s3://%s/%s", bucket, key)
     ddl_sql = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
-    with conn.cursor() as cur:
-        cur.execute(ddl_sql)
-    conn.commit()
+
+    cur = conn.cursor()
+    try:
+        # pg8000 executes one statement at a time - split the script on ';'
+        # so multiple CREATE TABLE / CREATE SCHEMA statements in one file work.
+        for statement in ddl_sql.split(";"):
+            statement = statement.strip()
+            if statement:
+                cur.execute(statement)
+        conn.commit()
+    finally:
+        cur.close()
     logger.info("DDL applied.")
 
 
@@ -182,28 +180,33 @@ def upsert_table(conn, table_key: str, df: pd.DataFrame, config: dict) -> int:
     records = list(df[columns].itertuples(index=False, name=None))
 
     col_list = ", ".join(columns)
-    placeholder_row = "(" + ", ".join(["%s"] * len(columns)) + ")"
+    row_placeholder = "(" + ", ".join(["%s"] * len(columns)) + ")"
+    values_sql = ", ".join([row_placeholder] * len(records))
+    params = [value for row in records for value in row]
 
     if mode == "insert_only":
         # Append-only audit log: never touch a row once it exists.
         sql = (
-            f"INSERT INTO {target_table} ({col_list}) VALUES %s "
+            f"INSERT INTO {target_table} ({col_list}) VALUES {values_sql} "
             f"ON CONFLICT ({', '.join(pk_cols)}) DO NOTHING"
         )
     elif mode == "upsert":
         update_cols = [c for c in columns if c not in pk_cols]
         set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
-        set_clause += ", updated_dtts = now()" if update_cols else "updated_dtts = now()"
+        set_clause = (set_clause + ", " if set_clause else "") + "updated_dtts = now()"
         sql = (
-            f"INSERT INTO {target_table} ({col_list}) VALUES %s "
+            f"INSERT INTO {target_table} ({col_list}) VALUES {values_sql} "
             f"ON CONFLICT ({', '.join(pk_cols)}) DO UPDATE SET {set_clause}"
         )
     else:
         raise ValueError(f"[{table_key}] unknown load mode: {mode}")
 
-    with conn.cursor() as cur:
-        psycopg2.extras.execute_values(cur, sql, records, template=placeholder_row, page_size=500)
+    cur = conn.cursor()
+    try:
+        cur.execute(sql, params)
         row_count = cur.rowcount
+    finally:
+        cur.close()
 
     conn.commit()
     logger.info("[%s] mode=%s rows_in_file=%d rows_affected=%d", table_key, mode, len(records), row_count)
@@ -213,11 +216,7 @@ def upsert_table(conn, table_key: str, df: pd.DataFrame, config: dict) -> int:
 def main():
     args = getResolvedOptions(
         sys.argv,
-        ["S3_INPUT_PATH", "SECRET_NAME"],
-    )
-    optional = getResolvedOptions(
-        sys.argv,
-        [],
+        ["S3_INPUT_PATH", "RDS_SECRET_NM", "RDS_DATABASE_NM"],
     )
 
     # Manually pull optional args so the job doesn't fail when they're absent.
@@ -228,7 +227,9 @@ def main():
         return default
 
     s3_input_path = args["S3_INPUT_PATH"]
-    secret_name = args["SECRET_NAME"]
+    secret_name = args["RDS_SECRET_NM"]
+    db_name = args["RDS_DATABASE_NM"]
+    region = opt("REGION", "us-east-1")
     tables_arg = opt("TABLES")
     run_ddl = opt("RUN_DDL", "true").lower() == "true"
     ddl_s3_path = opt("DDL_S3_PATH")
@@ -240,7 +241,8 @@ def main():
 
     logger.info("Starting CMS metadata load. Tables in scope: %s", table_keys)
 
-    conn = get_db_connection(secret_name)
+    rds_client = RdsClient(secret_name=secret_name, rds_database_name=db_name, region=region)
+    conn = rds_client.connect()
     try:
         if run_ddl:
             if not ddl_s3_path:

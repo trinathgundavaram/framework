@@ -1,3 +1,0 @@
-run_ty,run_ty_desc,sla_days
-CMS,"Fixed CMS program-audit reporting period, daily runs within it",1
-DAILY,"Single business day per run, prior-day cadence",1

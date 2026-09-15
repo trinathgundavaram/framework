@@ -11,7 +11,9 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 
-# Never commit real credentials
-*.tfvars
-!*.tfvars.example
+# dev.tfvars / test.tfvars / prod.tfvars ARE committed (placeholders only -
+# db_username/db_password are never in them, passed via TF_VAR_db_username /
+# TF_VAR_db_password at apply time instead). Only ignore a personal local
+# override file if you ever create one.
+*.local.tfvars
 .env
