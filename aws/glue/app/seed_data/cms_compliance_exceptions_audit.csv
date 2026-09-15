@@ -1,0 +1,9 @@
+event_id,btch_id,event_ctgy,event_ty,sevrty,actor,event_dtts,description
+1,20260103_UNIVERSE_ODAG1_210_CMS_2026_1,EXCEPTION,SOURCE_MISSING_AT_COMBINE,WARNING,SYSTEM,2026-01-03 20:00:00,Facets no approved anchor available for Jan 3 (candidate still PENDING_REVIEW at run time)
+2,20260106_UNIVERSE_ODAG1_210_CMS_2026_1,AUDIT,CARRY_FORWARD_ANCHOR_REVOKED,INFO,mgarcia,2026-01-05 07:30:00,Anchor (Day 2 batch) revoked - data quality issue found; grouping now open for a new anchor
+3,20260105_ODR_ROPENS_51_DAILY_2026_1,EXCEPTION,SOURCE_MISSING_AT_COMBINE,WARNING,SYSTEM,2026-01-05 20:00:00,MHK file not received for Jan 5 by SLA cutoff - extract closed PARTIAL, [50,64] only
+4,,EXCEPTION,DUPLICATE_FILE_IGNORED,WARNING,SYSTEM,2026-01-07 08:00:00,Duplicate resend of Qnxt's Jan 6 file - checksum matched, quarantined, no CRC/Override write
+5,,EXCEPTION,UNRECOGNIZED_SOURCE,WARNING,SYSTEM,2026-01-07 08:05:00,File from an unrecognized source code not in ComplianceDataSetSourceXwalk - quarantined, no CRC/Override write
+6,20260105_ODR_ROPENS_51_DAILY_2026_1,AUDIT,LATE_ARRIVAL_REOPEN_APPROVED,INFO,jsmith,2026-01-09 11:40:00,Late file accepted for MHK, Jan 5 (4 days late) - CRC row and extract reopened/regenerated/reclosed
+7,20260110_ODR_ROPENS_64_DAILY_2026_1,EXCEPTION,DATA_QUALITY_ISSUE_FLAGGED,WARNING,mgarcia,2026-01-12 13:00:00,ESI's Jan 10 file passed rules validation but was found to contain incorrect data on manual review
+8,20260110_ODR_ROPENS_64_DAILY_2026_1,AUDIT,CORRECTION_REOPEN_APPROVED,INFO,jsmith,2026-01-14 10:15:00,Corrected file accepted for ESI, Jan 10 - CRC row and extract reopened/regenerated/reclosed

@@ -1,0 +1,5 @@
+project_cd,table_nm,src_cd,run_ty,cmplnc_vrsn,carry_fwd_elig_ind
+UNIVERSE,ODAG1,210,CMS,2026,Y
+ODR,ROPENS,50,DAILY,2026,N
+ODR,ROPENS,51,DAILY,2026,N
+ODR,ROPENS,64,DAILY,2026,N

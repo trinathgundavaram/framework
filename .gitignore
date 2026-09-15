@@ -1,0 +1,17 @@
+# Terraform / Terragrunt
+**/.terraform/
+**/.terragrunt-cache/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Never commit real credentials
+*.tfvars
+!*.tfvars.example
+.env
