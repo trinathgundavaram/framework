@@ -83,18 +83,6 @@ variable "glue_role_name" {
   type        = string
 }
 
-variable "run_ddl" {
-  description = "Whether the job applies ddl/create_metadata_tables.sql on each run (--RUN_DDL). Safe to leave true - it's CREATE TABLE IF NOT EXISTS."
-  type        = bool
-  default     = true
-}
-
-variable "tables" {
-  description = "Optional comma-separated subset of table keys to load (--TABLES). Empty = all 5 tables."
-  type        = string
-  default     = ""
-}
-
 # --- Only set when Postgres is private/VPC-only -----------------------------
 
 variable "enable_vpc_connection" {

@@ -15,9 +15,6 @@ db_port           = 5432
 job_name       = "cms_compliance_metadata_load_prod"
 glue_role_name = "cms_compliance_metadata_load_prod-role"
 
-run_ddl = true
-tables  = ""
-
 enable_vpc_connection = false
 enable_schedule        = false
 

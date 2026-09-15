@@ -6,8 +6,14 @@
 # newer aws_s3_object, to match convention. Holds:
 #   python_code/glue_job_metadata_load.py
 #   python_code/rds_conn.py
-#   ddl/create_metadata_tables.sql
+#   ddl/create_metadata_tables.sql  (reference only - DDL/tables are assumed
+#                                    to already exist; the job never applies it)
 #   seed_data/<table>.csv   (one-time seed + refreshed for later manual updates)
+#
+# No config file is uploaded - the job takes --TABLE_NAME/--S3_FILE_NAME/
+# --PRIMARY_KEY etc. directly as job parameters, passed manually per run
+# (console "Run job" or `aws glue start-job-run --arguments`). See the
+# README for the exact commands per table.
 ##############################################################################
 
 resource "aws_s3_bucket" "artifacts" {
@@ -65,7 +71,7 @@ resource "aws_s3_bucket_object" "rds_conn_module" {
   tags = var.required_common_tags
 }
 
-# --- DDL -----------------------------------------------------------------------
+# --- DDL (reference only - assumed already applied, job does not run this) ---
 resource "aws_s3_bucket_object" "ddl_script" {
   bucket = aws_s3_bucket.artifacts.id
   key    = "${var.artifacts_bucket_key}/ddl/create_metadata_tables.sql"
@@ -88,10 +94,11 @@ resource "aws_s3_bucket_object" "seed_data" {
 }
 
 locals {
-  script_s3_uri   = "s3://${aws_s3_bucket.artifacts.id}/${aws_s3_bucket_object.glue_main_script.key}"
-  ddl_s3_uri      = "s3://${aws_s3_bucket.artifacts.id}/${aws_s3_bucket_object.ddl_script.key}"
+  script_s3_uri    = "s3://${aws_s3_bucket.artifacts.id}/${aws_s3_bucket_object.glue_main_script.key}"
+  rds_conn_s3_uri  = "s3://${aws_s3_bucket.artifacts.id}/${aws_s3_bucket_object.rds_conn_module.key}"
+  ddl_s3_uri       = "s3://${aws_s3_bucket.artifacts.id}/${aws_s3_bucket_object.ddl_script.key}"
   seed_data_s3_uri = "s3://${aws_s3_bucket.artifacts.id}/${var.artifacts_bucket_key}/seed_data/"
-  temp_dir_s3_uri = "s3://${aws_s3_bucket.artifacts.id}/${var.artifacts_bucket_key}/temp/"
+  temp_dir_s3_uri  = "s3://${aws_s3_bucket.artifacts.id}/${var.artifacts_bucket_key}/temp/"
 }
 
 output "bucket_name" {

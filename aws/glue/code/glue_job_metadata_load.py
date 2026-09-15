@@ -1,61 +1,68 @@
 """
 glue_job_metadata_load.py
 =============================================================================
-CMS Compliance Framework - single Glue job to load / update all "supporting
-metadata" tables in PostgreSQL:
+CMS Compliance Framework - generic Glue job that upserts ONE CSV file into
+ONE Postgres table per run. No config file involved (no table_config.json) -
+which table, which file, and the primary key are passed directly as job
+parameters at run time: AWS console "Run job" -> Job parameters, or
+`aws glue start-job-run --arguments`. The same job/script handles any table
+- nothing here is hardcoded to a specific table.
 
-    compliance_source_system         (reference, one-time seed)
-    compliance_run_type              (reference, one-time seed)
-    compliance_dataset_source_xwalk  (reference, one-time seed + manual edits)
-    compliance_request_intake        (human-entered, updated as processed)
-    cms_compliance_exceptions_audit  (append-only narrative log)
-
-These are the tables docs/design/schema-design.md calls out as "one-time seed
-or ad-hoc updates" - as opposed to ComplianceRequestControl / BatchOverride /
-FileDetail / ExtractControl, which the orchestration pipeline itself writes.
+Assumes the DDL/table already exists (this job never creates schema).
 
 Connection pattern
 -------------------
-Uses the same RdsClient (Secrets Manager -> pg8000) helper as the team's
-glue-jobs/code/rds_conn.py, imported from rds_conn.py alongside this script
-(see aws/glue/glue-job.tf for how both files land in S3 next to each other).
+Uses the RdsClient (Secrets Manager -> pg8000) helper from rds_conn.py,
+uploaded to S3 alongside this script (see aws/glue/glue-job.tf).
 
 DESIGN
 ------
-One job, driven entirely by TABLE_CONFIG below. Each run:
-  1. (optional) applies ddl/create_metadata_tables.sql so the schema exists.
-  2. For every table in scope, reads one input file (CSV) from S3 named
-     "<table_key>.csv" under --S3_INPUT_PATH.
-  3. Loads it into Postgres using the mode configured for that table:
-       - "upsert"      INSERT ... ON CONFLICT (pk) DO UPDATE  (reference /
-                       intake tables - first run inserts, later runs with an
-                       edited CSV update the same rows in place)
-       - "insert_only" INSERT ... ON CONFLICT (pk) DO NOTHING (append-only
-                       audit log - rows are never modified once written)
+- The input CSV's header IS the column list to load - by convention (see
+  ddl/create_metadata_tables.sql) every table's file layout matches the
+  table layout exactly except for the audit columns the DB itself owns
+  (created_dtts / updated_dtts / loaded_dtts / created_by / updated_by).
+  Those never appear in the file, so there's nothing to strip - the job
+  still guards against one showing up in a file by dropping any column
+  whose name is in AUDIT_COLUMNS before building SQL.
 
-This lets ONE job handle the initial one-time load and every later manual /
-ad-hoc update: re-running it with a refreshed CSV (add a row, correct a row,
-flip active_ind to N, mark an intake row processed_ind='Y', append new
-exception events) is the update mechanism - no separate "load" vs "update"
-jobs to maintain.
+- One run = one table = one file:
+    - "upsert"      INSERT ... ON CONFLICT (primary_key) DO UPDATE  - every
+                    non-PK column in the file is set from EXCLUDED, and
+                    updated_dtts (if it's one of the audit columns in scope)
+                    is bumped to now().
+    - "insert_only" INSERT ... ON CONFLICT (primary_key) DO NOTHING - for
+                    append-only logs (e.g. an audit/exception table).
+
+  Re-running the job against the same table with a refreshed CSV (add a
+  row, correct a row, flip a flag) is the update mechanism - there's no
+  separate "load" vs "update" job. Loading the framework's 5 metadata
+  tables (or any other table) is just 5 (or however many) separate manual
+  runs of this same job with different --TABLE_NAME / --S3_FILE_NAME /
+  --PRIMARY_KEY values - see the README for the exact commands.
 
 This is a Glue **Python Shell** job (not Spark) - these are small
 metadata/reference tables, so a lightweight pandas + pg8000 job is the
-right tool: faster startup, cheaper, and simpler upsert semantics than
-going through a Spark DataFrame write.
+right tool.
 
 JOB PARAMETERS (set as Glue job arguments, all as --KEY VALUE)
-  --S3_INPUT_PATH   s3://<bucket>/<prefix>/            (folder holding the CSVs)
-  --RDS_SECRET_NM   <Secrets Manager secret id>         (Postgres credentials)
-  --RDS_DATABASE_NM Postgres database name RdsClient connects to
-  --REGION          (optional) AWS region for the Secrets Manager lookup, default us-east-1
-  --TABLES          (optional) comma-separated subset of table keys to run;
-                     default = all five tables
-  --RUN_DDL         (optional) "true"/"false", default "true" - applies
-                     ddl/create_metadata_tables.sql (also uploaded to S3
-                     alongside the CSVs, see --DDL_S3_PATH)
-  --DDL_S3_PATH     (optional) s3://<bucket>/<prefix>/create_metadata_tables.sql
-                     required only when --RUN_DDL is true
+  --TABLE_NAME      Schema-qualified Postgres table to load, e.g.
+                     cms_compliance.compliance_source_system. Must already exist.
+  --S3_INPUT_PATH   s3://<bucket>/<prefix>/    Folder the input file lives in.
+  --S3_FILE_NAME    <file_name>.csv            File inside that folder to load
+                     (the job reads s3://<bucket>/<prefix>/<file_name>).
+  --PRIMARY_KEY     Comma-separated primary key column(s) for the ON CONFLICT
+                     target, e.g. src_cd
+                     or project_cd,table_nm,src_cd,run_ty,cmplnc_vrsn
+  --MODE            Optional: "upsert" (default) or "insert_only" (append-only
+                     table - audit/exception logs).
+  --AUDIT_COLUMNS   Optional comma-separated list of audit columns the table
+                     owns and this job must never load/overwrite, even if one
+                     shows up in the file. REPLACES the default list (doesn't
+                     add to it). Default: created_dtts,updated_dtts,loaded_dtts,
+                     created_by,updated_by
+  --RDS_SECRET_NM   Secrets Manager secret id holding the Postgres credentials.
+  --RDS_DATABASE_NM Postgres database name RdsClient connects to.
+  --REGION          Optional AWS region for the Secrets Manager lookup, default us-east-1.
 
 Glue job setup notes (see aws/glue/glue-job.tf):
   - Job type: Python Shell, Python 3.9
@@ -64,8 +71,6 @@ Glue job setup notes (see aws/glue/glue-job.tf):
         secretsmanager:GetSecretValue on RDS_SECRET_NM
   - The Secrets Manager secret is a JSON object:
         {"host": "...", "port": 5432, "dbname": "...", "username": "...", "password": "..."}
-  - Schedule via a Glue trigger (on-demand for one-time loads, or a schedule
-    for recurring ad-hoc-update runs) as needed.
 =============================================================================
 """
 
@@ -82,55 +87,19 @@ from rds_conn import RdsClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("cms_metadata_load")
 
-# -----------------------------------------------------------------------------
-# Table registry - the single source of truth for what this job loads and how.
-# -----------------------------------------------------------------------------
-TABLE_CONFIG = {
-    "compliance_source_system": {
-        "primary_key": ["src_cd"],
-        "columns": ["src_cd", "src_nm", "src_ty", "active_ind"],
-        "mode": "upsert",
-    },
-    "compliance_run_type": {
-        "primary_key": ["run_ty"],
-        "columns": ["run_ty", "run_ty_desc", "sla_days"],
-        "mode": "upsert",
-    },
-    "compliance_dataset_source_xwalk": {
-        "primary_key": ["project_cd", "table_nm", "src_cd", "run_ty", "cmplnc_vrsn"],
-        "columns": [
-            "project_cd", "table_nm", "src_cd", "run_ty", "cmplnc_vrsn",
-            "carry_fwd_elig_ind",
-        ],
-        "mode": "upsert",
-    },
-    "compliance_request_intake": {
-        "primary_key": ["intake_id"],
-        "columns": [
-            "intake_id", "project_cd", "table_nm", "src_cd", "req_dt_key",
-            "req_ty", "requested_by", "requested_dtts", "rsn",
-            "processed_ind", "processed_dtts",
-        ],
-        "mode": "upsert",
-    },
-    "cms_compliance_exceptions_audit": {
-        "primary_key": ["event_id"],
-        "columns": [
-            "event_id", "btch_id", "event_ctgy", "event_ty", "sevrty",
-            "actor", "event_dtts", "description",
-        ],
-        "mode": "insert_only",
-    },
+# Columns the database itself owns - never loaded from the file even if
+# present. Override with --AUDIT_COLUMNS to replace this list for a run
+# whose table uses different audit column names.
+DEFAULT_AUDIT_COLUMNS = {
+    "created_dtts", "updated_dtts", "loaded_dtts", "created_by", "updated_by",
 }
 
-DB_SCHEMA = "cms_compliance"
 
-
-def read_csv_from_s3(s3_input_path: str, table_key: str) -> pd.DataFrame:
-    """Read s3://.../<table_key>.csv into a DataFrame. Empty file -> empty frame."""
+def read_csv_from_s3(s3_input_path: str, file_name: str) -> pd.DataFrame:
+    """Read s3://.../<file_name> into a DataFrame. Empty file -> empty frame."""
     s3 = boto3.client("s3")
     bucket, _, prefix = s3_input_path.replace("s3://", "").partition("/")
-    key = f"{prefix.rstrip('/')}/{table_key}.csv"
+    key = f"{prefix.rstrip('/')}/{file_name}"
     logger.info("Reading s3://%s/%s", bucket, key)
     obj = s3.get_object(Bucket=bucket, Key=key)
     df = pd.read_csv(io.BytesIO(obj["Body"].read()), dtype=str, keep_default_na=False)
@@ -138,44 +107,25 @@ def read_csv_from_s3(s3_input_path: str, table_key: str) -> pd.DataFrame:
     return df
 
 
-def apply_ddl(conn, s3_ddl_path: str):
-    """Run the CREATE TABLE IF NOT EXISTS script so the schema is guaranteed present."""
-    s3 = boto3.client("s3")
-    bucket, _, key = s3_ddl_path.replace("s3://", "").partition("/")
-    logger.info("Applying DDL from s3://%s/%s", bucket, key)
-    ddl_sql = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
-
-    cur = conn.cursor()
-    try:
-        # pg8000 executes one statement at a time - split the script on ';'
-        # so multiple CREATE TABLE / CREATE SCHEMA statements in one file work.
-        for statement in ddl_sql.split(";"):
-            statement = statement.strip()
-            if statement:
-                cur.execute(statement)
-        conn.commit()
-    finally:
-        cur.close()
-    logger.info("DDL applied.")
-
-
-def upsert_table(conn, table_key: str, df: pd.DataFrame, config: dict) -> int:
+def upsert_file(conn, table: str, s3_input_path: str, file_name: str,
+                 pk_cols: list, mode: str, audit_columns: set) -> int:
     """
-    Generic upsert (or insert-only append) for one metadata table, driven by
-    TABLE_CONFIG. Returns number of rows sent to Postgres.
+    Generic upsert (or insert-only append) of one CSV file into one Postgres
+    table. Has no per-table knowledge - the file's own header defines which
+    columns get loaded. Returns number of rows sent to Postgres.
     """
+    df = read_csv_from_s3(s3_input_path, file_name)
     if df.empty:
-        logger.info("[%s] no rows in input file, skipping.", table_key)
+        logger.info("[%s] no rows in %s, skipping.", table, file_name)
         return 0
 
-    columns = config["columns"]
-    pk_cols = config["primary_key"]
-    mode = config["mode"]
-    target_table = f"{DB_SCHEMA}.{table_key}"
+    # File layout = table layout minus audit columns -> the header itself
+    # is the column list, guarded against an audit column sneaking in.
+    columns = [c for c in df.columns if c not in audit_columns]
 
-    missing = [c for c in columns if c not in df.columns]
-    if missing:
-        raise ValueError(f"[{table_key}] input CSV is missing columns: {missing}")
+    missing_pk = [c for c in pk_cols if c not in columns]
+    if missing_pk:
+        raise ValueError(f"[{table}] file {file_name} is missing primary key column(s): {missing_pk}")
 
     records = list(df[columns].itertuples(index=False, name=None))
 
@@ -185,21 +135,30 @@ def upsert_table(conn, table_key: str, df: pd.DataFrame, config: dict) -> int:
     params = [value for row in records for value in row]
 
     if mode == "insert_only":
-        # Append-only audit log: never touch a row once it exists.
+        # Append-only log: never touch a row once it exists.
         sql = (
-            f"INSERT INTO {target_table} ({col_list}) VALUES {values_sql} "
+            f"INSERT INTO {table} ({col_list}) VALUES {values_sql} "
             f"ON CONFLICT ({', '.join(pk_cols)}) DO NOTHING"
         )
     elif mode == "upsert":
         update_cols = [c for c in columns if c not in pk_cols]
         set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
-        set_clause = (set_clause + ", " if set_clause else "") + "updated_dtts = now()"
-        sql = (
-            f"INSERT INTO {target_table} ({col_list}) VALUES {values_sql} "
-            f"ON CONFLICT ({', '.join(pk_cols)}) DO UPDATE SET {set_clause}"
-        )
+        if "updated_dtts" in audit_columns:
+            set_clause = (set_clause + ", " if set_clause else "") + "updated_dtts = now()"
+        if not set_clause:
+            # Table is pure-PK with no other columns and no updated_dtts audit
+            # column - nothing to update, fall back to DO NOTHING.
+            sql = (
+                f"INSERT INTO {table} ({col_list}) VALUES {values_sql} "
+                f"ON CONFLICT ({', '.join(pk_cols)}) DO NOTHING"
+            )
+        else:
+            sql = (
+                f"INSERT INTO {table} ({col_list}) VALUES {values_sql} "
+                f"ON CONFLICT ({', '.join(pk_cols)}) DO UPDATE SET {set_clause}"
+            )
     else:
-        raise ValueError(f"[{table_key}] unknown load mode: {mode}")
+        raise ValueError(f"[{table}] unknown --MODE: {mode} (expected upsert or insert_only)")
 
     cur = conn.cursor()
     try:
@@ -209,14 +168,15 @@ def upsert_table(conn, table_key: str, df: pd.DataFrame, config: dict) -> int:
         cur.close()
 
     conn.commit()
-    logger.info("[%s] mode=%s rows_in_file=%d rows_affected=%d", table_key, mode, len(records), row_count)
+    logger.info("[%s] mode=%s rows_in_file=%d rows_affected=%d", table, mode, len(records), row_count)
     return len(records)
 
 
 def main():
     args = getResolvedOptions(
         sys.argv,
-        ["S3_INPUT_PATH", "RDS_SECRET_NM", "RDS_DATABASE_NM"],
+        ["TABLE_NAME", "S3_INPUT_PATH", "S3_FILE_NAME", "PRIMARY_KEY",
+         "RDS_SECRET_NM", "RDS_DATABASE_NM"],
     )
 
     # Manually pull optional args so the job doesn't fail when they're absent.
@@ -226,44 +186,37 @@ def main():
             return sys.argv[sys.argv.index(flag) + 1]
         return default
 
+    table = args["TABLE_NAME"]
     s3_input_path = args["S3_INPUT_PATH"]
+    file_name = args["S3_FILE_NAME"]
+    pk_cols = [c.strip() for c in args["PRIMARY_KEY"].split(",") if c.strip()]
     secret_name = args["RDS_SECRET_NM"]
     db_name = args["RDS_DATABASE_NM"]
+
     region = opt("REGION", "us-east-1")
-    tables_arg = opt("TABLES")
-    run_ddl = opt("RUN_DDL", "true").lower() == "true"
-    ddl_s3_path = opt("DDL_S3_PATH")
+    mode = opt("MODE", "upsert")
+    audit_columns_arg = opt("AUDIT_COLUMNS")
+    audit_columns = (
+        {c.strip() for c in audit_columns_arg.split(",") if c.strip()}
+        if audit_columns_arg else set(DEFAULT_AUDIT_COLUMNS)
+    )
 
-    table_keys = [t.strip() for t in tables_arg.split(",")] if tables_arg else list(TABLE_CONFIG.keys())
-    unknown = [t for t in table_keys if t not in TABLE_CONFIG]
-    if unknown:
-        raise ValueError(f"--TABLES contains unknown table key(s): {unknown}. Known: {list(TABLE_CONFIG)}")
+    if not pk_cols:
+        raise ValueError("--PRIMARY_KEY must list at least one column.")
 
-    logger.info("Starting CMS metadata load. Tables in scope: %s", table_keys)
+    logger.info(
+        "Starting load: table=%s file=s3://.../%s pk=%s mode=%s",
+        table, file_name, pk_cols, mode,
+    )
 
     rds_client = RdsClient(secret_name=secret_name, rds_database_name=db_name, region=region)
     conn = rds_client.connect()
     try:
-        if run_ddl:
-            if not ddl_s3_path:
-                raise ValueError("RUN_DDL is true but --DDL_S3_PATH was not provided.")
-            apply_ddl(conn, ddl_s3_path)
-
-        summary = {}
-        for table_key in table_keys:
-            config = TABLE_CONFIG[table_key]
-            try:
-                df = read_csv_from_s3(s3_input_path, table_key)
-                n = upsert_table(conn, table_key, df, config)
-                summary[table_key] = {"status": "OK", "rows": n}
-            except Exception as exc:  # noqa: BLE001 - log and continue with other tables
-                conn.rollback()
-                logger.exception("[%s] failed: %s", table_key, exc)
-                summary[table_key] = {"status": "FAILED", "error": str(exc)}
-
-        logger.info("Load summary: %s", summary)
-        if any(v["status"] == "FAILED" for v in summary.values()):
-            sys.exit(1)
+        n = upsert_file(conn, table, s3_input_path, file_name, pk_cols, mode, audit_columns)
+        logger.info("Done. table=%s rows_in_file=%d", table, n)
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 

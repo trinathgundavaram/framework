@@ -86,23 +86,25 @@ resource "aws_glue_job" "metadata_load" {
     python_version  = "3.9"
   }
 
-  default_arguments = merge(
-    {
-      "--S3_INPUT_PATH"                    = local.seed_data_s3_uri
-      "--RDS_SECRET_NM"                    = aws_secretsmanager_secret.db.name
-      "--RDS_DATABASE_NM"                  = var.rds_database_name
-      "--REGION"                           = var.region
-      "--RUN_DDL"                          = var.run_ddl ? "true" : "false"
-      "--DDL_S3_PATH"                      = local.ddl_s3_uri
-      "--extra-py-files"                   = "s3://${aws_s3_bucket.artifacts.id}/${aws_s3_bucket_object.rds_conn_module.key}"
-      "--additional-python-modules"        = "pg8000,pandas"
-      "--TempDir"                          = local.temp_dir_s3_uri
-      "--enable-continuous-cloudwatch-log" = "true"
-      "--enable-metrics"                   = "true"
-      "--job-language"                     = "python"
-    },
-    var.tables != "" ? { "--TABLES" = var.tables } : {}
-  )
+  # Only the environment-fixed arguments get a default here. --TABLE_NAME,
+  # --S3_FILE_NAME, and --PRIMARY_KEY (and optionally --MODE /
+  # --AUDIT_COLUMNS) are NOT set as defaults on purpose - this job loads one
+  # table per run, and which table/file/PK that is gets passed manually on
+  # every run (console "Run job" -> Job parameters, or `aws glue
+  # start-job-run --arguments`). --S3_INPUT_PATH defaults to the seed_data
+  # folder but can be overridden per run too if a file lives elsewhere.
+  default_arguments = {
+    "--S3_INPUT_PATH"                    = local.seed_data_s3_uri
+    "--RDS_SECRET_NM"                    = aws_secretsmanager_secret.db.name
+    "--RDS_DATABASE_NM"                  = var.rds_database_name
+    "--REGION"                           = var.region
+    "--extra-py-files"                   = local.rds_conn_s3_uri
+    "--additional-python-modules"        = "pg8000,pandas"
+    "--TempDir"                          = local.temp_dir_s3_uri
+    "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-metrics"                   = "true"
+    "--job-language"                     = "python"
+  }
 
   tags = merge(var.required_common_tags, { Environment = var.environment })
 }
