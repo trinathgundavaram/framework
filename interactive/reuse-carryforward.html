@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Universe carry-forward reuse — all tables, before/after close</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; max-width: 980px; margin: 40px auto; padding: 0 20px; color: #222; background: #fff; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  p.sub { color: #666; font-size: 14px; margin-top: 0; margin-bottom: 20px; }
+  .controls { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  button.nav { width: 40px; height: 40px; border-radius: 50%; border: 1px solid #ccc; background: #fafafa; font-size: 18px; cursor: pointer; flex-shrink: 0; }
+  button.nav:hover:not(:disabled) { background: #eee; }
+  button.nav:disabled { opacity: .3; cursor: default; }
+  .day-label { text-align: center; }
+  .day-label .d { font-size: 16px; font-weight: 600; }
+  .day-label .phase { font-size: 13px; font-weight: 600; padding: 2px 10px; border-radius: 10px; display: inline-block; margin-top: 2px; }
+  .phase.before { background: #fbe3b0; color: #6b4b06; }
+  .phase.after  { background: #cdeee0; color: #0a5c40; }
+  .day-label .n { font-size: 12px; color: #888; margin-top: 2px; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+  .tab { font-size: 12.5px; padding: 6px 12px; border-radius: 16px; border: 1px solid #ccc; background: #fafafa; cursor: pointer; color: #444; }
+  .tab:hover { background: #f0f0f0; }
+  .tab.active { background: #2f5496; border-color: #2f5496; color: #fff; }
+  .panel { background: #f6f6f4; border-radius: 10px; padding: 14px 18px; margin-bottom: 16px; }
+  .panel .note { font-size: 14px; line-height: 1.6; margin: 0; }
+  .table-wrap { overflow-x: auto; border: 1px solid #e2e2e2; border-radius: 8px; max-height: 420px; overflow-y: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 11.5px; white-space: nowrap; }
+  th { position: sticky; top: 0; background: #2f5496; color: #fff; padding: 6px 8px; text-align: left; font-weight: 600; z-index: 2; }
+  td { padding: 5px 8px; border-bottom: 1px solid #eee; }
+  .empty { padding: 20px; text-align: center; color: #999; font-size: 13px; }
+  footer { margin-top: 24px; font-size: 12px; color: #999; }
+  footer a { color: #666; }
+</style>
+</head>
+<body>
+
+<h1>Universe carry-forward reuse — all tables</h1>
+<p class="sub">Facets (source 210), Universe project, ODAG1, Run_Ty=CMS, fixed reporting period Jan 1&ndash;31. One file can stand in for several days &mdash; watch how the anchor gets created, replaced while pending, approved, ignored-but-loaded, revoked, and replaced.</p>
+
+<div class="controls">
+  <button class="nav" id="prev" aria-label="Previous step">&#8592;</button>
+  <div class="day-label">
+    <div class="d" id="day-label">Jan 1</div>
+    <div class="phase before" id="phase-label">before close</div>
+    <div class="n">step <span id="step-idx">1</span> of 12</div>
+  </div>
+  <button class="nav" id="next" aria-label="Next step">&#8594;</button>
+</div>
+
+<div class="tabs" id="tabs"></div>
+
+<div class="panel"><p class="note" id="note"></p></div>
+
+<div class="table-wrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
+
+<footer>
+  From the Universe compliance framework mock data. Companion to
+  <a href="latearrival.html">latearrival.html</a> (the ODR late-arrival / correction scenario).
+  <a href="../docs/design/framework-master.md">framework-master.md</a> ·
+  <a href="../docs/design/orchestration-flow.md">orchestration-flow.md</a>
+</footer>
+
+<script>
+const SRC_CD = '210';
+const PROJECT = 'UNIVERSE', TABLE = 'ODAG1', RUN_TY = 'CMS';
+const RPT_S = '2026-01-01', RPT_E = '2026-01-31';
+const DAYS = [
+  { date: '2026-01-01', label: 'Jan 1' },
+  { date: '2026-01-02', label: 'Jan 2' },
+  { date: '2026-01-03', label: 'Jan 3' },
+  { date: '2026-01-04', label: 'Jan 4' },
+  { date: '2026-01-05', label: 'Jan 5' },
+  { date: '2026-01-06', label: 'Jan 6' }
+];
+const TOTAL_STEPS = DAYS.length * 2;
+function bid(d) { return d.replace(/-/g, '') + '_' + PROJECT + '_' + TABLE + '_' + SRC_CD + '_' + RUN_TY + '_2026_1'; }
+function st(dayIdx, phase) { return dayIdx * 2 + (phase === 'after' ? 1 : 0); }
+function buildAsOf(events, stepIdx, keyFn) {
+  const applicable = events.filter(e => e.step <= stepIdx);
+  if (!keyFn) return applicable.map(e => e.row);
+  const map = new Map(); const order = [];
+  applicable.forEach(e => { const k = keyFn(e.row); if (!map.has(k)) order.push(k); map.set(k, e.row); });
+  return order.map(k => map.get(k));
+}
+
+// day index -> what happens: 'new' (file arrives, becomes own data), 'missing_pending' (no file, anchor still pending),
+// 'missing_revoked' (no file, anchor revoked), 'carried_ignored' (file arrives but anchor active, not promoted)
+const PLAN = ['new_candidate', 'new_replace_candidate', 'missing_then_approve', 'carried_ignored', 'missing_revoked', 'new_anchor'];
+
+// ---------------- CRC ----------------
+const crcEvents = [];
+DAYS.forEach((day, di) => {
+  const reqId = di + 1;
+  const b = bid(day.date);
+  const kind = PLAN[di];
+  let reqStat, resTy, usedB;
+  if (kind === 'new_candidate' || kind === 'new_replace_candidate' || kind === 'new_anchor') {
+    reqStat = 'RULES_PASSED'; resTy = 'NEW_FILE'; usedB = b;
+  } else if (kind === 'missing_then_approve' || kind === 'missing_revoked') {
+    reqStat = 'DATA_NOT_PROVIDED'; resTy = 'MISSING'; usedB = null;
+  } else if (kind === 'carried_ignored') {
+    reqStat = 'EXTRACTED'; resTy = 'CARRIED_FORWARD'; usedB = bid(DAYS[1].date); // Day 2's batch (the approved anchor)
+  }
+  crcEvents.push({ step: st(di, 'before'), row: { reqId, day: day.date, btchId: b, reqStat, resTy, usedB, close: 'N' } });
+  crcEvents.push({ step: st(di, 'after'),  row: { reqId, day: day.date, btchId: b, reqStat, resTy, usedB, close: 'Y' } });
+});
+function crcCells(r) { return [r.reqId, SRC_CD, r.day, r.btchId, r.reqStat, r.resTy, r.usedB || '\u2014', r.close]; }
+
+// ---------------- FileDetail ----------------
+const fdEvents = []; let fdId = 0;
+DAYS.forEach((day, di) => {
+  const kind = PLAN[di];
+  if (kind === 'new_candidate' || kind === 'new_replace_candidate' || kind === 'new_anchor') {
+    fdEvents.push({ step: st(di, 'before'), row: { id: ++fdId, evt: 'FILE_RECEIVED', day: day.date, entry: 'AUTO', detail: 's3://.../210/' + day.date.replace(/-/g, '') + '.dat', actor: 'SYSTEM' } });
+  }
+  if (kind === 'carried_ignored') {
+    fdEvents.push({ step: st(di, 'before'), row: { id: ++fdId, evt: 'FILE_LOADED_NOT_PROMOTED', day: day.date, entry: 'AUTO', detail: 'loaded to staging, anchor stays governing', actor: 'SYSTEM' } });
+  }
+  fdEvents.push({ step: st(di, 'after'), row: { id: ++fdId, evt: 'BATCH_CLOSED', day: day.date, entry: 'AUTO', detail: 'closed by SYSTEM', actor: 'SYSTEM' } });
+});
+function fdCells(r) { return [r.id, r.day, r.evt, r.entry, r.detail, r.actor]; }
+
+// ---------------- Override ----------------
+const ovrdEvents = [
+  { step: st(0, 'before'), row: { key: 'anchor1', btchId: bid(DAYS[0].date), overrideTy: 'CARRY_FORWARD_REUSE', apprvlStat: 'PENDING_REVIEW', by: '\u2014', validThru: '\u2014', createdByTy: 'AUTO', currentByTy: 'AUTO' } },
+  { step: st(1, 'before'), row: { key: 'anchor1', btchId: bid(DAYS[1].date), overrideTy: 'CARRY_FORWARD_REUSE', apprvlStat: 'PENDING_REVIEW', by: '\u2014', validThru: '\u2014', createdByTy: 'AUTO', currentByTy: 'AUTO' } },
+  { step: st(2, 'after'),  row: { key: 'anchor1', btchId: bid(DAYS[1].date), overrideTy: 'CARRY_FORWARD_REUSE', apprvlStat: 'APPROVED', by: 'jsmith', validThru: '2026-01-31', createdByTy: 'AUTO', currentByTy: 'MANUAL' } },
+  { step: st(4, 'before'), row: { key: 'anchor1', btchId: bid(DAYS[1].date), overrideTy: 'CARRY_FORWARD_REUSE', apprvlStat: 'REVOKED', by: 'mgarcia', validThru: '2026-01-31', createdByTy: 'AUTO', currentByTy: 'MANUAL' } },
+  { step: st(5, 'before'), row: { key: 'anchor2', btchId: bid(DAYS[5].date), overrideTy: 'CARRY_FORWARD_REUSE', apprvlStat: 'PENDING_REVIEW', by: '\u2014', validThru: '\u2014', createdByTy: 'AUTO', currentByTy: 'AUTO' } }
+];
+function ovrdCells(r) { return [r.key, SRC_CD, r.btchId, r.overrideTy, r.apprvlStat, r.by, r.validThru, r.createdByTy, r.currentByTy]; }
+
+// ---------------- ExtractControl (one row per day, no reopen in this scenario) ----------------
+const extEvents = [];
+DAYS.forEach((day, di) => {
+  const kind = PLAN[di];
+  const complete = kind !== 'missing_then_approve' && kind !== 'missing_revoked';
+  extEvents.push({ step: st(di, 'after'), row: { day: day.date, stat: complete ? 'COMPLETE' : 'PARTIAL', included: complete ? 'Facets' : '\u2014', missing: complete ? '\u2014' : 'Facets' } });
+});
+function extCells(r) { return [r.day, r.stat, r.included, r.missing]; }
+
+// ---------------- Audit ----------------
+const auditEvents = [
+  { step: st(2, 'after'), row: { id: 1, evt: 'SOURCE_MISSING_AT_COMBINE', actor: 'SYSTEM', desc: 'Facets: no approved anchor available for Jan 3 (candidate still PENDING_REVIEW at run time)' } },
+  { step: st(2, 'after'), row: { id: 2, evt: 'CARRY_FORWARD_ANCHOR_APPROVED', actor: 'jsmith', desc: 'Anchor (Day 2 batch) approved, valid through 2026-01-31' } },
+  { step: st(3, 'before'), row: { id: 3, evt: 'FILE_RECEIVED_ANCHOR_ACTIVE', actor: 'SYSTEM', desc: 'Jan 4 file loaded but not promoted \u2014 approved anchor still governing' } },
+  { step: st(4, 'before'), row: { id: 4, evt: 'CARRY_FORWARD_ANCHOR_REVOKED', actor: 'mgarcia', desc: 'Anchor (Day 2 batch) revoked \u2014 data quality issue found; grouping now open for a new anchor' } }
+];
+function auditCells(r) { return [r.id, r.evt, r.actor, r.desc]; }
+
+const TABLES = {
+  crc:    { label: 'ComplianceRequestControl', cols: ['Req_ID','Src','Req_Dt_Key','Btch_ID','Req_Stat','Resolution_Ty','Used_Btch_ID','Batch_Close_Ind'], events: crcEvents, key: r => r.reqId, cells: crcCells },
+  fd:     { label: 'ComplianceRequestFileDetail', cols: ['Detail_ID','Day','Event_Ty','Entry_Ty','Detail','Actor'], events: fdEvents, key: null, cells: fdCells },
+  ovrd:   { label: 'ComplianceBatchOverride', cols: ['Key','Src','Btch_ID','Override_Ty','Apprvl_Stat','Apprvd_By','Reuse_Valid_Thru','Created_By_Ty','Current_By_Ty'], events: ovrdEvents, key: r => r.key, cells: ovrdCells },
+  ext:    { label: 'ComplianceExtractControl', cols: ['Req_Dt_Key','Extract_Stat','Included_Src_Cds','Missing_Src_Cds'], events: extEvents, key: r => r.day, cells: extCells },
+  audit:  { label: 'CMS_ComplianceExceptionsAudit', cols: ['Event_ID','Event_Ty','Actor','Description'], events: auditEvents, key: null, cells: auditCells }
+};
+const TABLE_ORDER = ['crc', 'fd', 'ovrd', 'ext', 'audit'];
+
+const NOTES = [
+  ['Jan 1 \u2014 a file arrives. No active candidate exists for this grouping, so it becomes Anchor #1: CRC row created (Batch_Close_Ind=N), Override row inserted PENDING_REVIEW.',
+   'Jan 1 \u2014 SLA cutoff closes the CRC row. The Override candidate is untouched \u2014 close only applies to CRC.'],
+  ['Jan 2 \u2014 a second file arrives while Anchor #1 is still PENDING_REVIEW. CRC uses its own file as usual (today\u2019s file always feeds today\u2019s row). The Override row is UPDATED IN PLACE to this newer candidate \u2014 no second row.',
+   'Jan 2 \u2014 SLA cutoff closes today\u2019s CRC row. Override still PENDING_REVIEW, now pointing at Day 2\u2019s batch.'],
+  ['Jan 3 \u2014 no file today. The run checks for an APPROVED anchor: still PENDING_REVIEW at this moment, so reuse is blocked. CRC row is MISSING.',
+   'Jan 3 \u2014 CRC closes MISSING. Later this same day, an analyst approves the anchor \u2014 Override flips to APPROVED with a required Reuse_Valid_Thru_Dt_Key.'],
+  ['Jan 4 \u2014 a file arrives, but an APPROVED, still-valid anchor is active. Per the resolution priority, the anchor wins: CRC is CARRIED_FORWARD from Day 2\u2019s batch. The new file is loaded to staging (FileDetail) but never promoted.',
+   'Jan 4 \u2014 CRC closes. The anchor itself (Override) is completely untouched by today\u2019s ignored file.'],
+  ['Jan 5 \u2014 the anchor was revoked (a data-quality issue found in Day 2\u2019s file). With no active anchor and no file today, CRC is MISSING.',
+   'Jan 5 \u2014 CRC closes MISSING. The grouping is now free \u2014 the partial unique index no longer blocks a new candidate.'],
+  ['Jan 6 \u2014 a file arrives. Since Anchor #1 is REVOKED (not just closed), this can start Anchor #2: Override inserts a brand-new row, PENDING_REVIEW.',
+   'Jan 6 \u2014 CRC closes. Anchor #2 stays PENDING_REVIEW \u2014 nobody has approved it yet in this timeline.']
+];
+
+let stepIdx = 0; let activeTable = 'crc';
+function renderTabs() {
+  const tabs = document.getElementById('tabs'); tabs.innerHTML = '';
+  TABLE_ORDER.forEach(key => {
+    const b = document.createElement('button');
+    b.className = 'tab' + (key === activeTable ? ' active' : '');
+    b.textContent = TABLES[key].label;
+    b.addEventListener('click', () => { activeTable = key; render(); });
+    tabs.appendChild(b);
+  });
+}
+function render() {
+  renderTabs();
+  const dayIdx = Math.floor(stepIdx / 2); const phase = stepIdx % 2 === 0 ? 'before' : 'after'; const day = DAYS[dayIdx];
+  document.getElementById('day-label').textContent = day.label;
+  const pl = document.getElementById('phase-label');
+  pl.textContent = phase === 'before' ? 'before close' : 'after close';
+  pl.className = 'phase ' + phase;
+  document.getElementById('step-idx').textContent = stepIdx + 1;
+  document.getElementById('prev').disabled = stepIdx === 0;
+  document.getElementById('next').disabled = stepIdx === TOTAL_STEPS - 1;
+  document.getElementById('note').textContent = NOTES[dayIdx][phase === 'before' ? 0 : 1];
+
+  const t = TABLES[activeTable];
+  const rows = buildAsOf(t.events, stepIdx, t.key);
+  document.getElementById('thead').innerHTML = '<tr>' + t.cols.map(c => '<th>' + c + '</th>').join('') + '</tr>';
+  const tbody = document.getElementById('tbody');
+  if (rows.length === 0) { tbody.innerHTML = '<tr><td colspan="' + t.cols.length + '" class="empty">No rows yet at this point in time.</td></tr>'; return; }
+  tbody.innerHTML = '';
+  rows.forEach(r => { const tr = document.createElement('tr'); tr.innerHTML = t.cells(r).map(v => '<td>' + v + '</td>').join(''); tbody.appendChild(tr); });
+}
+document.getElementById('prev').addEventListener('click', function () { if (stepIdx > 0) { stepIdx--; render(); } });
+document.getElementById('next').addEventListener('click', function () { if (stepIdx < TOTAL_STEPS - 1) { stepIdx++; render(); } });
+render();
+</script>
+</body>
+</html>
