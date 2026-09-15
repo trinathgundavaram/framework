@@ -2,13 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>ODR daily processing — CRC table, before/after close</title>
+<title>ODR daily processing — all tables, before/after close</title>
 <style>
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #222; background: #fff; }
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; max-width: 980px; margin: 40px auto; padding: 0 20px; color: #222; background: #fff; }
   h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
-  p.sub { color: #666; font-size: 14px; margin-top: 0; margin-bottom: 24px; }
-  .controls { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  p.sub { color: #666; font-size: 14px; margin-top: 0; margin-bottom: 20px; }
+  .controls { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
   button.nav { width: 40px; height: 40px; border-radius: 50%; border: 1px solid #ccc; background: #fafafa; font-size: 18px; cursor: pointer; flex-shrink: 0; }
   button.nav:hover:not(:disabled) { background: #eee; }
   button.nav:disabled { opacity: .3; cursor: default; }
@@ -18,28 +18,27 @@
   .phase.before { background: #fbe3b0; color: #6b4b06; }
   .phase.after  { background: #cdeee0; color: #0a5c40; }
   .day-label .n { font-size: 12px; color: #888; margin-top: 2px; }
-  .panel { background: #f6f6f4; border-radius: 10px; padding: 14px 18px; margin-bottom: 18px; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+  .tab { font-size: 12.5px; padding: 6px 12px; border-radius: 16px; border: 1px solid #ccc; background: #fafafa; cursor: pointer; color: #444; }
+  .tab:hover { background: #f0f0f0; }
+  .tab.active { background: #2f5496; border-color: #2f5496; color: #fff; }
+  .panel { background: #f6f6f4; border-radius: 10px; padding: 14px 18px; margin-bottom: 16px; }
   .panel .note { font-size: 14px; line-height: 1.6; margin: 0; }
-  .panel .override { font-size: 13px; color: #555; margin: 8px 0 0; }
   .table-wrap { overflow-x: auto; border: 1px solid #e2e2e2; border-radius: 8px; max-height: 420px; overflow-y: auto; }
   table { border-collapse: collapse; width: 100%; font-size: 11.5px; white-space: nowrap; }
   th { position: sticky; top: 0; background: #2f5496; color: #fff; padding: 6px 8px; text-align: left; font-weight: 600; z-index: 2; }
   td { padding: 5px 8px; border-bottom: 1px solid #eee; }
-  tr.new td { background: #e6f1fb; }
-  tr.reopened td { background: #eeedfe; }
-  tr.open-row td:last-child { color: #854f0b; font-weight: 700; }
-  tr.closed-row td:last-child { color: #0f6e56; font-weight: 700; }
-  .legend { display: flex; gap: 18px; font-size: 12px; color: #555; margin: 12px 0 24px; flex-wrap: wrap; }
-  .legend span { display: inline-flex; align-items: center; gap: 6px; }
-  .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; border: 1px solid #ccc; }
-  footer { margin-top: 28px; font-size: 12px; color: #999; }
+  tr.hl td { background: #e6f1fb; }
+  tr.hl2 td { background: #eeedfe; }
+  .empty { padding: 20px; text-align: center; color: #999; font-size: 13px; }
+  footer { margin-top: 24px; font-size: 12px; color: #999; }
   footer a { color: #666; }
 </style>
 </head>
 <body>
 
-<h1>ComplianceRequestControl — before and after batch close</h1>
-<p class="sub">ODR project, sources Qnxt (50), MHK (51), ESI (64). Each day has two steps: right after files are processed (Batch_Close_Ind = N) and right after the SLA-cutoff close job runs (Batch_Close_Ind = Y).</p>
+<h1>ODR daily processing — all tables</h1>
+<p class="sub">Qnxt (50), MHK (51), ESI (64). Pick a table below; the day/close step stays the same across tables so you can compare what each one looks like at the same point in time.</p>
 
 <div class="controls">
   <button class="nav" id="prev" aria-label="Previous step">&#8592;</button>
@@ -51,28 +50,11 @@
   <button class="nav" id="next" aria-label="Next step">&#8594;</button>
 </div>
 
-<div class="panel">
-  <p class="note" id="note"></p>
-  <p class="override" id="override"></p>
-</div>
+<div class="tabs" id="tabs"></div>
 
-<div class="table-wrap">
-  <table id="tbl">
-    <thead>
-      <tr>
-        <th>Req_ID</th><th>Src</th><th>Req_Dt_Key</th><th>Btch_ID</th>
-        <th>Req_Stat</th><th>Resolution_Ty</th><th>Used_Btch_ID</th><th>Batch_Close_Ind</th>
-      </tr>
-    </thead>
-    <tbody id="tbody"></tbody>
-  </table>
-</div>
+<div class="panel"><p class="note" id="note"></p></div>
 
-<div class="legend">
-  <span><span class="swatch" style="background:#e6f1fb"></span> new row this day</span>
-  <span><span class="swatch" style="background:#eeedfe"></span> historical row reopened today</span>
-  <span><span class="swatch" style="background:#fff"></span> unchanged from an earlier day</span>
-</div>
+<div class="table-wrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
 
 <footer>
   From the ODR compliance framework mock data.
@@ -95,12 +77,24 @@ const DAYS = [
   { date: '2026-01-13', label: 'Jan 13' },
   { date: '2026-01-14', label: 'Jan 14', reopen: { targetDayIdx: 5, src: 'ESI', kind: 'correction' } }
 ];
+const TOTAL_STEPS = DAYS.length * 2;
+function bid(d, s) { return d.replace(/-/g, '') + '_ODR_ROPENS_' + SRC[s] + '_DAILY_2026_1'; }
+function st(dayIdx, phase) { return dayIdx * 2 + (phase === 'after' ? 1 : 0); }
 
-function bid(dateStr, src) {
-  return dateStr.replace(/-/g, '') + '_ODR_ROPENS_' + SRC[src] + '_DAILY_2026_1';
+function buildAsOf(events, stepIdx, keyFn) {
+  const applicable = events.filter(e => e.step <= stepIdx);
+  if (!keyFn) return applicable.map(e => e.row);
+  const map = new Map(); const order = [];
+  applicable.forEach(e => {
+    const k = keyFn(e.row);
+    if (!map.has(k)) order.push(k);
+    map.set(k, e.row);
+  });
+  return order.map(k => map.get(k));
 }
 
-const baseRows = [];
+// ---------------- CRC ----------------
+const crcEvents = [];
 DAYS.forEach((day, di) => {
   SRC_ORDER.forEach((src, si) => {
     const reqId = di * 3 + si + 1;
@@ -108,101 +102,160 @@ DAYS.forEach((day, di) => {
     let reqStat, resTy, usedB;
     if (day.missing === src) { reqStat = 'DATA_NOT_PROVIDED'; resTy = 'MISSING'; usedB = null; }
     else { reqStat = 'EXTRACTED'; resTy = 'NEW_FILE'; usedB = b; }
-    baseRows.push({ reqId, src, day: day.date, btchId: b, reqStat, resTy, usedB });
+    crcEvents.push({ step: st(di, 'before'), row: { reqId, src, day: day.date, btchId: b, reqStat, resTy, usedB, close: 'N' } });
+    crcEvents.push({ step: st(di, 'after'),  row: { reqId, src, day: day.date, btchId: b, reqStat, resTy, usedB, close: 'Y' } });
   });
+  if (day.reopen) {
+    const t = DAYS[day.reopen.targetDayIdx];
+    const tReqId = day.reopen.targetDayIdx * 3 + SRC_ORDER.indexOf(day.reopen.src) + 1;
+    const tB = bid(t.date, day.reopen.src);
+    const newVals = { reqId: tReqId, src: day.reopen.src, day: t.date, btchId: tB, reqStat: 'EXTRACTED', resTy: 'NEW_FILE', usedB: tB };
+    crcEvents.push({ step: st(di, 'before'), row: { ...newVals, close: 'N' } });
+    crcEvents.push({ step: st(di, 'after'),  row: { ...newVals, close: 'Y' } });
+  }
 });
-function rowFor(dayIdx, src) { return baseRows.find(r => r.day === DAYS[dayIdx].date && r.src === src); }
+function crcCells(r) { return [r.reqId, r.src, r.day, r.btchId, r.reqStat, r.resTy, r.usedB || '\u2014', r.close]; }
 
-const steps = [];
+// ---------------- FileDetail ----------------
+const fdEvents = []; let fdId = 0;
 DAYS.forEach((day, di) => {
-  ['before', 'after'].forEach(phase => {
-    steps.push({ dayIdx: di, phase, day });
+  SRC_ORDER.forEach(src => {
+    if (day.missing === src) return;
+    fdEvents.push({ step: st(di, 'before'), row: { id: ++fdId, evt: 'FILE_RECEIVED', src, day: day.date, entry: 'AUTO', detail: 's3://.../' + SRC[src] + '/' + day.date.replace(/-/g, '') + '.dat', actor: 'SYSTEM' } });
   });
-});
-
-function computeTableAtStep(stepIdx) {
-  const { dayIdx, phase } = steps[stepIdx];
-  const rows = [];
-  const highlight = {};
-
-  for (let di = 0; di <= dayIdx; di++) {
-    const day = DAYS[di];
-    const isCurrentDay = di === dayIdx;
-    SRC_ORDER.forEach(src => {
-      const base = rowFor(di, src);
-      const closed = isCurrentDay ? (phase === 'after' ? 'Y' : 'N') : 'Y';
-      rows.push({ ...base, close: closed });
-      if (isCurrentDay) highlight[base.reqId] = 'new';
-    });
-    if (day.reopen && di <= dayIdx) {
-      const t = rowFor(day.reopen.targetDayIdx, day.reopen.src);
-      const idx = rows.findIndex(r => r.reqId === t.reqId);
-      const isReopenDay = di === dayIdx;
-      const newVals = { reqStat: 'EXTRACTED', resTy: 'NEW_FILE', usedB: t.btchId };
-      if (idx >= 0) {
-        const closed = isReopenDay ? (phase === 'after' ? 'Y' : 'N') : 'Y';
-        rows[idx] = { ...rows[idx], ...newVals, close: closed };
-        if (isReopenDay) highlight[t.reqId] = 'reopened';
-      }
+  SRC_ORDER.forEach(src => {
+    fdEvents.push({ step: st(di, 'after'), row: { id: ++fdId, evt: 'BATCH_CLOSED', src, day: day.date, entry: 'AUTO', detail: 'closed by SYSTEM', actor: 'SYSTEM' } });
+  });
+  if (day.reopen) {
+    const t = DAYS[day.reopen.targetDayIdx];
+    if (day.reopen.kind === 'late arrival') {
+      fdEvents.push({ step: st(di, 'before'), row: { id: ++fdId, evt: 'LATE_ARRIVAL', src: day.reopen.src, day: t.date, entry: 'AUTO', detail: 'late file received ' + day.date, actor: 'SYSTEM' } });
+    } else {
+      fdEvents.push({ step: st(di, 'before'), row: { id: ++fdId, evt: 'FILE_RECEIVED', src: day.reopen.src, day: t.date, entry: 'AUTO', detail: 'corrected file received ' + day.date, actor: 'SYSTEM' } });
+    }
+    fdEvents.push({ step: st(di, 'after'), row: { id: ++fdId, evt: 'BATCH_CLOSED', src: day.reopen.src, day: t.date, entry: 'AUTO', detail: 're-closed by SYSTEM', actor: 'SYSTEM' } });
+    if (day.reopen.kind === 'correction') {
+      fdEvents.push({ step: st(di, 'after'), row: { id: ++fdId, evt: 'CORRECTION_FLAG_CLEARED', src: day.reopen.src, day: t.date, entry: 'MANUAL', detail: 'cleared by jsmith', actor: 'jsmith' } });
     }
   }
-  return { rows, highlight };
-}
+  if (day.flag) {
+    const w = DAYS.find(d => d.wrong === day.flag);
+    fdEvents.push({ step: st(di, 'before'), row: { id: ++fdId, evt: 'CORRECTION_FLAGGED', src: day.flag, day: w.date, entry: 'MANUAL', detail: 'flagged by mgarcia', actor: 'mgarcia' } });
+  }
+});
+function fdCells(r) { return [r.id, r.src, r.day, r.evt, r.entry, r.detail, r.actor]; }
+
+// ---------------- Override ----------------
+const ovrdEvents = [];
+DAYS.forEach((day, di) => {
+  if (!day.reopen) return;
+  const t = DAYS[day.reopen.targetDayIdx];
+  const b = bid(t.date, day.reopen.src);
+  const key = day.reopen.src + '-' + t.date;
+  const overrideTy = day.reopen.kind === 'late arrival' ? 'LATE_ARRIVAL_REOPEN' : 'CORRECTION_REOPEN';
+  ovrdEvents.push({ step: st(di, 'before'), row: { key, src: day.reopen.src, targetDay: t.date, btchId: b, overrideTy, apprvlStat: 'PENDING_REVIEW', by: '\u2014', createdByTy: 'AUTO', currentByTy: 'AUTO' } });
+  ovrdEvents.push({ step: st(di, 'after'),  row: { key, src: day.reopen.src, targetDay: t.date, btchId: b, overrideTy, apprvlStat: 'APPROVED', by: 'jsmith', createdByTy: 'AUTO', currentByTy: 'MANUAL' } });
+});
+function ovrdCells(r) { return [r.key, r.src, r.targetDay, r.btchId, r.overrideTy, r.apprvlStat, r.by, r.createdByTy, r.currentByTy]; }
+
+// ---------------- ExtractControl ----------------
+const extEvents = [];
+DAYS.forEach((day, di) => {
+  const stat = day.date === '2026-01-05' ? 'PARTIAL' : 'COMPLETE';
+  const missing = day.date === '2026-01-05' ? 'MHK' : '\u2014';
+  const included = day.date === '2026-01-05' ? 'Qnxt, ESI' : 'Qnxt, MHK, ESI';
+  extEvents.push({ step: st(di, 'after'), row: { day: day.date, stat, included, missing, closeInd: 'Y', reopenInd: 'N' } });
+});
+[{ day: '2026-01-05', at: 4 }, { day: '2026-01-10', at: 9 }].forEach(({ day, at }) => {
+  extEvents.push({ step: st(at, 'after'), row: { day, stat: 'COMPLETE', included: 'Qnxt, MHK, ESI', missing: '\u2014', closeInd: 'Y', reopenInd: 'Y' } });
+});
+function extCells(r) { return [r.day, r.stat, r.included, r.missing, r.closeInd, r.reopenInd]; }
+
+// ---------------- RequestInTake ----------------
+const intakeEvents = [
+  { step: st(7, 'before'), row: { id: 'INT-0001', src: 'ESI', day: '2026-01-10', reqTy: 'CORRECTION_REQUEST', by: 'mgarcia', processed: 'Y' } }
+];
+function intakeCells(r) { return [r.id, r.src, r.day, r.reqTy, r.by, r.processed]; }
+
+// ---------------- Audit ----------------
+const auditEvents = [
+  { step: st(0, 'after'), row: { id: 1, evt: 'SOURCE_MISSING_AT_COMBINE', actor: 'SYSTEM', desc: 'MHK not received for Jan 5 by SLA cutoff' } },
+  { step: st(2, 'after'), row: { id: 2, evt: 'DUPLICATE_FILE_IGNORED', actor: 'SYSTEM', desc: 'Duplicate resend of Qnxt Jan 6 file, quarantined' } },
+  { step: st(2, 'after'), row: { id: 3, evt: 'UNRECOGNIZED_SOURCE', actor: 'SYSTEM', desc: 'File from unrecognized source, quarantined' } },
+  { step: st(4, 'after'), row: { id: 4, evt: 'LATE_ARRIVAL_REOPEN_APPROVED', actor: 'jsmith', desc: 'MHK late file accepted for Jan 5' } },
+  { step: st(7, 'before'), row: { id: 5, evt: 'DATA_QUALITY_ISSUE_FLAGGED', actor: 'mgarcia', desc: 'ESI Jan 10 data found incorrect on review' } },
+  { step: st(9, 'after'), row: { id: 6, evt: 'CORRECTION_REOPEN_APPROVED', actor: 'jsmith', desc: 'ESI corrected file accepted for Jan 10' } }
+];
+function auditCells(r) { return [r.id, r.evt, r.actor, r.desc]; }
+
+const TABLES = {
+  crc:    { label: 'ComplianceRequestControl', cols: ['Req_ID','Src','Req_Dt_Key','Btch_ID','Req_Stat','Resolution_Ty','Used_Btch_ID','Batch_Close_Ind'], events: crcEvents, key: r => r.reqId, cells: crcCells },
+  fd:     { label: 'ComplianceRequestFileDetail', cols: ['Detail_ID','Src','Day','Event_Ty','Entry_Ty','Detail','Actor'], events: fdEvents, key: null, cells: fdCells },
+  ovrd:   { label: 'ComplianceBatchOverride', cols: ['Key','Src','Target Day','Btch_ID','Override_Ty','Apprvl_Stat','Apprvd_By','Created_By_Ty','Current_By_Ty'], events: ovrdEvents, key: r => r.key, cells: ovrdCells },
+  ext:    { label: 'ComplianceExtractControl', cols: ['Req_Dt_Key','Extract_Stat','Included_Src_Cds','Missing_Src_Cds','Extract_Close_Ind','Reopen_Ind'], events: extEvents, key: r => r.day, cells: extCells },
+  intake: { label: 'ComplianceRequestInTake', cols: ['Intake_ID','Src','Req_Dt_Key','Req_Ty','Requested_By','Processed_Ind'], events: intakeEvents, key: null, cells: intakeCells },
+  audit:  { label: 'CMS_ComplianceExceptionsAudit', cols: ['Event_ID','Event_Ty','Actor','Description'], events: auditEvents, key: null, cells: auditCells }
+};
+const TABLE_ORDER = ['crc', 'fd', 'ovrd', 'ext', 'intake', 'audit'];
 
 const noteFor = (di, phase, day) => {
   if (day.reopen) {
     const who = day.reopen.src;
-    if (phase === 'before') {
-      return day.label + ' \u2014 today\u2019s own 3 rows are created (Batch_Close_Ind=N). Separately, ' + who + '\u2019s ' + day.reopen.kind + ' for its earlier date is approved today \u2014 that historical row\u2019s Batch_Close_Ind also flips back to N as part of the same approval transaction.';
-    }
-    const tail = day.reopen.kind === 'correction'
-      ? 'Notice the reopened row\u2019s Resolution_Ty/Used_Btch_ID look IDENTICAL before and after \u2014 the actual file changed, but that detail lives in ComplianceRequestFileDetail, not CRC.'
-      : 'Notice Resolution_Ty flips MISSING \u2192 NEW_FILE and Used_Btch_ID now has a value \u2014 this row genuinely changes.';
-    return day.label + ' \u2014 SLA cutoff runs. All of today\u2019s own rows close (Batch_Close_Ind=Y), and ' + who + '\u2019s reopened row re-closes too. ' + tail;
+    if (phase === 'before') return day.label + ' \u2014 today\u2019s own rows are created. Separately, ' + who + '\u2019s ' + day.reopen.kind + ' for its earlier date is approved today \u2014 check ComplianceBatchOverride.';
+    return day.label + ' \u2014 SLA cutoff runs. Everything closes. Check ComplianceExtractControl \u2014 the affected day\u2019s extract has now regenerated.';
   }
-  if (day.wrong) {
-    return phase === 'before'
-      ? day.label + ' \u2014 today\u2019s 3 rows are created. ' + day.wrong + '\u2019s file arrives and passes validation, but its data is actually wrong \u2014 nothing in CRC can tell, so it\u2019s created exactly like a normal NEW_FILE row.'
-      : day.label + ' \u2014 SLA cutoff closes all three rows. The extract goes out COMPLETE even though ' + day.wrong + '\u2019s data is wrong \u2014 CRC only tracks presence, not correctness.';
-  }
-  if (day.flag) {
-    return phase === 'before'
-      ? day.label + ' \u2014 today\u2019s 3 rows are created normally.'
-      : day.label + ' \u2014 rows close. Separately, an analyst flags Jan 10\u2019s ' + day.flag + ' data as wrong \u2014 that write goes to ComplianceRequestFileDetail / ComplianceRequestInTake, not here. This table is identical before and after that flag.';
-  }
-  return phase === 'before'
-    ? day.label + ' \u2014 files land, each source gets its own row, Batch_Close_Ind=N while the day is still open.'
-    : day.label + ' \u2014 SLA cutoff runs. All three rows close (Batch_Close_Ind=Y). Routine day, no exceptions.';
+  if (day.wrong) return phase === 'before' ? day.label + ' \u2014 ' + day.wrong + '\u2019s file arrives and passes validation, but the data is wrong \u2014 nothing here can tell.' : day.label + ' \u2014 extract closes COMPLETE anyway.';
+  if (day.flag) return phase === 'before' ? day.label + ' \u2014 an analyst flags Jan 10\u2019s data \u2014 check ComplianceRequestInTake and ComplianceRequestFileDetail. CRC is untouched.' : day.label + ' \u2014 rows close normally.';
+  return phase === 'before' ? day.label + ' \u2014 files land, rows open (Batch_Close_Ind=N).' : day.label + ' \u2014 SLA cutoff closes everything. Routine day.';
 };
 
-let i = 0;
-function render() {
-  const { dayIdx, phase, day } = steps[i];
-  document.getElementById('day-label').textContent = day.label;
-  document.getElementById('phase-label').textContent = phase === 'before' ? 'before close' : 'after close';
-  document.getElementById('phase-label').className = 'phase ' + phase;
-  document.getElementById('step-idx').textContent = i + 1;
-  document.getElementById('prev').disabled = i === 0;
-  document.getElementById('next').disabled = i === steps.length - 1;
-  document.getElementById('note').textContent = noteFor(dayIdx, phase, day);
-  document.getElementById('override').textContent = '';
+let stepIdx = 0;
+let activeTable = 'crc';
 
-  const { rows, highlight } = computeTableAtStep(i);
+function renderTabs() {
+  const tabs = document.getElementById('tabs');
+  tabs.innerHTML = '';
+  TABLE_ORDER.forEach(key => {
+    const b = document.createElement('button');
+    b.className = 'tab' + (key === activeTable ? ' active' : '');
+    b.textContent = TABLES[key].label;
+    b.addEventListener('click', () => { activeTable = key; render(); });
+    tabs.appendChild(b);
+  });
+}
+
+function render() {
+  renderTabs();
+  const dayIdx = Math.floor(stepIdx / 2);
+  const phase = stepIdx % 2 === 0 ? 'before' : 'after';
+  const day = DAYS[dayIdx];
+  document.getElementById('day-label').textContent = day.label;
+  const pl = document.getElementById('phase-label');
+  pl.textContent = phase === 'before' ? 'before close' : 'after close';
+  pl.className = 'phase ' + phase;
+  document.getElementById('step-idx').textContent = stepIdx + 1;
+  document.getElementById('prev').disabled = stepIdx === 0;
+  document.getElementById('next').disabled = stepIdx === TOTAL_STEPS - 1;
+  document.getElementById('note').textContent = noteFor(dayIdx, phase, day);
+
+  const t = TABLES[activeTable];
+  const rows = buildAsOf(t.events, stepIdx, t.key);
+  const thead = document.getElementById('thead');
+  thead.innerHTML = '<tr>' + t.cols.map(c => '<th>' + c + '</th>').join('') + '</tr>';
   const tbody = document.getElementById('tbody');
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="' + t.cols.length + '" class="empty">No rows yet at this point in time.</td></tr>';
+    return;
+  }
   tbody.innerHTML = '';
   rows.forEach(r => {
     const tr = document.createElement('tr');
-    const h = highlight[r.reqId];
-    tr.className = (h === 'new' ? 'new ' : h === 'reopened' ? 'reopened ' : '') + (r.close === 'Y' ? 'closed-row' : 'open-row');
-    tr.innerHTML = '<td>' + r.reqId + '</td><td>' + r.src + '</td><td>' + r.day + '</td><td>' + r.btchId + '</td>' +
-      '<td>' + r.reqStat + '</td><td>' + r.resTy + '</td><td>' + (r.usedB || '\u2014') + '</td><td>' + r.close + '</td>';
+    tr.innerHTML = t.cells(r).map(v => '<td>' + v + '</td>').join('');
     tbody.appendChild(tr);
   });
-  const lastHighlighted = tbody.querySelector('tr.new, tr.reopened');
-  if (lastHighlighted) lastHighlighted.scrollIntoView({ block: 'center' });
 }
-document.getElementById('prev').addEventListener('click', function () { if (i > 0) { i--; render(); } });
-document.getElementById('next').addEventListener('click', function () { if (i < steps.length - 1) { i++; render(); } });
+document.getElementById('prev').addEventListener('click', function () { if (stepIdx > 0) { stepIdx--; render(); } });
+document.getElementById('next').addEventListener('click', function () { if (stepIdx < TOTAL_STEPS - 1) { stepIdx++; render(); } });
 render();
 </script>
 </body>
