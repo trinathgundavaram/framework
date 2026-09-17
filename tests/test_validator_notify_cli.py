@@ -152,6 +152,7 @@ def test_http_connector(http_server):
 
 
 def test_glue_connector():
+    pytest.importorskip("botocore")
     from botocore.exceptions import ClientError
 
     class Client:
