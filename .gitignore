@@ -17,3 +17,15 @@ override.tf.json
 # override file if you ever create one.
 *.local.tfvars
 .env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+.local_store/

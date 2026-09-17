@@ -1,5 +1,9 @@
 # CMS Compliance Framework — Metadata Glue Job (Terragrunt / Terraform)
 
+> **CMS Compliance Framework package:** the project-agnostic, filename-driven framework code lives in
+> `src/framework/` (design: `docs/design/cms-compliance-framework-design.md`; developer guide:
+> `docs/framework-package.md`). The rest of this README covers the metadata-load Glue job below.
+
 Deploys, end to end through Terragrunt, a single AWS Glue Python Shell job
 that upserts a CSV file into **any** Postgres table — not hardcoded to a
 fixed set of tables, and no config file to maintain. Which table, which
