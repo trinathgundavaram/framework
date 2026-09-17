@@ -11,6 +11,8 @@ Examples:
   framework validate-config
   framework create-batches --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH --as-of 2026-02-01
   framework ingest-file --bucket inbound --key prja/in/PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.txt
+  framework ingest-path --bucket inbound --prefix prja/in/     # every object waiting at one location
+  framework ingest-path                                        # every object at every configured location
   framework process-intake
   framework evaluate-extracts --project PRJA --set EXTRACT_GATING_MODE=BEST_EFFORT
   framework close-extract --extract-id 12 --closed-by jdoe --ack-warnings
@@ -83,6 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--bucket", required=True)
     sp.add_argument("--key", required=True)
     sp.add_argument("--version-id")
+    sp = add("ingest-path", "process every object at one location, or at every configured inbound location")
+    sp.add_argument("--bucket", help="with --prefix: scan this one location instead of every configured one")
+    sp.add_argument("--prefix")
     add("process-decisions", "apply approved reuse overrides and remove expired ones")
     scope(add("evaluate-extracts", "refresh extracts past their SLA hold and close the eligible ones"))
     sp = add("refresh-extract", "recount / combine / evaluate one extract")
@@ -148,6 +153,10 @@ def _dispatch(app: App, args) -> int:
     if c == "ingest-file":
         _print(app.pipeline.process_file(args.bucket, args.key, args.version_id))
         return 0
+    if c == "ingest-path":
+        s = app.pipeline.process_path(args.bucket, args.prefix)
+        _print(s)
+        return 1 if s.errors else 0
     if c == "process-decisions":
         s = app.decisions.run()
         _print(s)

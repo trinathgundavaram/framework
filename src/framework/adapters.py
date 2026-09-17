@@ -69,6 +69,9 @@ class ObjectStore(ABC):
     def exists(self, bucket: str, key: str) -> bool: ...
 
     @abstractmethod
+    def list_objects(self, bucket: str, prefix: str) -> list[ObjectInfo]: ...
+
+    @abstractmethod
     def download(self, bucket: str, key: str, dest: str, version_id: Optional[str] = None) -> None: ...
 
     @abstractmethod
@@ -114,6 +117,15 @@ class LocalObjectStore(ObjectStore):
     def exists(self, bucket, key):
         return self._path(bucket, key).is_file()
 
+    def list_objects(self, bucket, prefix):
+        """Files directly under <bucket>/<prefix> - not recursive (Q-03: inbound files are at the
+        template's root, no sub-folders)."""
+        d = self._path(bucket, prefix)
+        if not d.is_dir():
+            return []
+        return [ObjectInfo(bucket, f"{prefix}{p.name}", None, hashlib.md5(p.read_bytes()).hexdigest(), p.stat().st_size)
+                for p in sorted(d.iterdir()) if p.is_file()]
+
     def download(self, bucket, key, dest, version_id=None):
         shutil.copyfile(self._path(bucket, key), dest)
 
@@ -152,6 +164,18 @@ class S3ObjectStore(ObjectStore):
             if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
                 return False
             raise
+
+    def list_objects(self, bucket, prefix):
+        """Objects directly under prefix - Delimiter='/' keeps this non-recursive, matching
+        LocalObjectStore (Q-03: inbound files are at the template's root, no sub-folders)."""
+        out: list[ObjectInfo] = []
+        paginator = self.s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
+            for obj in page.get("Contents", []):
+                if obj["Key"] == prefix:                # the "folder" placeholder object itself, if any
+                    continue
+                out.append(ObjectInfo(bucket, obj["Key"], None, obj["ETag"].strip('"'), obj["Size"]))
+        return out
 
     def download(self, bucket, key, dest, version_id=None):
         extra = {"VersionId": version_id} if version_id else None

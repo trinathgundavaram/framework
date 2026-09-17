@@ -158,6 +158,7 @@ All of these were withdrawn by D-34, D-30 or D-39:
 | `create-batches --project --run-type --period [--as-of]` | `batches.create_batches` | project schedule (D-71) |
 | `process-intake` | `batches.IntakeProcessor` (ad-hoc request windows, D-79) | poll |
 | `ingest-file --bucket --key [--version-id]` | `ingest.IngestPipeline.process_file` | S3 event |
+| `ingest-path [--bucket --prefix]` | `ingest.IngestPipeline.process_path` (every object at one location, or at every configured location) | poll, or a bulk drop |
 | `process-decisions` | `overrides.DecisionProcessor` | poll (every few minutes) |
 | `evaluate-extracts [--project]` | `extract.ExtractEvaluator` (refresh + automatic close sweep) | project schedule, every 15 min (D-72) |
 | `close-extract --extract-id --closed-by [--ack-warnings]` | `extract.ExtractControlService.close` | human |
@@ -456,6 +457,8 @@ A correction is **not** an intake row: it is a `CORRECTION` override on the batc
 10. If the batch was `CARRIED_FORWARD`, the promoted file replaces the carried data: `Reuse_Btch_ID` is cleared and `CARRY_FORWARD_REMOVED` is logged. The `REUSE` override row is left as it is; it no longer applies because the batch has data (D-70).
 
 **Which batch a file belongs to (D-78).** Filenames carry the report period but not the run date, so the pipeline picks the **open** batch of the grain with the latest `Req_Dt_Key ≤ today`. If every batch of the grain is closed, it takes the most recent one and requires an approved, still-valid override of the type that matches its state (`LATE_ARRIVAL` with no data, `CORRECTION` with data); without one the file is quarantined as `FILE_REJECTED_BATCH_CLOSED`. That quarantine is **retryable**: delivering the same object again after the override exists reprocesses the same `Load_ID`.
+
+**P5b. Path ingest (`ingest-path [--bucket --prefix]`).** A thin sweep over P5: `ingest.IngestPipeline.process_path` lists every object waiting at one inbound location (`--bucket`/`--prefix`), or — when both are omitted — at the distinct inbound location of every active file config (config-driven, D-27; several source configs commonly share one folder, matched purely by filename template). Every object found is handed to the same `process_file` used by `ingest-file`, one at a time, so each one is still matched to exactly **one** file config and resolved against exactly **one** batch (D-26, D-33) under that batch's own lock — several files for different sources, different configs and different open batches are simply all picked up and processed in the one call. A location that cannot be listed, or an object that fails technically, is recorded and does not stop the rest of the sweep. `ingest-path` exists so an orchestrator (or a poll) can say "process whatever is waiting" instead of enumerating objects and calling `ingest-file` once per file; it changes nothing about how a single object is resolved or promoted.
 
 **P6. Promotion.** Core swap per §10.2.
 
@@ -954,6 +957,10 @@ The following v2 questions are closed: O-01, O-02, O-03, O-05–O-08, O-10, O-11
 ---
 
 ## 17. Change Log
+
+**Post-v5 implementation notes (no schema or decision change)**
+- **`ingest-path` (§3, §7 P5b):** a thin sweep over `process_file` that lists every object at one inbound location, or at every active file config's location, and processes each one through the unchanged §8 resolution logic. No new table, column or decision; D-26 (one file per batch) and D-33 (one file config per project/table/source) are unaffected because every object is still resolved individually.
+- **`app.py` carries no table-specific SQL.** `health()` (§15.3) now composes its report from `ingest.IngestPipeline.health()`, `overrides.DecisionProcessor.health()` and `extract.ExtractControlService.health()` instead of querying those tables itself, matching §15.1's per-module table ownership. The report's shape (keys and columns) is unchanged.
 
 **v4 → v5 (simpler control tables)**
 - **Removed table:** `ComplianceExtractTrigger` (D-76). 14 → 13 tables. The framework closes the run; the project's job chain generates the extract.

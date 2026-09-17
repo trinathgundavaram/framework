@@ -24,6 +24,7 @@ cp .env.example .env                      # database + local settings
 framework init-db
 framework create-batches --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
 framework ingest-file --bucket inbound --key prja/in/PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.txt
+framework ingest-path                           # sweep every configured inbound location in one call
 framework evaluate-extracts --project PRJA      # closes the runs whose data is complete
 ```
 

@@ -304,6 +304,81 @@ def test_correction_needs_its_own_override_type_and_expires(env, conn):
     assert (late.result, late.event_ty) == ("QUARANTINED", "FILE_REJECTED_BATCH_CLOSED")
 
 
+def test_process_path_scans_one_location_multiple_configs_and_batches(env, conn):
+    """Two files for two different sources - different configs, different batches - sitting in the
+    same inbound location are both picked up and promoted by one process_path() call. Each file is
+    still resolved to exactly one config and one batch (D-26), same as a separate ingest-file each."""
+    app, *_ = env
+    put_file(app, file_name("S1"), ["1|1|a"])
+    put_file(app, file_name("S2"), ["2|2|b"])
+    summary = app.pipeline.process_path("inbound", "prja/in/")
+    assert (summary.scanned, summary.promoted, summary.errors) == (2, 2, [])
+    assert {o.result for o in summary.outcomes} == {"PROMOTED"}
+    s1 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1'")
+    s2 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S2'")
+    assert s1["req_stat"] == "PROMOTED" and s2["req_stat"] == "PROMOTED"
+    assert s1["btch_id"] != s2["btch_id"]                     # separate batches, one file each (D-26, D-33)
+
+
+def test_process_path_defaults_to_every_configured_location(env, conn):
+    """With no bucket/prefix, every active file config's inbound location is scanned (D-27)."""
+    app, *_ = env
+    put_file(app, file_name("S1"), ["1|1|a"])
+    put_file(app, file_name("S2"), ["2|2|b"])
+    summary = app.pipeline.process_path()
+    assert summary.locations == ["inbound/prja/in/"]           # S1 and S2 share one configured folder
+    assert (summary.scanned, summary.promoted) == (2, 2)
+
+
+def test_process_path_mixed_outcomes_keep_going(env, conn):
+    """A quarantined file does not stop a sibling file in the same sweep from being promoted."""
+    app, *_ = env
+    put_file(app, "junk.txt", ["x"])                           # matches no template
+    put_file(app, file_name("S1"), ["1|1|a"])
+    summary = app.pipeline.process_path("inbound", "prja/in/")
+    assert (summary.scanned, summary.promoted, summary.quarantined) == (2, 1, 1)
+    assert sorted(o.result for o in summary.outcomes) == ["PROMOTED", "QUARANTINED"]
+
+
+def test_process_path_requires_bucket_and_prefix_together(env):
+    app, *_ = env
+    with pytest.raises(ValueError):
+        app.pipeline.process_path("inbound", None)
+    with pytest.raises(ValueError):
+        app.pipeline.process_path(None, "prja/in/")
+
+
+def test_process_path_empty_location_is_a_noop(env):
+    app, *_ = env
+    summary = app.pipeline.process_path("inbound", "prja/nothing-here/")
+    assert (summary.scanned, summary.outcomes) == (0, [])
+
+
+def test_process_path_records_a_listing_error_and_continues(env, conn):
+    """A location that cannot be listed (here: a path escaping the local store root) is recorded as
+    an error rather than raising, so a problem with one configured location does not sink the sweep."""
+    app, *_ = env
+    put_file(app, file_name("S1"), ["1|1|a"])
+    summary = app.pipeline.process_path("inbound", "../../evil/")
+    assert summary.scanned == 0 and summary.outcomes == []
+    assert len(summary.errors) == 1 and "ValueError" in summary.errors[0]
+    # the good location is untouched - the file is still sitting there, unprocessed
+    assert q1(conn, "SELECT count(*) n FROM ComplianceFileLoad")["n"] == 0
+
+
+def test_process_path_records_a_technical_failure_and_continues(env, conn):
+    """A file that fails technically (here: the rules engine errors) is recorded in `errors` and the
+    sweep still goes on to the next object instead of stopping."""
+    app, clock, rules = env
+    rules.error.add("FILE_LEVEL")
+    put_file(app, file_name("S1"), ["1|1|a"])
+    put_file(app, file_name("S2"), ["2|2|b"])
+    summary = app.pipeline.process_path("inbound", "prja/in/")
+    assert summary.scanned == 2 and summary.promoted == 0
+    assert len(summary.errors) == 2 and all("TechnicalFailure" in e for e in summary.errors)
+    assert {r["load_stat"] for r in qa(conn, "SELECT Load_Stat FROM ComplianceFileLoad")} == {"FAILED_TECHNICAL"}
+
+
 def test_file_matches_the_open_batch_of_the_latest_run_date(conn, tmp_path):
     """Daily runs of one period: an arriving file belongs to the open batch with the latest run date (D-78)."""
     seed_config(conn, sources=("S1",))

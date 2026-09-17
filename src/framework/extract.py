@@ -188,6 +188,23 @@ class ExtractControlService:
         rt = cfgmod.run_type(self.conn, extract["run_ty"])
         return earliest_close_date(extract["req_dt_key"], rt.sla_days if rt else 1)
 
+    def health(self) -> dict[str, list[dict]]:
+        """Runs past their SLA hold and still open, and runs whose closed data was superseded by a
+        later promotion (design §15.3): extract.py owns ComplianceExtractControl, so its health
+        queries live here rather than in app.py."""
+        q = lambda text, *p: self.conn.execute(text, p).fetchall()  # noqa: E731
+        today = self.clock.today(self.settings.business_tz)
+        return {
+            "extracts_past_hold_not_closed": q(
+                """SELECT e.Extract_ID, e.Project_Cd, e.Table_Nm, e.Run_Ty, e.Rpt_Start_Dt_Key, e.Rpt_End_Dt_Key,
+                          e.Req_Dt_Key, e.Eligibility_Cd, e.Eligibility_Rsn_Txt
+                     FROM ComplianceExtractControl e JOIN ComplianceRunType r ON r.Run_Ty = e.Run_Ty
+                    WHERE e.Extract_Close_Ind = 0 AND (e.Req_Dt_Key + (r.SLA_Days - 1)) < %s
+                    ORDER BY e.Extract_ID""", today),
+            "regenerate_required": q("""SELECT Extract_ID, Rpt_Start_Dt_Key, Req_Dt_Key FROM ComplianceExtractControl
+                                         WHERE Regenerate_Required_Ind=1 ORDER BY Extract_ID"""),
+        }
+
     def _data_pairs(self, received: list[dict]) -> list[tuple[str, Optional[int]]]:
         """(Btch_ID, promoted Load_ID) whose current core rows make up the extract. A CARRY_FORWARD batch
         contributes the reused batch's current data (D-70)."""

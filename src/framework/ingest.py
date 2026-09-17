@@ -1,8 +1,16 @@
 """File ingest pipeline (design §7 P5, §8, §9.4).
 
-One call processes one S3 object end to end. Business outcomes (quarantine, rules failure, late
-arrival) are returned; technical failures are raised after the load is marked FAILED_TECHNICAL so the
-orchestrator can retry (the replay restarts the same Load_ID - C0).
+`IngestPipeline.process_file` processes one S3 object end to end. Business outcomes (quarantine,
+rules failure, late arrival) are returned; technical failures are raised after the load is marked
+FAILED_TECHNICAL so the orchestrator can retry (the replay restarts the same Load_ID - C0).
+
+`IngestPipeline.process_path` processes every object waiting at one or more inbound locations in a
+single call. It is a thin loop over `process_file`: each object is still matched to exactly one file
+config and exactly one batch (D-26, D-33) through the same per-file, per-batch-locked resolution, so
+several files that match different configs - and land in different open batches - are all picked up
+and processed together without changing that one-file/one-config/one-batch invariant. Use it when an
+orchestrator wants to sweep a location (or every configured inbound location) instead of naming one
+object per call.
 
 Batch selection (D-78): a filename carries the report period but not the run date, so the file is
 matched to the **open** batch of its (project, table, source, run type, report period) with the
@@ -15,7 +23,8 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import timedelta
 from enum import Enum
 from typing import Callable, Optional
 
@@ -101,6 +110,38 @@ def s3_ref(bucket: str, key: str) -> str:
     return f"s3://{bucket}/{key}"
 
 
+PROMOTED_RESULTS = ("PROMOTED", "LATE_PROMOTED", "CORRECTION_PROMOTED")
+REJECTED_RESULTS = ("REJECTED_CLOSED", "RULES_FAILED")
+
+
+@dataclass
+class PathIngestSummary:
+    """Result of one process_path() sweep: how many objects were found and what happened to them.
+    `outcomes` carries one IngestOutcome per object, in the same order they were processed."""
+    scanned: int = 0
+    promoted: int = 0
+    quarantined: int = 0
+    rejected: int = 0
+    replayed: int = 0
+    other: int = 0
+    locations: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    outcomes: list[IngestOutcome] = field(default_factory=list)
+
+    def tally(self, outcome: IngestOutcome) -> None:
+        self.outcomes.append(outcome)
+        if outcome.result in PROMOTED_RESULTS:
+            self.promoted += 1
+        elif outcome.result == "QUARANTINED":
+            self.quarantined += 1
+        elif outcome.result in REJECTED_RESULTS:
+            self.rejected += 1
+        elif outcome.result == "REPLAY_IGNORED":
+            self.replayed += 1
+        else:
+            self.other += 1
+
+
 class IngestPipeline:
     def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings, store: ObjectStore,
                  rule_engine: RuleEngine, on_promoted: Optional[Callable[[int], None]] = None,
@@ -132,6 +173,63 @@ class IngestPipeline:
         except Exception as e:
             self._mark_technical_failure(load["load_id"], e)
             raise
+
+    def process_path(self, bucket: Optional[str] = None, prefix: Optional[str] = None) -> PathIngestSummary:
+        """Process every object waiting at one inbound location, or - when bucket and prefix are both
+        omitted - at every active file config's configured inbound location (D-27: locations to scan
+        come from config, never from a name baked into the pipeline).
+
+        Multiple files, multiple file configs and multiple batches in one call are safe: each object
+        found is still handed to `process_file` on its own, so it is matched to exactly one config and
+        exactly one batch, under that batch's own lock, exactly as a single `ingest-file` call would.
+        This only spares the caller from enumerating objects and invoking the pipeline once per file.
+        A problem listing one location, or a technical failure on one object, is recorded and does not
+        stop the rest of the sweep.
+        """
+        if bool(bucket) != bool(prefix):
+            raise ValueError("bucket and prefix must be given together, or both omitted")
+        locations = [(bucket, prefix if not prefix or prefix.endswith("/") else prefix + "/")] if bucket \
+            else self._configured_locations()
+        summary = PathIngestSummary(locations=[f"{b}/{p}" for b, p in locations])
+        for loc_bucket, loc_prefix in locations:
+            try:
+                objects = self.store.list_objects(loc_bucket, loc_prefix)
+            except Exception as e:  # noqa: BLE001 - an unreachable location does not stop the others
+                log.warning("could not list %s/%s: %s", loc_bucket, loc_prefix, e)
+                summary.errors.append(f"{loc_bucket}/{loc_prefix}: {type(e).__name__}: {e}")
+                continue
+            for info in objects:
+                summary.scanned += 1
+                try:
+                    out = self.process_file(loc_bucket, info.key, info.version_id)
+                except Exception as e:  # noqa: BLE001 - process_file already marked the load FAILED_TECHNICAL
+                    summary.errors.append(f"{loc_bucket}/{info.key}: {type(e).__name__}: {e}")
+                    continue
+                summary.tally(out)
+        return summary
+
+    def _configured_locations(self) -> list[tuple[str, str]]:
+        """The distinct (bucket, prefix) inbound locations of every active file config. Several configs
+        - one per source alias - commonly share a folder, matched purely by filename template, so this
+        de-duplicates before listing."""
+        seen: set[tuple[str, str]] = set()
+        for c in cfgmod.active_file_configs(self.conn):
+            seen.add(parse_uri(c.s3_src_file_path))
+        return sorted(seen)
+
+    def health(self) -> dict[str, list[dict]]:
+        """Loads stuck mid-pipeline, and current quarantine counts by reason (design §15.3): ingest.py
+        owns ComplianceFileLoad, so its health queries live here rather than in app.py."""
+        q = lambda text, *p: self.conn.execute(text, p).fetchall()  # noqa: E731
+        stale_before = self.clock.now() - timedelta(minutes=self.settings.heartbeat_stale_minutes)
+        return {
+            "stale_loads": q(
+                """SELECT Load_ID, S3_Key, Load_Stat, Heartbeat_Dtts FROM ComplianceFileLoad
+                    WHERE Load_Stat IN ('RECEIVED','STAGING','STAGED','RULES_RUNNING','FAILED_TECHNICAL')
+                      AND COALESCE(Heartbeat_Dtts, Updated_Dtts) < %s ORDER BY Load_ID""", stale_before),
+            "quarantine_by_reason": q("""SELECT Quarantine_Rsn_Cd, count(*) AS n FROM ComplianceFileLoad
+                                          WHERE Load_Stat='QUARANTINED' GROUP BY Quarantine_Rsn_Cd ORDER BY n DESC"""),
+        }
 
     @staticmethod
     def _retryable_quarantine(load: dict) -> bool:

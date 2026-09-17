@@ -1,12 +1,16 @@
-"""Service wiring and the operational health report (design §15.3).
+"""Service wiring (design §15.3 for the operational health report).
 
 Entry points (CLI today; Glue / Step Functions call the same CLI with job arguments) build an App
 from Settings and call one service. One database connection serves metadata, staging and core.
+
+App itself carries no table-specific SQL: `health()` composes the report from each service that owns
+the tables it queries (`ingest.IngestPipeline`, `overrides.DecisionProcessor`,
+`extract.ExtractControlService`), the same ownership split as design §15.1's "who writes which table" -
+generic wiring here, business/table-specific logic in the domain modules.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
 from functools import cached_property
 from typing import Optional
 
@@ -85,29 +89,11 @@ class App:
         return NotificationDispatcher(self.conn, self.settings, channel or build_channel(self.settings))
 
     def health(self) -> dict[str, list[dict]]:
-        q = lambda text, *p: self.conn.execute(text, p).fetchall()  # noqa: E731
-        now = self.clock.now()
-        today = self.clock.today(self.settings.business_tz)
-        return {
-            "stale_loads": q(
-                """SELECT Load_ID, S3_Key, Load_Stat, Heartbeat_Dtts FROM ComplianceFileLoad
-                    WHERE Load_Stat IN ('RECEIVED','STAGING','STAGED','RULES_RUNNING','FAILED_TECHNICAL')
-                      AND COALESCE(Heartbeat_Dtts, Updated_Dtts) < %s ORDER BY Load_ID""",
-                now - timedelta(minutes=self.settings.heartbeat_stale_minutes)),
-            "pending_reviews": q("""SELECT Ovrd_ID, Override_Ty, Req_ID, Btch_ID, Created_Dtts
-                                     FROM ComplianceBatchOverride WHERE Apprvl_Stat='PENDING_REVIEW' ORDER BY Ovrd_ID"""),
-            "overrides_expiring_soon": q(
-                """SELECT Ovrd_ID, Override_Ty, Btch_ID, Valid_Thru_Dt_Key FROM ComplianceBatchOverride
-                    WHERE Apprvl_Stat='APPROVED' AND Valid_Thru_Dt_Key BETWEEN %s AND %s ORDER BY Valid_Thru_Dt_Key""",
-                today, today + timedelta(days=7)),
-            "extracts_past_hold_not_closed": q(
-                """SELECT e.Extract_ID, e.Project_Cd, e.Table_Nm, e.Run_Ty, e.Rpt_Start_Dt_Key, e.Rpt_End_Dt_Key,
-                          e.Req_Dt_Key, e.Eligibility_Cd, e.Eligibility_Rsn_Txt
-                     FROM ComplianceExtractControl e JOIN ComplianceRunType r ON r.Run_Ty = e.Run_Ty
-                    WHERE e.Extract_Close_Ind = 0 AND (e.Req_Dt_Key + (r.SLA_Days - 1)) < %s
-                    ORDER BY e.Extract_ID""", today),
-            "regenerate_required": q("""SELECT Extract_ID, Rpt_Start_Dt_Key, Req_Dt_Key FROM ComplianceExtractControl
-                                         WHERE Regenerate_Required_Ind=1 ORDER BY Extract_ID"""),
-            "quarantine_by_reason": q("""SELECT Quarantine_Rsn_Cd, count(*) AS n FROM ComplianceFileLoad
-                                          WHERE Load_Stat='QUARANTINED' GROUP BY Quarantine_Rsn_Cd ORDER BY n DESC"""),
-        }
+        """Operational report (design §15.3), composed from the service that owns each set of tables:
+        stale loads and quarantine counts from the ingest pipeline, pending/expiring overrides from the
+        decision processor, and open-past-hold/regenerate-required runs from extract control."""
+        report: dict[str, list[dict]] = {}
+        report.update(self.pipeline.health())
+        report.update(self.decisions.health())
+        report.update(self.control.health())
+        return report

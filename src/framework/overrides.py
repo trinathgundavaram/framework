@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Callable, Optional
 
 import psycopg
@@ -126,6 +126,23 @@ class DecisionProcessor:
                                         ovrd_id=r["ovrd_id"], detail=f"reuse of {b['reuse_btch_id']} expired")
                 s.expired.append(r["ovrd_id"] or b["req_id"])
                 s.extracts_to_refresh.add(b["extract_id"])
+
+    # ------------------------------------------------------------------ health (design §15.3)
+    def health(self) -> dict[str, list[dict]]:
+        """Approvals awaiting review, and approved overrides expiring within a week - all three override
+        types, not just the REUSE rows this job applies: overrides.py owns ComplianceBatchOverride, so
+        its health queries live here rather than in app.py."""
+        q = lambda text, *p: self.conn.execute(text, p).fetchall()  # noqa: E731
+        today = self.clock.today(self.settings.business_tz)
+        return {
+            "pending_reviews": q("""SELECT Ovrd_ID, Override_Ty, Req_ID, Btch_ID, Created_Dtts
+                                     FROM ComplianceBatchOverride WHERE Apprvl_Stat='PENDING_REVIEW'
+                                     ORDER BY Ovrd_ID"""),
+            "overrides_expiring_soon": q(
+                """SELECT Ovrd_ID, Override_Ty, Btch_ID, Valid_Thru_Dt_Key FROM ComplianceBatchOverride
+                    WHERE Apprvl_Stat='APPROVED' AND Valid_Thru_Dt_Key BETWEEN %s AND %s
+                    ORDER BY Valid_Thru_Dt_Key""", today, today + timedelta(days=7)),
+        }
 
     # ------------------------------------------------------------------ validation
     def _reuse_problem(self, o: dict, b: dict) -> Optional[str]:

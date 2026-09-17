@@ -6,7 +6,7 @@ from framework.cli import main
 from framework.config import RuleBinding, validate_all
 from framework.settings import Settings
 
-from .helpers import create_batches, file_name, make_app, put_file, q1, seed_config, utc
+from .helpers import create_batches, file_name, make_app, put_file, q1, qa, seed_config, utc
 
 
 def codes(issues, severity="ERROR"):
@@ -97,11 +97,46 @@ def test_cli_end_to_end(conn, tmp_path, monkeypatch, capsys):
                  "--as-of", "2026-02-03T13:00:00+00:00",
                  "--set", "extract_gating_mode=BEST_EFFORT"]) == 0
     assert json.loads(capsys.readouterr().out)["closed_batches"] == 2
-    assert main(["health"]) == 0
+    capsys.readouterr()
+    assert main(["health"]) == 0                        # composed from ingest/overrides/extract control (§15.3)
+    assert set(json.loads(capsys.readouterr().out)) == {
+        "stale_loads", "quarantine_by_reason", "pending_reviews", "overrides_expiring_soon",
+        "extracts_past_hold_not_closed", "regenerate_required"}
     assert main(["process-decisions"]) == 0
     assert main(["process-intake"]) == 0
     assert main(["notify"]) == 0
     assert main(["show-config", "--set", "NOT_A_SETTING=1"]) == 2
+
+
+def test_cli_ingest_path(conn, tmp_path, monkeypatch, capsys):
+    """`ingest-path` end to end: one CLI call picks up files for two different sources - two configs,
+    two batches - sitting at the same configured inbound location."""
+    from .conftest import SCHEMA
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(f"FRAMEWORK_DB_DSN={os.environ['TEST_DATABASE_URL']}\n"
+                                   f"FRAMEWORK_METADATA_SCHEMA={SCHEMA}\nFRAMEWORK_OBJECT_STORE=local\n"
+                                   f"FRAMEWORK_LOCAL_STORE_ROOT={tmp_path / 'store'}\n")
+    monkeypatch.setenv("FRAMEWORK_RULE_ENGINE", "none")
+    assert main(["init-db"]) == 0
+    seed_config(conn)
+    assert main(["create-batches", "--project", "PRJA", "--run-type", "MONTHLY", "--period", "PREV_CALENDAR_MONTH",
+                 "--as-of", "2026-02-01T13:00:00+00:00"]) == 0
+    app, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
+    put_file(app, file_name("S1"), ["1|1|a"])
+    put_file(app, file_name("S2"), ["2|2|b"])
+
+    capsys.readouterr()
+    assert main(["ingest-path"]) == 0                        # no --bucket/--prefix: every configured location
+    out = json.loads(capsys.readouterr().out)
+    assert (out["scanned"], out["promoted"], out["errors"]) == (2, 2, [])
+    assert out["locations"] == ["inbound/prja/in/"]
+    assert {r["req_stat"] for r in qa(conn, "SELECT Req_Stat FROM ComplianceRequestControl")} == {"PROMOTED"}
+
+    capsys.readouterr()                                       # nothing left to pick up
+    assert main(["ingest-path", "--bucket", "inbound", "--prefix", "prja/in/"]) == 0
+    assert json.loads(capsys.readouterr().out)["scanned"] == 0
+
+    assert main(["ingest-path", "--bucket", "inbound"]) == 2   # --bucket without --prefix is rejected
 
 
 def test_rule_engine_adapter_contract(conn):

@@ -45,10 +45,10 @@ What each file in `src/framework/` does, what it owns, and what it leaves to oth
  cli.py ──► settings.py (job args > env > .env > defaults; DB from .env or Secrets Manager)
    │
    ▼
- app.py (App: one connection + services, health report)
+ app.py (App: one connection + services; wiring only)
    │
    ├─ batches.py    create-batches (period_sql.py), ad-hoc intake windows
-   ├─ ingest.py     file pipeline + §8 decision tables ──► load.py (read, stage, swap)
+   ├─ ingest.py     file pipeline (one object or a path sweep) + §8 decision tables ──► load.py (read, stage, swap)
    ├─ overrides.py  REUSE decisions: apply and expire
    ├─ extract.py    eligibility, refresh/combine, close, SLA sweep
    └─ audit.py      EventLogger, NotificationDispatcher
@@ -58,6 +58,8 @@ What each file in `src/framework/` does, what it owns, and what it leaves to oth
 ```
 
 **Layering rule:** `common`, `settings`, `db`, `load`, `config`, `adapters` and `audit` never import a service module (`batches`, `ingest`, `overrides`, `extract`, `app`, `cli`).
+
+**Health is an instance of the same rule.** `App.health()` (§15.3) carries no table-specific SQL; it only composes the dict returned by each service that owns the tables in question: `IngestPipeline.health()` (`ComplianceFileLoad`), `DecisionProcessor.health()` (`ComplianceBatchOverride`) and `ExtractControlService.health()` (`ComplianceExtractControl`). Apply the same split to future operational reports or cross-cutting reads: the generic composition goes in `app.py`; the query that knows a table's columns and status values goes in the module that already owns that table (§7).
 
 ---
 
@@ -72,12 +74,13 @@ What each file in `src/framework/` does, what it owns, and what it leaves to oth
 | `create-batches` | P2 | `batches.create_batches` → `batches.compute_period` (`period_sql.py` or `--period-file`) → `batches.create_batch` |
 | `process-intake` | P4 | `batches.IntakeProcessor` → `batches.create_batch` |
 | `ingest-file` | P5, P6 | `ingest.IngestPipeline` → `config.TemplateMatcher` → `adapters` (store) → `load.stage` → `adapters` (rules) → `ingest.decide` → `load.swap` → `extract.ExtractControlService.refresh` (early completion or regenerate flag) |
+| `ingest-path` | P5, P6 | `ingest.IngestPipeline.process_path` → `adapters` (store `list_objects`) → `IngestPipeline.process_file` per object found (same chain as `ingest-file`, once per object; several objects may resolve to different configs and different batches, D-26/D-33) |
 | `process-decisions` | P7 | `overrides.DecisionProcessor` → `extract` refresh |
 | `evaluate-extracts` | P10 | `extract.ExtractEvaluator` → `ExtractControlService.refresh` / `close` |
 | `refresh-extract` | P9 | `extract.ExtractControlService.refresh` (`MANUAL_REFRESH`) |
 | `close-extract` | P11 | `extract.ExtractControlService.close` |
 | `notify` | P13 | `audit.NotificationDispatcher` → `adapters` (log / SES / SNS) |
-| `health` | ops | `app.App.health` |
+| `health` | ops | `app.App.health` → `ingest.IngestPipeline.health` + `overrides.DecisionProcessor.health` + `extract.ExtractControlService.health` |
 
 Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 
@@ -94,7 +97,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 ### `app.py`
 - `App.from_settings`: opens the connection, checks the schema, builds the object store and rules engine.
 - Creates each service on first use and wires the hooks: a promoted file refreshes its extract (`EARLY_COMPLETE`); a promotion into a **closed** batch calls `evaluator.after_late_promotion` (`LATE_PROMOTION`, sets `Regenerate_Required_Ind`, D-41); an override decision refreshes its extract (`OVERRIDE_DECISION`).
-- `health()`: stale loads, pending reviews, overrides expiring within 7 days, extracts past their SLA hold and still open, runs needing regeneration, quarantine counts by reason (§15.3).
+- `health()`: merges the dict returned by `pipeline.health()`, `decisions.health()` and `control.health()` — stale loads and quarantine counts by reason (ingest), pending reviews and overrides expiring within 7 days (overrides), extracts past their SLA hold and still open and runs needing regeneration (extract) (§15.3). `app.py` itself carries none of that SQL: each service reports on the tables it owns (§7), the same split the layering rule already applies to imports.
 
 ### `settings.py`
 - `Settings`: every runtime and job-level setting with its default, and where each value came from (`argument`, `env`, `.env`, `default`).
@@ -133,7 +136,9 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 - `decide(ResolutionInput)` (§8): pure decision tables O-1 … O-5 (open batch) and C-1 … C-4 (closed batch); `required_override_ty(has_data)` says which override type a closed batch needs.
 - Batch selection (D-78): the open batch of the grain with the latest run date ≤ today; otherwise the most recent closed batch, which needs an approved, still-valid override. Without one the file is quarantined as `FILE_REJECTED_BATCH_CLOSED` — a **retryable** quarantine, so re-delivering the object after the approval reprocesses the same `Load_ID`.
 - `IngestPipeline.process_file` (P5): registers the object (C0 idempotency), matches the template, checks location, run type, effective crosswalk and batch, stages the file, runs FILE_LEVEL rules **when bindings exist** (mode `FILE_RULES_MODE`), resolves, promotes in the same transaction (superseding the previous `PROMOTED` load first, D-75), archives or quarantines, and handles replays and technical failures.
+- `IngestPipeline.process_path(bucket=None, prefix=None)`: lists objects at one location (`adapters.ObjectStore.list_objects`), or — with neither argument — at the distinct inbound location of every active file config (`_configured_locations`, de-duplicated, since several source configs commonly share one folder), and calls `process_file` once per object found. Each object still resolves to exactly one config and exactly one batch (D-26, D-33), under that batch's own lock, exactly as a separate `ingest-file` call would; a listing problem or a per-object technical failure is recorded on the returned `PathIngestSummary` and does not stop the rest of the sweep.
 - A file promoted into an open carried-forward batch clears `Reuse_Btch_ID` and logs `CARRY_FORWARD_REMOVED`; a promotion into a closed batch triggers the regenerate flag through the `on_late_promotion` hook.
+- `health()`: stale loads and quarantine counts by reason — `ingest.py` owns `ComplianceFileLoad` (§7), so its health queries live here rather than in `app.py`.
 
 ### `load.py`
 - Table introspection: `columns`, `staging_business_columns`, `core_insert_columns` (identity / generated / serial columns are skipped).
@@ -146,6 +151,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
   - **apply:** an approved, still-valid `REUSE` on an open batch without data → checks `Carry_Fwd_Ind`, that the batch has no promoted load, and that a source batch exists (the requested `Reuse_Btch_ID`, else the latest earlier closed batch with data; a carried batch resolves to its own source). Sets CRC `Resolution_Ty='CARRY_FORWARD'`, `Reuse_Btch_ID`, `Req_Stat='CARRIED_FORWARD'`; logs `OVERRIDE_APPROVED` + `CARRY_FORWARD_APPLIED`; refreshes the extract. An invalid row → `OVERRIDE_INVALID_DETECTED`, batch unchanged.
   - **expire:** an open carried batch whose override ran out (`Valid_Thru_Dt_Key < today`), was rejected or is gone → back to `PENDING`, `OVERRIDE_EXPIRED` + `CARRY_FORWARD_REMOVED`, extract refreshed.
 - There is no revoke and no promotion state: stopping an override is a date change (`sql/approvals.sql` template 6).
+- `health()`: pending reviews and approved overrides expiring within 7 days, across all three override types — `overrides.py` owns `ComplianceBatchOverride` (§7), so its health queries live here rather than in `app.py`.
 
 ### `extract.py`
 - `compute_eligibility` (§11.2): SLA hold (`earliest_close_dt`, computed), STRICT_ALL_PASS / BEST_EFFORT, period-rule status. Carried sources count as received.
@@ -153,9 +159,11 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 - `hold_date(extract)`: `Req_Dt_Key + (SLA_Days − 1)` from the run type (D-77).
 - `ExtractControlService.close` (§11.3): refresh, check eligibility (`CloseBlocked` otherwise), try-lock every open batch (`CloseDeferred`), then close every batch (`EXCEPTION_PENDING` → `COMPLETED_WITH_EXCEPTION`; NEW_FILE or CARRY_FORWARD → `COMPLETED`; otherwise `DATA_NOT_PROVIDED` / `MISSING`) and the extract, storing `Closed_By`, `Close_Warning_Txt` and `Closed_Data_Signature`.
 - `ExtractEvaluator.run(project, table, run type)` (P10): sweeps open extracts whose hold has passed (SLA joined from `ComplianceRunType`), closes the AUTO-eligible ones when `AUTO_CLOSE_EXTRACTS` is on, and reports the runs that need regeneration; `after_late_promotion` refreshes a closed run after a late arrival or correction.
+- `ExtractControlService.health()`: runs past their SLA hold and still open, and runs needing regeneration — `extract.py` owns `ComplianceExtractControl` (§7), so its health queries live here rather than in `app.py`.
 
 ### `adapters.py`
 - Object storage: `ObjectStore`, `LocalObjectStore` (`local://` and tests), `S3ObjectStore`, `parse_uri`, `basename`, `dirname`, `sha256_file`, `build_object_store`.
+- `ObjectStore.list_objects(bucket, prefix)`: every object directly under a location, non-recursive (Q-03: inbound files sit at the template's root, no sub-folders) — `LocalObjectStore` walks the directory, `S3ObjectStore` paginates `list_objects_v2` with `Delimiter="/"`. Backs `ingest.IngestPipeline.process_path`.
 - Rules engine (Q-12): `RuleOutcome`, `CallableRuleEngine` (applies GATE / ANNOTATE), `NoRulesEngine`, `build_rule_engine` (`RULE_ENGINE=gre|none|module:Class`, `GRE_ENTRYPOINT`).
 - Notification channels (D-54): `LogChannel`, `AwsChannel` (SES + SNS `SNS_TOPIC_ARN`), `build_channel`.
 - There are no extract connectors (D-76).
@@ -182,12 +190,12 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 |---|---|
 | `conftest.py` | `conn` fixture: recreates the metadata schema and the sample `stg_t` / `core_t` tables in `TEST_DATABASE_URL`. |
 | `helpers.py` | Synthetic configuration seed, job-level settings (`make_app`), fake rules engine, `create_batches`, file builders, `add_override` / `stop_override`. |
-| `test_units.py` | No database: templates, readers, local store, eligibility, §8 tables and `required_override_ty`, Btch_ID, Req_Stat transitions, settings precedence and `.env`, DB conninfo from DSN / secret, period SQL lookup. |
+| `test_units.py` | No database: templates, readers, local store (incl. `list_objects`), eligibility, §8 tables and `required_override_ty`, `PathIngestSummary.tally`, Btch_ID, Req_Stat transitions, settings precedence and `.env`, DB conninfo from DSN / secret, period SQL lookup. |
 | `test_batches.py` | Every period, lookback checks, project period file, create-batches (one batch per run date, daily runs of one period, re-run by `--as-of`, effective windows, scope, closed runs skipped), the removed CRC columns, ad-hoc intake windows. |
-| `test_ingest.py` | Promotion, replacement, quarantine reasons, structural failures, duplicates, zero records, GATE / ANNOTATE, no bindings, technical failure and replay, closed-batch overrides (late arrival, correction, retry after approval), batch selection by run date. |
+| `test_ingest.py` | Promotion, replacement, quarantine reasons, structural failures, duplicates, zero records, GATE / ANNOTATE, no bindings, technical failure and replay, closed-batch overrides (late arrival, correction, retry after approval), batch selection by run date, `process_path` (one location, every configured location, mixed outcomes, listing/technical errors that don't stop the sweep). |
 | `test_overrides.py` | `REUSE`: apply, invalid cases, pending until approved, expiry, replacement by a real file, reuse chains; `LATE_ARRIVAL` / `CORRECTION` rows are left to the pipeline. |
 | `test_extract.py` | Automatic close after the hold, STRICT partial and rule failures, BEST_EFFORT manual close with acknowledged warnings, zero data, deferred close on a locked batch, period-rule errors, sweep scope and `AUTO_CLOSE_EXTRACTS`, per-run-date holds, regenerate reporting. |
-| `test_config_cli.py` | Validator, notifications, CLI end to end (with `.env`, `--set` and `close-extract`), rules adapter contract. |
+| `test_config_cli.py` | Validator, notifications, CLI end to end (with `.env`, `--set` and `close-extract`), `ingest-path` end to end, the composed `health` report, rules adapter contract. |
 
 ---
 

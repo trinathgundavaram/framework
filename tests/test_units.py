@@ -11,7 +11,7 @@ from framework.common import (ConfigError, FileRejected, InvalidStatusTransition
                               earliest_close_date)
 from framework.config import FileConfig, MatchError, TemplateError, TemplateMatcher, parse_template, render
 from framework.extract import AUTO, MANUAL_ONLY, NOT_ELIGIBLE, EligibilityInput, compute_eligibility
-from framework.ingest import Action, ResolutionInput, decide, required_override_ty
+from framework.ingest import Action, IngestOutcome, PathIngestSummary, ResolutionInput, decide, required_override_ty
 from framework.load import read_file, scan_delimited, stage
 from framework.settings import Settings, read_env_file
 
@@ -146,6 +146,26 @@ def test_local_store(tmp_path):
     assert parse_uri("s3://bucket/a/b") == ("bucket", "a/b/")
     with pytest.raises(ValueError):
         parse_uri("ftp://x/y")
+
+
+def test_path_ingest_summary_tally():
+    s = PathIngestSummary()
+    for result in ("PROMOTED", "LATE_PROMOTED", "CORRECTION_PROMOTED", "QUARANTINED",
+                   "REJECTED_CLOSED", "RULES_FAILED", "REPLAY_IGNORED", "IN_PROGRESS"):
+        s.tally(IngestOutcome(load_id=1, result=result))
+    assert (s.promoted, s.quarantined, s.rejected, s.replayed, s.other) == (3, 1, 2, 1, 1)
+    assert len(s.outcomes) == 8
+
+
+def test_local_store_list_objects(tmp_path):
+    s = LocalObjectStore(str(tmp_path))
+    s.put("b", "in/x.txt", b"hello")
+    s.put("b", "in/y.txt", b"world!")
+    s.put("b", "in/sub/z.txt", b"nested")             # not returned: listing is non-recursive (Q-03: root only)
+    objs = s.list_objects("b", "in/")
+    assert sorted(o.key for o in objs) == ["in/x.txt", "in/y.txt"]
+    assert {o.bucket for o in objs} == {"b"}
+    assert s.list_objects("b", "does-not-exist/") == []
 
 
 def test_spark_engine_requires_jdbc_url():
