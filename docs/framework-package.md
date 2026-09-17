@@ -50,6 +50,27 @@ framework validate-config
 
 Python 3.10+ (tested on 3.10 and 3.11) and PostgreSQL 14+ with `btree_gist` (tested on 16).
 
+### Windows without Docker
+
+1. **Install Python 3.10+** from python.org, and tick "Add python.exe to PATH".
+2. **Install PostgreSQL 14+.**
+   - With admin rights: use the EDB installer (<https://www.postgresql.org/download/windows/>). It includes `btree_gist`.
+   - Without admin rights: download the EDB **zip binaries**, unzip them to e.g. `C:\pgsql`, and run:
+     ```powershell
+     C:\pgsql\bin\initdb.exe -D C:\pgdata -U postgres -A trust -E UTF8
+     C:\pgsql\bin\pg_ctl.exe -D C:\pgdata -l C:\pgdata\log.txt start
+     C:\pgsql\bin\createdb.exe -U postgres fwtest
+     ```
+3. **Set up the environment and run the tests** (PowerShell):
+   ```powershell
+   py -3 -m venv .venv
+   .\.venv\Scripts\Activate.ps1          # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+   pip install -e ".[dev]"
+   $env:TEST_DATABASE_URL = "postgresql://postgres@localhost:5432/fwtest"
+   pytest
+   ```
+4. **Stop the database** when you're done: `C:\pgsql\bin\pg_ctl.exe -D C:\pgdata stop`.
+
 ## Onboarding a project (config only)
 
 1. **Create the target tables.**
