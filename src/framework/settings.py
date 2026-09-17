@@ -1,55 +1,86 @@
-"""Runtime settings, read from environment variables (prefix FRAMEWORK_).
+"""Runtime settings.
 
-Nothing here is project-specific. Values that answer still-open design questions are
-marked with the question id so they can be changed without code changes.
+Precedence for every setting:  environment (FRAMEWORK_<NAME>)  >  config file [settings]  >
+metadata table ComplianceFrameworkSetting (Setting_Nm = <NAME>)  >  built-in default.
+
+Bootstrap settings (needed before the metadata database can be reached) come from the
+environment or the config file only: CONFIG_FILE, METADATA_SCHEMA, AWS_REGION.
+The metadata / data database connections are resolved separately (see connections.py).
 """
 from __future__ import annotations
 
+import configparser
 import json
+import logging
 import os
-from dataclasses import dataclass, field
+import re
+import typing
+from dataclasses import dataclass, field, fields
 from datetime import date
-from typing import Optional
+from typing import Any, Mapping, Optional
 
+log = logging.getLogger(__name__)
 
-def _env(name: str, default: Optional[str] = None) -> Optional[str]:
-    return os.environ.get(f"FRAMEWORK_{name}", default)
+BOOTSTRAP = ("config_file", "metadata_schema", "aws_region")
+DEFAULT_CONFIG_FILE = "framework.ini"
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 
-
-def _bool(name: str, default: bool) -> bool:
-    raw = _env(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in ("1", "true", "yes", "y", "on")
-
-
-def _int(name: str, default: int) -> int:
-    raw = _env(name)
-    return default if raw is None else int(raw)
-
-
-def _list(name: str, default: list[str]) -> list[str]:
-    raw = _env(name)
-    if raw is None:
-        return list(default)
-    return [x.strip() for x in raw.split(",") if x.strip()]
+# name -> description (seeded into ComplianceFrameworkSetting by init-db)
+DESCRIPTIONS = {
+    "object_store": "s3 | local",
+    "local_store_root": "root folder when OBJECT_STORE=local (s3://bucket/key -> <root>/bucket/key)",
+    "default_quarantine_uri": "quarantine location for files that match no file config",
+    "filename_case_sensitive": "Q-03: filename template matching is case-sensitive",
+    "file_effective_date_basis": "Q-04: RPT_START | RPT_END - date used to pick the effective crosswalk row",
+    "supported_file_types": "Q-02: comma-separated enabled file types",
+    "file_encoding": "Q-02: text encoding of delimited files",
+    "quote_char": "Q-02: quote character of delimited files",
+    "empty_as_null": "load empty strings as NULL",
+    "trailer_count_check": "Q-02: validate the trailer record count",
+    "trailer_count_regex": "Q-02: regex whose first group is the trailer record count",
+    "xlsx_sheet": "Q-02: sheet index or name for xlsx files",
+    "xlsx_header_row": "Q-02: 0-based row where the xlsx content starts",
+    "scheduler_window_hours": "cron fires newer than this are created by create-batches",
+    "catchup_lookback_days": "Q-14: catch-up horizon in days",
+    "go_live_date": "Q-14: no batches are created for scheduled dates before this (YYYY-MM-DD)",
+    "lock_timeout_seconds": "seconds to wait for a batch/extract advisory lock",
+    "heartbeat_stale_minutes": "health: loads without heartbeat for this long are stale",
+    "trigger_reconcile_minutes": "REQUESTED triggers older than this are reconciled",
+    "strict_waiver_auto_trigger": "Q-06: STRICT extracts satisfied through waivers trigger automatically",
+    "auto_retrigger_after_reopen": "D-41/Q-16: re-trigger automatically after a reopen is promoted",
+    "retry_failed_triggers_on_sweep": "Q-07: evaluate-extracts re-fires FAILED triggers",
+    "call_retry_backoff_seconds": "Q-07: base backoff between extract call retries",
+    "http_accepted_status": "Q-08: HTTP status ranges treated as accepted, e.g. 200-299",
+    "param_date_format": "strftime format for date extract-job parameters",
+    "adhoc_allow_add_source_before_trigger": "Q-05: ad-hoc intake may add a source to an untriggered extract",
+    "cycle_init_existing_batch": "Q-18: SKIP | FAIL when a CYCLE_INIT batch already exists",
+    "rule_engine": "Q-12: gre | none | module:Class",
+    "gre_entrypoint": "Q-12: module:function implementing the GRE call",
+    "notify_backend": "log | aws",
+    "notify_from_email": "SES sender address",
+    "default_notify_emails": "recipients for events without a file config",
+    "spark_jdbc_url": "override the JDBC URL derived from the target connection (Spark engine)",
+    "spark_jdbc_properties": "extra JDBC properties as JSON (Spark engine)",
+    "spark_write_partitions": "Spark JDBC write partitions",
+    "spark_batch_size": "Spark JDBC batch size",
+}
 
 
 @dataclass
 class Settings:
-    # --- database (D-55: direct connection, no pooler) ---
-    db_dsn: Optional[str] = None
-    db_secret_name: Optional[str] = None
+    # --- bootstrap (env / config file only) ---
+    config_file: Optional[str] = None
+    metadata_schema: str = "cms_compliance"
     aws_region: str = "us-east-1"
 
     # --- object storage ---
-    object_store: str = "s3"                      # s3 | local
+    object_store: str = "s3"
     local_store_root: str = "./.local_store"
     default_quarantine_uri: str = "s3://quarantine-bucket-not-configured/unmatched/"
 
     # --- filename matching (Q-03, Q-04) ---
-    filename_case_sensitive: bool = True           # Q-03 proposal
-    file_effective_date_basis: str = "RPT_START"   # Q-04 proposal: RPT_START | RPT_END
+    filename_case_sensitive: bool = True
+    file_effective_date_basis: str = "RPT_START"
 
     # --- file reading (Q-02) ---
     supported_file_types: list[str] = field(default_factory=lambda: [".txt", ".csv"])
@@ -71,24 +102,24 @@ class Settings:
     heartbeat_stale_minutes: int = 30
     trigger_reconcile_minutes: int = 15
 
-    # --- extract trigger (Q-06, Q-07, Q-08, Q-09, Q-16) ---
-    strict_waiver_auto_trigger: bool = False       # Q-06 proposal: waivers -> manual trigger
-    auto_retrigger_after_reopen: bool = True       # D-41 (Q-16 may change this)
-    retry_failed_triggers_on_sweep: bool = False   # Q-07
-    call_retry_backoff_seconds: int = 5            # Q-07
-    http_accepted_status: list[str] = field(default_factory=lambda: ["200-299"])  # Q-08
+    # --- extract trigger (Q-06, Q-07, Q-08, Q-16) ---
+    strict_waiver_auto_trigger: bool = False
+    auto_retrigger_after_reopen: bool = True
+    retry_failed_triggers_on_sweep: bool = False
+    call_retry_backoff_seconds: int = 5
+    http_accepted_status: list[str] = field(default_factory=lambda: ["200-299"])
     param_date_format: str = "%Y-%m-%d"
 
     # --- intake (Q-05, Q-18) ---
-    adhoc_allow_add_source_before_trigger: bool = True   # Q-05 proposal
-    cycle_init_existing_batch: str = "SKIP"              # Q-18 proposal: SKIP | FAIL
+    adhoc_allow_add_source_before_trigger: bool = True
+    cycle_init_existing_batch: str = "SKIP"
 
     # --- rules engine (Q-12) ---
-    rule_engine: str = "gre"                       # gre | none | "module:Class"
-    gre_entrypoint: Optional[str] = None           # "module:function" (Q-12)
+    rule_engine: str = "gre"
+    gre_entrypoint: Optional[str] = None
 
     # --- notifications (D-54) ---
-    notify_backend: str = "log"                    # log | aws
+    notify_backend: str = "log"
     notify_from_email: Optional[str] = None
     default_notify_emails: list[str] = field(default_factory=list)
 
@@ -98,49 +129,121 @@ class Settings:
     spark_write_partitions: int = 4
     spark_batch_size: int = 10000
 
+    # --- provenance (not a setting) ---
+    sources: dict = field(default_factory=dict, repr=False, compare=False)
+
+    # ------------------------------------------------------------------ loading
+    @classmethod
+    def names(cls) -> list[str]:
+        return [f.name for f in fields(cls) if f.name != "sources"]
+
+    @classmethod
+    def load(cls, env: Optional[Mapping[str, str]] = None,
+             config: Optional[configparser.ConfigParser] = None) -> "Settings":
+        """Environment + config file layers (metadata is applied later with apply_metadata)."""
+        env = os.environ if env is None else env
+        s = cls()
+        path = env.get("FRAMEWORK_CONFIG_FILE")
+        if config is None:
+            config = read_config_file(path)
+        s.config_file = path or (DEFAULT_CONFIG_FILE if os.path.isfile(DEFAULT_CONFIG_FILE) else None)
+        file_values = dict(config.items("settings")) if config.has_section("settings") else {}
+        for name in cls.names():
+            if name == "config_file":
+                continue
+            if name in file_values:
+                s._set(name, file_values[name], "file")
+            env_key = f"FRAMEWORK_{name.upper()}"
+            if env_key in env:
+                s._set(name, env[env_key], "env")
+        s.validate_bootstrap()
+        return s
+
+    # kept for backwards compatibility
     @classmethod
     def from_env(cls) -> "Settings":
-        s = cls()
-        s.db_dsn = _env("DB_DSN")
-        s.db_secret_name = _env("DB_SECRET_NAME")
-        s.aws_region = _env("AWS_REGION", os.environ.get("AWS_REGION", s.aws_region))
-        s.object_store = _env("OBJECT_STORE", s.object_store)
-        s.local_store_root = _env("LOCAL_STORE_ROOT", s.local_store_root)
-        s.default_quarantine_uri = _env("DEFAULT_QUARANTINE_URI", s.default_quarantine_uri)
-        s.filename_case_sensitive = _bool("FILENAME_CASE_SENSITIVE", s.filename_case_sensitive)
-        s.file_effective_date_basis = _env("FILE_EFFECTIVE_DATE_BASIS", s.file_effective_date_basis)
-        s.supported_file_types = [t.lower() for t in _list("SUPPORTED_FILE_TYPES", s.supported_file_types)]
-        s.file_encoding = _env("FILE_ENCODING", s.file_encoding)
-        s.quote_char = _env("QUOTE_CHAR", s.quote_char)
-        s.empty_as_null = _bool("EMPTY_AS_NULL", s.empty_as_null)
-        s.trailer_count_check = _bool("TRAILER_COUNT_CHECK", s.trailer_count_check)
-        s.trailer_count_regex = _env("TRAILER_COUNT_REGEX", s.trailer_count_regex)
-        s.xlsx_sheet = _env("XLSX_SHEET", s.xlsx_sheet)
-        s.xlsx_header_row = _int("XLSX_HEADER_ROW", s.xlsx_header_row)
-        s.scheduler_window_hours = _int("SCHEDULER_WINDOW_HOURS", s.scheduler_window_hours)
-        s.catchup_lookback_days = _int("CATCHUP_LOOKBACK_DAYS", s.catchup_lookback_days)
-        gl = _env("GO_LIVE_DATE")
-        s.go_live_date = date.fromisoformat(gl) if gl else None
-        s.lock_timeout_seconds = _int("LOCK_TIMEOUT_SECONDS", s.lock_timeout_seconds)
-        s.heartbeat_stale_minutes = _int("HEARTBEAT_STALE_MINUTES", s.heartbeat_stale_minutes)
-        s.trigger_reconcile_minutes = _int("TRIGGER_RECONCILE_MINUTES", s.trigger_reconcile_minutes)
-        s.strict_waiver_auto_trigger = _bool("STRICT_WAIVER_AUTO_TRIGGER", s.strict_waiver_auto_trigger)
-        s.auto_retrigger_after_reopen = _bool("AUTO_RETRIGGER_AFTER_REOPEN", s.auto_retrigger_after_reopen)
-        s.retry_failed_triggers_on_sweep = _bool("RETRY_FAILED_TRIGGERS_ON_SWEEP", s.retry_failed_triggers_on_sweep)
-        s.call_retry_backoff_seconds = _int("CALL_RETRY_BACKOFF_SECONDS", s.call_retry_backoff_seconds)
-        s.http_accepted_status = _list("HTTP_ACCEPTED_STATUS", s.http_accepted_status)
-        s.param_date_format = _env("PARAM_DATE_FORMAT", s.param_date_format)
-        s.adhoc_allow_add_source_before_trigger = _bool(
-            "ADHOC_ALLOW_ADD_SOURCE_BEFORE_TRIGGER", s.adhoc_allow_add_source_before_trigger)
-        s.cycle_init_existing_batch = _env("CYCLE_INIT_EXISTING_BATCH", s.cycle_init_existing_batch).upper()
-        s.rule_engine = _env("RULE_ENGINE", s.rule_engine)
-        s.gre_entrypoint = _env("GRE_ENTRYPOINT")
-        s.notify_backend = _env("NOTIFY_BACKEND", s.notify_backend)
-        s.notify_from_email = _env("NOTIFY_FROM_EMAIL")
-        s.default_notify_emails = _list("DEFAULT_NOTIFY_EMAILS", [])
-        s.spark_jdbc_url = _env("SPARK_JDBC_URL")
-        props = _env("SPARK_JDBC_PROPERTIES")
-        s.spark_jdbc_properties = json.loads(props) if props else {}
-        s.spark_write_partitions = _int("SPARK_WRITE_PARTITIONS", s.spark_write_partitions)
-        s.spark_batch_size = _int("SPARK_BATCH_SIZE", s.spark_batch_size)
-        return s
+        return cls.load()
+
+    def validate_bootstrap(self) -> None:
+        if not _IDENT.match(self.metadata_schema or ""):
+            raise ValueError(f"METADATA_SCHEMA {self.metadata_schema!r} is not a valid identifier")
+
+    def apply_metadata(self, rows: Mapping[str, Optional[str]]) -> list[str]:
+        """Apply ComplianceFrameworkSetting values for settings not set by env/file. Returns unknown names."""
+        unknown = []
+        known = set(self.names())
+        for raw_name, value in rows.items():
+            name = raw_name.lower()
+            if name not in known:
+                unknown.append(raw_name)
+                continue
+            if name in BOOTSTRAP or self.sources.get(name) in ("env", "file") or value is None:
+                continue
+            self._set(name, value, "metadata")
+        return unknown
+
+    def _set(self, name: str, raw: Any, source: str) -> None:
+        setattr(self, name, coerce(name, raw))
+        self.sources[name] = source
+
+    def as_text(self, name: str) -> Optional[str]:
+        v = getattr(self, name)
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, list):
+            return ",".join(v)
+        if isinstance(v, dict):
+            return json.dumps(v)
+        return v.isoformat() if isinstance(v, date) else str(v)
+
+
+def _hints() -> dict:
+    return typing.get_type_hints(Settings)
+
+
+def coerce(name: str, raw: Any) -> Any:
+    """Convert a text value to the declared type of setting `name` (raises ValueError)."""
+    typ = _hints()[name]
+    if not isinstance(raw, str):
+        return raw
+    text = raw.strip()
+    origin = typing.get_origin(typ)
+    args = typing.get_args(typ)
+    if origin is typing.Union and type(None) in args:           # Optional[X]
+        if text == "" or text.lower() in ("none", "null"):
+            return None
+        typ = next(a for a in args if a is not type(None))
+        origin = typing.get_origin(typ)
+    if typ is bool:
+        if text.lower() in ("1", "true", "yes", "y", "on"):
+            return True
+        if text.lower() in ("0", "false", "no", "n", "off"):
+            return False
+        raise ValueError(f"{name}: {raw!r} is not a boolean")
+    if typ is int:
+        return int(text)
+    if typ is date:
+        return date.fromisoformat(text)
+    if origin is list or typ is list:
+        items = [x.strip() for x in text.split(",") if x.strip()]
+        return [i.lower() for i in items] if name == "supported_file_types" else items
+    if typ is dict or origin is dict:
+        return json.loads(text) if text else {}
+    if name == "cycle_init_existing_batch":
+        return text.upper()
+    return raw if name in ("quote_char",) else text
+
+
+def read_config_file(path: Optional[str]) -> configparser.ConfigParser:
+    """INI config file. Missing explicit path is an error; the default ./framework.ini is optional."""
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str.lower
+    if path:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"FRAMEWORK_CONFIG_FILE {path} does not exist")
+        cp.read(path, encoding="utf-8")
+    elif os.path.isfile(DEFAULT_CONFIG_FILE):
+        cp.read(DEFAULT_CONFIG_FILE, encoding="utf-8")
+    return cp

@@ -29,7 +29,7 @@ def batch(conn, src):
     return q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd=%s AND Run_Ty='MONTHLY'", src)
 
 
-def test_late_arrival_reopen_approve_promote_and_retrigger(closed, conn):
+def test_late_arrival_reopen_approve_promote_and_retrigger(closed, conn, data):
     app, clock, rules, connector, ext = closed
     out = send(app, "S2", ["5|5|e"], datetime(2026, 2, 5, 8, 0))
     assert (out.result, out.rule) == ("PENDING_APPROVAL", "X-1")
@@ -43,7 +43,7 @@ def test_late_arrival_reopen_approve_promote_and_retrigger(closed, conn):
     assert d.promoted == [out.ovrd_id] and d.invalid == []
     b = batch(conn, "S2")
     assert (b["batch_close_ind"], b["resolution_ty"], b["req_stat"], b["current_load_id"]) == (1, "NEW_FILE", "COMPLETED", out.load_id)
-    assert qa(conn, "SELECT id FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", b["btch_id"]) == [{"id": 5}]
+    assert qa(data, "SELECT id FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", b["btch_id"]) == [{"id": 5}]
     e = q1(conn, "SELECT * FROM ComplianceExtractControl WHERE Extract_ID=%s", ext)
     # BEST_EFFORT with both sources now present and rules passed -> AUTO -> automatic RETRIGGER (D-41)
     assert (e["trigger_cnt"], e["retrigger_required_ind"], e["extract_stat"]) == (2, 0, "COMPLETE")
@@ -51,7 +51,7 @@ def test_late_arrival_reopen_approve_promote_and_retrigger(closed, conn):
     assert q1(conn, "SELECT Promotion_Stat FROM ComplianceBatchOverride WHERE Ovrd_ID=%s", out.ovrd_id)["promotion_stat"] == "PROMOTED"
 
 
-def test_correction_flag_cycle_and_x4_keeps_type(closed, conn):
+def test_correction_flag_cycle_and_x4_keeps_type(closed, conn, data):
     app, clock, rules, connector, ext = closed
     with conn.transaction():
         conn.execute("""INSERT INTO ComplianceRequestInTake (Intake_ID, Project_Cd, Table_Nm, Run_Ty, Src_Cd, Req_Ty,
@@ -67,7 +67,7 @@ def test_correction_flag_cycle_and_x4_keeps_type(closed, conn):
     app.decisions.run()
     assert q1(conn, "SELECT Currently_Flagged_For_Correction f FROM vw_crc_current_flags WHERE Req_ID=%s",
               batch(conn, "S1")["req_id"])["f"] is False
-    cur = qa(conn, "SELECT id, amount FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", batch(conn, "S1")["btch_id"])
+    cur = qa(data, "SELECT id, amount FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", batch(conn, "S1")["btch_id"])
     assert [(r["id"], int(r["amount"])) for r in cur] == [(1, 100)]
     # second correction after promotion -> X-4, same row, type kept
     out2 = send(app, "S1", ["1|200|a"], datetime(2026, 2, 6, 8, 0))
@@ -103,7 +103,7 @@ def test_x5_reopen_rejected_when_rules_fail(closed, conn):
     assert q1(conn, "SELECT count(*) n FROM ComplianceBatchOverride WHERE Override_Ty LIKE '%%REOPEN'")["n"] == 0
 
 
-def test_rejection_and_restage_from_archive(closed, conn):
+def test_rejection_and_restage_from_archive(closed, conn, data):
     app, clock, rules, connector, ext = closed
     a = send(app, "S2", ["5|5|e"], datetime(2026, 2, 5, 8, 0))
     with conn.transaction():
@@ -114,20 +114,20 @@ def test_rejection_and_restage_from_archive(closed, conn):
     b = send(app, "S2", ["6|6|f"], datetime(2026, 2, 5, 9, 0))
     assert b.rule == "X-1" and b.ovrd_id != a.ovrd_id
     approve_reopen(conn, b.ovrd_id, b.load_id)
-    with conn.transaction():                                                         # staged rows lost
-        conn.execute("DELETE FROM stg_t.tbl_x")
+    with data.transaction():                                                         # staged rows lost
+        data.execute("DELETE FROM stg_t.tbl_x")
     d = app.decisions.run()
     assert d.promoted == [b.ovrd_id]
     assert q1(conn, "SELECT count(*) n FROM CMS_ComplianceExceptionsAudit WHERE Event_Ty='REOPEN_RESTAGED_FROM_ARCHIVE'")["n"] == 1
-    assert qa(conn, "SELECT id FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", batch(conn, "S2")["btch_id"]) == [{"id": 6}]
+    assert qa(data, "SELECT id FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", batch(conn, "S2")["btch_id"]) == [{"id": 6}]
 
 
-def test_promotion_failure_when_archive_missing(closed, conn):
+def test_promotion_failure_when_archive_missing(closed, conn, data):
     app, clock, rules, connector, ext = closed
     b = send(app, "S2", ["6|6|f"], datetime(2026, 2, 5, 9, 0))
     approve_reopen(conn, b.ovrd_id, b.load_id)
-    with conn.transaction():
-        conn.execute("DELETE FROM stg_t.tbl_x")
+    with data.transaction():
+        data.execute("DELETE FROM stg_t.tbl_x")
     app.store.delete("inbound", "prja/archive/" + file_name("S2", ts=datetime(2026, 2, 5, 9, 0)))
     d = app.decisions.run()
     assert d.promotion_failed == [b.ovrd_id]

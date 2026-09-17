@@ -5,7 +5,7 @@ import pytest
 from framework.batches.scheduler import run_scheduler
 from framework.errors import TechnicalFailure
 
-from .helpers import file_name, make_app, put_file, q1, qa, seed_config, utc
+from .helpers import TARGET, file_name, make_app, put_file, q1, qa, seed_config, utc
 
 
 @pytest.fixture
@@ -22,9 +22,10 @@ def ingest(app, name, rows, header=True, **kw):
 
 
 def core_rows(conn, src="S1"):
-    return qa(conn, """SELECT c.id, c.amount, c.current_ind, c.load_id FROM core_t.tbl_x c
-                        JOIN ComplianceRequestControl r ON r.Btch_ID = c.btch_id WHERE r.Src_Cd=%s
-                        ORDER BY c.load_id, c.id""", src)
+    """metadata and data may be different databases: look the batch up first."""
+    ids = [r["btch_id"] for r in qa(conn, "SELECT Btch_ID FROM ComplianceRequestControl WHERE Src_Cd=%s", src)]
+    return qa(TARGET["conn"], """SELECT c.id, c.amount, c.current_ind, c.load_id FROM core_t.tbl_x c
+                                 WHERE c.btch_id = ANY(%s) ORDER BY c.load_id, c.id""", ids)
 
 
 def test_o1_promote(env, conn):
@@ -56,7 +57,7 @@ def test_o2_replacement_latest_arrival_wins(env, conn):
     assert [(r["id"], r["current_ind"], r["load_id"]) for r in rows] == [
         (1, 0, first.load_id), (2, 0, first.load_id), (7, 1, second.load_id)]
     assert q1(conn, "SELECT Load_Stat FROM ComplianceFileLoad WHERE Load_ID=%s", first.load_id)["load_stat"] == "SUPERSEDED"
-    staged = qa(conn, "SELECT load_id FROM stg_t.tbl_x")
+    staged = qa(TARGET["conn"], "SELECT load_id FROM stg_t.tbl_x")
     assert {r["load_id"] for r in staged} == {second.load_id}    # D-05 delete by Btch_ID
 
 
@@ -201,3 +202,34 @@ def test_trailer_count(conn, tmp_path):
     assert bad.event_ty == "FILE_TRAILER_COUNT_MISMATCH"
     good = ingest(app, file_name("S1", ts=datetime(2026, 2, 1, 11, 0)), ["1|1|a", "TRL|1"])
     assert good.result == "PROMOTED"
+
+
+def test_replay_after_metadata_commit_failure_is_idempotent(env, conn, data, monkeypatch):
+    """The data-side swap commits before the metadata transaction; if the metadata commit fails the
+    restart must not duplicate core rows (metadata and data in different databases)."""
+    app, *_ = env
+    first = ingest(app, file_name("S1", ts=datetime(2026, 2, 1, 9, 0, 0)), ["1|1|a"])
+    name = file_name("S1", ts=datetime(2026, 2, 1, 10, 0, 0))
+    original = app.pipeline.logger.batch_event
+    calls = {"n": 0}
+
+    def flaky(event, **kw):
+        if event == "FILE_PROMOTED" and calls["n"] == 0:
+            calls["n"] += 1
+            raise RuntimeError("metadata database went away")
+        return original(event, **kw)
+    monkeypatch.setattr(app.pipeline.logger, "batch_event", flaky)
+    with pytest.raises(RuntimeError):
+        ingest(app, name, ["2|2|b", "3|3|c"])
+    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1' AND Run_Ty='MONTHLY'")
+    assert b["current_load_id"] == first.load_id                         # metadata rolled back
+    same_db = data is conn
+    cur = qa(data, "SELECT load_id FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", b["btch_id"])
+    assert {r["load_id"] for r in cur} == ({first.load_id} if same_db else {first.load_id + 1})
+    again = app.pipeline.process_file("inbound", "prja/in/" + name)
+    assert again.result == "PROMOTED"
+    rows = core_rows(conn)
+    assert [(r["id"], r["current_ind"], r["load_id"]) for r in rows] == [
+        (1, 0, first.load_id), (2, 1, again.load_id), (3, 1, again.load_id)]
+    assert q1(conn, "SELECT Current_Load_ID FROM ComplianceRequestControl WHERE Req_ID=%s",
+              b["req_id"])["current_load_id"] == again.load_id

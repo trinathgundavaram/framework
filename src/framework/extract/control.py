@@ -13,6 +13,7 @@ from .. import locks
 from ..audit.event_logger import EventLogger
 from ..batches.crc_repository import batches_of_extract
 from ..clock import Clock
+from ..connections import ConnectionManager
 from ..config import repository as repo
 from ..config.models import ExtractPolicy
 from ..settings import Settings
@@ -39,24 +40,31 @@ def data_signature(pairs: list[tuple[str, int]]) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def combined_rows(conn: psycopg.Connection, extract: dict, core_schema: str, limit: Optional[int] = None) -> list[dict]:
-    """§10.4 combine query - current core rows of every received batch in the extract."""
-    q = sql.SQL("""SELECT c.* FROM ComplianceRequestControl r
-                    JOIN {core} c ON c.btch_id = r.Btch_ID AND c.current_ind = 1
-                   WHERE r.Extract_ID = %s AND r.Resolution_Ty = 'NEW_FILE'""").format(
-        core=sql.Identifier(core_schema.lower(), extract["table_nm"].lower()))
+def combined_rows(conns: ConnectionManager, extract: dict, limit: Optional[int] = None) -> list[dict]:
+    """§10.4 combine - current core rows of every received batch (metadata and data may be different databases)."""
+    meta = conns.meta
+    pairs = meta.execute("""SELECT Btch_ID, Current_Load_ID FROM ComplianceRequestControl
+                             WHERE Extract_ID = %s AND Resolution_Ty = 'NEW_FILE'""",
+                         (extract["extract_id"],)).fetchall()
+    if not pairs:
+        return []
+    cfg = repo.table_file_config(meta, extract["project_cd"], extract["table_nm"])
+    q = sql.SQL("SELECT c.* FROM {core} c WHERE c.current_ind = 1 AND c.load_id = ANY(%s) AND c.btch_id = ANY(%s)").format(
+        core=sql.Identifier(cfg.core_schema_nm.lower(), cfg.core_tblnm.lower()))
     if limit:
         q = q + sql.SQL(" LIMIT {}").format(sql.Literal(limit))
-    return conn.execute(q, (extract["extract_id"],)).fetchall()
+    return conns.for_config(cfg).execute(
+        q, ([p["current_load_id"] for p in pairs], [p["btch_id"] for p in pairs])).fetchall()
 
 
 class ExtractControlService:
-    def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings, rule_engine: RuleEngine):
-        self.conn = conn
+    def __init__(self, conns: ConnectionManager, clock: Clock, settings: Settings, rule_engine: RuleEngine):
+        self.conns = conns
+        self.conn = conns.meta
         self.clock = clock
         self.settings = settings
         self.rules = rule_engine
-        self.logger = EventLogger(conn, clock)
+        self.logger = EventLogger(self.conn, clock)
 
     def refresh(self, extract_id: int, trigger_cd: str) -> ExtractState:
         with locks.held(self.conn, locks.extract_key(extract_id), self.settings.lock_timeout_seconds):
@@ -151,14 +159,14 @@ class ExtractControlService:
         if not btch_ids:
             return PASSED, ()             # nothing to validate (zero data - see D-49)
         bindings = repo.rule_bindings(self.conn, e["project_cd"], e["table_nm"], "*", "PERIOD_LEVEL")
-        cfg = repo.file_config(self.conn, e["project_cd"], e["table_nm"],
-                               self.conn.execute("SELECT Src_Cd FROM ComplianceRequestControl WHERE Btch_ID=%s",
-                                                 (btch_ids[0],)).fetchone()["src_cd"])
-        outcome = self.rules.run(self.conn, bindings, {
+        cfg = repo.table_file_config(self.conn, e["project_cd"], e["table_nm"])
+        data = self.conns.for_config(cfg) if cfg else self.conn
+        outcome = self.rules.run(data, self.conn, bindings, {
             "scope": "PERIOD_LEVEL", "extract_id": e["extract_id"], "project_cd": e["project_cd"],
             "table_nm": e["table_nm"], "run_ty": e["run_ty"], "rpt_start_dt_key": e["rpt_start_dt_key"],
             "rpt_end_dt_key": e["rpt_end_dt_key"], "btch_id_list": list(btch_ids), "load_id_list": list(load_ids),
-            "core_schema_nm": cfg.core_schema_nm if cfg else None, "core_tblnm": e["table_nm"]}, mode)
+            "core_schema_nm": cfg.core_schema_nm if cfg else None, "core_tblnm": e["table_nm"],
+            "target_connection_nm": cfg.target_connection_nm if cfg else None}, mode)
         ctx = dict(extract_id=e["extract_id"], project_cd=e["project_cd"], table_nm=e["table_nm"], run_ty=e["run_ty"])
         if outcome.status == ERROR:
             self.logger.audit("RULES_ENGINE_TECHNICAL_FAILURE", description=f"period rules: {outcome.error}"[:900], **ctx)

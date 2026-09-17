@@ -1,19 +1,22 @@
 # CMS Compliance Framework: Python Package
 
-This is the implementation of [`docs/design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md) (v3.1).
+This is the implementation of [`docs/design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md) (v3.2).
 - **Project-agnostic:** every project, table, source and run type is configuration. The code has no project-specific branches.
 - **Filename-driven:** incoming files are recognised by the templates stored in `ComplianceSourceFileConfig`.
+- **Metadata-driven:** runtime settings and data-database connections live in metadata tables; the environment and an optional `framework.ini` can override them (see [Configuration](#configuration)).
 - **Phase 1 scope (design §3):** a local, orchestration-agnostic package with a CLI. Glue or Step Functions wrappers come later (D-13).
 
 ## Layout
 
 ```
 pyproject.toml                  package metadata; `framework` console script
+framework.ini.example           sample config file (copy to framework.ini)
 docker-compose.yml              local PostgreSQL 16 for development/tests
 src/framework/
   cli.py                        entry points (one command = one service)
-  app.py                        service wiring
-  settings.py                   FRAMEWORK_* environment settings
+  app.py                        service wiring + start-up (settings -> metadata connection -> metadata settings)
+  settings.py                   runtime settings (env > config file > ComplianceFrameworkSetting > default)
+  connections.py                metadata + named data connections (env > config file > metadata row > secret)
   clock.py, db.py, locks.py, errors.py, health.py
   config/                       models, repository, filename templates (§9), validator (§5.1)
   common/                       Btch_ID + SLA hold, Req_Stat model (abstract states, §6.1)
@@ -30,7 +33,7 @@ src/framework/
   sql/seed/*.sql                event types, period strategies, PROVISIONAL Req_Stat values (Q-01)
   sql/period_strategies/*.sql   report-period calculations
   sql/templates/approvals.sql   manual approval / waiver SQL (design Appendix B)
-tests/                          109 tests (unit + PostgreSQL integration)
+tests/                          119 tests (unit + PostgreSQL integration; single or split databases)
 ```
 
 ## Quick start (local)
@@ -39,14 +42,19 @@ tests/                          109 tests (unit + PostgreSQL integration)
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 docker compose up -d
-export FRAMEWORK_DB_DSN=postgresql://framework:framework@localhost:5432/framework
-export TEST_DATABASE_URL=$FRAMEWORK_DB_DSN
-pytest                                 # tests recreate the cms_compliance schema - use a scratch database
+export TEST_DATABASE_URL=postgresql://framework:framework@localhost:5432/framework
+pytest                                 # tests drop/recreate the metadata schema - use a scratch database
 
-framework init-db                      # schema + seeds (DDL is skipped if the schema already exists)
-export FRAMEWORK_OBJECT_STORE=local FRAMEWORK_LOCAL_STORE_ROOT=./.local_store FRAMEWORK_RULE_ENGINE=none
+cp framework.ini.example framework.ini # then edit [metadata_db] (or export FRAMEWORK_DB_DSN=...)
+framework init-db                      # metadata schema + DDL (skipped if present) + seeds + default settings
+framework test-connections
+framework show-config
 framework validate-config
 ```
+
+Optional test modes:
+- `TEST_METADATA_SCHEMA=fw_meta` runs the suite against a non-default metadata schema.
+- `TEST_DATA_DATABASE_URL=postgresql://.../fwdata` puts the staging/core tables in a second database, registered as connection `DATA1` (split-database mode).
 
 Python 3.10+ (tested on 3.10 and 3.11) and PostgreSQL 14+ with `btree_gist` (tested on 16).
 
@@ -60,6 +68,7 @@ Python 3.10+ (tested on 3.10 and 3.11) and PostgreSQL 14+ with `btree_gist` (tes
      C:\pgsql\bin\initdb.exe -D C:\pgdata -U postgres -A trust -E UTF8
      C:\pgsql\bin\pg_ctl.exe -D C:\pgdata -l C:\pgdata\log.txt start
      C:\pgsql\bin\createdb.exe -U postgres fwtest
+     C:\pgsql\bin\createdb.exe -U postgres fwdata     # optional: split-database tests
      ```
 3. **Set up the environment and run the tests** (PowerShell):
    ```powershell
@@ -68,23 +77,32 @@ Python 3.10+ (tested on 3.10 and 3.11) and PostgreSQL 14+ with `btree_gist` (tes
    pip install -e ".[dev]"
    $env:TEST_DATABASE_URL = "postgresql://postgres@localhost:5432/fwtest"
    pytest
+   $env:TEST_DATA_DATABASE_URL = "postgresql://postgres@localhost:5432/fwdata"   # optional
+   pytest
    ```
+   To run the CLI, copy `framework.ini.example` to `framework.ini`, set `[metadata_db]` and `[settings] object_store = local`, then `framework init-db`.
 4. **Stop the database** when you're done: `C:\pgsql\bin\pg_ctl.exe -D C:\pgdata stop`.
 
 ## Onboarding a project (config only)
 
-1. **Create the target tables.**
+1. **Register the data database** (skip if the tables live in the metadata database):
+   ```sql
+   INSERT INTO ComplianceDbConnection (Connection_Nm, Connection_Desc, Host, Port, Database_Nm, User_Nm, Sslmode, Secret_Nm)
+   VALUES ('PRJA_DW', 'Project A warehouse', 'prja-db.example.internal', 5432, 'prja', 'framework_app', 'require', 'prja/dw/framework');
+   ```
+   Then run `framework test-connections`.
+2. **Create the target tables** in that database.
    - Staging: business columns in file order, plus `btch_id`, `load_id`, `src_file_nm`, `stg_load_dtts`.
    - Core: business columns plus `btch_id`, `load_id`, `current_ind`, `load_dtts`, `end_dtts`.
    - See the DDL comment at the end of `001_schema.sql`.
-2. **Insert config rows**, in this order:
+3. **Insert config rows**, in this order:
    1. `ComplianceSourceSystem`
    2. `ComplianceRunType` (`SLA_Days` ≥ 1)
    3. `ComplianceDataSetSourceXwalk` (one row per source × run type, effective-dated; ROUTINE rows need a cron and a period strategy)
-   4. `ComplianceSourceFileConfig` (one active row per project/table/source: template, aliases, file format, engine, GATE/ANNOTATE, S3 paths, targets)
+   4. `ComplianceSourceFileConfig` (one active row per project/table/source: template, aliases, file format, engine, GATE/ANNOTATE, S3 paths, `Target_Connection_Nm`, targets; all sources of a table use the same connection)
    5. `ComplianceExtractPolicy` + `ComplianceExtractJobParam` (one per project/table/run type)
    6. `ComplianceRuleBinding`
-3. **Run `framework validate-config`.** It must report no `ERROR` issues.
+4. **Run `framework validate-config`.** It must report no `ERROR` issues. Target tables are checked in the target connection's database.
 
 Filename template example (literal text plus exactly one of each placeholder, separated by literals):
 
@@ -96,7 +114,9 @@ Filename template example (literal text plus exactly one of each placeholder, se
 
 | Command | Purpose | Typical trigger |
 |---|---|---|
-| `init-db [--no-provisional-status]` | Schema and seeds | Deploy |
+| `init-db [--no-provisional-status]` | Metadata schema, DDL, seeds, default settings rows | Deploy |
+| `show-config` | Every setting with its value and source (`env` / `file` / `metadata` / `default`); metadata connection (no password) | Ops |
+| `test-connections` | Connect to the metadata database and every active / referenced data connection; exit 1 if any fails | Deploy / ops |
 | `validate-config` | Config checks; exit 1 on errors, logs `CONFIG_VALIDATION_FAILED` | CI / before activating config |
 | `create-batches [--as-of]` | Batches for cron fires in the scheduler window | Cron |
 | `catchup [--as-of]` | Batches for missed fires in the lookback | Hourly |
@@ -119,11 +139,34 @@ Use the templates in `src/framework/sql/templates/approvals.sql`.
 - Approving a reopen requires naming the reviewed `Load_ID` (§12.4).
 - `process-decisions` picks decisions up and writes the audit trail.
 
-## Settings (`FRAMEWORK_*` environment variables)
+## Configuration
 
-| Variable | Default | Notes |
+### Where values come from
+
+| What | Precedence (highest first) |
+|---|---|
+| Runtime settings | `FRAMEWORK_<NAME>` env var > `[settings]` in the config file > `ComplianceFrameworkSetting` row > built-in default |
+| Bootstrap settings (`CONFIG_FILE`, `METADATA_SCHEMA`, `AWS_REGION`) | env var > config file (never metadata) |
+| Metadata database (config, control, audit tables) | `FRAMEWORK_DB_*` env vars > `[metadata_db]` > Secrets Manager secret |
+| Data database `<name>` (staging, core) | `FRAMEWORK_CONN_<NAME>_*` env vars > `[connection:<name>]` > `ComplianceDbConnection` row > Secrets Manager secret |
+
+- **Config file:** `FRAMEWORK_CONFIG_FILE`, otherwise `./framework.ini` if it exists. See `framework.ini.example`.
+- **Connection keys** (env suffix / file key): `DSN`/`dsn`, `HOST`/`host`, `PORT`/`port`, `NAME`/`dbname` (or `database`), `USER`/`user`, `PASSWORD`/`password`, `PASSWORD_ENV`/`password_env` (name of a variable that holds the password), `SSLMODE`/`sslmode`, `CONNECT_TIMEOUT`/`connect_timeout`, `SECRET_NAME`/`secret_name`. Explicit keys override values in the DSN. The secret is JSON with `host`, `port`, `dbname`, `username`, `password` and optionally `sslmode`; it fills any field no higher layer set.
+- **`<NAME>` in env vars** is the connection name upper-cased with non-alphanumerics replaced by `_` (e.g. `PRJA_DW` → `FRAMEWORK_CONN_PRJA_DW_HOST`).
+- **Passwords** are never stored in `ComplianceDbConnection`: use `Secret_Nm` or `Password_Env_Var`.
+- **`Target_Connection_Nm` NULL** means the tables are in the metadata database.
+- **Change a setting in metadata:** `UPDATE ComplianceFrameworkSetting SET Setting_Val = '60', Updated_Dtts = now() WHERE Setting_Nm = 'LOCK_TIMEOUT_SECONDS';` (NULL = default). It applies at the next command start. `validate-config` reports values that do not convert.
+- Direct connections only (D-55): no RDS Proxy / PgBouncer transaction pooling.
+
+### Settings
+
+Names below are the setting names; the env var is `FRAMEWORK_<NAME>`, the file key is the lower-case name, the metadata row is `Setting_Nm = <NAME>`.
+
+| Setting | Default | Notes |
 |---|---|---|
-| `DB_DSN` / `DB_SECRET_NAME` | — | Direct connection only (D-55). The secret JSON holds host, port, dbname, username, password. |
+| `CONFIG_FILE` | `./framework.ini` if present | Bootstrap (env only). |
+| `METADATA_SCHEMA` | `cms_compliance` | Bootstrap. Schema of all framework tables, including audit. |
+| `AWS_REGION` | `us-east-1` | Bootstrap. |
 | `OBJECT_STORE`, `LOCAL_STORE_ROOT` | `s3`, `./.local_store` | |
 | `DEFAULT_QUARANTINE_URI` | placeholder | Destination for files that match no config. |
 | `FILENAME_CASE_SENSITIVE` | `true` | **Q-03** |
@@ -143,17 +186,19 @@ Use the templates in `src/framework/sql/templates/approvals.sql`.
 | `CYCLE_INIT_EXISTING_BATCH` | `SKIP` | **Q-18** (`SKIP` / `FAIL`) |
 | `RULE_ENGINE`, `GRE_ENTRYPOINT` | `gre`, — | **Q-12**. `none` disables rules; `module:Class` plugs in another engine. |
 | `NOTIFY_BACKEND`, `NOTIFY_FROM_EMAIL`, `DEFAULT_NOTIFY_EMAILS` | `log`, —, — | D-54 (`aws` = SES/SNS) |
-| `SPARK_JDBC_URL`, `SPARK_JDBC_PROPERTIES`, `SPARK_WRITE_PARTITIONS`, `SPARK_BATCH_SIZE` | —, `{}`, `4`, `10000` | For `Engine_Cd = SPARK`. |
+| `SPARK_JDBC_URL`, `SPARK_JDBC_PROPERTIES`, `SPARK_WRITE_PARTITIONS`, `SPARK_BATCH_SIZE` | —, `{}`, `4`, `10000` | For `Engine_Cd = SPARK`. The JDBC URL, user and password default to the file config's target connection. |
 
 ## GRE integration contract (Q-12)
 
 Set `FRAMEWORK_GRE_ENTRYPOINT=package.module:function` to a function with this signature:
 
 ```python
-def run_rules(conn, rule_group: str, rule_variant: str, run_params: dict) -> list[dict]:
+def run_rules(data_conn, metadata_conn, rule_group: str, rule_variant: str, run_params: dict) -> list[dict]:
     # one dict per executed rule: {"rule_ref": "R1", "passed": True, "detail": None}
     # raise on technical failure (treated as ERROR -> retry, never as a data failure)
 ```
+
+`data_conn` is the database with the staging/core tables (`run_params["target_connection_nm"]`, NULL = metadata database); `metadata_conn` is the metadata database. They are the same connection when the tables are in the metadata database (**Q-19**).
 
 `run_params` contents by scope:
 - **FILE_LEVEL:** `btch_id`, `load_id`, the staging table, project/table/source/run type and report dates.
@@ -167,7 +212,7 @@ The framework applies GATE/ANNOTATE itself: the mode comes from the file config 
 
 **Not yet verified:**
 - **Spark engine** (`load/engine/spark_engine.py`). It is written against PySpark 3.x but was not run: PySpark and the PostgreSQL JDBC driver were not installable in the build environment. Test it on Glue/Spark before enabling `Engine_Cd = SPARK`.
-- **AWS adapters** (S3 store, Glue connector, SES/SNS, Secrets Manager DSN). They are written against boto3; unit tests cover the Glue connector with a fake client only.
+- **AWS adapters** (S3 store, Glue connector, SES/SNS, Secrets Manager connection secrets). They are written against boto3; unit tests cover the Glue connector with a fake client only.
 
 **Waiting on decisions** (defaults are configurable; see the design doc §16):
 
@@ -182,5 +227,6 @@ The framework applies GATE/ANNOTATE itself: the mode comes from the file config 
 | Q-12 | GRE entry point. |
 | Q-13, Q-14, Q-15 | Orchestration, rollout and security. |
 | Q-16, Q-17, Q-18 | Auto re-trigger, alerting, cycle-init duplicates. |
+| Q-19 | Where GRE reads/writes when the data database differs from the metadata database. |
 
 **Not built** (design Phase 2): Glue / Step Functions wrappers, Terraform for the new jobs, CI pipeline.

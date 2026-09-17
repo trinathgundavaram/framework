@@ -12,7 +12,8 @@ from .base import ExecutionEngine, StageResult
 
 
 class PandasEngine(ExecutionEngine):
-    def load_to_staging(self, conn, *, file_path, cfg, stg_columns, btch_id, load_id, src_file_nm, loaded_at):
+    def load_to_staging(self, conn, *, file_path, cfg, stg_columns, btch_id, load_id, src_file_nm, loaded_at,
+                        target=None):
         result = read_file(file_path, cfg, len(stg_columns), self.settings)
         table = sql.Identifier(cfg.stg_schema_nm.lower(), cfg.stg_tblnm.lower())
         cols = [*stg_columns, "btch_id", "load_id", "src_file_nm", "stg_load_dtts"]

@@ -2,6 +2,8 @@
 
 Examples:
   framework init-db
+  framework show-config
+  framework test-connections
   framework validate-config
   framework create-batches --as-of 2026-02-01T11:00:00Z
   framework ingest-file --bucket inbound --key prja/in/PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.txt
@@ -21,10 +23,11 @@ from .app import App
 from .batches.scheduler import run_catchup, run_scheduler
 from .clock import parse_as_of
 from .config.validator import validate_all
-from .db import connect, init_db, resolve_dsn
+from .connections import ConnectionManager, ConnectionResolver, open_connection
+from .db import init_db, load_metadata_settings, schema_exists
 from .errors import FrameworkError
 from . import health
-from .settings import Settings
+from .settings import Settings, read_config_file
 
 log = logging.getLogger("framework")
 
@@ -57,6 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("init-db", "apply schema DDL and seed data")
     sp.add_argument("--no-provisional-status", action="store_true",
                     help="do not load the provisional Req_Stat values (Q-01)")
+    add("show-config", "print resolved settings and connections (with their source; no passwords)")
+    add("test-connections", "connect to the metadata database and every registered data connection")
     add("validate-config", "validate configuration tables")
     add("create-batches", "create batches for cron fires in the scheduler window", True)
     add("catchup", "create batches for missed cron fires within the lookback", True)
@@ -86,25 +91,72 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    settings = Settings.from_env()
     try:
+        settings = Settings.load()
         if args.cmd == "init-db":
-            with connect(resolve_dsn(settings)) as conn:
-                _print({"applied": init_db(conn, include_provisional_status=not args.no_provisional_status)})
+            resolver = ConnectionResolver(settings, read_config_file(settings.config_file))
+            spec = resolver.metadata_spec()
+            with open_connection(spec) as conn:
+                applied = init_db(conn, settings.metadata_schema,
+                                  include_provisional_status=not args.no_provisional_status)
+            _print({"database": spec.describe(), "schema": settings.metadata_schema, "applied": applied})
             return 0
+        if args.cmd == "test-connections":
+            return _test_connections(settings)
         clock = parse_as_of(getattr(args, "as_of", None))
-        app = App.from_settings(settings, clock)
-        with app.conn:
+        with App.from_settings(settings, clock) as app:
             return _dispatch(app, args)
-    except FrameworkError as e:
+    except (FrameworkError, ValueError, FileNotFoundError) as e:
         log.error("%s: %s", type(e).__name__, e)
         return 2
 
 
+def _test_connections(settings: Settings) -> int:
+    """Each connection is reported independently so one bad connection does not hide the others."""
+    results = []
+    resolver = ConnectionResolver(settings, read_config_file(settings.config_file))
+    try:
+        spec = resolver.metadata_spec()
+        meta = open_connection(spec)
+    except FrameworkError as e:
+        _print([{"connection": "METADATA", "ok": False, "error": str(e)}])
+        return 1
+    with meta:
+        ok = schema_exists(meta, settings.metadata_schema)
+        results.append({"connection": "METADATA", "target": spec.describe(), "sources": spec.sources, "ok": ok,
+                        "error": None if ok else f"schema {settings.metadata_schema} not initialised (run init-db)"})
+        if ok:
+            try:
+                settings.apply_metadata(load_metadata_settings(meta))
+            except ValueError as e:
+                results.append({"connection": "METADATA", "ok": False, "error": f"ComplianceFrameworkSetting: {e}"})
+            names = [r["connection_nm"] for r in meta.execute(
+                """SELECT Connection_Nm FROM ComplianceDbConnection WHERE Active_Ind = 1
+                   UNION SELECT DISTINCT Target_Connection_Nm FROM ComplianceSourceFileConfig
+                          WHERE Active_Ind = 1 AND Target_Connection_Nm IS NOT NULL ORDER BY 1""").fetchall()]
+            conns = ConnectionManager(resolver, meta)
+            for n in names:
+                try:
+                    s = conns.spec(n)
+                    with open_connection(s) as c:
+                        c.execute("SELECT 1")
+                    results.append({"connection": n, "target": s.describe(), "sources": s.sources, "ok": True})
+                except FrameworkError as e:
+                    results.append({"connection": n, "ok": False, "error": str(e)})
+    _print(results)
+    return 0 if all(r["ok"] for r in results) else 1
+
+
 def _dispatch(app: App, args) -> int:
     c = args.cmd
+    if c == "show-config":
+        _print({"settings": {n: {"value": getattr(app.settings, n),
+                                 "source": app.settings.sources.get(n, "default")} for n in Settings.names()},
+                "metadata_database": app.conns.spec(None).describe(),
+                "metadata_database_sources": app.conns.spec(None).sources})
+        return 0
     if c == "validate-config":
-        issues = validate_all(app.conn, app.settings.filename_case_sensitive)
+        issues = validate_all(app.conn, app.settings.filename_case_sensitive, app.conns)
         _print([asdict(i) for i in issues])
         errors = [i for i in issues if i.severity == "ERROR"]
         if errors:

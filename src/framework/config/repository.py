@@ -116,3 +116,18 @@ def business_tz_for_extract(conn: psycopg.Connection, project_cd: str, table_nm:
             ORDER BY Active_Ind DESC, Effective_Start_Dt DESC LIMIT 1""",
         (project_cd, table_nm, run_ty)).fetchone()
     return r["business_tz"] if r else "UTC"
+
+
+def table_connection_names(conn: psycopg.Connection, project_cd: str, table_nm: str) -> set[Optional[str]]:
+    rows = conn.execute(
+        """SELECT DISTINCT Target_Connection_Nm FROM ComplianceSourceFileConfig
+            WHERE Project_Cd=%s AND Table_Nm=%s AND Active_Ind=1""", (project_cd, table_nm)).fetchall()
+    return {r["target_connection_nm"] for r in rows}
+
+
+def table_file_config(conn: psycopg.Connection, project_cd: str, table_nm: str) -> Optional[FileConfig]:
+    """Any active file config of the table (all share the target connection and core table - validator)."""
+    r = conn.execute(
+        """SELECT * FROM ComplianceSourceFileConfig WHERE Project_Cd=%s AND Table_Nm=%s AND Active_Ind=1
+            ORDER BY Cfg_ID LIMIT 1""", (project_cd, table_nm)).fetchone()
+    return FileConfig.from_row(r) if r else None

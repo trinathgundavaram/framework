@@ -6,6 +6,7 @@ from datetime import date, datetime, timezone
 
 from framework.app import App
 from framework.clock import FixedClock
+from framework.connections import ConnectionManager, ConnectionResolver
 from framework.config.templates import render
 from framework.extract.connectors import CallResult
 from framework.settings import Settings
@@ -14,6 +15,9 @@ from framework.validation.gre_adapter import RuleOutcome
 
 TEMPLATE = "{PROJECT}_{TABLE}_{SRC}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt"
 TZ = "America/Chicago"
+
+# set by conftest: data connection name registered for the file configs (None = metadata DB) and its connection
+TARGET: dict = {"name": None, "conn": None}
 
 
 def utc(*a) -> datetime:
@@ -29,8 +33,8 @@ class FakeRules:
         self.error: set[str] = set()                  # scopes that raise technical errors
         self.calls: list[dict] = []
 
-    def run(self, conn, bindings, run_params, mode):
-        self.calls.append(dict(run_params, mode=mode))
+    def run(self, data_conn, metadata_conn, bindings, run_params, mode):
+        self.calls.append(dict(run_params, mode=mode, data_conn=data_conn))
         scope = run_params["scope"]
         if scope in self.error:
             return RuleOutcome("ERROR", error="boom")
@@ -67,7 +71,10 @@ def make_app(conn, tmp_path, now: datetime, **overrides) -> tuple[App, FixedCloc
     clock = FixedClock(now)
     rules = FakeRules()
     connector = FakeConnector()
-    app = App(conn, clock, settings, LocalObjectStore(settings.local_store_root), rules,
+    conns = ConnectionManager(ConnectionResolver(settings, env={}), metadata_conn=conn)
+    if TARGET["name"]:
+        conns.register(TARGET["name"], TARGET["conn"])
+    app = App(conns, clock, settings, LocalObjectStore(settings.local_store_root), rules,
               connector_factory=lambda job_ty, s: connector, sleep=lambda s: None)
     return app, clock, rules, connector
 
@@ -93,11 +100,11 @@ def seed_config(conn, *, sources=("S1", "S2"), gating="STRICT_ALL_PASS", sla=2, 
                      Table_Alias, Src_Alias, Src_File_Ty, Delmtr_Cd, Src_File_Has_Hdr_Ind, Src_File_Has_Trlr_Ind,
                      Allow_Zero_Rcd_Ind, Engine_Cd, Rules_Vld_Md, Is_Rules_Engine_Required, S3_Src_File_Path,
                      Src_File_Archive_Path, S3_Quarantine_Path, Stg_Schema_Nm, Stg_Tblnm, Core_Schema_Nm, Core_Tblnm,
-                     Failr_Email_Notfn_Id)
+                     Failr_Email_Notfn_Id, Target_Connection_Nm)
                    VALUES ('PRJA','tbl_x',%s,%s,'PRJA','TBLX',%s,'.txt','|',%s,0,%s,'PANDAS',%s,%s,
                            's3://inbound/prja/in/','s3://inbound/prja/archive/','s3://inbound/prja/quarantine/',
-                           'stg_t','tbl_x','core_t','tbl_x','ops@example.com')""",
-                (s, TEMPLATE, s, has_header, allow_zero, rules_mode, rules_required))
+                           'stg_t','tbl_x','core_t','tbl_x','ops@example.com',%s)""",
+                (s, TEMPLATE, s, has_header, allow_zero, rules_mode, rules_required, TARGET["name"]))
             conn.execute("""INSERT INTO ComplianceRuleBinding VALUES ('PRJA','tbl_x',%s,'FILE_LEVEL','g_file',%s,1)""", (s, s))
         conn.execute("INSERT INTO ComplianceRuleBinding VALUES ('PRJA','tbl_x','*','PERIOD_LEVEL','g_period','all',1)")
         for rt in ("MONTHLY", "ADHOC"):

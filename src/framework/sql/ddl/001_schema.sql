@@ -1,12 +1,9 @@
 -- =============================================================================
 -- CMS Compliance Framework - schema (source of truth; mirrors design doc Appendix A)
 -- Target: PostgreSQL 14+ (tested on 16). Requires the btree_gist extension (Q-11).
--- Idempotency: run once per database via `framework init-db`.
+-- Applied by `framework init-db`, which creates the metadata schema (FRAMEWORK_METADATA_SCHEMA),
+-- sets search_path to it and installs btree_gist first. Object names are intentionally unqualified.
 -- =============================================================================
-CREATE EXTENSION IF NOT EXISTS btree_gist;          -- Q-11
-CREATE SCHEMA IF NOT EXISTS cms_compliance;
-SET search_path = cms_compliance, public;
-
 -- ================= lookups =================
 CREATE TABLE ComplianceSourceSystem (
   Src_Cd       VARCHAR(30)  PRIMARY KEY,
@@ -61,6 +58,33 @@ CREATE TABLE CompliancePeriodStrategy (
   Strategy_Desc               VARCHAR(300)
 );
 
+-- ================= connections & settings =================
+CREATE TABLE ComplianceDbConnection (                      -- named data (staging/core) databases
+  Connection_Nm       VARCHAR(63)  PRIMARY KEY
+                      CHECK (Connection_Nm ~ '^[A-Za-z][A-Za-z0-9_]*$' AND upper(Connection_Nm) <> 'METADATA'),
+  Connection_Desc     VARCHAR(300),
+  Host                VARCHAR(255),
+  Port                INT CHECK (Port BETWEEN 1 AND 65535),
+  Database_Nm         VARCHAR(63),
+  User_Nm             VARCHAR(63),
+  Sslmode             VARCHAR(15) CHECK (Sslmode IN ('disable','allow','prefer','require','verify-ca','verify-full')),
+  Secret_Nm           VARCHAR(255),                         -- Secrets Manager secret (JSON host/port/dbname/username/password)
+  Password_Env_Var    VARCHAR(100),                         -- NAME of an env var holding the password; never the password
+  Connect_Timeout_Sec INT CHECK (Connect_Timeout_Sec > 0),
+  Active_Ind          SMALLINT NOT NULL DEFAULT 1 CHECK (Active_Ind IN (0,1)),
+  Created_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Created_By VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Updated_By VARCHAR(100) NOT NULL DEFAULT current_user
+);
+
+CREATE TABLE ComplianceFrameworkSetting (                  -- runtime settings (env / config file override these)
+  Setting_Nm    VARCHAR(100) PRIMARY KEY CHECK (Setting_Nm ~ '^[A-Z][A-Z0-9_]*$'),
+  Setting_Val   TEXT,                                       -- NULL = use the built-in default
+  Setting_Desc  VARCHAR(500),
+  Active_Ind    SMALLINT NOT NULL DEFAULT 1 CHECK (Active_Ind IN (0,1)),
+  Created_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Created_By VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Updated_By VARCHAR(100) NOT NULL DEFAULT current_user
+);
+
 -- ================= configuration =================
 CREATE TABLE ComplianceDataSetSourceXwalk (
   Project_Cd         VARCHAR(30) NOT NULL,
@@ -92,6 +116,7 @@ CREATE TABLE ComplianceSourceFileConfig (
   Project_Cd             VARCHAR(30)  NOT NULL,
   Table_Nm               VARCHAR(63)  NOT NULL,
   Src_Cd                 VARCHAR(30)  NOT NULL REFERENCES ComplianceSourceSystem,
+  Target_Connection_Nm   VARCHAR(63)  REFERENCES ComplianceDbConnection,   -- staging+core database; NULL = metadata database
   Src_File_Nm_Tmplt      VARCHAR(255) NOT NULL,                         -- §9 (validator checks grammar)
   Project_Alias          VARCHAR(50)  NOT NULL,
   Table_Alias            VARCHAR(80)  NOT NULL,

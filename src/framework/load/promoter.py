@@ -18,6 +18,7 @@ from .tables import core_insert_columns
 class PromotionResult:
     disabled_cnt: int
     appended_cnt: int
+    already_applied: bool = False
 
 
 def staged_row_count(conn: psycopg.Connection, cfg: FileConfig, btch_id: str, load_id: int) -> int:
@@ -35,6 +36,16 @@ def swap(conn: psycopg.Connection, cfg: FileConfig, btch_id: str, load_id: int, 
     stg = sql.Identifier(cfg.stg_schema_nm.lower(), cfg.stg_tblnm.lower())
     col_sql = sql.SQL(", ").join(map(sql.Identifier, cols))
     with conn.cursor() as cur:
+        # replay after a cross-database commit failure (metadata and data in different databases): the swap
+        # already committed on the data side, so the load's rows are the only current rows of the batch.
+        cur.execute(sql.SQL("SELECT count(*) FILTER (WHERE load_id = %s) AS mine, "
+                            "count(*) FILTER (WHERE load_id <> %s) AS other "
+                            "FROM {} WHERE btch_id = %s AND current_ind = 1").format(core),
+                    (load_id, load_id, btch_id))
+        chk = cur.fetchone()
+        mine, other = (chk["mine"], chk["other"]) if isinstance(chk, dict) else chk
+        if expected_rows > 0 and mine == expected_rows and other == 0:
+            return PromotionResult(0, mine, already_applied=True)
         cur.execute(sql.SQL("UPDATE {} SET current_ind = 0, end_dtts = %s WHERE btch_id = %s AND current_ind = 1")
                     .format(core), (now, btch_id))
         disabled = cur.rowcount

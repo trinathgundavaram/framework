@@ -3,7 +3,7 @@
 -- The code never uses these literals: it resolves every status through Abstract_State,
 -- so replacing this file (one active value per abstract state + transitions) needs no code change.
 -- =============================================================================
-INSERT INTO cms_compliance.ComplianceRequestStatus (Req_Stat, Req_Stat_Desc, Abstract_State, Is_Closed_Ind) VALUES
+INSERT INTO ComplianceRequestStatus (Req_Stat, Req_Stat_Desc, Abstract_State, Is_Closed_Ind) VALUES
   ('PENDING',                  'Open, no usable data yet',                         'S_AWAITING',           0),
   ('RULES_PASSED',             'Open, staged and validated (transient)',           'S_VALIDATED',          0),
   ('PROMOTED',                 'Open, current data promoted to core',              'S_PROMOTED',           0),
@@ -13,7 +13,7 @@ INSERT INTO cms_compliance.ComplianceRequestStatus (Req_Stat, Req_Stat_Desc, Abs
   ('DATA_NOT_PROVIDED',        'Closed by extract trigger, no data',               'S_NOT_PROVIDED',       1)
 ON CONFLICT (Req_Stat) DO NOTHING;
 
-INSERT INTO cms_compliance.ComplianceRequestStatusTransition (From_Req_Stat, To_Req_Stat, Trigger_Cd) VALUES
+INSERT INTO ComplianceRequestStatusTransition (From_Req_Stat, To_Req_Stat, Trigger_Cd) VALUES
   ('PENDING',                  'RULES_PASSED',       'FILE_PASSED'),
   ('PROMOTED',                 'RULES_PASSED',       'FILE_PASSED'),
   ('EXCEPTION_PENDING',        'RULES_PASSED',       'FILE_PASSED'),

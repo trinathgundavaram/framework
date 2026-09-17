@@ -22,6 +22,7 @@ from ..common.status import S_EXCEPTION, S_PROMOTED, StatusModel
 from ..config import repository as repo
 from ..config.models import FileConfig
 from ..config.templates import MatchError, TemplateMatcher
+from ..connections import ConnectionManager
 from ..errors import FileRejected, RowCountMismatch, TechnicalFailure
 from ..ingest.file_reader import sanitize_db_error
 from ..load import promoter
@@ -55,18 +56,19 @@ def s3_ref(bucket: str, key: str) -> str:
 
 
 class IngestPipeline:
-    def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings, store: ObjectStore,
+    def __init__(self, conns: ConnectionManager, clock: Clock, settings: Settings, store: ObjectStore,
                  rule_engine: RuleEngine,
                  engine_factory: Callable[[str, Settings], ExecutionEngine] = build_engine,
                  on_promoted: Optional[Callable[[int], None]] = None):
-        self.conn = conn
+        self.conns = conns
+        self.conn = conns.meta                  # metadata / control / audit database
         self.clock = clock
         self.settings = settings
         self.store = store
         self.rules = rule_engine
         self.engine_factory = engine_factory
         self.on_promoted = on_promoted          # extract refresh hook (early completion, D-21)
-        self.logger = EventLogger(conn, clock)
+        self.logger = EventLogger(self.conn, clock)
         self._status: Optional[StatusModel] = None
 
     @property
@@ -204,12 +206,14 @@ class IngestPipeline:
                                       project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_cd=cfg.src_cd,
                                       run_ty=batch["run_ty"],
                                       description=f"same content as load {other['load_id']} ({other['btch_id']})")
-            stg_cols = staging_business_columns(self.conn, cfg.stg_schema_nm, cfg.stg_tblnm)
+            data = self.conns.for_config(cfg)
+            stg_cols = staging_business_columns(data, cfg.stg_schema_nm, cfg.stg_tblnm)
             engine = self.engine_factory(cfg.engine_cd, self.settings)
             try:
-                staged = engine.load_to_staging(self.conn, file_path=path, cfg=cfg, stg_columns=stg_cols,
+                staged = engine.load_to_staging(data, file_path=path, cfg=cfg, stg_columns=stg_cols,
                                                 btch_id=batch["btch_id"], load_id=load_id,
-                                                src_file_nm=basename(info.key), loaded_at=self.clock.now())
+                                                src_file_nm=basename(info.key), loaded_at=self.clock.now(),
+                                                target=self.conns.spec(cfg.target_connection_nm))
             except FileRejected as e:
                 return self._quarantine(load_id, info, e.event_ty, str(e), cfg, batch)
         with self.conn.transaction():
@@ -229,12 +233,13 @@ class IngestPipeline:
                 self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='RULES_RUNNING', Heartbeat_Dtts=%s "
                                   "WHERE Load_ID=%s", (self.clock.now(), load_id))
             bindings = repo.rule_bindings(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_cd, "FILE_LEVEL")
-            outcome = self.rules.run(self.conn, bindings, {
+            outcome = self.rules.run(self.conns.for_config(cfg), self.conn, bindings, {
                 "scope": "FILE_LEVEL", "btch_id": batch["btch_id"], "load_id": load_id,
                 "project_cd": cfg.project_cd, "table_nm": cfg.table_nm, "src_cd": cfg.src_cd,
                 "run_ty": batch["run_ty"], "rpt_start_dt_key": batch["rpt_start_dt_key"],
                 "rpt_end_dt_key": batch["rpt_end_dt_key"], "stg_schema_nm": cfg.stg_schema_nm,
-                "stg_tblnm": cfg.stg_tblnm}, cfg.rules_vld_md)
+                "stg_tblnm": cfg.stg_tblnm, "target_connection_nm": cfg.target_connection_nm},
+                cfg.rules_vld_md)
             if outcome.status == ERROR:
                 with self.conn.transaction():
                     self.conn.execute("UPDATE ComplianceFileLoad SET Rules_Stat='ERROR' WHERE Load_ID=%s", (load_id,))
@@ -300,7 +305,11 @@ class IngestPipeline:
                 self.status.check(b["req_stat"], to_code)
                 load = self.conn.execute("SELECT Stg_Rcd_Cnt FROM ComplianceFileLoad WHERE Load_ID=%s",
                                          (load_id,)).fetchone()
-                res = promoter.swap(self.conn, cfg, b["btch_id"], load_id, load["stg_rcd_cnt"], now)
+                # data-side swap commits inside the open metadata transaction; if the metadata commit then
+                # fails, the load stays non-terminal and the replay re-runs the (idempotent) swap.
+                data = self.conns.for_config(cfg)
+                with data.transaction():
+                    res = promoter.swap(data, cfg, b["btch_id"], load_id, load["stg_rcd_cnt"], now)
                 self.conn.execute(
                     """UPDATE ComplianceRequestControl SET Resolution_Ty='NEW_FILE', Current_Load_ID=%s, Req_Stat=%s,
                               Updated_Dtts=%s WHERE Req_ID=%s""", (load_id, to_code, now, req_id))

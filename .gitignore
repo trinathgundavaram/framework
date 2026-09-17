@@ -29,3 +29,6 @@ htmlcov/
 dist/
 build/
 .local_store/
+
+# local framework configuration (may contain credentials)
+framework.ini

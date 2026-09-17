@@ -9,6 +9,7 @@ from typing import Optional
 import psycopg
 
 from ...config.models import FileConfig
+from ...connections import ConnSpec
 from ...settings import Settings
 
 
@@ -25,5 +26,6 @@ class ExecutionEngine(ABC):
     @abstractmethod
     def load_to_staging(self, conn: psycopg.Connection, *, file_path: str, cfg: FileConfig,
                         stg_columns: list[str], btch_id: str, load_id: int, src_file_nm: str,
-                        loaded_at: datetime) -> StageResult:
-        """Delete staging rows for btch_id (D-05) and load the file tagged with load_id."""
+                        loaded_at: datetime, target: Optional[ConnSpec] = None) -> StageResult:
+        """Delete staging rows for btch_id (D-05) and load the file tagged with load_id.
+        `conn` is the target (data) connection; `target` is its resolved spec (used by Spark JDBC)."""

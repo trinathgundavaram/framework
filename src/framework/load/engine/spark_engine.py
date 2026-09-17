@@ -25,12 +25,14 @@ class SparkEngine(ExecutionEngine):
             self._spark = SparkSession.builder.appName("cms-compliance-framework").getOrCreate()
         return self._spark
 
-    def load_to_staging(self, conn, *, file_path, cfg, stg_columns, btch_id, load_id, src_file_nm, loaded_at):
+    def load_to_staging(self, conn, *, file_path, cfg, stg_columns, btch_id, load_id, src_file_nm, loaded_at,
+                        target=None):
         from pyspark.sql import functions as F
         from pyspark.sql.types import StringType, StructField, StructType
 
-        if not self.settings.spark_jdbc_url:
-            raise ConfigError("FRAMEWORK_SPARK_JDBC_URL is required for Engine_Cd=SPARK")
+        jdbc_url = self.settings.spark_jdbc_url or (target.jdbc_url() if target else None)
+        if not jdbc_url:
+            raise ConfigError("Spark engine needs the target connection spec or SPARK_JDBC_URL")
         if cfg.src_file_ty not in (".txt", ".csv"):
             raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"Spark engine reads delimited files only, got {cfg.src_file_ty}")
         if cfg.has_trailer:
@@ -49,12 +51,14 @@ class SparkEngine(ExecutionEngine):
         table = sql.Identifier(cfg.stg_schema_nm.lower(), cfg.stg_tblnm.lower())
         with conn.transaction():
             conn.execute(sql.SQL("DELETE FROM {} WHERE btch_id = %s").format(table), (btch_id,))
-        props = {"driver": "org.postgresql.Driver", "stringtype": "unspecified",
-                 **self.settings.spark_jdbc_properties}
+        props = {"driver": "org.postgresql.Driver", "stringtype": "unspecified"}
+        if target is not None:
+            props.update({k: str(v) for k, v in (("user", target.user), ("password", target.password)) if v})
+        props.update(self.settings.spark_jdbc_properties)
         try:
             (df.repartition(self.settings.spark_write_partitions).write
              .option("batchsize", self.settings.spark_batch_size)
-             .jdbc(self.settings.spark_jdbc_url, f"{cfg.stg_schema_nm}.{cfg.stg_tblnm}", mode="append",
+             .jdbc(jdbc_url, f"{cfg.stg_schema_nm}.{cfg.stg_tblnm}", mode="append",
                    properties=props))
         except Exception as e:  # noqa: BLE001
             if "invalid input syntax" in str(e) or "out of range" in str(e):

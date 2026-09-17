@@ -11,6 +11,7 @@ from .. import locks
 from ..audit.event_logger import EventLogger
 from ..batches.crc_repository import get_batch
 from ..clock import Clock
+from ..connections import ConnectionManager
 from ..common.status import S_COMPLETE, StatusModel
 from ..config import repository as repo
 from ..errors import TechnicalFailure
@@ -42,13 +43,14 @@ class DecisionSummary:
 
 
 class DecisionProcessor:
-    def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings, store: ObjectStore,
+    def __init__(self, conns: ConnectionManager, clock: Clock, settings: Settings, store: ObjectStore,
                  after_reopen: Optional[Callable[[int], None]] = None,
                  refresh_extract: Optional[Callable[[int], None]] = None):
-        self.conn, self.clock, self.settings, self.store = conn, clock, settings, store
+        self.conns = conns
+        self.conn, self.clock, self.settings, self.store = conns.meta, clock, settings, store
         self.after_reopen = after_reopen          # D-41 re-trigger hook
         self.refresh_extract = refresh_extract    # waiver decisions
-        self.logger = EventLogger(conn, clock)
+        self.logger = EventLogger(self.conn, clock)
 
     def run(self) -> DecisionSummary:
         s = DecisionSummary()
@@ -165,8 +167,9 @@ class DecisionProcessor:
         if cfg is None:
             raise TechnicalFailure("no active file config for the batch")
         load = self.conn.execute("SELECT * FROM ComplianceFileLoad WHERE Load_ID=%s", (o["candidate_load_id"],)).fetchone()
-        if promoter.staged_row_count(self.conn, cfg, b["btch_id"], load["load_id"]) != load["stg_rcd_cnt"]:
-            restage(self.conn, self.store, cfg, load, self.settings, now)
+        data = self.conns.for_config(cfg)
+        if promoter.staged_row_count(data, cfg, b["btch_id"], load["load_id"]) != load["stg_rcd_cnt"]:
+            restage(data, self.store, cfg, load, self.settings, now, self.conns.spec(cfg.target_connection_nm))
             with self.conn.transaction():
                 self.logger.audit("REOPEN_RESTAGED_FROM_ARCHIVE", ovrd_id=ovrd_id, req_id=b["req_id"],
                                   btch_id=b["btch_id"], load_id=load["load_id"], extract_id=b["extract_id"])
@@ -179,7 +182,8 @@ class DecisionProcessor:
                 return False
             to_code = status.code(S_COMPLETE)
             status.check(b["req_stat"], to_code)
-            res = promoter.swap(self.conn, cfg, b["btch_id"], load["load_id"], load["stg_rcd_cnt"], now)
+            with data.transaction():      # commits before the metadata transaction; re-run is idempotent
+                res = promoter.swap(data, cfg, b["btch_id"], load["load_id"], load["stg_rcd_cnt"], now)
             if b["current_load_id"] and b["current_load_id"] != load["load_id"]:
                 self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='SUPERSEDED', Updated_Dtts=%s "
                                   "WHERE Load_ID=%s AND Load_Stat='PROMOTED'", (now, b["current_load_id"]))

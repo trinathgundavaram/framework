@@ -77,6 +77,7 @@ class FileConfig:
     sns_topic_arn: Optional[str]
     email_subjct_txt: Optional[str]
     active: bool
+    target_connection_nm: Optional[str] = None
 
     @classmethod
     def from_row(cls, r: dict) -> "FileConfig":
@@ -88,7 +89,8 @@ class FileConfig:
                    r["rules_vld_md"], r["is_rules_engine_required"] == 1, excl, r["s3_src_file_path"],
                    r["src_file_archive_path"], r["s3_quarantine_path"], r["stg_schema_nm"], r["stg_tblnm"],
                    r["core_schema_nm"], r["core_tblnm"], r["sucs_email_notfn_id"], r["failr_email_notfn_id"],
-                   r["notify_channel_cd"], r["sns_topic_arn"], r["email_subjct_txt"], r["active_ind"] == 1)
+                   r["notify_channel_cd"], r["sns_topic_arn"], r["email_subjct_txt"], r["active_ind"] == 1,
+                   r.get("target_connection_nm"))
 
 
 @dataclass(frozen=True)

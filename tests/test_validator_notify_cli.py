@@ -20,9 +20,28 @@ def codes(issues, severity="ERROR"):
     return sorted({i.code for i in issues if i.severity == severity})
 
 
-def test_clean_config_is_valid(conn):
+def test_clean_config_is_valid(conn, tmp_path):
     seed_config(conn)
-    assert codes(validate_all(conn)) == []
+    app, *_ = make_app(conn, tmp_path, utc(2026, 2, 1))
+    issues = validate_all(conn, True, app.conns)
+    assert codes(issues) == [] and codes(issues, "WARNING") == []
+
+
+def test_validator_connection_and_setting_checks(conn, data, tmp_path):
+    seed_config(conn)
+    app, *_ = make_app(conn, tmp_path, utc(2026, 2, 1))
+    with data.transaction():
+        data.execute("DROP TABLE core_t.tbl_x")
+    with conn.transaction():
+        conn.execute("UPDATE ComplianceFrameworkSetting SET Setting_Val='maybe' WHERE Setting_Nm='EMPTY_AS_NULL'")
+        conn.execute("INSERT INTO ComplianceFrameworkSetting (Setting_Nm, Setting_Val) VALUES ('NOT_A_SETTING','1')")
+        conn.execute("INSERT INTO ComplianceDbConnection (Connection_Nm, Host) VALUES ('NODB', 'h')")  # no db name
+    issues = validate_all(conn, True, app.conns)
+    assert {"TARGET_TABLE", "SETTING_VALUE", "CONNECTION"} <= set(codes(issues))
+    assert "SETTING_UNKNOWN" in codes(issues, "WARNING")
+    with conn.transaction():
+        conn.execute("UPDATE ComplianceSourceFileConfig SET Target_Connection_Nm='NODB' WHERE Src_Cd='S2'")
+    assert "TARGET_CONNECTION_MISMATCH" in codes(validate_all(conn, True, app.conns))
 
 
 def test_validator_detects_problems(conn):
@@ -72,13 +91,22 @@ def test_notifications_sent_once(conn, tmp_path):
 
 
 def test_cli_end_to_end(conn, tmp_path, monkeypatch, capsys):
+    from .conftest import SCHEMA
+    monkeypatch.chdir(tmp_path)                       # no stray ./framework.ini
     monkeypatch.setenv("FRAMEWORK_DB_DSN", os.environ["TEST_DATABASE_URL"])
+    monkeypatch.setenv("FRAMEWORK_METADATA_SCHEMA", SCHEMA)
     monkeypatch.setenv("FRAMEWORK_OBJECT_STORE", "local")
     monkeypatch.setenv("FRAMEWORK_LOCAL_STORE_ROOT", str(tmp_path / "store"))
     monkeypatch.setenv("FRAMEWORK_RULE_ENGINE", "none")
     assert main(["init-db"]) == 0                     # idempotent re-run on an initialised schema
     seed_config(conn)
     assert main(["validate-config"]) == 0
+    assert main(["test-connections"]) == 0
+    assert main(["show-config"]) == 0
+    shown = json.loads(capsys.readouterr().out.split("\n]\n", 1)[1])
+    assert shown["settings"]["rule_engine"] == {"value": "none", "source": "env"}
+    assert shown["settings"]["object_store"]["source"] == "env"
+    assert shown["settings"]["lock_timeout_seconds"]["source"] == "metadata"
     assert main(["create-batches", "--as-of", "2026-02-01T13:00:00+00:00"]) == 0
     capsys.readouterr()
     app, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
@@ -98,14 +126,15 @@ def test_rule_engine_adapter_contract(conn):
     from framework.validation.gre_adapter import CallableRuleEngine, GreRuleEngine
 
     b = [RuleBinding("P", "T", "S", "FILE_LEVEL", "g", "v")]
-    ok = CallableRuleEngine(lambda c, g, v, p: [{"rule_ref": "R1", "passed": True}])
-    assert ok.run(conn, b, {}, "GATE").status == "PASSED"
-    bad = CallableRuleEngine(lambda c, g, v, p: [{"rule_ref": "R1", "passed": False}])
-    assert bad.run(conn, b, {}, "GATE").failed_rules == ["R1"]
-    assert bad.run(conn, b, {}, "ANNOTATE").status == "PASSED_WITH_WARNINGS"
-    assert CallableRuleEngine(lambda *a: [{"oops": 1}]).run(conn, b, {}, "GATE").status == "ERROR"
-    assert GreRuleEngine(None).run(conn, b, {}, "GATE").status == "ERROR"          # Q-12 not configured
-    assert GreRuleEngine(None).run(conn, [], {}, "GATE").status == "PASSED"
+    seen = []
+    ok = CallableRuleEngine(lambda d, m, g, v, p: seen.append((d, m)) or [{"rule_ref": "R1", "passed": True}])
+    assert ok.run("data", conn, b, {}, "GATE").status == "PASSED" and seen == [("data", conn)]
+    bad = CallableRuleEngine(lambda d, m, g, v, p: [{"rule_ref": "R1", "passed": False}])
+    assert bad.run(conn, conn, b, {}, "GATE").failed_rules == ["R1"]
+    assert bad.run(conn, conn, b, {}, "ANNOTATE").status == "PASSED_WITH_WARNINGS"
+    assert CallableRuleEngine(lambda *a: [{"oops": 1}]).run(conn, conn, b, {}, "GATE").status == "ERROR"
+    assert GreRuleEngine(None).run(conn, conn, b, {}, "GATE").status == "ERROR"          # Q-12 not configured
+    assert GreRuleEngine(None).run(conn, conn, [], {}, "GATE").status == "PASSED"
 
 
 POLICY = ExtractPolicy("P", "T", "R", "STRICT_ALL_PASS", "GATE", "HTTP_API", None, "", "POST", None, 5, 0, True)

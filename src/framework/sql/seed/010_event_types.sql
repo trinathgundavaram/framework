@@ -1,5 +1,5 @@
 -- Event vocabulary (design §5.3). Safe to re-run.
-INSERT INTO cms_compliance.ComplianceEventType (Event_Ty, Log_Tbl_Cd, Event_Ctgy, Default_Sevrty, Notify_Ind) VALUES
+INSERT INTO ComplianceEventType (Event_Ty, Log_Tbl_Cd, Event_Ctgy, Default_Sevrty, Notify_Ind) VALUES
   ('BATCH_CREATED','FILE_DETAIL','AUDIT','INFO',0),
   ('BATCH_CLOSED','FILE_DETAIL','AUDIT','INFO',0),
   ('FILE_RECEIVED','FILE_DETAIL','AUDIT','INFO',0),

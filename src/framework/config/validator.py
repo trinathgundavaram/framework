@@ -6,13 +6,17 @@ from datetime import date, datetime
 from itertools import combinations
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from typing import Optional
+
 import psycopg
 
 from ..batches import cron
 from ..batches.period_strategies import strategy_file_exists
 from ..common.status import StatusModel
+from ..connections import ConnectionManager
 from ..errors import ConfigError
 from ..extract.trigger import EXTRACT_ATTRS
+from ..settings import Settings, coerce
 from ..load.tables import columns, CORE_FRAMEWORK_COLS, STAGING_FRAMEWORK_COLS
 from . import repository as repo
 from .templates import TemplateError, TemplateMatcher, compile_template, parse_template, render
@@ -39,10 +43,63 @@ def _valid_tz(tz: str) -> bool:
         return False
 
 
-def validate_all(conn: psycopg.Connection, case_sensitive: bool = True) -> list[Issue]:
+def _check_target_tables(add, dconn: psycopg.Connection, c, label: str) -> None:
+    where = f" in connection {c.target_connection_nm}" if c.target_connection_nm else ""
+    stg = {col.name for col in columns(dconn, c.stg_schema_nm, c.stg_tblnm)}
+    core = {col.name for col in columns(dconn, c.core_schema_nm, c.core_tblnm)}
+    if not stg:
+        add("TARGET_TABLE", f"{label}: staging table {c.stg_schema_nm}.{c.stg_tblnm} not found{where}")
+    elif missing := [x for x in STAGING_FRAMEWORK_COLS if x not in stg]:
+        add("TARGET_TABLE", f"{label}: staging table lacks {missing}")
+    if not core:
+        add("TARGET_TABLE", f"{label}: core table {c.core_schema_nm}.{c.core_tblnm} not found{where}")
+    elif missing := [x for x in CORE_FRAMEWORK_COLS if x not in core]:
+        add("TARGET_TABLE", f"{label}: core table lacks {missing}")
+
+
+def validate_all(conn: psycopg.Connection, case_sensitive: bool = True,
+                 conns: Optional[ConnectionManager] = None) -> list[Issue]:
+    """`conn` is the metadata database; `conns` resolves data connections (None = everything in `conn`)."""
     issues: list[Issue] = []
     def add(code: str, msg: str, severity: str = "ERROR") -> None:
         issues.append(Issue(code, msg, severity))
+
+    # --- framework settings stored in metadata
+    known = set(Settings.names())
+    for r in conn.execute("SELECT Setting_Nm, Setting_Val FROM ComplianceFrameworkSetting WHERE Active_Ind=1").fetchall():
+        name = r["setting_nm"].lower()
+        if name not in known:
+            add("SETTING_UNKNOWN", f"ComplianceFrameworkSetting {r['setting_nm']} is not a known setting", "WARNING")
+        elif name in ("config_file", "metadata_schema", "aws_region"):
+            add("SETTING_BOOTSTRAP", f"{r['setting_nm']} cannot be set in metadata (use environment or config file)",
+                "WARNING")
+        elif r["setting_val"] is not None:
+            try:
+                coerce(name, r["setting_val"])
+            except (ValueError, TypeError) as e:
+                add("SETTING_VALUE", f"ComplianceFrameworkSetting {r['setting_nm']}={r['setting_val']!r}: {e}")
+
+    # --- data connections
+    data_conns: dict[Optional[str], Optional[psycopg.Connection]] = {None: conn}
+    def data_conn(name: Optional[str], label: str) -> Optional[psycopg.Connection]:
+        key = None if conns is None or conns.is_metadata(name) else name
+        if key is None and name and conns is None:
+            add("CONNECTION", f"{label}: Target_Connection_Nm {name} cannot be checked without a connection manager",
+                "WARNING")
+            return None
+        if key not in data_conns:
+            try:
+                data_conns[key] = conns.get(key)
+            except ConfigError as e:
+                add("CONNECTION", f"{label}: {e}")
+                data_conns[key] = None
+        return data_conns[key]
+    if conns is not None:
+        for r in conn.execute("SELECT Connection_Nm FROM ComplianceDbConnection WHERE Active_Ind=1").fetchall():
+            try:
+                conns.spec(r["connection_nm"])
+            except ConfigError as e:
+                add("CONNECTION", str(e))
 
     # --- status model (Q-01) and event vocabulary
     try:
@@ -119,22 +176,24 @@ def validate_all(conn: psycopg.Connection, case_sensitive: bool = True) -> list[
             add("FILE_CONFIG_NO_XWALK", f"{label}: no active crosswalk row")
         if c.engine_cd == "SPARK" and c.has_trailer:
             add("ENGINE", f"{label}: Spark engine does not support trailer records")
-        stg = {col.name for col in columns(conn, c.stg_schema_nm, c.stg_tblnm)}
-        core = {col.name for col in columns(conn, c.core_schema_nm, c.core_tblnm)}
-        if not stg:
-            add("TARGET_TABLE", f"{label}: staging table {c.stg_schema_nm}.{c.stg_tblnm} not found")
-        elif missing := [x for x in STAGING_FRAMEWORK_COLS if x not in stg]:
-            add("TARGET_TABLE", f"{label}: staging table lacks {missing}")
-        if not core:
-            add("TARGET_TABLE", f"{label}: core table {c.core_schema_nm}.{c.core_tblnm} not found")
-        elif missing := [x for x in CORE_FRAMEWORK_COLS if x not in core]:
-            add("TARGET_TABLE", f"{label}: core table lacks {missing}")
+        dconn = data_conn(c.target_connection_nm, label)
+        if dconn is not None:
+            _check_target_tables(add, dconn, c, label)
         for p in ("s3_src_file_path", "src_file_archive_path", "s3_quarantine_path"):
             v = getattr(c, p)
             if not (v.startswith("s3://") or v.startswith("local://")):
                 add("PATH", f"{label}: {p} must be an s3:// URI")
         if c.rules_required and not repo.rule_bindings(conn, c.project_cd, c.table_nm, c.src_cd, "FILE_LEVEL"):
             add("RULES_BINDING", f"{label}: Is_Rules_Engine_Required=1 but no FILE_LEVEL rule binding", "WARNING")
+
+    # --- one data connection per (project, table): combine and period rules read one database
+    by_table: dict[tuple, set] = {}
+    for c in cfgs:
+        by_table.setdefault((c.project_cd, c.table_nm), set()).add(c.target_connection_nm or None)
+    for k, names in by_table.items():
+        if len(names) > 1:
+            add("TARGET_CONNECTION_MISMATCH", f"{k}: sources use different Target_Connection_Nm "
+                                              f"{sorted(n or 'METADATA' for n in names)}")
 
     # --- template overlap (§9.3): render a sample for each config/run type and test all other configs
     matcher = TemplateMatcher(cfgs, case_sensitive)

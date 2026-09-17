@@ -1,9 +1,9 @@
-# CMS Compliance Framework: Consolidated Design (v3)
+# CMS Compliance Framework: Consolidated Design (v3.2)
 
 | | |
 |---|---|
 | **Status** | Build-ready for every module that §16 (Open Questions) does not name as blocked. |
-| **Revision** | v3.1, 2026-09-16 (implementation notes added: Appendix A columns, extra operational events; code in `src/framework`). v3, 2026-09-16. Replaces v2 and v1. v3 is **project-agnostic** and **filename-driven**. Carry-forward is removed, batches are keyed by report period, and batches close only when the framework triggers the extract. See §17. |
+| **Revision** | v3.2, 2026-09-16: configurable metadata database and schema, named data-database connections, metadata-driven runtime settings (D-65 – D-68). v3.1, 2026-09-16 (implementation notes added: Appendix A columns, extra operational events; code in `src/framework`). v3, 2026-09-16. Replaces v2 and v1. v3 is **project-agnostic** and **filename-driven**. Carry-forward is removed, batches are keyed by report period, and batches close only when the framework triggers the extract. See §17. |
 | **Basis** | Only the decisions recorded in §2. Earlier worked examples, mock data and legacy/sample code are deliberately **not** used as inputs. |
 | **Conventions** | `D-nn` = confirmed decision. `Q-nn` = open question (§16). **⚠** = depends on an open question. |
 
@@ -24,7 +24,7 @@
 14. Feasibility, Drawbacks & Risks
 15. Package Structure, Tests & Operations
 16. Open Questions
-17. Change Log (v2 → v3)
+17. Change Log
 - Appendix A: PostgreSQL DDL (tested on PostgreSQL 16)
 - Appendix B: Approval / Waiver SQL Templates
 - Appendix C: Synthetic Walkthrough
@@ -116,6 +116,10 @@ A single, **project-agnostic** framework for compliance source files. It does th
 | D-62 | **Engine.** File volumes are mixed; the engine (pandas / Spark) is chosen per file-config row. |
 | D-63 | **Period-level validation mode.** `Period_Rules_Vld_Md` on `ComplianceExtractPolicy`. *(You had no preference; this is the design choice.)* |
 | D-64 | **Approver role.** Approvals run under a dedicated `framework_approver` DB role limited to the override table. *(You had no preference; this is the design choice.)* |
+| D-65 | **Metadata database is configurable.** The config, control and audit tables live together in one **metadata database** whose connection is resolved with the precedence *environment > config file > Secrets Manager* (a full DSN is accepted in the first two). The schema name is configurable (`FRAMEWORK_METADATA_SCHEMA`, default `cms_compliance`); the audit tables use the same schema. |
+| D-66 | **Data databases are named connections.** Each project's staging/core database is a row in `ComplianceDbConnection`, referenced by `ComplianceSourceFileConfig.Target_Connection_Nm` (NULL = the metadata database). Precedence per connection: *environment (`FRAMEWORK_CONN_<NAME>_*`) > config file `[connection:<name>]` > metadata row > Secrets Manager*. Passwords are never stored in metadata (secret or password environment variable only). All sources of one (project, table) use the same connection. |
+| D-67 | **Runtime settings live in metadata.** `ComplianceFrameworkSetting` holds every runtime setting; *environment > config file `[settings]` > metadata > built-in default*. Bootstrap values (config file path, metadata schema, AWS region) come from the environment or config file only. |
+| D-68 | **Cross-database promotion.** When the data and metadata databases differ, the core swap commits on the data side inside the still-open metadata transaction. If the metadata commit then fails, the load stays non-terminal and its replay detects the already-applied swap (§10.2), so core rows are never duplicated. |
 
 Also carried from v1: gating modes `STRICT_ALL_PASS` / `BEST_EFFORT` per (project, table, run type); extract generation is external; notification recipient lists are comma-delimited text; the local package is built first; `Req_Stat` is enforced by a lookup table (**the list is pending from you, Q-01**).
 
@@ -137,6 +141,8 @@ All of these were withdrawn by D-34, D-30 or D-39:
 
 | CLI command | Service | Eventual trigger (D-13) |
 |---|---|---|
+| `init-db` | `db.init_db` (metadata schema, DDL once, seeds, default settings) | deploy |
+| `show-config` / `test-connections` | settings + connection resolution (D-65 – D-67) | deploy / ops |
 | `validate-config` | `config.validator.validate_all` | CI, and before any config change is applied |
 | `create-batches --as-of` | `batches.scheduler.run` | cron |
 | `catchup --as-of` | `batches.catchup.run` | cron (hourly) |
@@ -176,7 +182,8 @@ All of these were withdrawn by D-34, D-30 or D-39:
 ## 5. Data Model
 
 Full DDL is in Appendix A.
-- **Schema:** `cms_compliance`. PascalCase names are unquoted, so Postgres folds them to lowercase.
+- **Schema:** configurable metadata schema (default `cms_compliance`, D-65). The DDL is unqualified and applied with `search_path` set to that schema. PascalCase names are unquoted, so Postgres folds them to lowercase.
+- **Databases:** config, control and audit tables are in the metadata database. Staging and core tables are in the metadata database or in a named data database (D-66).
 - **Types:** timestamps are `TIMESTAMPTZ` (UTC). Indicators are `SMALLINT` 0/1.
 - **Audit columns:** every config table carries `Created_*` / `Updated_*`.
 
@@ -194,6 +201,8 @@ Full DDL is in Appendix A.
 | `ComplianceRuleBinding` | `(Project_Cd, Table_Nm, Src_Cd, Rule_Scope_Cd, Gre_Rule_Group, Gre_Rule_Variant)` | Links a scope to GRE rules. `Src_Cd = '*'` means all sources, used for `PERIOD_LEVEL`. The GATE/ANNOTATE mode does **not** live here: `FILE_LEVEL` uses the file-config mode (D-44), `PERIOD_LEVEL` uses the policy mode (D-63). ⚠ Q-12 (GRE call details). |
 | `ComplianceRequestStatus` / `ComplianceRequestStatusTransition` | status / (from, to, trigger) | **Values pending Q-01.** The transition table enforces legal moves. |
 | `ComplianceEventType` | `Event_Ty` | Event vocabulary: log table, category, severity, `Notify_Ind`, `Notify_Channel_Cd` (D-54). |
+| `ComplianceDbConnection` | `Connection_Nm` | Named data databases (D-66): host, port, database, user, sslmode, connect timeout, `Secret_Nm`, `Password_Env_Var` (the *name* of a variable). `METADATA` is reserved. |
+| `ComplianceFrameworkSetting` | `Setting_Nm` (upper-case setting name) | Runtime settings (D-67). `Setting_Val` NULL = built-in default. `init-db` seeds every setting with its default and description without overwriting existing values. |
 
 **`ComplianceSourceFileConfig` columns**
 
@@ -204,7 +213,7 @@ Full DDL is in Appendix A.
 | File format | `Src_File_Ty`, `Delmtr_Cd`, `Line_Term_Cd`, `Src_File_Has_Hdr_Ind`, `Src_File_Has_Trlr_Ind` (⚠ Q-02) |
 | Handling | `Allow_Zero_Rcd_Ind` (D-60), `Engine_Cd` (D-62), `Rules_Vld_Md` (D-44), `Is_Rules_Engine_Required`, `Load_Exclude_Col_List` (D-61) |
 | S3 paths | inbound, archive, quarantine |
-| Targets | staging schema and table; core schema and table (`Core_Tblnm = Table_Nm`, D-25) |
+| Targets | `Target_Connection_Nm` (D-66, NULL = metadata database); staging schema and table; core schema and table (`Core_Tblnm = Table_Nm`, D-25) |
 | Notifications | business and delivery-owner groups, success/failure recipient lists, subject/body text, `Notify_Channel_Cd`, `Sns_Topic_Arn` |
 
 **`config.validator` rejects:**
@@ -218,6 +227,10 @@ Full DDL is in Appendix A.
 - Crosswalk rows for the same (project, table, run type) whose strategies give different periods for the same scheduled date. All sources of an extract must share its period.
 - An invalid cron expression or timezone.
 - `Core_Tblnm ≠ Table_Nm`.
+- Staging / core tables missing or lacking framework columns **in the target connection's database**.
+- Sources of the same (project, table) pointing at different `Target_Connection_Nm` values.
+- A `ComplianceDbConnection` row that cannot be resolved (for example no database name in any layer), or a file config whose connection cannot be opened.
+- A `ComplianceFrameworkSetting` value that does not convert to the setting's type (error); an unknown or bootstrap-only setting name (warning).
 
 ### 5.2 Control
 
@@ -614,7 +627,7 @@ Every failure except C0 quarantines the file, sets `Load_Stat = QUARANTINED` wit
   - With a trailer, the trailer is removed before counting.
   - All values are read as text and cast to the staging column types; a cast failure → `FILE_PARSE_ERROR`.
 
-### 10.2 Promotion (D-01): one Postgres transaction
+### 10.2 Promotion (D-01): one transaction per database
 ```sql
 -- caller holds the session advisory lock on Btch_ID
 BEGIN;
@@ -631,6 +644,8 @@ COMMIT;
 - **Identifiers** are quoted with `psycopg.sql.Identifier`. No `SELECT *`.
 - **Spark is never used for this step.** Spark JDBC can't make the disable and the append atomic.
 - **Out-of-order files are safe,** because each swap touches only its own `Btch_ID`.
+- **Separate data database (D-68):** the two core statements run in a data-database transaction that commits just before the metadata transaction commits. Before swapping, the promoter checks whether the batch's only current core rows are exactly the load's `Stg_Rcd_Cnt` rows; if so the swap was already applied and is skipped. Until the metadata commit succeeds, `Current_Load_ID` still names the previous load, so combine (§10.4, filtered by `Load_ID`) never mixes the two.
+- **Same database:** the data statements run in a savepoint of the metadata transaction, i.e. one atomic transaction as before.
 
 ### 10.3 Lineage
 `Btch_ID` (which period and source) + `Load_ID` (which physical file) + `CRC.Current_Load_ID` (which load is current) + `ComplianceFileLoad` (S3 version, SHA).
@@ -733,6 +748,7 @@ Session advisory locks (`pg_try_advisory_lock` / `pg_advisory_lock` with a timeo
 - Locks are released automatically if a process dies.
 - A `Heartbeat_Dtts` older than N minutes with no lock held means a crash → alert.
 - **Direct DB connections only** (D-55). RDS Proxy / PgBouncer transaction pooling would silently break session locks.
+- **Locks live in the metadata database** (D-65), even when the staging/core tables are in a data database.
 
 ### 12.3 Invariants enforced in the database
 - Unique grains.
@@ -851,6 +867,8 @@ Session advisory locks (`pg_try_advisory_lock` / `pg_advisory_lock` with a timeo
 | New period strategy or extract connector type | Needs a package deploy, not config | Keep a broad strategy set; connector types `GLUE_JOB` and `HTTP_API` from day one |
 | Manual SQL approvals (D-12) | No maker/checker | `framework_approver` role (D-64), guarded templates, processor validation |
 | `btree_gist` needed for the effective-date exclusion | Extension must be allowed on RDS | Q-11; fall back to validator-only enforcement |
+| Metadata and data in different databases (D-66) | No distributed transaction; a crash between the two commits leaves core ahead of metadata | Commit ordering + idempotent replay (D-68); stale-heartbeat health query |
+| Settings spread over three layers (D-67) | Hard to tell which value is in effect | `framework show-config` prints every value with its source; `validate-config` checks metadata values |
 | Two engines (pandas / Spark) | Cast differences between them | Parity tests on the same fixtures |
 
 ---
@@ -877,7 +895,7 @@ framework/
 - `templates.match(object_name) -> MatchResult | MatchError`
 - `resolution_engine.decide(ResolutionInput) -> ResolutionDecision` (a pure function)
 - `promoter.promote(conn, btch_id, load_id) -> PromotionResult`
-- `gre_adapter.run(scope, params) -> RuleOutcome`
+- `gre_adapter.run(data_conn, metadata_conn, bindings, run_params, mode) -> RuleOutcome`
 - `control.compute_eligibility(ExtractSnapshot, Policy, as_of) -> Eligibility`
 - `trigger.fire(conn, extract_id, trigger_ty, requested_by, ack) -> TriggerResult`
 - `connectors.*.call(rendered_params) -> CallResult(accepted, job_run_ref, response)`
@@ -905,8 +923,9 @@ framework/
   - extracts past `Earliest_Trigger_Dt` and not triggered (Q-17);
   - `Retrigger_Required_Ind = 1`;
   - quarantine counts by reason.
+- **Configuration checks:** `framework show-config` (every setting and its source, metadata connection without password) and `framework test-connections` (metadata plus every registered data connection).
 - **Security:**
-  - SSE-KMS on S3; RDS encryption and TLS; Secrets Manager for DB and API credentials.
+  - SSE-KMS on S3; RDS encryption and TLS; Secrets Manager for DB and API credentials. Connection rows hold no passwords (D-66).
   - DB roles: `framework_app`, `framework_approver` (D-64), `framework_readonly`.
   - No PHI in logs or notifications. ⚠ Q-15: data classification.
 - **Retention:** keep everything, with monthly partitions on core, `ComplianceFileLoad` and both audit tables (D-57).
@@ -950,10 +969,18 @@ The following v2 questions are closed: O-01, O-02, O-03, O-05–O-08, O-10, O-11
 | **Q-16** | Auto re-trigger after a correction may regenerate or resubmit an extract already sent externally. Is that acceptable, or should post-submission re-triggers always be manual? | `evaluator` | Manual after the first successful trigger (would amend D-41) |
 | **Q-17** | Should extracts past `Earliest_Trigger_Dt` and still not triggered raise an alert, and after how many days? | ops | Alert after 1 day |
 | **Q-18** | CYCLE_INIT for a period whose batches already exist: skip silently (`PROCESSED`) or fail? | intake | Skip, logged |
+| **Q-19** | When a project's data database differs from the metadata database, where does GRE read rules and write results? The adapter passes both connections (data first, metadata second). | `gre_adapter` | GRE metadata in the metadata database; rules query the data database |
 
 ---
 
-## 17. Change Log (v2 → v3)
+## 17. Change Log
+
+**v3.2**
+- **Added** `ComplianceDbConnection`, `ComplianceFrameworkSetting` and `ComplianceSourceFileConfig.Target_Connection_Nm` (D-65 – D-67).
+- **Changed:** the metadata schema name and connection are configurable; the DDL is schema-unqualified; promotion across two databases uses commit ordering plus an idempotent swap (D-68); the GRE entry point receives `(data_conn, metadata_conn, …)`.
+- **Added commands:** `show-config`, `test-connections`.
+
+**v2 → v3**
 
 **Removed**
 - **Carry-forward, entirely** (D-34): anchor override type, expiry job, `Used_Btch_ID`, `Reuse_Valid_Thru_Dt_Key`, `CARRIED_FORWARD` resolution, the carry-forward grouping index and all anchor edge cases.
@@ -986,13 +1013,18 @@ The following v2 questions are closed: O-01, O-02, O-03, O-05–O-08, O-10, O-11
 
 ## Appendix A: PostgreSQL DDL (tested on PostgreSQL 16)
 
-> **Source of truth:** `src/framework/sql/ddl/001_schema.sql` in the repository. Seed data lives in `src/framework/sql/seed/` (event types, period strategies, and **provisional** `Req_Stat` values pending Q-01). The implementation added `Failed_Rule_Refs`, `Data_Signature` and `Triggered_Data_Signature` to `ComplianceExtractControl`.
+> **Source of truth:** `src/framework/sql/ddl/001_schema.sql` in the repository. Seed data lives in `src/framework/sql/seed/` (event types, period strategies, and **provisional** `Req_Stat` values pending Q-01). The implementation added `Failed_Rule_Refs`, `Data_Signature` and `Triggered_Data_Signature` to `ComplianceExtractControl`. v3.2 added `ComplianceDbConnection`, `ComplianceFrameworkSetting` and `Target_Connection_Nm`, and removed the schema qualifier (the schema is configurable, D-65).
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS btree_gist;          -- Q-11
-CREATE SCHEMA IF NOT EXISTS cms_compliance;
-SET search_path = cms_compliance, public;
-
+-- `framework init-db` runs, before this file:
+--   CREATE SCHEMA IF NOT EXISTS <metadata_schema>; SET LOCAL search_path TO <metadata_schema>, public;
+--   CREATE EXTENSION IF NOT EXISTS btree_gist;
+-- =============================================================================
+-- CMS Compliance Framework - schema (source of truth; mirrors design doc Appendix A)
+-- Target: PostgreSQL 14+ (tested on 16). Requires the btree_gist extension (Q-11).
+-- Applied by `framework init-db`, which creates the metadata schema (FRAMEWORK_METADATA_SCHEMA),
+-- sets search_path to it and installs btree_gist first. Object names are intentionally unqualified.
+-- =============================================================================
 -- ================= lookups =================
 CREATE TABLE ComplianceSourceSystem (
   Src_Cd       VARCHAR(30)  PRIMARY KEY,
@@ -1047,6 +1079,33 @@ CREATE TABLE CompliancePeriodStrategy (
   Strategy_Desc               VARCHAR(300)
 );
 
+-- ================= connections & settings =================
+CREATE TABLE ComplianceDbConnection (                      -- named data (staging/core) databases
+  Connection_Nm       VARCHAR(63)  PRIMARY KEY
+                      CHECK (Connection_Nm ~ '^[A-Za-z][A-Za-z0-9_]*$' AND upper(Connection_Nm) <> 'METADATA'),
+  Connection_Desc     VARCHAR(300),
+  Host                VARCHAR(255),
+  Port                INT CHECK (Port BETWEEN 1 AND 65535),
+  Database_Nm         VARCHAR(63),
+  User_Nm             VARCHAR(63),
+  Sslmode             VARCHAR(15) CHECK (Sslmode IN ('disable','allow','prefer','require','verify-ca','verify-full')),
+  Secret_Nm           VARCHAR(255),                         -- Secrets Manager secret (JSON host/port/dbname/username/password)
+  Password_Env_Var    VARCHAR(100),                         -- NAME of an env var holding the password; never the password
+  Connect_Timeout_Sec INT CHECK (Connect_Timeout_Sec > 0),
+  Active_Ind          SMALLINT NOT NULL DEFAULT 1 CHECK (Active_Ind IN (0,1)),
+  Created_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Created_By VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Updated_By VARCHAR(100) NOT NULL DEFAULT current_user
+);
+
+CREATE TABLE ComplianceFrameworkSetting (                  -- runtime settings (env / config file override these)
+  Setting_Nm    VARCHAR(100) PRIMARY KEY CHECK (Setting_Nm ~ '^[A-Z][A-Z0-9_]*$'),
+  Setting_Val   TEXT,                                       -- NULL = use the built-in default
+  Setting_Desc  VARCHAR(500),
+  Active_Ind    SMALLINT NOT NULL DEFAULT 1 CHECK (Active_Ind IN (0,1)),
+  Created_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Created_By VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Updated_By VARCHAR(100) NOT NULL DEFAULT current_user
+);
+
 -- ================= configuration =================
 CREATE TABLE ComplianceDataSetSourceXwalk (
   Project_Cd         VARCHAR(30) NOT NULL,
@@ -1078,6 +1137,7 @@ CREATE TABLE ComplianceSourceFileConfig (
   Project_Cd             VARCHAR(30)  NOT NULL,
   Table_Nm               VARCHAR(63)  NOT NULL,
   Src_Cd                 VARCHAR(30)  NOT NULL REFERENCES ComplianceSourceSystem,
+  Target_Connection_Nm   VARCHAR(63)  REFERENCES ComplianceDbConnection,   -- staging+core database; NULL = metadata database
   Src_File_Nm_Tmplt      VARCHAR(255) NOT NULL,                         -- §9 (validator checks grammar)
   Project_Alias          VARCHAR(50)  NOT NULL,
   Table_Alias            VARCHAR(80)  NOT NULL,
@@ -1433,47 +1493,47 @@ SELECT c.Req_ID,
 
 ## Appendix B: Approval / Waiver SQL Templates (D-12, D-48, D-64)
 
-Run these as `framework_approver`. **Each must report 1 row.** A result of 0 means the candidate changed or the row was already decided; re-review.
+Run these as `framework_approver`, with `search_path` set to the metadata schema (D-65). **Each must report 1 row.** A result of 0 means the candidate changed or the row was already decided; re-review.
 
 ```sql
 -- Approve a reopen (you reviewed load :reviewed_load_id)
-UPDATE cms_compliance.ComplianceBatchOverride
+UPDATE ComplianceBatchOverride
    SET Apprvl_Stat='APPROVED', Apprvd_By=:me, Apprvd_Dtts=now(), Reviewed_Load_ID=:reviewed_load_id,
        History = History || E'\n' || now() || ' APPROVED by ' || :me, Updated_Dtts=now()
  WHERE Ovrd_ID=:ovrd_id AND Override_Ty IN ('LATE_ARRIVAL_REOPEN','CORRECTION_REOPEN')
    AND Apprvl_Stat='PENDING_REVIEW' AND Candidate_Load_ID=:reviewed_load_id;
 
 -- Reject a pending reopen or waiver
-UPDATE cms_compliance.ComplianceBatchOverride
+UPDATE ComplianceBatchOverride
    SET Apprvl_Stat='REJECTED', Rejected_By=:me, Rejected_Dtts=now(), Rejection_Rsn=:reason,
        History = History || E'\n' || now() || ' REJECTED by ' || :me || ': ' || :reason, Updated_Dtts=now()
  WHERE Ovrd_ID=:ovrd_id AND Apprvl_Stat='PENDING_REVIEW';
 
 -- Request a SOURCE_WAIVER for an open batch
-INSERT INTO cms_compliance.ComplianceBatchOverride
+INSERT INTO ComplianceBatchOverride
   (Override_Ty, Req_ID, Extract_ID, Project_Cd, Table_Nm, Src_Cd, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, History)
 SELECT 'SOURCE_WAIVER', Req_ID, Extract_ID, Project_Cd, Table_Nm, Src_Cd, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key,
        now() || ' SOURCE_WAIVER requested by ' || :me || ': ' || :reason
-  FROM cms_compliance.ComplianceRequestControl WHERE Req_ID=:req_id AND Batch_Close_Ind=0;
+  FROM ComplianceRequestControl WHERE Req_ID=:req_id AND Batch_Close_Ind=0;
 
 -- Request a RULE_WAIVER for an extract
-INSERT INTO cms_compliance.ComplianceBatchOverride
+INSERT INTO ComplianceBatchOverride
   (Override_Ty, Extract_ID, Project_Cd, Table_Nm, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Rule_Ref, History)
 SELECT 'RULE_WAIVER', Extract_ID, Project_Cd, Table_Nm, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, :rule_ref,
        now() || ' RULE_WAIVER requested by ' || :me || ': ' || :reason
-  FROM cms_compliance.ComplianceExtractControl WHERE Extract_ID=:extract_id AND Trigger_Stat <> 'TRIGGERED';
+  FROM ComplianceExtractControl WHERE Extract_ID=:extract_id AND Trigger_Stat <> 'TRIGGERED';
 
 -- Approve a waiver
-UPDATE cms_compliance.ComplianceBatchOverride
+UPDATE ComplianceBatchOverride
    SET Apprvl_Stat='APPROVED', Apprvd_By=:me, Apprvd_Dtts=now(),
        History = History || E'\n' || now() || ' APPROVED by ' || :me, Updated_Dtts=now()
  WHERE Ovrd_ID=:ovrd_id AND Override_Ty IN ('SOURCE_WAIVER','RULE_WAIVER') AND Apprvl_Stat='PENDING_REVIEW';
 
 -- Revoke an approved waiver (only before the extract is triggered)
-UPDATE cms_compliance.ComplianceBatchOverride o
+UPDATE ComplianceBatchOverride o
    SET Apprvl_Stat='REVOKED', Revoked_By=:me, Revoked_Dtts=now(), Revocation_Rsn=:reason,
        History = History || E'\n' || now() || ' REVOKED by ' || :me || ': ' || :reason, Updated_Dtts=now()
-  FROM cms_compliance.ComplianceExtractControl e
+  FROM ComplianceExtractControl e
  WHERE o.Ovrd_ID=:ovrd_id AND o.Extract_ID=e.Extract_ID AND o.Apprvl_Stat='APPROVED'
    AND o.Override_Ty IN ('SOURCE_WAIVER','RULE_WAIVER') AND e.Trigger_Stat <> 'TRIGGERED';
 ```

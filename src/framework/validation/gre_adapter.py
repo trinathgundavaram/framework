@@ -4,7 +4,7 @@ GRE call mechanics are open question Q-12. The adapter therefore delegates the a
 execution to a configurable entry point (FRAMEWORK_GRE_ENTRYPOINT="package.module:function")
 with this contract:
 
-    def run_rules(conn, rule_group: str, rule_variant: str, run_params: dict) -> list[dict]
+    def run_rules(data_conn, metadata_conn, rule_group: str, rule_variant: str, run_params: dict) -> list[dict]
         # returns one dict per executed rule: {"rule_ref": str, "passed": bool, "detail": str | None}
         # raise any exception for a technical failure
 
@@ -47,8 +47,9 @@ class RuleOutcome:
 
 class RuleEngine(ABC):
     @abstractmethod
-    def run(self, conn: psycopg.Connection, bindings: Sequence[RuleBinding], run_params: dict,
-            mode: str) -> RuleOutcome: ...
+    def run(self, data_conn: psycopg.Connection, metadata_conn: psycopg.Connection,
+            bindings: Sequence[RuleBinding], run_params: dict, mode: str) -> RuleOutcome:
+        """data_conn: database holding the staging/core tables; metadata_conn: framework/GRE metadata."""
 
 
 def _summarise(results: list[dict], mode: str) -> RuleOutcome:
@@ -66,13 +67,13 @@ class CallableRuleEngine(RuleEngine):
     def __init__(self, fn: Callable[..., list[dict]]):
         self.fn = fn
 
-    def run(self, conn, bindings, run_params, mode):
+    def run(self, data_conn, metadata_conn, bindings, run_params, mode):
         if not bindings:
             return RuleOutcome(PASSED)
         results: list[dict] = []
         try:
             for b in bindings:
-                out = self.fn(conn, b.gre_rule_group, b.gre_rule_variant, dict(run_params))
+                out = self.fn(data_conn, metadata_conn, b.gre_rule_group, b.gre_rule_variant, dict(run_params))
                 for r in out:
                     if "rule_ref" not in r or "passed" not in r:
                         raise ValueError(f"rule engine returned an invalid result {r!r}")
@@ -100,7 +101,7 @@ class GreRuleEngine(CallableRuleEngine):
 class NoRulesEngine(RuleEngine):
     """Passes everything. For environments where rules are intentionally disabled."""
 
-    def run(self, conn, bindings, run_params, mode):
+    def run(self, data_conn, metadata_conn, bindings, run_params, mode):
         return RuleOutcome(PASSED)
 
 

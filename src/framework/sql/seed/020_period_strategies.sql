@@ -1,5 +1,5 @@
 -- Period strategies shipped with the package (src/framework/batches/sql/period_strategies/*.sql). Safe to re-run.
-INSERT INTO cms_compliance.CompliancePeriodStrategy
+INSERT INTO CompliancePeriodStrategy
   (Period_Strategy_Cd, Sql_File_Nm, Requires_Lookback_Days_Ind, Requires_Lookback_Weeks_Ind, Strategy_Desc) VALUES
   ('SAME_DAY',               'same_day.sql',               0, 0, 'Report period = the scheduled date'),
   ('PREV_DAY',               'prev_day.sql',               0, 0, 'Report period = the day before the scheduled date'),
