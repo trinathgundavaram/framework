@@ -12,13 +12,12 @@ from typing import Optional
 
 import psycopg
 
-from .adapters import (ObjectStore, RuleEngine, build_channel, build_connector, build_object_store,
-                       build_rule_engine)
+from .adapters import ObjectStore, RuleEngine, build_channel, build_object_store, build_rule_engine
 from .audit import NotificationDispatcher
 from .batches import IntakeProcessor, ScheduleSummary, create_batches
 from .common import Clock, ConfigError
 from .db import schema_exists
-from .extract import ExtractControlService, ExtractEvaluator, ExtractTriggerService
+from .extract import ExtractControlService, ExtractEvaluator
 from .ingest import IngestPipeline
 from .overrides import DecisionProcessor
 from .settings import Settings
@@ -31,8 +30,6 @@ class App:
     settings: Settings
     store: ObjectStore
     rules: RuleEngine
-    connector_factory: object = build_connector
-    sleep: object = None
     spark: object = None
 
     @classmethod
@@ -62,24 +59,19 @@ class App:
         return ExtractControlService(self.conn, self.clock, self.settings, self.rules)
 
     @cached_property
-    def trigger(self) -> ExtractTriggerService:
-        kw = {"sleep": self.sleep} if self.sleep else {}
-        return ExtractTriggerService(self.conn, self.clock, self.settings, self.control, self.connector_factory, **kw)
-
-    @cached_property
     def evaluator(self) -> ExtractEvaluator:
-        return ExtractEvaluator(self.conn, self.clock, self.settings, self.control, self.trigger)
+        return ExtractEvaluator(self.conn, self.clock, self.settings, self.control)
 
     @cached_property
     def pipeline(self) -> IngestPipeline:
         return IngestPipeline(self.conn, self.clock, self.settings, self.store, self.rules,
                               on_promoted=lambda ext: ext and self.control.refresh(ext, "EARLY_COMPLETE"),
+                              on_late_promotion=lambda ext: ext and self.evaluator.after_late_promotion(ext),
                               spark=self.spark)
 
     @cached_property
     def decisions(self) -> DecisionProcessor:
-        return DecisionProcessor(self.conn, self.clock, self.settings, self.store,
-                                 after_reopen=self.evaluator.after_reopen_promotion,
+        return DecisionProcessor(self.conn, self.clock, self.settings,
                                  refresh_extract=lambda ext: self.control.refresh(ext, "OVERRIDE_DECISION"))
 
     @cached_property
@@ -95,24 +87,27 @@ class App:
     def health(self) -> dict[str, list[dict]]:
         q = lambda text, *p: self.conn.execute(text, p).fetchall()  # noqa: E731
         now = self.clock.now()
+        today = self.clock.today(self.settings.business_tz)
         return {
             "stale_loads": q(
                 """SELECT Load_ID, S3_Key, Load_Stat, Heartbeat_Dtts FROM ComplianceFileLoad
                     WHERE Load_Stat IN ('RECEIVED','STAGING','STAGED','RULES_RUNNING','FAILED_TECHNICAL')
                       AND COALESCE(Heartbeat_Dtts, Updated_Dtts) < %s ORDER BY Load_ID""",
                 now - timedelta(minutes=self.settings.heartbeat_stale_minutes)),
-            "pending_reviews": q("""SELECT Ovrd_ID, Override_Ty, Btch_ID, Candidate_Load_ID, Created_Dtts
+            "pending_reviews": q("""SELECT Ovrd_ID, Override_Ty, Req_ID, Btch_ID, Created_Dtts
                                      FROM ComplianceBatchOverride WHERE Apprvl_Stat='PENDING_REVIEW' ORDER BY Ovrd_ID"""),
-            "failed_promotions": q("SELECT Ovrd_ID, Btch_ID FROM ComplianceBatchOverride WHERE Promotion_Stat='FAILED'"),
-            "triggers_in_flight": q("""SELECT Trigger_ID, Extract_ID, Requested_Dtts FROM ComplianceExtractTrigger
-                                        WHERE Call_Stat='REQUESTED'"""),
-            "extracts_past_hold_not_triggered": q(
-                """SELECT Extract_ID, Project_Cd, Table_Nm, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Eligibility_Cd,
-                          Eligibility_Rsn_Txt FROM ComplianceExtractControl
-                    WHERE Trigger_Stat IN ('NOT_TRIGGERED','FAILED') AND Earliest_Trigger_Dt < %s
-                    ORDER BY Extract_ID""", now.date()),
-            "retrigger_required": q("""SELECT Extract_ID, Eligibility_Cd FROM ComplianceExtractControl
-                                        WHERE Retrigger_Required_Ind=1"""),
+            "overrides_expiring_soon": q(
+                """SELECT Ovrd_ID, Override_Ty, Btch_ID, Valid_Thru_Dt_Key FROM ComplianceBatchOverride
+                    WHERE Apprvl_Stat='APPROVED' AND Valid_Thru_Dt_Key BETWEEN %s AND %s ORDER BY Valid_Thru_Dt_Key""",
+                today, today + timedelta(days=7)),
+            "extracts_past_hold_not_closed": q(
+                """SELECT e.Extract_ID, e.Project_Cd, e.Table_Nm, e.Run_Ty, e.Rpt_Start_Dt_Key, e.Rpt_End_Dt_Key,
+                          e.Req_Dt_Key, e.Eligibility_Cd, e.Eligibility_Rsn_Txt
+                     FROM ComplianceExtractControl e JOIN ComplianceRunType r ON r.Run_Ty = e.Run_Ty
+                    WHERE e.Extract_Close_Ind = 0 AND (e.Req_Dt_Key + (r.SLA_Days - 1)) < %s
+                    ORDER BY e.Extract_ID""", today),
+            "regenerate_required": q("""SELECT Extract_ID, Rpt_Start_Dt_Key, Req_Dt_Key FROM ComplianceExtractControl
+                                         WHERE Regenerate_Required_Ind=1 ORDER BY Extract_ID"""),
             "quarantine_by_reason": q("""SELECT Quarantine_Rsn_Cd, count(*) AS n FROM ComplianceFileLoad
                                           WHERE Load_Stat='QUARANTINED' GROUP BY Quarantine_Rsn_Cd ORDER BY n DESC"""),
         }

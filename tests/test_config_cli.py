@@ -1,11 +1,7 @@
 import json
 import os
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
-import pytest
-
-from framework.adapters import CallableRuleEngine, GlueJobConnector, HttpApiConnector, LogChannel, build_rule_engine
+from framework.adapters import CallableRuleEngine, LogChannel, build_rule_engine
 from framework.cli import main
 from framework.config import RuleBinding, validate_all
 from framework.settings import Settings
@@ -52,7 +48,7 @@ def test_template_overlap_detected(conn):
 
 def test_notifications_sent_once(conn, tmp_path):
     seed_config(conn)
-    app, clock, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
+    app, clock, rules = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
     create_batches(app)
     app.pipeline.process_file("inbound", put_file(app, "junk.txt", ["x"]))
     app.pipeline.process_file("inbound", put_file(app, file_name("S1"), ["1|2"]))
@@ -92,11 +88,15 @@ def test_cli_end_to_end(conn, tmp_path, monkeypatch, capsys):
     assert main(["ingest-file", "--bucket", "inbound", "--key", key]) == 0
     assert json.loads(capsys.readouterr().out)["result"] == "PROMOTED"
     ext = q1(conn, "SELECT Extract_ID FROM ComplianceExtractControl")["extract_id"]
-    assert main(["trigger-extract", "--extract-id", str(ext), "--requested-by", "me",
-                 "--set", "EXTRACT_JOB_NAME=job"]) == 2                                   # blocked -> exit 2
+    capsys.readouterr()
+    assert main(["close-extract", "--extract-id", str(ext), "--closed-by", "me"]) == 2     # not eligible -> exit 2
     assert main(["refresh-extract", "--extract-id", str(ext)]) == 0
-    assert main(["evaluate-extracts", "--project", "PRJA"]) == 2                  # no extract job configured
-    assert main(["evaluate-extracts", "--project", "PRJA", "--set", "EXTRACT_JOB_NAME=job"]) == 0
+    assert main(["evaluate-extracts", "--project", "PRJA"]) == 0                  # still inside the SLA hold
+    capsys.readouterr()
+    assert main(["close-extract", "--extract-id", str(ext), "--closed-by", "me", "--ack-warnings",
+                 "--as-of", "2026-02-03T13:00:00+00:00",
+                 "--set", "extract_gating_mode=BEST_EFFORT"]) == 0
+    assert json.loads(capsys.readouterr().out)["closed_batches"] == 2
     assert main(["health"]) == 0
     assert main(["process-decisions"]) == 0
     assert main(["process-intake"]) == 0
@@ -117,70 +117,3 @@ def test_rule_engine_adapter_contract(conn):
     assert missing.run(conn, b, {}, "GATE").status == "ERROR"
     assert missing.run(conn, [], {}, "GATE").status == "PASSED"
     assert build_rule_engine(Settings(rule_engine="none")).run(conn, b, {}, "GATE").status == "PASSED"
-
-
-SETTINGS = Settings(extract_job_type="HTTP_API", extract_call_timeout_sec=5, extract_job_name="extract_job")
-
-
-class _Handler(BaseHTTPRequestHandler):
-    status = 202
-    seen = []
-
-    def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        _Handler.seen.append((dict(self.headers), body))
-        self.send_response(_Handler.status)
-        self.end_headers()
-        self.wfile.write(json.dumps({"job_run_id": "abc"}).encode())
-
-    def log_message(self, *a):
-        pass
-
-
-@pytest.fixture
-def http_server():
-    srv = HTTPServer(("127.0.0.1", 0), _Handler)
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
-    yield f"http://127.0.0.1:{srv.server_port}/extract"
-    srv.shutdown()
-
-
-def test_http_connector(http_server):
-    from dataclasses import replace
-    pol = replace(SETTINGS, extract_endpoint_url=http_server, extract_auth_secret_name="sec")
-    con = HttpApiConnector("us-east-1", secret_loader=lambda n: {"header_name": "X-Api-Key", "header_value": "k"})
-    _Handler.status = 202
-    r = con.call(pol, [("period", "2026-01-01")])
-    assert r.accepted and r.job_run_ref == "abc"
-    headers, body = _Handler.seen[-1]
-    assert body == {"period": "2026-01-01"} and headers["X-Api-Key"] == "k"
-    _Handler.status = 500
-    r = con.call(pol, [])
-    assert not r.accepted and not r.ambiguous
-    r = con.call(replace(pol, extract_endpoint_url="http://127.0.0.1:1/x"), [])
-    assert not r.accepted
-
-
-def test_glue_connector():
-    pytest.importorskip("botocore")
-    from botocore.exceptions import ClientError
-
-    class Client:
-        def __init__(self, exc=None):
-            self.exc, self.kw = exc, None
-
-        def start_job_run(self, **kw):
-            self.kw = kw
-            if self.exc:
-                raise self.exc
-            return {"JobRunId": "jr_9"}
-
-    pol = SETTINGS
-    c = Client()
-    r = GlueJobConnector("us-east-1", c).call(pol, [("--A", "1")])
-    assert r.accepted and r.job_run_ref == "jr_9" and c.kw == {"JobName": "extract_job", "Arguments": {"--A": "1"}}
-    r = GlueJobConnector("us-east-1", Client(ClientError({"Error": {"Code": "X"}}, "StartJobRun"))).call(pol, [])
-    assert not r.accepted and not r.ambiguous
-    r = GlueJobConnector("us-east-1", Client(TimeoutError("read timeout"))).call(pol, [])
-    assert r.ambiguous

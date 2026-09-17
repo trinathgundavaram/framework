@@ -4,7 +4,6 @@
 * stage()         delete the batch's staging rows (D-05) and load one file tagged with its Load_ID;
                   engine PANDAS (python reader + COPY) or SPARK (JDBC) - job setting LOAD_ENGINE (D-62)
 * swap()          disable current core rows of the batch and append the load's staged rows (D-01)
-* restage()       re-stage an approved reopen file from the S3 archive (D-53)
 
 Staging and core tables live in the framework database (schema-qualified in the file config).
 """
@@ -12,9 +11,7 @@ from __future__ import annotations
 
 import csv
 import io
-import os
 import re
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
@@ -22,10 +19,9 @@ from typing import TYPE_CHECKING, Optional
 import psycopg
 from psycopg import sql
 
-from .common import ConfigError, FileRejected, RowCountMismatch, TechnicalFailure
+from .common import ConfigError, FileRejected, RowCountMismatch
 
 if TYPE_CHECKING:
-    from .adapters import ObjectStore
     from .config import FileConfig
     from .settings import Settings
 
@@ -277,26 +273,6 @@ def _stage_spark(conn, settings, spark, file_path, cfg, stg_columns, btch_id, lo
             raise FileRejected("FILE_PARSE_ERROR", "value does not fit staging column types")
         raise
     return StageResult(rows, None)
-
-
-def restage(conn, store: "ObjectStore", settings: "Settings", cfg: "FileConfig", load: dict, now) -> int:
-    """Re-stage an approved reopen file from the S3 archive (D-53)."""
-    from .adapters import basename, parse_uri, sha256_file
-
-    bucket, prefix = parse_uri(cfg.src_file_archive_path)
-    key = f"{prefix}{basename(load['s3_key'])}"
-    if not store.exists(bucket, key):
-        raise TechnicalFailure(f"archived object {bucket}/{key} not found")
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, basename(key))
-        store.download(bucket, key, path)
-        if load["file_sha256"] and sha256_file(path) != load["file_sha256"]:
-            raise TechnicalFailure(f"archived object {bucket}/{key} does not match the approved file checksum")
-        res = stage(conn, settings, file_path=path, cfg=cfg, btch_id=load["btch_id"], load_id=load["load_id"],
-                    src_file_nm=basename(load["s3_key"]), loaded_at=now)
-    if res.data_rows != load["stg_rcd_cnt"]:
-        raise TechnicalFailure(f"re-staged {res.data_rows} rows, expected {load['stg_rcd_cnt']}")
-    return res.data_rows
 
 
 # ============================================================================ promotion (D-01, §10.2)

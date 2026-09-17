@@ -1,7 +1,8 @@
 """Command-line entry points (design §3). Each command calls one service and sets the exit code.
 
 Any setting can be passed as a job argument with --set NAME=VALUE (see settings.py), so one Glue job
-definition per project carries its own period, extract job and gating configuration.
+definition per project carries its own period and gating configuration. The framework closes a run
+when its data is complete; the project's job chain generates the extract afterwards (D-76).
 
 Examples:
   framework init-db
@@ -10,9 +11,9 @@ Examples:
   framework validate-config
   framework create-batches --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH --as-of 2026-02-01
   framework ingest-file --bucket inbound --key prja/in/PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.txt
-  framework evaluate-extracts --project PRJA --set EXTRACT_JOB_NAME=prja_extract \\
-      --set 'EXTRACT_PARAMS={"--PERIOD_START": "{rpt_start_dt_key}", "--BATCHES": "{btch_id_list}"}'
-  framework trigger-extract --extract-id 12 --requested-by jdoe --ack-warnings
+  framework process-intake
+  framework evaluate-extracts --project PRJA --set EXTRACT_GATING_MODE=BEST_EFFORT
+  framework close-extract --extract-id 12 --closed-by jdoe --ack-warnings
 """
 from __future__ import annotations
 
@@ -82,19 +83,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--bucket", required=True)
     sp.add_argument("--key", required=True)
     sp.add_argument("--version-id")
-    add("process-decisions", "act on manual approvals / rejections / waivers / carry-forwards")
-    scope(add("evaluate-extracts", "refresh extracts past their SLA hold and auto-trigger eligible ones"))
+    add("process-decisions", "apply approved reuse overrides and remove expired ones")
+    scope(add("evaluate-extracts", "refresh extracts past their SLA hold and close the eligible ones"))
     sp = add("refresh-extract", "recount / combine / evaluate one extract")
     sp.add_argument("--extract-id", type=int, required=True)
-    sp = add("trigger-extract", "manually trigger an extract")
+    sp = add("close-extract", "close one extract and its batches (manual)")
     sp.add_argument("--extract-id", type=int, required=True)
-    sp.add_argument("--requested-by", required=True)
+    sp.add_argument("--closed-by", required=True)
     sp.add_argument("--ack-warnings", action="store_true")
-    sp = add("resolve-trigger", "resolve an in-flight trigger whose outcome is unknown")
-    sp.add_argument("--trigger-id", type=int, required=True)
-    sp.add_argument("--outcome", choices=["accepted", "failed"], required=True)
-    sp.add_argument("--actor", required=True)
-    sp.add_argument("--job-run-ref")
     add("notify", "send pending notifications")
     add("health", "print operational health report")
     return p
@@ -155,21 +151,17 @@ def _dispatch(app: App, args) -> int:
     if c == "process-decisions":
         s = app.decisions.run()
         _print(s)
-        return 1 if s.promotion_failed or s.invalid else 0
+        return 1 if s.invalid else 0
     if c == "evaluate-extracts":
         s = app.evaluator.run(args.project, args.table, args.run_type)
         _print(s)
-        return 1 if s.failed or s.reconcile_required else 0
+        return 1 if s.deferred or s.regenerate_required else 0
     if c == "refresh-extract":
         st = app.control.refresh(args.extract_id, "MANUAL_REFRESH")
         _print({"extract": st.extract, "eligibility": st.eligibility})
         return 0
-    if c == "trigger-extract":
-        _print(app.trigger.fire(args.extract_id, "MANUAL", args.requested_by, args.ack_warnings))
-        return 0
-    if c == "resolve-trigger":
-        app.trigger.resolve(args.trigger_id, args.outcome == "accepted", args.actor, args.job_run_ref)
-        _print({"trigger_id": args.trigger_id, "resolved": args.outcome})
+    if c == "close-extract":
+        _print(app.control.close(args.extract_id, args.closed_by, args.ack_warnings))
         return 0
     if c == "notify":
         _print({"sent": app.notifier().run()})

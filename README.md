@@ -1,21 +1,22 @@
 # CMS Compliance Framework
 
 A project-agnostic, filename-driven framework for CMS compliance source files: batch registration,
-file intake, validation, promotion to core, reopen approvals, waivers, carry-forward, period
-validation and extract triggering. PostgreSQL + Python; runs locally or as AWS Glue jobs.
+file intake, validation, promotion to core, manual overrides (reuse, late arrival, correction),
+period validation and **closing the run** when its data is complete. The project's own job chain
+generates the extract afterwards. PostgreSQL + Python; runs locally or as AWS Glue jobs.
 
 | Start here | |
 |---|---|
 | Setup, settings, commands, onboarding | [`docs/framework-package.md`](docs/framework-package.md) |
 | What each module does | [`docs/module-reference.md`](docs/module-reference.md) |
-| Design and decisions (v4) | [`docs/design/cms-compliance-framework-design.md`](docs/design/cms-compliance-framework-design.md) |
+| Design and decisions (v5) | [`docs/design/cms-compliance-framework-design.md`](docs/design/cms-compliance-framework-design.md) |
 | Schema (source of truth) | [`src/framework/sql/schema.sql`](src/framework/sql/schema.sql) |
 
-**What lives where (v4)**
+**What lives where (v5)**
 
 | In tables (5 config + event vocabulary) | Outside tables |
 |---|---|
-| `ComplianceSourceSystem`, `ComplianceRunType` (incl. `Carry_Fwd_Ind`), `ComplianceDataSetSourceXwalk` (which project/table/source/run type apply, and when), `ComplianceSourceFileConfig` (file contract, paths, targets, recipients), `ComplianceRuleBinding` | Database connection: `.env` locally, Secrets Manager in AWS · Settings: `--set` job arguments > environment > `.env` · Report period: `create-batches --period <NAME>` (`period_sql.py`) · Extract job, parameters, gating mode: arguments of the project's `evaluate-extracts` job |
+| `ComplianceSourceSystem`, `ComplianceRunType` (incl. `Carry_Fwd_Ind`), `ComplianceDataSetSourceXwalk` (which project/table/source/run type apply, and when), `ComplianceSourceFileConfig` (file contract, paths, targets, recipients), `ComplianceRuleBinding` | Database connection: `.env` locally, Secrets Manager in AWS · Settings: `--set` job arguments > environment > `.env` · Report period: `create-batches --period <NAME>` (`period_sql.py`) · Gating mode and automatic close: arguments of the project's `evaluate-extracts` job |
 
 ```bash
 pip install -e ".[dev]"
@@ -23,7 +24,7 @@ cp .env.example .env                      # database + local settings
 framework init-db
 framework create-batches --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
 framework ingest-file --bucket inbound --key prja/in/PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.txt
-framework evaluate-extracts --project PRJA --set EXTRACT_JOB_NAME=prja_extract
+framework evaluate-extracts --project PRJA      # closes the runs whose data is complete
 ```
 
 ---

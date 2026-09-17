@@ -1,10 +1,9 @@
 """Shared test fixtures/builders. All names are synthetic."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 
-from framework.adapters import CallResult, LocalObjectStore, RuleOutcome
+from framework.adapters import LocalObjectStore, RuleOutcome
 from framework.app import App
 from framework.common import FixedClock
 from framework.config import render
@@ -12,8 +11,7 @@ from framework.settings import Settings
 
 TEMPLATE = "{PROJECT}_{TABLE}_{SRC}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt"
 TZ = "America/Chicago"
-EXTRACT_PARAMS = {"--PERIOD_START": "{rpt_start_dt_key}", "--BATCHES": "{btch_id_list}",
-                  "--TRIGGER_ID": "{trigger_id}", "--MODE": "full"}
+
 
 
 def utc(*a) -> datetime:
@@ -42,41 +40,26 @@ class FakeRules:
         return RuleOutcome("PASSED_WITH_WARNINGS", warned_rules=list(failed))
 
 
-@dataclass
-class FakeConnector:
-    mode: str = "accept"          # accept | reject | ambiguous | reject_then_accept
-    calls: list = field(default_factory=list)
-
-    def call(self, settings, params):
-        self.calls.append(list(params))
-        if self.mode == "accept" or (self.mode == "reject_then_accept" and len(self.calls) > 1):
-            return CallResult(True, job_run_ref=f"jr_{len(self.calls)}", response_txt="ok")
-        if self.mode == "ambiguous":
-            return CallResult(False, response_txt="timeout", ambiguous=True)
-        return CallResult(False, response_txt="HTTP 500")
-
-
-def make_app(conn, tmp_path, now: datetime, **overrides) -> tuple[App, FixedClock, FakeRules, FakeConnector]:
+def make_app(conn, tmp_path, now: datetime, **overrides) -> tuple[App, FixedClock, FakeRules]:
     """Job-level settings mirror what the project's scheduled jobs would pass."""
     settings = Settings(object_store="local", local_store_root=str(tmp_path / "store"), lock_timeout_seconds=2,
-                        call_retry_backoff_seconds=0, business_tz=TZ, extract_job_name="extract_job",
-                        extract_max_call_retries=1, extract_params=dict(EXTRACT_PARAMS))
+                        business_tz=TZ)
     for k, v in overrides.items():
         setattr(settings, k, v)
     clock = FixedClock(now)
     rules = FakeRules()
-    connector = FakeConnector()
-    app = App(conn, clock, settings, LocalObjectStore(settings.local_store_root), rules,
-              connector_factory=lambda s: connector, sleep=lambda s: None)
-    return app, clock, rules, connector
+    app = App(conn, clock, settings, LocalObjectStore(settings.local_store_root), rules)
+    return app, clock, rules
 
 
-def seed_config(conn, *, sources=("S1", "S2"), sla=2, allow_zero=0, has_header=1, carry_fwd=0, rules=True):
+def seed_config(conn, *, sources=("S1", "S2"), sla=2, allow_zero=0, has_header=1, carry_fwd=0, rules=True,
+                adhoc_sla=1):
     with conn.transaction():
         for s in sources:
             conn.execute("INSERT INTO ComplianceSourceSystem (Src_Cd, Src_Nm, Src_Ty) VALUES (%s,%s,'VENDOR')", (s, s))
         conn.execute("""INSERT INTO ComplianceRunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind)
-                        VALUES ('MONTHLY','monthly','ROUTINE',%s,%s), ('ADHOC','ad hoc','ADHOC',1,0)""", (sla, carry_fwd))
+                        VALUES ('MONTHLY','monthly','ROUTINE',%s,%s), ('ADHOC','ad hoc','ADHOC',%s,%s)""",
+                     (sla, carry_fwd, adhoc_sla, carry_fwd))
         for s in sources:
             for rt in ("MONTHLY", "ADHOC"):
                 conn.execute("""INSERT INTO ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_Cd, Run_Ty,
@@ -122,12 +105,28 @@ def qa(conn, sql, *params):
     return conn.execute(sql, params).fetchall()
 
 
-def approve_reopen(conn, ovrd_id: int, reviewed_load_id: int, who="approver") -> int:
+def add_override(conn, req_id: int, override_ty: str, valid_thru, *, reuse_btch_id=None, approved=True,
+                 who="approver") -> int:
+    """What sql/approvals.sql does: one manual row, approved with a validity date."""
     with conn.transaction():
         return conn.execute(
-            """UPDATE ComplianceBatchOverride
-                  SET Apprvl_Stat='APPROVED', Apprvd_By=%s, Apprvd_Dtts=now(), Reviewed_Load_ID=%s,
-                      History = History || E'\\n' || 'APPROVED', Updated_Dtts=now()
-                WHERE Ovrd_ID=%s AND Override_Ty IN ('LATE_ARRIVAL_REOPEN','CORRECTION_REOPEN')
-                  AND Apprvl_Stat='PENDING_REVIEW' AND Candidate_Load_ID=%s""",
-            (who, reviewed_load_id, ovrd_id, reviewed_load_id)).rowcount
+            """INSERT INTO ComplianceBatchOverride
+                 (Override_Ty, Req_ID, Project_Cd, Table_Nm, Src_Cd, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key,
+                  Req_Dt_Key, Btch_ID, Reuse_Btch_ID, Rsn, Requested_By, Apprvl_Stat, Apprvd_By, Apprvd_Dtts,
+                  Valid_Thru_Dt_Key)
+               SELECT %s, Req_ID, Project_Cd, Table_Nm, Src_Cd, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key,
+                      Req_Dt_Key, Btch_ID, %s, 'test', %s,
+                      CASE WHEN %s THEN 'APPROVED' ELSE 'PENDING_REVIEW' END,
+                      CASE WHEN %s THEN %s END, CASE WHEN %s THEN now() END,
+                      CASE WHEN %s THEN %s::date END
+                 FROM ComplianceRequestControl WHERE Req_ID=%s
+               RETURNING Ovrd_ID""",
+            (override_ty, reuse_btch_id, who, approved, approved, who, approved, approved, valid_thru,
+             req_id)).fetchone()["ovrd_id"]
+
+
+def stop_override(conn, ovrd_id: int, valid_thru) -> None:
+    """Template 6: stop an approved override by moving its validity date into the past."""
+    with conn.transaction():
+        conn.execute("UPDATE ComplianceBatchOverride SET Valid_Thru_Dt_Key=%s, Updated_Dtts=now() WHERE Ovrd_ID=%s",
+                     (valid_thru, ovrd_id))

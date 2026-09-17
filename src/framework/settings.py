@@ -68,30 +68,14 @@ class Settings:
     spark_write_partitions: int = 4
     spark_batch_size: int = 10000
 
-    # --- locking / health / intake ---
+    # --- locking / health ---
     lock_timeout_seconds: int = 300
     heartbeat_stale_minutes: int = 30
-    adhoc_allow_add_source_before_trigger: bool = True
-    cycle_init_existing_batch: str = "SKIP"       # SKIP | FAIL
 
-    # --- extract (job level; were ComplianceExtractPolicy / ComplianceExtractJobParam) ---
+    # --- extract close (job level) ---
     extract_gating_mode: str = "STRICT_ALL_PASS"  # STRICT_ALL_PASS | BEST_EFFORT
     period_rules_mode: str = "GATE"               # GATE | ANNOTATE
-    extract_job_type: str = "GLUE_JOB"            # GLUE_JOB | HTTP_API
-    extract_job_name: Optional[str] = None        # GLUE_JOB
-    extract_endpoint_url: Optional[str] = None    # HTTP_API
-    extract_http_method: str = "POST"
-    extract_auth_secret_name: Optional[str] = None
-    extract_call_timeout_sec: int = 60
-    extract_max_call_retries: int = 0
-    extract_params: dict = field(default_factory=dict)   # JSON {"--NAME": "text with {placeholders}"}
-    strict_waiver_auto_trigger: bool = False
-    auto_retrigger_after_reopen: bool = True
-    retry_failed_triggers_on_sweep: bool = False
-    call_retry_backoff_seconds: int = 5
-    trigger_reconcile_minutes: int = 15
-    http_accepted_status: list[str] = field(default_factory=lambda: ["200-299"])
-    param_date_format: str = "%Y-%m-%d"
+    auto_close_extracts: bool = True              # evaluate-extracts closes AUTO-eligible extracts
 
     # --- notifications ---
     notify_backend: str = "log"                   # log | aws
@@ -137,8 +121,6 @@ class Settings:
         for name, allowed in (("load_engine", ("PANDAS", "SPARK")), ("file_rules_mode", ("GATE", "ANNOTATE")),
                               ("period_rules_mode", ("GATE", "ANNOTATE")),
                               ("extract_gating_mode", ("STRICT_ALL_PASS", "BEST_EFFORT")),
-                              ("extract_job_type", ("GLUE_JOB", "HTTP_API")),
-                              ("cycle_init_existing_batch", ("SKIP", "FAIL")),
                               ("file_effective_date_basis", ("RPT_START", "RPT_END"))):
             if getattr(self, name) not in allowed:
                 raise ConfigError(f"{name.upper()} must be one of {allowed}, got {getattr(self, name)!r}")
@@ -271,6 +253,6 @@ def _coerce(name: str, raw: Any) -> Any:
         return value
     if name == "quote_char":
         return raw
-    if name.endswith(("_mode", "_engine", "_type", "_existing_batch", "_basis")) and name != "rule_engine":
+    if name.endswith(("_mode", "_engine", "_basis")) and name != "rule_engine":
         return text.upper()
     return text

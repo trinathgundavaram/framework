@@ -1,10 +1,11 @@
 # CMS Compliance Framework: Python Package
 
-Implementation of [`design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md) (v4). File-by-file detail: [`module-reference.md`](module-reference.md).
+Implementation of [`design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md) (v5). File-by-file detail: [`module-reference.md`](module-reference.md).
 
 - **Project-agnostic:** projects, tables, sources and run types are rows in five configuration tables. The code has no project-specific branches.
 - **Filename-driven:** incoming files are recognised by the templates in `ComplianceSourceFileConfig`.
-- **Job-level settings:** connections, runtime settings, the report period, the extract job and its parameters are **not** tables. They come from `.env` (local), AWS Secrets Manager (database credentials) and the arguments of each project's scheduled job.
+- **Job-level settings:** connections, runtime settings and the report period are **not** tables. They come from `.env` (local), AWS Secrets Manager (database credentials) and the arguments of each project's scheduled job.
+- **The framework closes the run; it does not generate the extract** (D-76). `evaluate-extracts` / `close-extract` freeze the run's batch list; the next job in the project's chain builds the submission.
 
 ## Layout
 
@@ -22,14 +23,14 @@ src/framework/
   period_sql.py           report-period SQL by name
   batches.py              create-batches, intake, CRC/extract rows
   ingest.py               file pipeline + resolution decision tables
-  load.py                 file reading, staging (pandas/COPY or Spark), core swap, archive re-stage
-  overrides.py            approvals, waivers, carry-forward, reopen promotion
-  extract.py              eligibility, refresh/combine, trigger + close, SLA sweep
+  load.py                 file reading, staging (pandas/COPY or Spark), core swap
+  overrides.py            REUSE decisions: apply and expire
+  extract.py              eligibility, refresh/combine, close, SLA sweep
   audit.py                audit writer, notifications
-  adapters.py             S3/local store, GRE rules engine, Glue/HTTP connectors, SES/SNS
-  sql/schema.sql          schema (source of truth)
+  adapters.py             S3/local store, GRE rules engine, SES/SNS
+  sql/schema.sql          schema (source of truth, CREATE-only)
   sql/seed.sql            event vocabulary
-  sql/approvals.sql       manual approval / waiver / carry-forward SQL
+  sql/approvals.sql       manual override templates (reuse / late arrival / correction)
 tests/                    unit + PostgreSQL integration tests
 ```
 
@@ -71,27 +72,9 @@ The environment variable is `FRAMEWORK_<NAME>`; the job argument is `--set <NAME
 | `PERIOD_RULES_MODE` | `GATE` | (Was `Period_Rules_Vld_Md`.) |
 | `RULE_ENGINE`, `GRE_ENTRYPOINT` | `gre`, — | **Q-12**. `none` disables rules; `module:Class` plugs in another engine. |
 | `LOCK_TIMEOUT_SECONDS`, `HEARTBEAT_STALE_MINUTES` | `300`, `30` | |
-| `ADHOC_ALLOW_ADD_SOURCE_BEFORE_TRIGGER`, `CYCLE_INIT_EXISTING_BATCH` | `true`, `SKIP` | **Q-05**, **Q-18** |
 | `EXTRACT_GATING_MODE` | `STRICT_ALL_PASS` | or `BEST_EFFORT`. (Was `Extract_Gating_Md`.) |
-| `EXTRACT_JOB_TYPE` | `GLUE_JOB` | or `HTTP_API` |
-| `EXTRACT_JOB_NAME` | — | Glue job to start. |
-| `EXTRACT_ENDPOINT_URL`, `EXTRACT_HTTP_METHOD`, `EXTRACT_AUTH_SECRET_NAME` | —, `POST`, — | HTTP API (**Q-08**: secret JSON `{"header_name", "header_value"}`). |
-| `EXTRACT_CALL_TIMEOUT_SEC`, `EXTRACT_MAX_CALL_RETRIES` | `60`, `0` | **Q-07** |
-| `EXTRACT_PARAMS` | `{}` | JSON object, see below. (Was `ComplianceExtractJobParam`.) |
-| `STRICT_WAIVER_AUTO_TRIGGER` | `false` | **Q-06** |
-| `AUTO_RETRIGGER_AFTER_REOPEN` | `true` | D-41 / **Q-16** |
-| `RETRY_FAILED_TRIGGERS_ON_SWEEP`, `CALL_RETRY_BACKOFF_SECONDS`, `TRIGGER_RECONCILE_MINUTES` | `false`, `5`, `15` | **Q-07** |
-| `HTTP_ACCEPTED_STATUS`, `PARAM_DATE_FORMAT` | `200-299`, `%Y-%m-%d` | |
+| `AUTO_CLOSE_EXTRACTS` | `true` | `false` makes `evaluate-extracts` refresh only, leaving every close to a person. |
 | `NOTIFY_BACKEND`, `NOTIFY_FROM_EMAIL`, `DEFAULT_NOTIFY_EMAILS`, `SNS_TOPIC_ARN` | `log`, —, —, — | D-54 (`aws` = SES/SNS). (`SNS_TOPIC_ARN` was a file-config column.) |
-
-**`EXTRACT_PARAMS`** maps each job argument / JSON field to a text template:
-
-```json
-{"--PERIOD_START": "{rpt_start_dt_key}", "--PERIOD_END": "{rpt_end_dt_key}",
- "--BATCHES": "{btch_id_list}", "--TRIGGER_ID": "{trigger_id}", "--MODE": "full"}
-```
-
-Placeholders: `extract_id, project_cd, table_nm, run_ty, rpt_start_dt_key, rpt_end_dt_key, extract_stat, extract_rules_stat, required_src_cnt, received_src_cnt, waived_src_cnt, included_src_cds, missing_src_cds, waived_src_cds, carried_src_cds, trigger_cnt, combine_run_cnt, btch_id_list, load_id_list, trigger_id`. Dates use `PARAM_DATE_FORMAT`. An unknown placeholder blocks the trigger with a `ConfigError`.
 
 ### Report periods
 
@@ -158,7 +141,7 @@ Python 3.10+ and PostgreSQL 14+ with `btree_gist` (tested on 16). `TEST_METADATA
    - Core: business columns plus `btch_id`, `load_id`, `current_ind`, `load_dtts`, `end_dtts` (see the comment at the end of `schema.sql`).
 2. **Insert configuration rows** (SQL or the Glue metadata-load job), in this order:
    1. `ComplianceSourceSystem`
-   2. `ComplianceRunType` — `SLA_Days` ≥ 1; `Carry_Fwd_Ind = 1` if batches of this run type may reuse the previous batch's data after approval.
+   2. `ComplianceRunType` — `SLA_Days` ≥ 1 (the hold is `Req_Dt_Key + SLA_Days − 1`); `Carry_Fwd_Ind = 1` if batches of this run type may reuse the previous batch's data after approval.
    3. `ComplianceDataSetSourceXwalk` — one effective-dated row per project / table / source / run type. Nothing else.
    4. `ComplianceSourceFileConfig` — one active row per project / table / source: template, aliases, file format, S3 paths, staging/core tables, notification recipients.
    5. `ComplianceRuleBinding` — FILE_LEVEL per source (optional) and PERIOD_LEVEL (`Src_Cd = '*'`).
@@ -168,10 +151,10 @@ Python 3.10+ and PostgreSQL 14+ with `btree_gist` (tested on 16). `TEST_METADATA
    ```bash
    # monthly, 06:00 on the 1st
    framework create-batches --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
-   # every 15 minutes
-   framework evaluate-extracts --project PRJA \
-     --set EXTRACT_JOB_NAME=prja_extract --set EXTRACT_GATING_MODE=STRICT_ALL_PASS \
-     --set 'EXTRACT_PARAMS={"--PERIOD_START": "{rpt_start_dt_key}", "--BATCHES": "{btch_id_list}"}'
+   # every 15 minutes: close the runs whose data is complete, then generate their extracts
+   framework evaluate-extracts --project PRJA --set EXTRACT_GATING_MODE=STRICT_ALL_PASS
+   # the next step of the project's chain reads the closed extract rows
+   # (Combine_Btch_ID_List, Regenerate_Required_Ind) and builds the submission
    # S3 event -> ingest-file; polling -> process-intake, process-decisions, notify
    ```
 
@@ -193,26 +176,26 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 | `show-config` | Settings with value and source; database target (no password) | Ops |
 | `test-connection` | Connect and check the schema; exit 1 if not initialised | Deploy / ops |
 | `validate-config` | Configuration checks; exit 1 on errors, logs `CONFIG_VALIDATION_FAILED` | CI / before activating config |
-| `create-batches --project --run-type --period [--table] [--period-file] [--lookback-days] [--lookback-weeks]` | Batches of one project / ROUTINE run type for the period of the run date | Project schedule |
-| `process-intake` | CYCLE_INIT / ADHOC_REQUEST / CORRECTION_REQUEST | Poll |
+| `create-batches --project --run-type --period [--table] [--period-file] [--lookback-days] [--lookback-weeks]` | Batches of one project / ROUTINE run type for the period of the run date (one set per run date, D-77) | Project schedule |
+| `process-intake` | Ad-hoc intake: create the batches of today's run date for every open request window (D-79) | Poll |
 | `ingest-file --bucket --key [--version-id]` | One inbound object end to end | S3 event |
-| `process-decisions` | Act on approvals, rejections, waivers and carry-forwards; promote approved reopens; re-trigger (D-41) when the extract job is configured | Poll |
-| `evaluate-extracts [--project] [--table] [--run-type]` | Reconcile triggers; refresh extracts past the SLA hold; auto-trigger AUTO-eligible ones | Project schedule |
-| `refresh-extract --extract-id` | Recount / combine / evaluate one extract | Manual |
-| `trigger-extract --extract-id --requested-by [--ack-warnings]` | Manual trigger (exit 2 if blocked) | Human |
-| `resolve-trigger --trigger-id --outcome accepted/failed --actor [--job-run-ref]` | Resolve a trigger call whose outcome is unknown | Human |
+| `process-decisions` | Apply approved `REUSE` overrides and remove the ones that ran out | Poll |
+| `evaluate-extracts [--project] [--table] [--run-type]` | Refresh the runs past their SLA hold, close the AUTO-eligible ones, list the runs needing regeneration | Project schedule |
+| `refresh-extract --extract-id` | Recount / combine / evaluate one run | Manual |
+| `close-extract --extract-id --closed-by [--ack-warnings]` | Close one run and its batches (exit 2 if blocked) | Human |
 | `notify` | Send pending notifications | Poll |
 | `health` | Operational report (§15.3) | Ops |
 
 **Exit codes:** 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 
-## Approvals, waivers and carry-forward (manual SQL, D-12)
+## Overrides (manual SQL, D-12, D-74)
 
-Use the templates in `src/framework/sql/approvals.sql`. Every statement must report **1 row**; `process-decisions` picks the decision up and writes the audit trail.
+Use the templates in `src/framework/sql/approvals.sql`. Every statement must report **1 row**. One shape covers three decisions, each approved with a `Valid_Thru_Dt_Key` — the last date it may be used. **There is no revoke:** template 6 moves that date into the past.
 
-- **Reopen:** approving requires naming the reviewed `Load_ID` (§12.4).
-- **Source / rule waiver:** request, approve, reject or revoke before the extract is triggered.
-- **Carry-forward (D-70):** for an open batch with no data, when the run type has `Carry_Fwd_Ind = 1`. Request it (optionally naming `Reuse_Btch_ID`), then approve it. On approval the batch becomes `CARRIED_FORWARD` and the extract counts it as received, combining the reused batch's current core rows. A file that arrives later for the open batch replaces the carry-forward; revoking it before the trigger returns the batch to `PENDING`; a file after the close is a `LATE_ARRIVAL_REOPEN`.
+- **`REUSE` (D-70):** for an open batch with no data, when the run type has `Carry_Fwd_Ind = 1`. Optionally name `Reuse_Btch_ID`; otherwise the latest earlier closed batch with data is used. `process-decisions` applies it (the batch becomes `CARRIED_FORWARD` and counts as received, combining the reused batch's current core rows) and removes it again when it runs out. A file that arrives later for the open batch replaces the carried data.
+- **`LATE_ARRIVAL`:** lets a file be promoted into a **closed** batch that has no data.
+- **`CORRECTION`:** lets a file replace the data of a **closed** batch that has data.
+- Both of the last two are read by the ingest pipeline: with a valid override the file is promoted and the run is marked `Regenerate_Required_Ind = 1`; without one it is quarantined as `FILE_REJECTED_BATCH_CLOSED`, and re-delivering the same object after the approval reprocesses it.
 
 ## GRE integration contract (Q-12)
 
@@ -232,12 +215,12 @@ The framework applies GATE/ANNOTATE itself (`FILE_RULES_MODE`, `PERIOD_RULES_MOD
 
 ## Implementation status and open items
 
-**Implemented and tested:** every flow in design §7, the §8 decision tables, §9 templates, §10 promotion and combine, §11 eligibility, trigger, close, re-trigger and reconciliation, §12 locks and idempotency, carry-forward (D-70), the validator, notifications and health.
+**Implemented and tested:** every flow in design §7, the §8 decision tables, §9 templates, §10 promotion and combine, §11 eligibility and close, §12 locks and idempotency, the three override types (D-74), the per-run-date grain (D-77), ad-hoc request windows (D-79), the validator, notifications and health.
 
 **Not yet verified:**
 - **Spark engine** (`LOAD_ENGINE=SPARK`): written against PySpark 3.x but not run here; test on Glue/Spark before enabling.
-- **AWS adapters** (S3 store, Glue connector, SES/SNS, Secrets Manager): written against boto3; unit tests cover the Glue connector with a fake client and the database secret with a fake loader.
+- **AWS adapters** (S3 store, SES/SNS, Secrets Manager): written against boto3; the database secret is covered by a unit test with a fake loader.
 
-**Waiting on decisions** (defaults are configurable; see design §16): Q-02 file types, encoding and trailer layout; Q-03 case sensitivity; Q-04 effective-date basis; Q-05 – Q-08 ad-hoc additions, waiver auto-trigger, call retries, HTTP auth; Q-11 PostgreSQL version; Q-12 GRE entry point; Q-13 – Q-15 orchestration, rollout, security; Q-16 – Q-18 auto re-trigger, alerting, cycle-init duplicates.
+**Waiting on decisions** (defaults are configurable; see design §16): Q-02 file types, encoding and trailer layout; Q-03 case sensitivity; Q-04 effective-date basis; Q-05 ad-hoc source additions; Q-11 PostgreSQL version; Q-12 GRE entry point; Q-13 – Q-15 orchestration, rollout, security; Q-16 regeneration downstream; Q-17 alerting on runs that stay open.
 
 **Not built:** Glue / Step Functions wrappers for the framework commands, their Terraform, CI pipeline.

@@ -4,15 +4,15 @@ import pytest
 
 from framework.common import TechnicalFailure
 
-from .helpers import create_batches, file_name, make_app, put_file, q1, qa, seed_config, utc
+from .helpers import add_override, create_batches, file_name, make_app, put_file, q1, qa, seed_config, utc
 
 
 @pytest.fixture
 def env(conn, tmp_path):
     seed_config(conn)
-    app, clock, rules, connector = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
+    app, clock, rules = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
     create_batches(app)
-    return app, clock, rules, connector
+    return app, clock, rules
 
 
 def ingest(app, name, rows, header=True, **kw):
@@ -31,7 +31,7 @@ def test_o1_promote(env, conn):
     out = ingest(app, file_name("S1"), ["1|10.50|a", "2||b"])
     assert (out.result, out.rule) == ("PROMOTED", "O-1")
     b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1'")
-    assert (b["resolution_ty"], b["req_stat"], b["current_load_id"]) == ("NEW_FILE", "PROMOTED", out.load_id)
+    assert (b["resolution_ty"], b["req_stat"]) == ("NEW_FILE", "PROMOTED")
     assert [(r["id"], r["current_ind"]) for r in core_rows(conn)] == [(1, 1), (2, 1)]
     assert core_rows(conn)[1]["amount"] is None                     # empty -> NULL
     load = q1(conn, "SELECT * FROM ComplianceFileLoad WHERE Load_ID=%s", out.load_id)
@@ -55,12 +55,13 @@ def test_o2_replacement_latest_arrival_wins(env, conn):
     assert [(r["id"], r["current_ind"], r["load_id"]) for r in rows] == [
         (1, 0, first.load_id), (2, 0, first.load_id), (7, 1, second.load_id)]
     assert q1(conn, "SELECT Load_Stat FROM ComplianceFileLoad WHERE Load_ID=%s", first.load_id)["load_stat"] == "SUPERSEDED"
+    assert q1(conn, "SELECT count(*) n FROM ComplianceFileLoad WHERE Load_Stat='PROMOTED'")["n"] == 1
     staged = qa(conn, "SELECT load_id FROM stg_t.tbl_x")
     assert {r["load_id"] for r in staged} == {second.load_id}    # D-05 delete by Btch_ID
 
 
 def test_o3_o4_rules_failures(env, conn):
-    app, clock, rules, _ = env
+    app, clock, rules = env
     rules.file_fail["S1"] = ["R_NOT_NULL"]
     out = ingest(app, file_name("S1"), ["1|1|a"])
     assert (out.result, out.rule) == ("RULES_FAILED", "O-3")
@@ -74,7 +75,8 @@ def test_o3_o4_rules_failures(env, conn):
     bad = ingest(app, file_name("S1", ts=datetime(2026, 2, 1, 12, 0, 0)), ["9|9|x"])
     assert bad.rule == "O-4"
     b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1'")
-    assert (b["req_stat"], b["resolution_ty"], b["current_load_id"]) == ("EXCEPTION_PENDING", "NEW_FILE", good.load_id)
+    assert (b["req_stat"], b["resolution_ty"]) == ("EXCEPTION_PENDING", "NEW_FILE")
+    assert q1(conn, "SELECT Load_ID FROM ComplianceFileLoad WHERE Load_Stat='PROMOTED'")["load_id"] == good.load_id
     assert [r["id"] for r in core_rows(conn) if r["current_ind"] == 1] == [1]       # D-46
     assert q1(conn, "SELECT count(*) n FROM CMS_ComplianceExceptionsAudit WHERE Event_Ty='RULES_VALIDATION_FAILED'")["n"] == 2
     assert rules.calls[0]["mode"] == "GATE" and rules.calls[0]["btch_id"] == b["btch_id"]
@@ -82,7 +84,7 @@ def test_o3_o4_rules_failures(env, conn):
 
 def test_annotate_warnings_promote(conn, tmp_path):
     seed_config(conn)
-    app, clock, rules, _ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0), file_rules_mode="ANNOTATE")
+    app, clock, rules = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0), file_rules_mode="ANNOTATE")
     create_batches(app)
     rules.file_fail["S1"] = ["R_WARN"]
     out = ingest(app, file_name("S1"), ["1|1|a"])
@@ -148,7 +150,7 @@ def test_zero_records(conn, tmp_path):
 
 
 def test_duplicate_and_same_content_other_batch(env, conn):
-    app, clock, *_ = env
+    app, clock, rules = env
     ingest(app, file_name("S1"), ["1|1|a"])
     dup = ingest(app, file_name("S1", ts=datetime(2026, 2, 1, 11, 0)), ["1|1|a"])
     assert (dup.result, dup.event_ty) == ("QUARANTINED", "FILE_REJECTED_DUPLICATE")
@@ -159,7 +161,7 @@ def test_duplicate_and_same_content_other_batch(env, conn):
 
 
 def test_replay_and_technical_failure_restart(env, conn):
-    app, clock, rules, _ = env
+    app, clock, rules = env
     name = file_name("S1")
     key = put_file(app, name, ["1|1|a"])
     rules.error.add("FILE_LEVEL")
@@ -204,7 +206,7 @@ def test_trailer_count(conn, tmp_path):
 
 def test_no_rule_binding_skips_file_rules(conn, tmp_path):
     seed_config(conn, sources=("S1",), rules=False)
-    app, clock, rules, _ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
+    app, clock, rules = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
     create_batches(app)
     out = ingest(app, file_name("S1"), ["1|1|a"])
     assert out.result == "PROMOTED" and "FILE_LEVEL" not in [c["scope"] for c in rules.calls]
@@ -228,10 +230,90 @@ def test_failure_during_promotion_rolls_back_core_and_control(env, conn, monkeyp
     with pytest.raises(RuntimeError):
         ingest(app, name, ["2|2|b", "3|3|c"])
     b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1' AND Run_Ty='MONTHLY'")
-    assert b["current_load_id"] == first.load_id
+    assert q1(conn, "SELECT Load_ID FROM ComplianceFileLoad WHERE Load_Stat='PROMOTED'")["load_id"] == first.load_id
     cur = qa(conn, "SELECT load_id FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", b["btch_id"])
     assert {r["load_id"] for r in cur} == {first.load_id}
     again = app.pipeline.process_file("inbound", "prja/in/" + name)
     assert again.result == "PROMOTED"
     assert [(r["id"], r["current_ind"], r["load_id"]) for r in core_rows(conn)] == [
         (1, 0, first.load_id), (2, 1, again.load_id), (3, 1, again.load_id)]
+    assert q1(conn, "SELECT Load_ID FROM ComplianceFileLoad WHERE Load_Stat='PROMOTED'")["load_id"] == again.load_id
+
+
+def test_file_for_a_closed_batch_needs_an_approved_override(conn, tmp_path):
+    """A closed batch only accepts a file when an approved, still-valid override says so (D-74)."""
+    seed_config(conn)
+    app, clock, rules = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0), extract_gating_mode="BEST_EFFORT")
+    create_batches(app)
+    ingest(app, file_name("S1"), ["1|1|a"])
+    clock.set(utc(2026, 2, 2, 12, 0))
+    ext = q1(conn, "SELECT Extract_ID FROM ComplianceExtractControl")["extract_id"]
+    app.control.close(ext, "ops", ack_warnings=True)
+    s2 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S2'")
+    assert (s2["batch_close_ind"], s2["req_stat"], s2["resolution_ty"]) == (1, "DATA_NOT_PROVIDED", "MISSING")
+
+    clock.set(utc(2026, 2, 5, 12, 0))
+    blocked_name = file_name("S2", ts=datetime(2026, 2, 5, 8, 0))
+    blocked = ingest(app, blocked_name, ["5|5|e"])
+    assert (blocked.result, blocked.event_ty) == ("QUARANTINED", "FILE_REJECTED_BATCH_CLOSED")
+    assert not app.store.exists("inbound", "prja/in/" + blocked_name)
+
+    add_override(conn, s2["req_id"], "LATE_ARRIVAL", date(2026, 2, 10))
+    # the same object delivered again is reprocessed, because that quarantine reason is not final
+    key = put_file(app, blocked_name, ["5|5|e"])
+    retry = app.pipeline.process_file("inbound", key)
+    assert (retry.result, retry.rule, retry.load_id) == ("LATE_PROMOTED", "C-1", blocked.load_id)
+    # once that batch has data, a further file needs the CORRECTION type instead (D-74)
+    again = ingest(app, file_name("S2", ts=datetime(2026, 2, 5, 9, 0)), ["6|6|f"])
+    assert (again.result, again.event_ty) == ("QUARANTINED", "FILE_REJECTED_BATCH_CLOSED")
+    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Req_ID=%s", s2["req_id"])
+    assert (b["batch_close_ind"], b["req_stat"], b["resolution_ty"]) == (1, "COMPLETED", "NEW_FILE")
+    assert qa(conn, "SELECT id FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", b["btch_id"]) == [{"id": 5}]
+    e = q1(conn, "SELECT * FROM ComplianceExtractControl")
+    assert e["regenerate_required_ind"] == 1 and e["received_src_cnt"] == 2
+    assert q1(conn, "SELECT count(*) n FROM CMS_ComplianceExceptionsAudit "
+                    "WHERE Event_Ty='EXTRACT_REGENERATE_REQUIRED'")["n"] == 1
+
+
+def test_correction_needs_its_own_override_type_and_expires(env, conn):
+    app, clock, rules = env
+    first = ingest(app, file_name("S1"), ["1|1|a"])
+    ingest(app, file_name("S2"), ["2|2|b"])
+    clock.set(utc(2026, 2, 2, 12, 0))
+    ext = q1(conn, "SELECT Extract_ID FROM ComplianceExtractControl")["extract_id"]
+    app.control.close(ext, "SYSTEM", automatic=True)
+    s1 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1'")
+
+    clock.set(utc(2026, 2, 4, 12, 0))
+    add_override(conn, s1["req_id"], "LATE_ARRIVAL", date(2026, 2, 10))       # wrong type: the batch has data
+    wrong = ingest(app, file_name("S1", ts=datetime(2026, 2, 4, 8, 0)), ["9|9|z"])
+    assert (wrong.result, wrong.event_ty) == ("QUARANTINED", "FILE_REJECTED_BATCH_CLOSED")
+    with conn.transaction():                                                  # make room for the right type
+        conn.execute("UPDATE ComplianceBatchOverride SET Apprvl_Stat='REJECTED', Rejected_By='ops', "
+                     "Rejected_Dtts=now() WHERE Req_ID=%s", (s1["req_id"],))
+    add_override(conn, s1["req_id"], "CORRECTION", date(2026, 2, 5))
+    ok = ingest(app, file_name("S1", ts=datetime(2026, 2, 4, 9, 0)), ["1|100|a"])
+    assert (ok.result, ok.rule) == ("CORRECTION_PROMOTED", "C-2")
+    cur = qa(conn, "SELECT id, amount FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", s1["btch_id"])
+    assert [(r["id"], int(r["amount"])) for r in cur] == [(1, 100)]
+    assert q1(conn, "SELECT Load_Stat FROM ComplianceFileLoad WHERE Load_ID=%s", first.load_id)["load_stat"] == "SUPERSEDED"
+    assert q1(conn, "SELECT Req_Stat FROM ComplianceRequestControl WHERE Req_ID=%s", s1["req_id"])["req_stat"] == "COMPLETED"
+
+    clock.set(utc(2026, 2, 6, 12, 0))                                          # override has run out
+    late = ingest(app, file_name("S1", ts=datetime(2026, 2, 6, 9, 0)), ["1|200|a"])
+    assert (late.result, late.event_ty) == ("QUARANTINED", "FILE_REJECTED_BATCH_CLOSED")
+
+
+def test_file_matches_the_open_batch_of_the_latest_run_date(conn, tmp_path):
+    """Daily runs of one period: an arriving file belongs to the open batch with the latest run date (D-78)."""
+    seed_config(conn, sources=("S1",))
+    app, clock, rules = make_app(conn, tmp_path, utc(2026, 2, 2, 13, 0))
+    create_batches(app, period="CURRENT_CALENDAR_MONTH")
+    clock.set(utc(2026, 2, 3, 13, 0))
+    create_batches(app, period="CURRENT_CALENDAR_MONTH")
+    name = file_name("S1", start=date(2026, 2, 1), end=date(2026, 2, 28), ts=datetime(2026, 2, 3, 9, 0))
+    out = app.pipeline.process_file("inbound", put_file(app, name, ["3|3|c"]))
+    assert out.result == "PROMOTED"
+    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Req_ID=%s", out.req_id)
+    assert b["req_dt_key"] == date(2026, 2, 3)
+    assert q1(conn, "SELECT Req_Stat FROM ComplianceRequestControl WHERE Req_Dt_Key='2026-02-02'")["req_stat"] == "PENDING"

@@ -10,8 +10,8 @@ from framework.batches import period_sql
 from framework.common import (ConfigError, FileRejected, InvalidStatusTransition, build_btch_id, check_transition,
                               earliest_close_date)
 from framework.config import FileConfig, MatchError, TemplateError, TemplateMatcher, parse_template, render
-from framework.extract import AUTO, MANUAL_ONLY, NOT_ELIGIBLE, EligibilityInput, compute_eligibility, render_params
-from framework.ingest import Action, ActiveReopen, ResolutionInput, decide
+from framework.extract import AUTO, MANUAL_ONLY, NOT_ELIGIBLE, EligibilityInput, compute_eligibility
+from framework.ingest import Action, ResolutionInput, decide, required_override_ty
 from framework.load import read_file, scan_delimited, stage
 from framework.settings import Settings, read_env_file
 
@@ -161,8 +161,8 @@ D = date(2026, 2, 2)
 
 
 def inp(**kw):
-    base = dict(gating_md="STRICT_ALL_PASS", required=2, received=2, waived=0, rules_stat="PASSED",
-                failed_rules=(), waived_rules=frozenset(), today=D, earliest_trigger_dt=D)
+    base = dict(gating_md="STRICT_ALL_PASS", required=2, received=2, rules_stat="PASSED",
+                failed_rules=(), today=D, earliest_close_dt=D)
     base.update(kw)
     return EligibilityInput(**base)
 
@@ -184,17 +184,11 @@ def test_rules_not_available(stat):
     assert compute_eligibility(inp(rules_stat=stat, gating_md="BEST_EFFORT")).code == NOT_ELIGIBLE
 
 
-def test_strict_missing_source_blocked_until_waiver():
-    assert compute_eligibility(inp(received=1)).code == NOT_ELIGIBLE
-    assert compute_eligibility(inp(received=1, waived=1)).code == MANUAL_ONLY
-    assert compute_eligibility(inp(received=1, waived=1), strict_waiver_auto=True).code == AUTO
-
-
-def test_strict_failed_rules_need_rule_waivers():
-    e = compute_eligibility(inp(rules_stat="FAILED", failed_rules=("R1", "R2"), waived_rules=frozenset({"R1"})))
-    assert e.code == NOT_ELIGIBLE and "R2" in e.reason
-    assert compute_eligibility(inp(rules_stat="FAILED", failed_rules=("R1", "R2"),
-                       waived_rules=frozenset({"R1", "R2"}))).code == MANUAL_ONLY
+def test_strict_blocks_missing_sources_and_failed_rules():
+    e = compute_eligibility(inp(received=1))
+    assert e.code == NOT_ELIGIBLE and "1 of 2" in e.reason
+    e = compute_eligibility(inp(rules_stat="FAILED", failed_rules=("R1",)))
+    assert e.code == NOT_ELIGIBLE and "R1" in e.reason
 
 
 def test_best_effort_warnings():
@@ -210,43 +204,38 @@ def test_no_required_sources():
 
 
 # ---------------------------------------------------------------- resolution tables
-@pytest.mark.parametrize("prior, passed, action, rule", [
+@pytest.mark.parametrize("has_data, passed, action, rule", [
     (False, True, Action.PROMOTE, "O-1"),
     (True, True, Action.PROMOTE_REPLACE, "O-2"),
     (False, False, Action.EXCEPTION_NO_DATA, "O-3"),
     (True, False, Action.EXCEPTION_KEEP_PRIOR, "O-4"),
 ])
-def test_open_batch(prior, passed, action, rule):
-    d = decide(ResolutionInput(False, "NEW_FILE" if prior else None, prior, passed))
+def test_open_batch(has_data, passed, action, rule):
+    d = decide(ResolutionInput(batch_closed=False, has_data=has_data, file_passed=passed))
     assert (d.action, d.rule) == (action, rule)
 
 
-@pytest.mark.parametrize("resolution, expected", [("MISSING", "LATE_ARRIVAL_REOPEN"), ("NEW_FILE", "CORRECTION_REOPEN")])
-def test_x1_type_from_resolution(resolution, expected):
-    d = decide(ResolutionInput(True, resolution, resolution == "NEW_FILE", True))
-    assert (d.action, d.rule, d.override_ty) == (Action.REOPEN_INSERT, "X-1", expected)
-
-
-@pytest.mark.parametrize("stat, promo, action, rule", [
-    ("PENDING_REVIEW", "NOT_APPLICABLE", Action.REOPEN_REPLACE_PENDING, "X-2"),
-    ("APPROVED", "PENDING", Action.REOPEN_RESET_APPROVED, "X-3"),
-    ("APPROVED", "FAILED", Action.REOPEN_RESET_APPROVED, "X-3"),
-    ("APPROVED", "PROMOTED", Action.REOPEN_RESET_PROMOTED, "X-4"),
+@pytest.mark.parametrize("has_data, override_ty, action, rule", [
+    (False, "LATE_ARRIVAL", Action.PROMOTE_LATE, "C-1"),
+    (True, "CORRECTION", Action.PROMOTE_CORRECTION, "C-2"),
+    (False, None, Action.REJECT_CLOSED, "C-3"),
+    (True, None, Action.REJECT_CLOSED, "C-3"),
+    (False, "CORRECTION", Action.REJECT_CLOSED, "C-3"),        # wrong type for a batch without data
+    (True, "LATE_ARRIVAL", Action.REJECT_CLOSED, "C-3"),       # wrong type for a batch with data
 ])
-def test_active_reopen(stat, promo, action, rule):
-    d = decide(ResolutionInput(True, "NEW_FILE", True, True, ActiveReopen(stat, promo, "LATE_ARRIVAL_REOPEN")))
+def test_closed_batch(has_data, override_ty, action, rule):
+    d = decide(ResolutionInput(batch_closed=True, has_data=has_data, file_passed=True, override_ty=override_ty))
     assert (d.action, d.rule) == (action, rule)
-    assert d.override_ty == "LATE_ARRIVAL_REOPEN"      # D-47 type kept
 
 
-def test_x5_reopen_rejected_on_failure_regardless_of_override():
-    for ar in (None, ActiveReopen("PENDING_REVIEW", "NOT_APPLICABLE", "CORRECTION_REOPEN")):
-        assert decide(ResolutionInput(True, "MISSING", False, False, ar)).action == Action.REOPEN_REJECT
+@pytest.mark.parametrize("override_ty", [None, "LATE_ARRIVAL", "CORRECTION"])
+def test_closed_batch_rules_failure_never_promotes(override_ty):
+    d = decide(ResolutionInput(batch_closed=True, has_data=False, file_passed=False, override_ty=override_ty))
+    assert (d.action, d.rule) == (Action.REJECT_RULES, "C-4")
 
 
-def test_closed_unresolved_is_a_bug():
-    with pytest.raises(ValueError):
-        decide(ResolutionInput(True, None, False, True))
+def test_required_override_ty():
+    assert required_override_ty(False) == "LATE_ARRIVAL" and required_override_ty(True) == "CORRECTION"
 
 
 # ---------------------------------------------------------------- Btch_ID
@@ -331,16 +320,3 @@ def test_period_sql_lookup(tmp_path):
         period_sql("BAD", str(f))
     with pytest.raises(ConfigError):
         period_sql("FISCAL", str(tmp_path / "missing.py"))
-
-
-def test_render_params():
-    ext = {"extract_id": 7, "project_cd": "P", "table_nm": "T", "run_ty": "M", "rpt_start_dt_key": date(2026, 1, 1),
-           "rpt_end_dt_key": date(2026, 1, 31), "extract_stat": "COMPLETE", "extract_rules_stat": "PASSED",
-           "required_src_cnt": 2, "received_src_cnt": 2, "waived_src_cnt": 0, "included_src_cds": "A,B",
-           "missing_src_cds": "", "waived_src_cds": "", "carried_src_cds": None, "trigger_cnt": 0,
-           "combine_run_cnt": 1}
-    out = render_params({"--PERIOD": "{RPT_START_DT_KEY}..{rpt_end_dt_key}", "--B": "{btch_id_list}",
-                         "--T": "{trigger_id}", "--MODE": "full"}, ext, ["b1", "b2"], [1, 2], 9)
-    assert out == [("--PERIOD", "2026-01-01..2026-01-31"), ("--B", "b1,b2"), ("--T", "9"), ("--MODE", "full")]
-    with pytest.raises(ConfigError, match="unknown placeholder"):
-        render_params({"--X": "{nope}"}, ext, [], [], 1)

@@ -1,9 +1,14 @@
 """File ingest pipeline (design §7 P5, §8, §9.4).
 
-One call processes one S3 object end to end. Business outcomes (quarantine, rules failure,
-reopen request...) are returned; technical failures are raised after the load is marked
-FAILED_TECHNICAL so the orchestrator can retry (the replay restarts the same Load_ID - C0).
-The resolution decision tables (§8) are the pure function `decide` below.
+One call processes one S3 object end to end. Business outcomes (quarantine, rules failure, late
+arrival) are returned; technical failures are raised after the load is marked FAILED_TECHNICAL so the
+orchestrator can retry (the replay restarts the same Load_ID - C0).
+
+Batch selection (D-78): a filename carries the report period but not the run date, so the file is
+matched to the **open** batch of its (project, table, source, run type, report period) with the
+latest run date. When every batch of that grain is closed, the file is promoted only if an approved,
+still-valid override exists for it (LATE_ARRIVAL for a batch with no data, CORRECTION for one that
+has data); otherwise it is quarantined so a person can decide.
 """
 from __future__ import annotations
 
@@ -20,8 +25,8 @@ from . import config as cfgmod
 from . import db
 from .adapters import ERROR, ObjectInfo, ObjectStore, RuleEngine, basename, dirname, parse_uri, sha256_file
 from .audit import EventLogger
-from .batches import find_batch, get_batch
-from .common import (EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch,
+from .batches import get_batch, promoted_load
+from .common import (COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch,
                      TechnicalFailure, check_transition)
 from .config import FileConfig, MatchError, TemplateMatcher
 from .load import sanitize_db_error, stage, swap
@@ -29,81 +34,57 @@ from .settings import Settings
 
 log = logging.getLogger(__name__)
 
+TERMINAL_LOAD_STATS = {"QUARANTINED", "RULES_FAILED", "PROMOTED", "SUPERSEDED"}
+ARCHIVE_LOAD_STATS = {"RULES_FAILED", "PROMOTED", "SUPERSEDED"}
+
 
 # ============================================================================ decision tables (§8), pure
 class Action(str, Enum):
-    PROMOTE = "PROMOTE"                              # O-1
-    PROMOTE_REPLACE = "PROMOTE_REPLACE"              # O-2
-    EXCEPTION_NO_DATA = "EXCEPTION_NO_DATA"          # O-3
-    EXCEPTION_KEEP_PRIOR = "EXCEPTION_KEEP_PRIOR"    # O-4
-    REOPEN_INSERT = "REOPEN_INSERT"                  # X-1
-    REOPEN_REPLACE_PENDING = "REOPEN_REPLACE_PENDING"    # X-2
-    REOPEN_RESET_APPROVED = "REOPEN_RESET_APPROVED"      # X-3
-    REOPEN_RESET_PROMOTED = "REOPEN_RESET_PROMOTED"      # X-4
-    REOPEN_REJECT = "REOPEN_REJECT"                  # X-5
-
-
-@dataclass(frozen=True)
-class ActiveReopen:
-    apprvl_stat: str          # PENDING_REVIEW | APPROVED
-    promotion_stat: str       # NOT_APPLICABLE | PENDING | PROMOTED | FAILED
-    override_ty: str
+    PROMOTE = "PROMOTE"                              # O-1: open batch, no data yet
+    PROMOTE_REPLACE = "PROMOTE_REPLACE"              # O-2: open batch, replaces its current data
+    EXCEPTION_NO_DATA = "EXCEPTION_NO_DATA"          # O-3: open batch, rules failed, no prior data
+    EXCEPTION_KEEP_PRIOR = "EXCEPTION_KEEP_PRIOR"    # O-4: open batch, rules failed, prior data kept
+    PROMOTE_LATE = "PROMOTE_LATE"                    # C-1: closed batch with no data + LATE_ARRIVAL
+    PROMOTE_CORRECTION = "PROMOTE_CORRECTION"        # C-2: closed batch with data + CORRECTION
+    REJECT_CLOSED = "REJECT_CLOSED"                  # C-3: closed batch, no approved override
+    REJECT_RULES = "REJECT_RULES"                    # C-4: closed batch, file failed its rules
 
 
 @dataclass(frozen=True)
 class ResolutionInput:
     batch_closed: bool
-    resolution_ty: Optional[str]      # NEW_FILE | MISSING | None
-    has_prior_promoted: bool          # batch already has data (Current_Load_ID or an applied CARRY_FORWARD)
-    file_passed: bool                 # FILE_LEVEL rules passed (incl. warnings) and zero-record rule satisfied
-    active_reopen: Optional[ActiveReopen] = None
+    has_data: bool                    # NEW_FILE promoted load, or an applied CARRY_FORWARD
+    file_passed: bool                 # FILE_LEVEL rules passed (incl. warnings) and the zero-record rule is met
+    override_ty: Optional[str] = None  # approved, still-valid override for this batch (LATE_ARRIVAL / CORRECTION)
 
 
 @dataclass(frozen=True)
 class ResolutionDecision:
     action: Action
     rule: str
-    override_ty: Optional[str] = None
-
-
-def reopen_type_for(resolution_ty: Optional[str]) -> str:
-    """X-1: NEW_FILE -> CORRECTION_REOPEN; MISSING / CARRY_FORWARD (own data never arrived) -> LATE_ARRIVAL_REOPEN."""
-    if resolution_ty == "NEW_FILE":
-        return "CORRECTION_REOPEN"
-    if resolution_ty in ("MISSING", "CARRY_FORWARD"):
-        return "LATE_ARRIVAL_REOPEN"
-    raise ValueError(f"a closed batch must be resolved, got {resolution_ty!r}")
 
 
 def decide(inp: ResolutionInput) -> ResolutionDecision:
     if not inp.batch_closed:
         if inp.file_passed:
-            if inp.has_prior_promoted:
-                return ResolutionDecision(Action.PROMOTE_REPLACE, "O-2")
-            return ResolutionDecision(Action.PROMOTE, "O-1")
-        if inp.has_prior_promoted:
-            return ResolutionDecision(Action.EXCEPTION_KEEP_PRIOR, "O-4")
-        return ResolutionDecision(Action.EXCEPTION_NO_DATA, "O-3")
-
+            return ResolutionDecision(Action.PROMOTE_REPLACE, "O-2") if inp.has_data \
+                else ResolutionDecision(Action.PROMOTE, "O-1")
+        return ResolutionDecision(Action.EXCEPTION_KEEP_PRIOR, "O-4") if inp.has_data \
+            else ResolutionDecision(Action.EXCEPTION_NO_DATA, "O-3")
     if not inp.file_passed:
-        return ResolutionDecision(Action.REOPEN_REJECT, "X-5")
-    ar = inp.active_reopen
-    if ar is None:
-        return ResolutionDecision(Action.REOPEN_INSERT, "X-1", reopen_type_for(inp.resolution_ty))
-    if ar.apprvl_stat == "PENDING_REVIEW":
-        return ResolutionDecision(Action.REOPEN_REPLACE_PENDING, "X-2", ar.override_ty)
-    if ar.apprvl_stat == "APPROVED" and ar.promotion_stat == "PROMOTED":
-        return ResolutionDecision(Action.REOPEN_RESET_PROMOTED, "X-4", ar.override_ty)   # D-47: type kept
-    if ar.apprvl_stat == "APPROVED":
-        return ResolutionDecision(Action.REOPEN_RESET_APPROVED, "X-3", ar.override_ty)
-    raise ValueError(f"unexpected active reopen state {ar}")
+        return ResolutionDecision(Action.REJECT_RULES, "C-4")
+    if inp.has_data and inp.override_ty == "CORRECTION":
+        return ResolutionDecision(Action.PROMOTE_CORRECTION, "C-2")
+    if not inp.has_data and inp.override_ty == "LATE_ARRIVAL":
+        return ResolutionDecision(Action.PROMOTE_LATE, "C-1")
+    return ResolutionDecision(Action.REJECT_CLOSED, "C-3")
+
+
+def required_override_ty(has_data: bool) -> str:
+    return "CORRECTION" if has_data else "LATE_ARRIVAL"
 
 
 # ============================================================================ pipeline
-TERMINAL_LOAD_STATS = {"QUARANTINED", "RULES_FAILED", "PENDING_APPROVAL", "PROMOTED", "SUPERSEDED"}
-ARCHIVE_LOAD_STATS = {"RULES_FAILED", "PENDING_APPROVAL", "PROMOTED", "SUPERSEDED"}
-
-
 @dataclass
 class IngestOutcome:
     load_id: int
@@ -122,22 +103,24 @@ def s3_ref(bucket: str, key: str) -> str:
 
 class IngestPipeline:
     def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings, store: ObjectStore,
-                 rule_engine: RuleEngine, on_promoted: Optional[Callable[[int], None]] = None, spark=None):
+                 rule_engine: RuleEngine, on_promoted: Optional[Callable[[int], None]] = None,
+                 on_late_promotion: Optional[Callable[[int], None]] = None, spark=None):
         self.conn = conn
         self.clock = clock
         self.settings = settings
         self.store = store
         self.rules = rule_engine
+        self.on_promoted = on_promoted                  # extract refresh hook (early completion, D-21)
+        self.on_late_promotion = on_late_promotion      # refresh + regenerate flag for a closed extract
         self.spark = spark
-        self.on_promoted = on_promoted          # extract refresh hook (early completion, D-21)
-        self.logger = EventLogger(self.conn, clock)
+        self.logger = EventLogger(conn, clock)
 
     # ------------------------------------------------------------------ entry point
     def process_file(self, bucket: str, key: str, version_id: Optional[str] = None) -> IngestOutcome:
         info = self.store.head(bucket, key, version_id)
         load, is_new = self._register(info)
         if not is_new:
-            if load["load_stat"] in TERMINAL_LOAD_STATS:
+            if load["load_stat"] in TERMINAL_LOAD_STATS and not self._retryable_quarantine(load):
                 return self._replay(load, info)
             if load["btch_id"]:
                 if not db.try_lock(self.conn, db.batch_key(load["btch_id"])):
@@ -149,6 +132,12 @@ class IngestPipeline:
         except Exception as e:
             self._mark_technical_failure(load["load_id"], e)
             raise
+
+    @staticmethod
+    def _retryable_quarantine(load: dict) -> bool:
+        """A file quarantined only because its batch was closed is reprocessed when it is delivered
+        again: by then an approved LATE_ARRIVAL / CORRECTION override may exist (D-74)."""
+        return load["load_stat"] == "QUARANTINED" and load["quarantine_rsn_cd"] == "FILE_REJECTED_BATCH_CLOSED"
 
     # ------------------------------------------------------------------ steps
     def _register(self, info: ObjectInfo) -> tuple[dict, bool]:
@@ -203,11 +192,14 @@ class IngestPipeline:
             return self._quarantine(load_id, info, "FILE_REJECTED_RUNTY_NOT_CONFIGURED",
                                     f"run type {m.run_ty!r} is not configured/effective for "
                                     f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_cd} on {ref_date}", cfg)
-        batch = find_batch(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_cd, run_ty, m.rpt_start, m.rpt_end)
+        batch, override = self._select_batch(cfg, run_ty, m.rpt_start, m.rpt_end)
         if batch is None:
-            return self._quarantine(load_id, info, "FILE_REJECTED_NO_BATCH",
-                                    f"no batch for {cfg.project_cd}/{cfg.table_nm}/{cfg.src_cd}/{run_ty} "
-                                    f"{m.rpt_start}..{m.rpt_end}", cfg)
+            event = "FILE_REJECTED_BATCH_CLOSED" if override == "CLOSED" else "FILE_REJECTED_NO_BATCH"
+            detail = ("every batch for this period is closed and no approved, valid override exists"
+                      if override == "CLOSED" else "no batch exists for this period")
+            return self._quarantine(load_id, info, event,
+                                    f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_cd}/{run_ty} "
+                                    f"{m.rpt_start}..{m.rpt_end}: {detail}", cfg)
         with self.conn.transaction():
             self.conn.execute(
                 """UPDATE ComplianceFileLoad SET Cfg_ID=%s, Req_ID=%s, Btch_ID=%s,
@@ -226,6 +218,8 @@ class IngestPipeline:
             outcome = self._process_locked(load_id, info, cfg, batch["req_id"])
         if outcome.result == "PROMOTED" and self.on_promoted:
             self.on_promoted(outcome.extract_id)
+        elif outcome.result in ("LATE_PROMOTED", "CORRECTION_PROMOTED") and self.on_late_promotion:
+            self.on_late_promotion(outcome.extract_id)
         return outcome
 
     def _resolve_run_type(self, token: str) -> Optional[str]:
@@ -238,6 +232,36 @@ class IngestPipeline:
                     return c
         return None
 
+    def _select_batch(self, cfg: FileConfig, run_ty: str, rpt_start, rpt_end) -> tuple[Optional[dict], Optional[str]]:
+        """The batch a file belongs to (D-78). Returns (batch, override type) - the override type is
+        'CLOSED' when only closed batches exist and none of them may accept the file."""
+        rows = self.conn.execute(
+            """SELECT * FROM ComplianceRequestControl
+                WHERE Project_Cd=%s AND Table_Nm=%s AND Src_Cd=%s AND Run_Ty=%s
+                  AND Rpt_Start_Dt_Key=%s AND Rpt_End_Dt_Key=%s
+                ORDER BY Req_Dt_Key DESC, Req_ID DESC""",
+            (cfg.project_cd, cfg.table_nm, cfg.src_cd, run_ty, rpt_start, rpt_end)).fetchall()
+        if not rows:
+            return None, None
+        today = self.clock.today(self.settings.business_tz)
+        open_rows = [r for r in rows if r["batch_close_ind"] == 0]
+        if open_rows:
+            return next((r for r in open_rows if r["req_dt_key"] <= today), open_rows[-1]), None
+        for r in rows:                                   # closed: an approved, valid override may accept it
+            ovrd = self.active_override(r, required_override_ty(self._has_data(r)), today)
+            if ovrd:
+                return r, ovrd["override_ty"]
+        return None, "CLOSED"
+
+    def active_override(self, batch: dict, override_ty: str, today) -> Optional[dict]:
+        return self.conn.execute(
+            """SELECT * FROM ComplianceBatchOverride
+                WHERE Req_ID=%s AND Override_Ty=%s AND Apprvl_Stat='APPROVED' AND Valid_Thru_Dt_Key >= %s""",
+            (batch["req_id"], override_ty, today)).fetchone()
+
+    def _has_data(self, batch: dict) -> bool:
+        return batch["resolution_ty"] == "CARRY_FORWARD" or promoted_load(self.conn, batch["btch_id"]) is not None
+
     def _process_locked(self, load_id: int, info: ObjectInfo, cfg: FileConfig, req_id: int) -> IngestOutcome:
         batch = get_batch(self.conn, req_id)
         with tempfile.TemporaryDirectory() as tmp:
@@ -247,10 +271,11 @@ class IngestPipeline:
             with self.conn.transaction():
                 self.conn.execute("UPDATE ComplianceFileLoad SET File_Sha256=%s, Updated_Dtts=%s WHERE Load_ID=%s",
                                   (sha, self.clock.now(), load_id))
-            dup = self._duplicate_of(sha, batch, load_id)                            # C11
-            if dup:
+            current = promoted_load(self.conn, batch["btch_id"])                     # C11
+            if current and current["file_sha256"] == sha and current["load_id"] != load_id:
                 return self._quarantine(load_id, info, "FILE_REJECTED_DUPLICATE",
-                                        f"identical to load {dup} of batch {batch['btch_id']}", cfg, batch)
+                                        f"identical to load {current['load_id']} of batch {batch['btch_id']}",
+                                        cfg, batch)
             other = self.conn.execute(
                 """SELECT Load_ID, Btch_ID FROM ComplianceFileLoad WHERE File_Sha256=%s AND Btch_ID<>%s
                       AND Load_Stat <> 'QUARANTINED' LIMIT 1""", (sha, batch["btch_id"])).fetchone()
@@ -263,8 +288,8 @@ class IngestPipeline:
                                       description=f"same content as load {other['load_id']} ({other['btch_id']})")
             try:
                 staged = stage(self.conn, self.settings, file_path=path, cfg=cfg, btch_id=batch["btch_id"],
-                                    load_id=load_id, src_file_nm=basename(info.key), loaded_at=self.clock.now(),
-                                    spark=self.spark)
+                               load_id=load_id, src_file_nm=basename(info.key), loaded_at=self.clock.now(),
+                               spark=self.spark)
             except FileRejected as e:
                 return self._quarantine(load_id, info, e.event_ty, str(e), cfg, batch)
         with self.conn.transaction():
@@ -287,8 +312,8 @@ class IngestPipeline:
                 "scope": "FILE_LEVEL", "btch_id": batch["btch_id"], "load_id": load_id,
                 "project_cd": cfg.project_cd, "table_nm": cfg.table_nm, "src_cd": cfg.src_cd,
                 "run_ty": batch["run_ty"], "rpt_start_dt_key": batch["rpt_start_dt_key"],
-                "rpt_end_dt_key": batch["rpt_end_dt_key"], "stg_schema_nm": cfg.stg_schema_nm,
-                "stg_tblnm": cfg.stg_tblnm}, self.settings.file_rules_mode)
+                "rpt_end_dt_key": batch["rpt_end_dt_key"], "req_dt_key": batch["req_dt_key"],
+                "stg_schema_nm": cfg.stg_schema_nm, "stg_tblnm": cfg.stg_tblnm}, self.settings.file_rules_mode)
             if outcome.status == ERROR:
                 with self.conn.transaction():
                     self.conn.execute("UPDATE ComplianceFileLoad SET Rules_Stat='ERROR' WHERE Load_ID=%s", (load_id,))
@@ -307,71 +332,56 @@ class IngestPipeline:
         self._move(info, cfg.src_file_archive_path, "", load_id)
         return result
 
-    def _duplicate_of(self, sha: str, batch: dict, load_id: int) -> Optional[int]:
-        ids = [batch["current_load_id"]] if batch["current_load_id"] else []
-        cand = self.conn.execute(
-            """SELECT Candidate_Load_ID FROM ComplianceBatchOverride WHERE Req_ID=%s
-                  AND Override_Ty IN ('LATE_ARRIVAL_REOPEN','CORRECTION_REOPEN')
-                  AND Apprvl_Stat IN ('PENDING_REVIEW','APPROVED')""", (batch["req_id"],)).fetchone()
-        if cand:
-            ids.append(cand["candidate_load_id"])
-        ids = [i for i in ids if i != load_id]
-        if not ids:
-            return None
-        row = self.conn.execute("SELECT Load_ID FROM ComplianceFileLoad WHERE Load_ID = ANY(%s) AND File_Sha256=%s "
-                                "LIMIT 1", (ids, sha)).fetchone()
-        return row["load_id"] if row else None
-
     # ------------------------------------------------------------------ resolution (§8)
     def _resolve(self, load_id, info, cfg, req_id, passed, rules_stat, failure_event, detail) -> IngestOutcome:
         now = self.clock.now()
         ref = s3_ref(info.bucket, info.key)
+        today = self.clock.today(self.settings.business_tz)
         with self.conn.transaction():
             b = get_batch(self.conn, req_id, for_update=True)
-            ar = self.conn.execute(
-                """SELECT * FROM ComplianceBatchOverride WHERE Req_ID=%s
-                      AND Override_Ty IN ('LATE_ARRIVAL_REOPEN','CORRECTION_REOPEN')
-                      AND Apprvl_Stat IN ('PENDING_REVIEW','APPROVED') FOR UPDATE""", (req_id,)).fetchone()
             closed = b["batch_close_ind"] == 1
-            d = decide(ResolutionInput(
-                batch_closed=closed, resolution_ty=b["resolution_ty"],
-                has_prior_promoted=b["current_load_id"] is not None or b["resolution_ty"] == "CARRY_FORWARD",
-                file_passed=passed,
-                active_reopen=ActiveReopen(ar["apprvl_stat"], ar["promotion_stat"], ar["override_ty"]) if ar else None))
+            has_data = self._has_data(b)
+            ovrd = self.active_override(b, required_override_ty(has_data), today) if closed else None
+            d = decide(ResolutionInput(batch_closed=closed, has_data=has_data, file_passed=passed,
+                                       override_ty=ovrd["override_ty"] if ovrd else None))
             ctx = dict(project_cd=b["project_cd"], table_nm=b["table_nm"], src_cd=b["src_cd"], run_ty=b["run_ty"],
                        req_id=req_id, btch_id=b["btch_id"], load_id=load_id, extract_id=b["extract_id"], file_ref=ref)
-            out = IngestOutcome(load_id, "", d.rule, req_id=req_id, extract_id=b["extract_id"])
+            out = IngestOutcome(load_id, "", d.rule, req_id=req_id, extract_id=b["extract_id"],
+                                ovrd_id=ovrd["ovrd_id"] if ovrd else None)
+            self.logger.batch_event("FILE_RECEIVED", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
+                                    file_ref=ref, detail=f"rule={d.rule}")
 
-            if not closed:
-                self.logger.batch_event("FILE_RECEIVED", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
-                                        file_ref=ref, detail=f"rule={d.rule}")
-            else:
-                recv = "CORRECTION_RECEIVED" if b["resolution_ty"] == "NEW_FILE" else "LATE_ARRIVAL_RECEIVED"
-                self.logger.batch_event(recv, req_id=req_id, btch_id=b["btch_id"], load_id=load_id, file_ref=ref,
-                                        detail=f"rule={d.rule}")
-
-            if d.action in (Action.PROMOTE, Action.PROMOTE_REPLACE):
-                check_transition(b["req_stat"], PROMOTED)
+            if d.action in (Action.PROMOTE, Action.PROMOTE_REPLACE, Action.PROMOTE_LATE, Action.PROMOTE_CORRECTION):
+                to_stat = COMPLETED if closed else PROMOTED
+                check_transition(b["req_stat"], to_stat)
                 staged_cnt = self.conn.execute("SELECT Stg_Rcd_Cnt FROM ComplianceFileLoad WHERE Load_ID=%s",
                                                (load_id,)).fetchone()["stg_rcd_cnt"]
+                prior = promoted_load(self.conn, b["btch_id"])
+                if prior and prior["load_id"] != load_id:
+                    self._supersede(prior["load_id"])                 # before the new row becomes PROMOTED
                 res = swap(self.conn, cfg, b["btch_id"], load_id, staged_cnt, now)   # same transaction
                 self.conn.execute(
-                    """UPDATE ComplianceRequestControl SET Resolution_Ty='NEW_FILE', Current_Load_ID=%s, Req_Stat=%s,
-                              Reuse_Btch_ID=NULL, Updated_Dtts=%s WHERE Req_ID=%s""", (load_id, PROMOTED, now, req_id))
-                if b["resolution_ty"] == "CARRY_FORWARD":
-                    self._end_carry_forward(b, load_id, now)
-                if d.action == Action.PROMOTE_REPLACE:
-                    self._supersede(b["current_load_id"])
-                    self.logger.batch_event("FILE_REPLACED_BEFORE_CLOSE", req_id=req_id, btch_id=b["btch_id"],
-                                            load_id=load_id, detail=f"replaces load {b['current_load_id']}")
+                    """UPDATE ComplianceRequestControl SET Resolution_Ty='NEW_FILE', Req_Stat=%s, Reuse_Btch_ID=NULL,
+                              Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, now, req_id))
                 self.conn.execute(
                     """UPDATE ComplianceFileLoad SET Load_Stat='PROMOTED', Rules_Stat=%s, Core_Appended_Cnt=%s,
                               Core_Disabled_Cnt=%s, Promoted_Dtts=%s, Heartbeat_Dtts=NULL, Updated_Dtts=%s
                         WHERE Load_ID=%s""", (rules_stat, res.appended_cnt, res.disabled_cnt, now, now, load_id))
-                self.logger.batch_event("FILE_PROMOTED", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
+                if d.action == Action.PROMOTE_REPLACE:
+                    self.logger.batch_event(
+                        "FILE_REPLACED_BEFORE_CLOSE", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
+                        detail=(f"replaces load {prior['load_id']}" if prior
+                                else f"replaces carried data of {b['reuse_btch_id']}"))
+                if b["resolution_ty"] == "CARRY_FORWARD":
+                    self._end_carry_forward(b, load_id, now)
+                promoted_event = {Action.PROMOTE_LATE: "LATE_ARRIVAL_PROMOTED",
+                                  Action.PROMOTE_CORRECTION: "CORRECTION_PROMOTED"}.get(d.action, "FILE_PROMOTED")
+                self.logger.batch_event(promoted_event, req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
+                                        ovrd_id=out.ovrd_id, entry_ty="MANUAL" if closed else "AUTO",
                                         detail=f"appended={res.appended_cnt} disabled={res.disabled_cnt}"
                                                + (f"; {detail}" if detail else ""))
-                out.result = "PROMOTED"
+                out.result = {Action.PROMOTE_LATE: "LATE_PROMOTED",
+                              Action.PROMOTE_CORRECTION: "CORRECTION_PROMOTED"}.get(d.action, "PROMOTED")
 
             elif d.action in (Action.EXCEPTION_NO_DATA, Action.EXCEPTION_KEEP_PRIOR):
                 check_transition(b["req_stat"], EXCEPTION_PENDING)
@@ -383,87 +393,40 @@ class IngestPipeline:
                 self.logger.audit(failure_event, description=detail, **ctx)
                 out.result, out.event_ty = "RULES_FAILED", failure_event
 
-            elif d.action == Action.REOPEN_REJECT:                                     # D-45
+            elif d.action == Action.REJECT_RULES:                                      # closed batch, file failed
                 self._rules_failed(load_id, rules_stat, detail, now)
                 self.logger.batch_event("FILE_RULES_FAILED", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
                                         detail=detail)
-                self.logger.audit("REOPEN_REJECTED_RULES_FAILED", description=f"{failure_event}: {detail}", **ctx)
-                out.result, out.event_ty = "REOPEN_REJECTED", "REOPEN_REJECTED_RULES_FAILED"
+                self.logger.audit(failure_event, description=f"closed batch: {detail}", **ctx)
+                out.result, out.event_ty = "RULES_FAILED", failure_event
 
-            elif d.action == Action.REOPEN_INSERT:
-                row = self.conn.execute(
-                    """INSERT INTO ComplianceBatchOverride
-                         (Override_Ty, Req_ID, Extract_ID, Project_Cd, Table_Nm, Src_Cd, Run_Ty, Rpt_Start_Dt_Key,
-                          Rpt_End_Dt_Key, Btch_ID, Candidate_Load_ID, Prior_Load_ID, Prior_Resolution_Ty,
-                          Prior_Req_Stat, Apprvl_Stat, Promotion_Stat, Last_Processed_Apprvl_Stat, History,
-                          Created_Dtts, Updated_Dtts, Updated_By)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING_REVIEW','NOT_APPLICABLE',
-                               'PENDING_REVIEW',%s,%s,%s,'SYSTEM')
-                       RETURNING Ovrd_ID""",
-                    (d.override_ty, req_id, b["extract_id"], b["project_cd"], b["table_nm"], b["src_cd"], b["run_ty"],
-                     b["rpt_start_dt_key"], b["rpt_end_dt_key"], b["btch_id"], load_id, b["current_load_id"],
-                     b["resolution_ty"], b["req_stat"], f"{now.isoformat()} created PENDING_REVIEW, candidate load {load_id}",
-                     now, now)).fetchone()
-                self._pending(load_id, rules_stat, now)
-                self.logger.audit("REOPEN_CANDIDATE_CREATED", ovrd_id=row["ovrd_id"],
-                                  description=f"{d.override_ty} candidate load {load_id}", **ctx)
-                out.result, out.ovrd_id = "PENDING_APPROVAL", row["ovrd_id"]
-
-            else:  # REOPEN_REPLACE_PENDING / RESET_APPROVED / RESET_PROMOTED
-                old = ar["candidate_load_id"]
-                if old != b["current_load_id"]:
-                    self._supersede(old)
-                refresh_prior = d.action == Action.REOPEN_RESET_PROMOTED
-                self.conn.execute(
-                    """UPDATE ComplianceBatchOverride
-                          SET Candidate_Load_ID=%s, Reviewed_Load_ID=NULL, Apprvl_Stat='PENDING_REVIEW',
-                              Apprvd_By=NULL, Apprvd_Dtts=NULL, Promotion_Stat='NOT_APPLICABLE', Promoted_Dtts=NULL,
-                              Last_Processed_Apprvl_Stat='PENDING_REVIEW',
-                              Prior_Load_ID = CASE WHEN %s THEN %s ELSE Prior_Load_ID END,
-                              Prior_Resolution_Ty = CASE WHEN %s THEN %s ELSE Prior_Resolution_Ty END,
-                              Prior_Req_Stat = CASE WHEN %s THEN %s ELSE Prior_Req_Stat END,
-                              History = History || E'\\n' || %s, Updated_Dtts=%s, Updated_By='SYSTEM'
-                        WHERE Ovrd_ID=%s""",
-                    (load_id, refresh_prior, b["current_load_id"], refresh_prior, b["resolution_ty"],
-                     refresh_prior, b["req_stat"],
-                     f"{now.isoformat()} {d.rule}: candidate load {old} replaced by {load_id} "
-                     f"(was {ar['apprvl_stat']}/{ar['promotion_stat']}) -> PENDING_REVIEW",
-                     now, ar["ovrd_id"]))
-                self._pending(load_id, rules_stat, now)
-                self.logger.audit("REOPEN_CANDIDATE_REPLACED", ovrd_id=ar["ovrd_id"],
-                                  description=f"{d.rule}: load {old} -> {load_id}", **ctx)
-                out.result, out.ovrd_id = "PENDING_APPROVAL", ar["ovrd_id"]
+            else:                                                                      # REJECT_CLOSED
+                self._rules_failed(load_id, rules_stat, "batch is closed and has no approved override", now)
+                self.logger.audit("FILE_REJECTED_BATCH_CLOSED", description="no approved, valid override", **ctx)
+                out.result, out.event_ty = "REJECTED_CLOSED", "FILE_REJECTED_BATCH_CLOSED"
         return out
 
     def _end_carry_forward(self, b: dict, load_id: int, now) -> None:
-        """A real file replaces an applied carry-forward on an open batch: the override is revoked."""
+        """A real file replaced an applied carry-forward: stop the reuse and record it."""
         row = self.conn.execute(
-            """UPDATE ComplianceBatchOverride SET Apprvl_Stat='REVOKED', Revoked_By='SYSTEM', Revoked_Dtts=%s,
-                      Revocation_Rsn=%s, Last_Processed_Apprvl_Stat='REVOKED',
-                      History = History || E'\\n' || %s, Updated_Dtts=%s, Updated_By='SYSTEM'
-                WHERE Req_ID=%s AND Override_Ty='CARRY_FORWARD' AND Apprvl_Stat='APPROVED' RETURNING Ovrd_ID""",
-            (now, f"superseded by file load {load_id}", f"{now.isoformat()} REVOKED: file load {load_id} promoted",
-             now, b["req_id"])).fetchone()
+            """UPDATE ComplianceBatchOverride SET Valid_Thru_Dt_Key=%s, Updated_Dtts=%s, Updated_By='SYSTEM',
+                      Rsn = COALESCE(Rsn || ' | ', '') || %s
+                WHERE Req_ID=%s AND Override_Ty='REUSE' AND Apprvl_Stat='APPROVED' RETURNING Ovrd_ID""",
+            (b["req_dt_key"], now, f"superseded by file load {load_id}", b["req_id"])).fetchone()
         self.logger.batch_event("CARRY_FORWARD_REMOVED", req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id,
                                 ovrd_id=row["ovrd_id"] if row else None,
-                                detail=f"reused {b['reuse_btch_id']} replaced by load {load_id}")
+                                detail=f"reuse of {b['reuse_btch_id']} replaced by load {load_id}")
 
     def _supersede(self, load_id: Optional[int]) -> None:
         if load_id:
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='SUPERSEDED', Updated_Dtts=%s "
-                              "WHERE Load_ID=%s AND Load_Stat IN ('PROMOTED','PENDING_APPROVAL')",
-                              (self.clock.now(), load_id))
+                              "WHERE Load_ID=%s AND Load_Stat='PROMOTED'", (self.clock.now(), load_id))
 
     def _rules_failed(self, load_id, rules_stat, detail, now) -> None:
         self.conn.execute(
             """UPDATE ComplianceFileLoad SET Load_Stat='RULES_FAILED', Rules_Stat=%s, Error_Txt=%s,
                       Heartbeat_Dtts=NULL, Updated_Dtts=%s WHERE Load_ID=%s""",
             (rules_stat, detail, now, load_id))
-
-    def _pending(self, load_id, rules_stat, now) -> None:
-        self.conn.execute(
-            """UPDATE ComplianceFileLoad SET Load_Stat='PENDING_APPROVAL', Rules_Stat=%s, Heartbeat_Dtts=NULL,
-                      Updated_Dtts=%s WHERE Load_ID=%s""", (rules_stat, now, load_id))
 
     # ------------------------------------------------------------------ quarantine / move / failure
     def _quarantine(self, load_id: int, info: ObjectInfo, event_ty: str, message: str,

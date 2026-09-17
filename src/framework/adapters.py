@@ -1,16 +1,15 @@
-"""Adapters to external systems: object storage (S3 / local), the GRE rules engine, extract job
-connectors (Glue / HTTP) and notification channels (log / SES+SNS). Heavy SDKs are imported lazily."""
+"""Adapters to external systems: object storage (S3 / local), the GRE rules engine and notification
+channels (log / SES + SNS). Heavy SDKs are imported lazily.
+
+The framework does not call the extract job itself (D-76): the project's job chain generates the
+extract after the framework closes the run."""
 from __future__ import annotations
 
 import hashlib
 import importlib
-import json
 import logging
 import os
 import shutil
-import socket
-import urllib.error
-import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -253,95 +252,6 @@ def build_rule_engine(settings: Settings) -> RuleEngine:
             raise RuleEngineNotConfigured("GRE_ENTRYPOINT is not set (open question Q-12: GRE call mechanics)")
         return CallableRuleEngine(missing)
     return CallableRuleEngine(_import(settings.gre_entrypoint, "GRE_ENTRYPOINT"))
-
-
-# ============================================================================ extract connectors (D-39, D-42)
-# The framework only needs to know whether the call was accepted; it never tracks the job's own outcome.
-@dataclass
-class CallResult:
-    accepted: bool
-    job_run_ref: Optional[str] = None
-    response_txt: Optional[str] = None
-    ambiguous: bool = False      # request may have been received; do not blindly retry (§11.3 step 6)
-
-
-class ExtractConnector(ABC):
-    @abstractmethod
-    def call(self, settings: Settings, params: list[tuple[str, str]]) -> CallResult: ...
-
-
-class GlueJobConnector(ExtractConnector):
-    """Starts EXTRACT_JOB_NAME; parameters become job Arguments (names should include '--')."""
-
-    def __init__(self, region: str, client=None):
-        self._client, self.region = client, region
-
-    def call(self, settings, params):
-        from botocore.exceptions import ClientError, EndpointConnectionError, ParamValidationError
-
-        if self._client is None:
-            import boto3
-
-            self._client = boto3.client("glue", region_name=self.region)
-        try:
-            resp = self._client.start_job_run(JobName=settings.extract_job_name, Arguments=dict(params))
-        except (ClientError, ParamValidationError, EndpointConnectionError) as e:
-            return CallResult(False, response_txt=f"{type(e).__name__}: {e}"[:1000])      # refused / never sent
-        except Exception as e:  # noqa: BLE001 - e.g. read timeout after send: outcome unknown
-            return CallResult(False, response_txt=f"{type(e).__name__}: {e}"[:1000], ambiguous=True)
-        return CallResult(True, job_run_ref=resp.get("JobRunId"), response_txt="started")
-
-
-class HttpApiConnector(ExtractConnector):
-    """POST/PUT a JSON object {param_name: value} to EXTRACT_ENDPOINT_URL. If EXTRACT_AUTH_SECRET_NAME is
-    set, the Secrets Manager secret must contain {"header_name": ..., "header_value": ...} (Q-08)."""
-
-    def __init__(self, region: str, secret_loader=None):
-        self.region = region
-        self.secret_loader = secret_loader
-
-    def call(self, settings, params):
-        headers = {"Content-Type": "application/json"}
-        if settings.extract_auth_secret_name:
-            if self.secret_loader is None:
-                from .settings import _secret_loader
-                self.secret_loader = _secret_loader(self.region)
-            sec = self.secret_loader(settings.extract_auth_secret_name)
-            headers[sec["header_name"]] = sec["header_value"]
-        req = urllib.request.Request(settings.extract_endpoint_url, data=json.dumps(dict(params)).encode("utf-8"),
-                                     headers=headers, method=settings.extract_http_method)
-        ok = lambda code: any(int(lo) <= code <= int(hi or lo)  # noqa: E731
-                              for lo, _, hi in (r.partition("-") for r in settings.http_accepted_status))
-        try:
-            with urllib.request.urlopen(req, timeout=settings.extract_call_timeout_sec) as resp:
-                text = resp.read(2000).decode("utf-8", "replace")
-                return CallResult(ok(resp.status), resp.headers.get("x-request-id") or _ref_from(text), text[:1000])
-        except urllib.error.HTTPError as e:
-            return CallResult(ok(e.code), None, f"HTTP {e.code}")
-        except urllib.error.URLError as e:
-            # connection refused / DNS failure -> nothing was sent; timeouts -> unknown
-            return CallResult(False, None, f"URLError: {e.reason}"[:1000],
-                              ambiguous=isinstance(e.reason, (socket.timeout, TimeoutError)))
-        except (socket.timeout, TimeoutError) as e:
-            return CallResult(False, None, f"timeout: {e}", ambiguous=True)
-
-
-def _ref_from(text: str) -> Optional[str]:
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return None
-    if isinstance(data, dict):
-        for k in ("job_run_id", "jobRunId", "id", "request_id", "requestId"):
-            if k in data:
-                return str(data[k])
-    return None
-
-
-def build_connector(settings: Settings) -> ExtractConnector:
-    if settings.extract_job_type == "GLUE_JOB":
-        return GlueJobConnector(settings.aws_region)
-    return HttpApiConnector(settings.aws_region)
 
 
 # ============================================================================ notification channels (D-54)

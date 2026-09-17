@@ -42,20 +42,12 @@ class RowCountMismatch(FrameworkError):
     """Core swap appended a different number of rows than were staged."""
 
 
-class TriggerBlocked(FrameworkError):
-    """Extract is not eligible for the requested trigger."""
+class CloseBlocked(FrameworkError):
+    """The extract is not eligible to be closed."""
 
 
-class TriggerDeferred(FrameworkError):
-    """One or more batches of the extract are locked by another process."""
-
-
-class TriggerCallFailed(FrameworkError):
-    """The extract job/API rejected the call or could not be reached."""
-
-
-class TriggerOutcomeUnknown(FrameworkError):
-    """The call may or may not have been accepted; manual reconciliation is required."""
+class CloseDeferred(FrameworkError):
+    """One or more batches of the extract are locked by another process; try again later."""
 
 
 # ============================================================================ clock
@@ -108,7 +100,8 @@ def build_btch_id(req_dt: date, project_cd: str, table_nm: str, src_cd: str, run
 
 
 def earliest_close_date(req_dt: date, sla_days: int) -> date:
-    """D-38: SLA 1 = creation day, SLA 2 = next day, ... (calendar days)."""
+    """D-38: the SLA hold, computed when it is needed - never stored.
+    SLA 1 = the run date itself, SLA 2 = the next day, ... (calendar days)."""
     if sla_days < 1:
         raise ValueError("SLA_Days must be >= 1")
     return req_dt + timedelta(days=sla_days - 1)

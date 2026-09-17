@@ -33,31 +33,47 @@ def test_period_missing_param_and_project_file(conn, tmp_path):
     assert compute_period(conn, "FISCAL_H1", date(2026, 7, 2), period_file=str(f)) == (date(2026, 1, 1), date(2026, 6, 30))
 
 
-def test_create_batches_one_batch_per_period(conn, tmp_path):
+def test_create_batches_one_batch_per_run_date(conn, tmp_path):
     seed_config(conn)
     app, clock, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
     s = create_batches(app)
-    assert s.created == 2 and not s.errors and (s.rpt_start, s.rpt_end) == (date(2026, 1, 1), date(2026, 1, 31))
-    clock.set(utc(2026, 2, 2, 13, 0))                  # a second run in the same month: same period (D-30)
-    s = create_batches(app)
+    assert s.created == 2 and not s.errors
+    assert (s.run_date, s.rpt_start, s.rpt_end) == (date(2026, 2, 1), date(2026, 1, 1), date(2026, 1, 31))
+    s = create_batches(app)                            # same run date again: nothing new (D-30)
     assert s.created == 0 and s.existing == 2
     rows = qa(conn, "SELECT * FROM ComplianceRequestControl ORDER BY Src_Cd")
     assert [r["btch_id"] for r in rows] == ["20260201_PRJA_tbl_x_S1_MONTHLY_V1_1", "20260201_PRJA_tbl_x_S2_MONTHLY_V1_1"]
-    assert rows[0]["rpt_start_dt_key"] == date(2026, 1, 1) and rows[0]["rpt_end_dt_key"] == date(2026, 1, 31)
-    assert rows[0]["earliest_close_dt"] == date(2026, 2, 2) and rows[0]["req_stat"] == "PENDING"
-    assert rows[0]["created_by"] == "SCHEDULER"
+    assert (rows[0]["req_dt_key"], rows[0]["req_stat"], rows[0]["created_by"]) == (date(2026, 2, 1), "PENDING", "SCHEDULER")
     e = q1(conn, "SELECT * FROM ComplianceExtractControl")
-    assert e["required_src_cnt"] == 2 and e["earliest_trigger_dt"] == date(2026, 2, 2)
+    assert (e["required_src_cnt"], e["req_dt_key"], e["extract_close_ind"]) == (2, date(2026, 2, 1), 0)
     assert q1(conn, "SELECT count(*) n FROM ComplianceRequestFileDetail WHERE Event_Ty='BATCH_CREATED'")["n"] == 2
+    # nothing stores an SLA date: the hold is Req_Dt_Key + (SLA_Days - 1), computed when needed
+    cols = {r["column_name"] for r in qa(conn, """SELECT column_name FROM information_schema.columns
+                                                   WHERE table_name='compliancerequestcontrol'
+                                                     AND table_schema = current_schema()""")}
+    assert "earliest_close_dt" not in cols and "intake_id" not in cols and "current_load_id" not in cols
+
+
+def test_daily_runs_of_the_same_period_get_their_own_batch_and_extract(conn, tmp_path):
+    """A CMS-style run type: the same report period, one batch and one extract per run date."""
+    seed_config(conn, sources=("S1",))
+    app, clock, *_ = make_app(conn, tmp_path, utc(2026, 2, 2, 13, 0))
+    assert create_batches(app, period="CURRENT_CALENDAR_MONTH").created == 1
+    clock.set(utc(2026, 2, 3, 13, 0))
+    assert create_batches(app, period="CURRENT_CALENDAR_MONTH").created == 1
+    rows = qa(conn, "SELECT * FROM ComplianceRequestControl ORDER BY Req_Dt_Key")
+    assert [(r["req_dt_key"], r["rpt_start_dt_key"]) for r in rows] == [
+        (date(2026, 2, 2), date(2026, 2, 1)), (date(2026, 2, 3), date(2026, 2, 1))]
+    assert len({r["extract_id"] for r in rows}) == 2
+    assert [r["btch_id"][-1] for r in rows] == ["1", "1"]
 
 
 def test_missed_run_recreated_with_as_of(conn, tmp_path):
-    """Catch-up = run the job for the missed date: the period follows that date, Btch_ID the actual day."""
     seed_config(conn, sources=("S1",))
     app, clock, *_ = make_app(conn, tmp_path, utc(2026, 3, 5, 12, 0))
     assert create_batches(app).created == 1                        # Feb period
     clock.set(utc(2026, 2, 1, 12, 0))
-    assert create_batches(app).created == 1                        # Jan period
+    assert create_batches(app).created == 1                        # Jan period, run date Feb 1
     rows = qa(conn, "SELECT * FROM ComplianceRequestControl ORDER BY Rpt_Start_Dt_Key")
     assert [(r["rpt_start_dt_key"], r["req_dt_key"]) for r in rows] == [
         (date(2026, 1, 1), date(2026, 2, 1)), (date(2026, 2, 1), date(2026, 3, 5))]
@@ -76,93 +92,90 @@ def test_effective_window_scope_and_errors(conn, tmp_path):
         app.create_batches(project_cd="PRJA", run_ty="ADHOC", period="SAME_DAY")
 
 
-def test_no_batch_added_to_triggered_extract(conn, tmp_path):
+def test_no_batch_added_to_closed_extract(conn, tmp_path):
     seed_config(conn, sources=("S1",))
     app, clock, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
     create_batches(app)
     with conn.transaction():
-        conn.execute("UPDATE ComplianceExtractControl SET Trigger_Stat='TRIGGERED'")
-        conn.execute("""INSERT INTO ComplianceSourceSystem (Src_Cd, Src_Nm, Src_Ty) VALUES ('S3','s3','VENDOR')""")
-        conn.execute("""INSERT INTO ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_Cd, Run_Ty, Effective_Start_Dt,
-                        Cmplnc_Vrsn) VALUES ('PRJA','tbl_x','S3','MONTHLY','2025-01-01','V1')""")
+        conn.execute("UPDATE ComplianceExtractControl SET Extract_Close_Ind=1, Extract_Closed_Dtts=now(), "
+                     "Closed_By='ops'")
+        conn.execute("INSERT INTO ComplianceSourceSystem (Src_Cd, Src_Nm, Src_Ty) VALUES ('S3','s3','VENDOR')")
+        conn.execute("""INSERT INTO ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_Cd, Run_Ty,
+                        Effective_Start_Dt, Cmplnc_Vrsn) VALUES ('PRJA','tbl_x','S3','MONTHLY','2025-01-01','V1')""")
     s = create_batches(app)
     assert s.created == 0 and s.skipped == 1
     assert q1(conn, "SELECT count(*) n FROM CMS_ComplianceExceptionsAudit "
-                    "WHERE Event_Ty='BATCH_CREATE_SKIPPED_EXTRACT_TRIGGERED'")["n"] == 1
+                    "WHERE Event_Ty='BATCH_CREATE_SKIPPED_EXTRACT_CLOSED'")["n"] == 1
 
 
-# ---------------------------------------------------------------- intake (P4)
-def intake(conn, iid, req_ty, run_ty, src=None, start="2026-03-01", end="2026-03-31"):
+# ---------------------------------------------------------------- ad-hoc intake (P4)
+def intake(conn, iid, run_ty="ADHOC", src=None, req_ty="UNIVERSE_PULL", start="2026-03-01", end="2026-03-31",
+           req_start="2026-04-02", req_end=None):
     with conn.transaction():
         conn.execute("""INSERT INTO ComplianceRequestInTake (Intake_ID, Project_Cd, Table_Nm, Run_Ty, Src_Cd, Req_Ty,
-                        Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Requested_By, Requested_Dtts)
-                        VALUES (%s,'PRJA','tbl_x',%s,%s,%s,%s,%s,'analyst', now())""",
-                     (iid, run_ty, src, req_ty, start, end))
+                        Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key, Requested_By)
+                        VALUES (%s,'PRJA','tbl_x',%s,%s,%s,%s,%s,%s,%s,'analyst')""",
+                     (iid, run_ty, src, req_ty, start, end, req_start, req_end or req_start))
 
 
 def stat(conn, iid):
-    return q1(conn, "SELECT Intake_Stat, Error_Txt FROM ComplianceRequestInTake WHERE Intake_ID=%s", iid)
+    return q1(conn, "SELECT * FROM ComplianceRequestInTake WHERE Intake_ID=%s", iid)
 
 
 @pytest.fixture
 def app(conn, tmp_path):
     seed_config(conn)
-    return make_app(conn, tmp_path, utc(2026, 4, 2, 15, 0))[0]
+    return make_app(conn, tmp_path, utc(2026, 4, 2, 15, 0))
 
 
-def test_adhoc_fan_out_and_duplicate(app, conn):
-    intake(conn, "A1", "ADHOC_REQUEST", "ADHOC")
-    app.intake.run()
-    assert stat(conn, "A1")["intake_stat"] == "PROCESSED"
+def test_one_off_request_creates_one_run(app, conn):
+    a, clock, _ = app
+    intake(conn, "A1")                                       # req start = req end = 2026-04-02
+    s = a.intake.run()
+    assert (s.created, s.completed, s.failed) == (2, 1, 0)
+    row = stat(conn, "A1")
+    assert (row["intake_stat"], row["last_created_dt_key"]) == ("COMPLETED", date(2026, 4, 2))
     rows = qa(conn, "SELECT * FROM ComplianceRequestControl WHERE Run_Ty='ADHOC' ORDER BY Src_Cd")
-    assert [r["created_by"] for r in rows] == ["ADHOC_INTAKE"] * 2 and rows[0]["intake_id"] == "A1"
-    assert rows[0]["earliest_close_dt"] == rows[0]["req_dt_key"]                   # ADHOC SLA 1 = same day
-    e = q1(conn, "SELECT * FROM ComplianceExtractControl WHERE Run_Ty='ADHOC'")
-    assert e["required_src_cnt"] == 2
-    intake(conn, "A2", "ADHOC_REQUEST", "ADHOC", src="S1")
-    app.intake.run()
-    assert stat(conn, "A2")["intake_stat"] == "FAILED"                              # D-35
-    assert q1(conn, "SELECT count(*) n FROM CMS_ComplianceExceptionsAudit WHERE Event_Ty='INTAKE_DUPLICATE_PERIOD'")["n"] == 1
-
-
-def test_adhoc_adds_source_before_trigger_but_not_after(app, conn):
-    intake(conn, "A1", "ADHOC_REQUEST", "ADHOC", src="S1")
-    app.intake.run()
-    intake(conn, "A2", "ADHOC_REQUEST", "ADHOC", src="S2")
-    app.intake.run()
-    assert stat(conn, "A2")["intake_stat"] == "PROCESSED"
+    assert [r["created_by"] for r in rows] == ["ADHOC_INTAKE"] * 2
+    assert {r["req_dt_key"] for r in rows} == {date(2026, 4, 2)}
     assert q1(conn, "SELECT Required_Src_Cnt n FROM ComplianceExtractControl WHERE Run_Ty='ADHOC'")["n"] == 2
-    with conn.transaction():
-        conn.execute("UPDATE ComplianceExtractControl SET Trigger_Stat='TRIGGERED' WHERE Run_Ty='ADHOC'")
-        conn.execute("DELETE FROM ComplianceRequestFileDetail WHERE Req_ID IN (SELECT Req_ID FROM ComplianceRequestControl WHERE Src_Cd='S2' AND Run_Ty='ADHOC')")
-        conn.execute("DELETE FROM ComplianceRequestControl WHERE Src_Cd='S2' AND Run_Ty='ADHOC'")
-    intake(conn, "A3", "ADHOC_REQUEST", "ADHOC", src="S2")
-    app.intake.run()
-    assert stat(conn, "A3")["intake_stat"] == "FAILED" and "triggered" in stat(conn, "A3")["error_txt"]
+    assert a.intake.run().created == 0                        # COMPLETED rows are not picked up again
 
 
-def test_cycle_init_and_category_checks(app, conn):
-    intake(conn, "C1", "CYCLE_INIT", "MONTHLY")
-    intake(conn, "C2", "CYCLE_INIT", "ADHOC")
-    intake(conn, "C3", "ADHOC_REQUEST", "MONTHLY")
-    app.intake.run()
-    assert stat(conn, "C1")["intake_stat"] == "PROCESSED"
-    assert q1(conn, "SELECT count(*) n FROM ComplianceRequestControl WHERE Created_By='CYCLE_INIT'")["n"] == 2
-    for i in ("C2", "C3"):
-        assert stat(conn, i)["intake_stat"] == "FAILED"
-    intake(conn, "C5", "CYCLE_INIT", "MONTHLY")
-    app.intake.run()
-    assert stat(conn, "C5")["intake_stat"] == "PROCESSED"          # Q-18 default SKIP
-    app.settings.cycle_init_existing_batch = "FAIL"
-    intake(conn, "C6", "CYCLE_INIT", "MONTHLY")
-    app.intake.run()
-    assert stat(conn, "C6")["intake_stat"] == "FAILED"
+def test_request_window_creates_batches_daily_for_the_same_period(app, conn):
+    """10-day window, same report dates: one batch per source per run date, each with its own extract."""
+    a, clock, _ = app
+    intake(conn, "A2", src="S1", req_start="2026-04-02", req_end="2026-04-11")
+    for day in (2, 3, 4):
+        clock.set(utc(2026, 4, day, 15, 0))
+        s = a.intake.run()
+        assert s.created == 1 and s.completed == 0
+        assert stat(conn, "A2")["intake_stat"] == "IN_PROGRESS"
+    rows = qa(conn, "SELECT * FROM ComplianceRequestControl WHERE Run_Ty='ADHOC' ORDER BY Req_Dt_Key")
+    assert [r["req_dt_key"] for r in rows] == [date(2026, 4, 2), date(2026, 4, 3), date(2026, 4, 4)]
+    assert {(r["rpt_start_dt_key"], r["rpt_end_dt_key"]) for r in rows} == {(date(2026, 3, 1), date(2026, 3, 31))}
+    assert len({r["extract_id"] for r in rows}) == 3
+    assert [r["btch_id"] for r in rows] == [f"2026040{d}_PRJA_tbl_x_S1_ADHOC_V1_1" for d in (2, 3, 4)]
+    a.intake.run()                                            # same day twice: idempotent
+    assert q1(conn, "SELECT count(*) n FROM ComplianceRequestControl WHERE Run_Ty='ADHOC'")["n"] == 3
+    clock.set(utc(2026, 4, 11, 15, 0))
+    assert a.intake.run().completed == 1
+    assert stat(conn, "A2")["intake_stat"] == "COMPLETED"
 
 
-def test_no_effective_source_and_correction_without_batch(app, conn):
-    intake(conn, "N1", "ADHOC_REQUEST", "ADHOC", start="2020-01-01", end="2020-01-31")   # before Effective_Start_Dt
-    intake(conn, "N2", "CORRECTION_REQUEST", "MONTHLY", src="S1")
-    app.intake.run()
-    assert stat(conn, "N1")["intake_stat"] == "FAILED"
-    assert stat(conn, "N2")["intake_stat"] == "FAILED"
+def test_request_not_started_yet_is_left_alone(app, conn):
+    a, clock, _ = app
+    intake(conn, "A3", req_start="2026-04-10", req_end="2026-04-12")
+    assert a.intake.run().created == 0
+    assert stat(conn, "A3")["intake_stat"] == "NEW"
+
+
+def test_routine_run_type_and_unknown_source_fail(app, conn):
+    a, *_ = app
+    intake(conn, "R1", run_ty="MONTHLY")
+    intake(conn, "R2", start="2020-01-01", end="2020-01-31")      # before Effective_Start_Dt
+    s = a.intake.run()
+    assert s.failed == 2
+    assert stat(conn, "R1")["intake_stat"] == "FAILED" and "ADHOC" in stat(conn, "R1")["error_txt"]
+    assert "crosswalk" in stat(conn, "R2")["error_txt"]
     assert q1(conn, "SELECT count(*) n FROM CMS_ComplianceExceptionsAudit WHERE Event_Ty='INTAKE_FAILED'")["n"] == 2
