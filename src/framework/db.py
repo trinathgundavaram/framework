@@ -1,16 +1,21 @@
-"""Database helpers. Connections are autocommit; every unit of work uses an explicit
-`with conn.transaction():` block so the transaction boundary is visible in code.
-Connection configuration lives in connections.py."""
+"""Database helpers: schema install and advisory locks.
+
+Connections are autocommit; every unit of work uses an explicit `with conn.transaction():` block.
+Lock order is always EXT -> BTCH (design §12.2). Session locks are released if the session dies.
+"""
 from __future__ import annotations
 
+import time
+from contextlib import contextmanager
 from importlib import resources
-from typing import Iterable, Optional
+from typing import Iterator, Optional
 
 import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
 
-from .settings import DESCRIPTIONS, BOOTSTRAP, Settings
+from .common import LockTimeout
+from .settings import Settings
 
 
 def connect(dsn: str, schema: Optional[str] = None) -> psycopg.Connection:
@@ -20,11 +25,8 @@ def connect(dsn: str, schema: Optional[str] = None) -> psycopg.Connection:
                            application_name="cms-compliance-framework", **kw)
 
 
-def _sql_files(sub: str) -> Iterable[tuple[str, str]]:
-    base = resources.files("framework").joinpath("sql").joinpath(sub)
-    for entry in sorted(base.iterdir(), key=lambda p: p.name):
-        if entry.name.endswith(".sql"):
-            yield entry.name, entry.read_text(encoding="utf-8")
+def sql_text(name: str) -> str:
+    return resources.files("framework").joinpath("sql", name).read_text(encoding="utf-8")
 
 
 def schema_exists(conn: psycopg.Connection, schema: str) -> bool:
@@ -33,9 +35,8 @@ def schema_exists(conn: psycopg.Connection, schema: str) -> bool:
 
 
 def _ensure_btree_gist(conn: psycopg.Connection, schema: str) -> str:
-    """btree_gist (Q-11) is installed once per database, preferably in `public`, so dropping one metadata
-    schema never cascades into the exclusion constraints of another. Falls back to the metadata schema
-    when `public` is not writable (PostgreSQL 15+ default privileges)."""
+    """Installed once per database, preferably in `public` (falls back to the metadata schema when
+    `public` is not writable), so dropping one metadata schema never breaks another."""
     row = conn.execute("SELECT extnamespace::regnamespace::text AS ns FROM pg_extension "
                        "WHERE extname = 'btree_gist'").fetchone()
     if row:
@@ -46,41 +47,62 @@ def _ensure_btree_gist(conn: psycopg.Connection, schema: str) -> str:
         return "extension btree_gist (installed in public)"
     except psycopg.errors.InsufficientPrivilege:
         conn.execute(sql.SQL("CREATE EXTENSION btree_gist SCHEMA {}").format(sql.Identifier(schema)))
-        return f"extension btree_gist (installed in {schema}: no CREATE privilege on public)"
+        return f"extension btree_gist (installed in {schema})"
 
 
-def init_db(conn: psycopg.Connection, schema: str = "cms_compliance", *,
-            include_provisional_status: bool = True) -> list[str]:
-    """Create the metadata schema (if missing), apply DDL once, and apply idempotent seed data."""
-    Settings(metadata_schema=schema).validate_bootstrap()
+def init_db(conn: psycopg.Connection, schema: str = "cms_compliance") -> list[str]:
+    """Create the metadata schema (if missing), apply schema.sql once, and (re)apply seed.sql."""
+    Settings(metadata_schema=schema).validate()
     applied = []
     with conn.transaction():
         conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
         conn.execute(sql.SQL("SET LOCAL search_path TO {}, public").format(sql.Identifier(schema)))
         applied.append(_ensure_btree_gist(conn, schema))
-        exists = schema_exists(conn, schema)
-        for name, text in _sql_files("ddl"):
-            if exists:
-                applied.append(f"ddl/{name} (skipped: schema already initialised)")
-                continue
-            conn.execute(text)
-            applied.append(f"ddl/{name}")
-        for name, text in _sql_files("seed"):
-            if "PROVISIONAL" in name and not include_provisional_status:
-                continue
-            conn.execute(text)
-            applied.append(f"seed/{name}")
-        defaults = Settings()
-        with conn.cursor() as cur:
-            cur.executemany(
-                """INSERT INTO ComplianceFrameworkSetting (Setting_Nm, Setting_Val, Setting_Desc)
-                   VALUES (%s, %s, %s) ON CONFLICT (Setting_Nm) DO NOTHING""",
-                [(n.upper(), defaults.as_text(n), DESCRIPTIONS.get(n))
-                 for n in Settings.names() if n not in BOOTSTRAP])
-        applied.append("seed/framework settings (defaults)")
+        if schema_exists(conn, schema):
+            applied.append("schema.sql (skipped: schema already initialised)")
+        else:
+            conn.execute(sql_text("schema.sql"))
+            applied.append("schema.sql")
+        conn.execute(sql_text("seed.sql"))
+        applied.append("seed.sql")
     return applied
 
 
-def load_metadata_settings(conn: psycopg.Connection) -> dict[str, Optional[str]]:
-    rows = conn.execute("SELECT Setting_Nm, Setting_Val FROM ComplianceFrameworkSetting WHERE Active_Ind = 1").fetchall()
-    return {r["setting_nm"]: r["setting_val"] for r in rows}
+# ============================================================================ advisory locks
+def extract_key(extract_id: int) -> str:
+    return f"EXT:{extract_id}"
+
+
+def batch_key(btch_id: str) -> str:
+    return f"BTCH:{btch_id}"
+
+
+def seq_key(project: str, table: str, src: str, run_ty: str) -> str:
+    return f"SEQ:{project}|{table}|{src}|{run_ty}"
+
+
+def try_lock(conn: psycopg.Connection, key: str) -> bool:
+    return bool(conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS ok", (key,)).fetchone()["ok"])
+
+
+def unlock(conn: psycopg.Connection, key: str) -> None:
+    conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+
+
+@contextmanager
+def held(conn: psycopg.Connection, key: str, timeout_seconds: Optional[float], poll: float = 0.2) -> Iterator[None]:
+    """Session lock; timeout_seconds=None -> single non-blocking attempt (raises LockTimeout if busy)."""
+    deadline = time.monotonic() + (timeout_seconds or 0)
+    while not try_lock(conn, key):
+        if timeout_seconds is None or time.monotonic() >= deadline:
+            raise LockTimeout(f"could not acquire lock {key}" + (f" within {timeout_seconds}s" if timeout_seconds else ""))
+        time.sleep(poll)
+    try:
+        yield
+    finally:
+        unlock(conn, key)
+
+
+def xact_lock(conn: psycopg.Connection, key: str) -> None:
+    """Transaction-scoped lock (released at commit/rollback)."""
+    conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))

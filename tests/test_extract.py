@@ -2,17 +2,16 @@ from datetime import datetime
 
 import pytest
 
-from framework.batches.scheduler import run_scheduler
-from framework.errors import TriggerBlocked
-from framework import locks
+from framework.common import TriggerBlocked
+from framework import db as locks
 
-from .helpers import file_name, make_app, put_file, q1, qa, seed_config, utc
+from .helpers import create_batches, file_name, make_app, put_file, q1, qa, seed_config, utc
 
 
-def setup(conn, tmp_path, **seed):
-    seed_config(conn, **seed)
-    app, clock, rules, connector = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
-    run_scheduler(conn, clock, app.settings)
+def setup(conn, tmp_path, **settings):
+    seed_config(conn)
+    app, clock, rules, connector = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0), **settings)
+    create_batches(app)
     return app, clock, rules, connector
 
 
@@ -46,6 +45,7 @@ def test_auto_trigger_after_hold_closes_batches(conn, tmp_path):
     assert {(r["batch_close_ind"], r["req_stat"], r["closed_by_trigger_id"]) for r in rows} == {(1, "COMPLETED", e["last_trigger_id"])}
     t = q1(conn, "SELECT * FROM ComplianceExtractTrigger")
     assert t["call_stat"] == "SUCCEEDED" and t["job_run_ref"] == "jr_1" and "--MODE=full" in t["rendered_params_txt"]
+    assert t["extract_job_ref"] == "extract_job"
     assert app.evaluator.run().evaluated == 0                          # nothing left to do
 
 
@@ -108,7 +108,7 @@ def test_strict_rule_failure_and_rule_waiver(conn, tmp_path):
 
 
 def test_best_effort_requires_ack(conn, tmp_path):
-    app, clock, rules, connector = setup(conn, tmp_path, gating="BEST_EFFORT")
+    app, clock, rules, connector = setup(conn, tmp_path, extract_gating_mode="BEST_EFFORT")
     ingest(app, "S1")
     e = extract(conn)
     with pytest.raises(TriggerBlocked, match="SLA hold"):
@@ -126,7 +126,7 @@ def test_best_effort_requires_ack(conn, tmp_path):
 
 
 def test_best_effort_zero_data_manual(conn, tmp_path):
-    app, clock, rules, connector = setup(conn, tmp_path, gating="BEST_EFFORT")
+    app, clock, rules, connector = setup(conn, tmp_path, extract_gating_mode="BEST_EFFORT")
     clock.set(utc(2026, 2, 2, 12, 0))
     e = extract(conn)
     out = app.trigger.fire(e["extract_id"], "MANUAL", "jdoe", ack_warnings=True)
@@ -199,3 +199,18 @@ def test_period_rules_technical_error(conn, tmp_path):
     assert app.evaluator.run().not_eligible == 1
     rules.error.clear()
     assert app.evaluator.run().triggered            # ERROR forces a fresh combine
+
+
+def test_sweep_scope_and_missing_job_config(conn, tmp_path):
+    from framework.common import ConfigError
+
+    app, clock, rules, connector = setup(conn, tmp_path)
+    ingest(app, "S1")
+    ingest(app, "S2")
+    clock.set(utc(2026, 2, 2, 12, 0))
+    assert app.evaluator.run(project_cd="OTHER").evaluated == 0          # another project's job
+    app.settings.extract_job_name = None
+    with pytest.raises(ConfigError, match="EXTRACT_JOB_NAME"):
+        app.evaluator.run(project_cd="PRJA")
+    app.settings.extract_job_name = "extract_job"
+    assert app.evaluator.run(project_cd="PRJA", run_ty="MONTHLY").triggered

@@ -2,7 +2,7 @@
 
 Project-agnostic, filename-driven framework: batch registration, file intake, validation,
 promotion to core, reopen approvals, waivers, period validation and extract triggering.
-See docs/design/cms-compliance-framework-design.md.
+See docs/design/cms-compliance-framework-design.md and docs/module-reference.md.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

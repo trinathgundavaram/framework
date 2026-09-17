@@ -1,8 +1,34 @@
-# CMS Compliance Framework — Metadata Glue Job (Terragrunt / Terraform)
+# CMS Compliance Framework
 
-> **CMS Compliance Framework package:** the project-agnostic, filename-driven framework code lives in
-> `src/framework/` (design: `docs/design/cms-compliance-framework-design.md`; developer guide:
-> `docs/framework-package.md`). The rest of this README covers the metadata-load Glue job below.
+A project-agnostic, filename-driven framework for CMS compliance source files: batch registration,
+file intake, validation, promotion to core, reopen approvals, waivers, carry-forward, period
+validation and extract triggering. PostgreSQL + Python; runs locally or as AWS Glue jobs.
+
+| Start here | |
+|---|---|
+| Setup, settings, commands, onboarding | [`docs/framework-package.md`](docs/framework-package.md) |
+| What each module does | [`docs/module-reference.md`](docs/module-reference.md) |
+| Design and decisions (v4) | [`docs/design/cms-compliance-framework-design.md`](docs/design/cms-compliance-framework-design.md) |
+| Schema (source of truth) | [`src/framework/sql/schema.sql`](src/framework/sql/schema.sql) |
+
+**What lives where (v4)**
+
+| In tables (5 config + event vocabulary) | Outside tables |
+|---|---|
+| `ComplianceSourceSystem`, `ComplianceRunType` (incl. `Carry_Fwd_Ind`), `ComplianceDataSetSourceXwalk` (which project/table/source/run type apply, and when), `ComplianceSourceFileConfig` (file contract, paths, targets, recipients), `ComplianceRuleBinding` | Database connection: `.env` locally, Secrets Manager in AWS · Settings: `--set` job arguments > environment > `.env` · Report period: `create-batches --period <NAME>` (`period_sql.py`) · Extract job, parameters, gating mode: arguments of the project's `evaluate-extracts` job |
+
+```bash
+pip install -e ".[dev]"
+cp .env.example .env                      # database + local settings
+framework init-db
+framework create-batches --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
+framework ingest-file --bucket inbound --key prja/in/PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.txt
+framework evaluate-extracts --project PRJA --set EXTRACT_JOB_NAME=prja_extract
+```
+
+---
+
+# Metadata-load Glue job (Terragrunt / Terraform)
 
 Deploys, end to end through Terragrunt, a single AWS Glue Python Shell job
 that upserts a CSV file into **any** Postgres table — not hardcoded to a
@@ -46,7 +72,7 @@ aws/glue/
   test.tfvars             "                              " — test
   prod.tfvars              "                              " — prod
   s3-artifacts.tf        Bucket + aws_s3_bucket_object uploads (script,
-                         rds_conn.py, DDL for reference, seed CSVs)
+                         rds_conn.py, src/framework/sql/schema.sql for reference, seed CSVs)
   secrets.tf             aws_secretsmanager_secret with the Postgres credentials
   glue-job.tf            IAM role, aws_glue_job, optional VPC connection/schedule,
                          SNS + CloudWatch failure alerting
@@ -55,8 +81,7 @@ aws/glue/
                                  per-table logic, no config file. Table name,
                                  file, and primary key are job parameters.
     rds_conn.py                 RdsClient — Secrets Manager -> pg8000 connection helper
-    ddl/create_metadata_tables.sql   Reference only - assumed already applied
-    seed_data/*.csv        One-time seed data, one CSV per table
+    seed_data/*.csv        Seed data for the configuration tables, one CSV per table
 
 infra/
   terragrunt.hcl                 Root config: remote state + AWS provider, shared by every environment
@@ -144,7 +169,7 @@ tell the job which table, which file, and the primary key every time.
 
 | Key | Example value |
 |---|---|
-| `--TABLE_NAME` | `cms_compliance.compliance_source_system` |
+| `--TABLE_NAME` | `cms_compliance.compliancesourcesystem` |
 | `--S3_INPUT_PATH` | `s3://<artifacts-bucket>/cms-compliance-metadata/seed_data/` |
 | `--S3_FILE_NAME` | `compliance_source_system.csv` |
 | `--PRIMARY_KEY` | `src_cd` |
@@ -156,7 +181,7 @@ tell the job which table, which file, and the primary key every time.
 aws glue start-job-run \
   --job-name cms_compliance_metadata_load_dev \
   --arguments '{
-    "--TABLE_NAME": "cms_compliance.compliance_source_system",
+    "--TABLE_NAME": "cms_compliance.compliancesourcesystem",
     "--S3_INPUT_PATH": "s3://<artifacts-bucket>/cms-compliance-metadata/seed_data/",
     "--S3_FILE_NAME": "compliance_source_system.csv",
     "--PRIMARY_KEY": "src_cd"
@@ -172,7 +197,7 @@ A few notes on the parameters:
   `--S3_FILE_NAME` (and `--TABLE_NAME` / `--PRIMARY_KEY`) — override
   `--S3_INPUT_PATH` too if the file lives somewhere else in the bucket.
 - `--PRIMARY_KEY` takes one or more columns, comma-separated, e.g.
-  `project_cd,table_nm,src_cd,run_ty,cmplnc_vrsn` for a composite key.
+  `project_cd,table_nm,src_cd,run_ty,effective_start_dt` for a composite key.
 - The file's own CSV header defines which columns get loaded — it must
   match the table's columns minus whichever audit columns the table owns
   (`created_dtts`, `updated_dtts`, `loaded_dtts`, `created_by`,
@@ -184,41 +209,37 @@ A few notes on the parameters:
   need to pass them unless you want to point at a different secret/db for
   one run.
 
-### The framework's 5 metadata tables
+### The framework's configuration tables
 
 Reference commands for the tables this repo ships seed data for
 (`aws/glue/code/seed_data/*.csv`) — swap `dev` for `test`/`prod` and adjust
-the bucket:
+the bucket. Framework table names are unquoted in `schema.sql`, so Postgres
+stores them lower-case (`compliancesourcesystem`, ...).
 
 ```bash
 BUCKET=<artifacts-bucket>
 INPUT=s3://$BUCKET/cms-compliance-metadata/seed_data/
 
 aws glue start-job-run --job-name cms_compliance_metadata_load_dev --arguments "{
-  \"--TABLE_NAME\": \"cms_compliance.compliance_source_system\",
+  \"--TABLE_NAME\": \"cms_compliance.compliancesourcesystem\",
   \"--S3_INPUT_PATH\": \"$INPUT\", \"--S3_FILE_NAME\": \"compliance_source_system.csv\",
   \"--PRIMARY_KEY\": \"src_cd\" }"
 
 aws glue start-job-run --job-name cms_compliance_metadata_load_dev --arguments "{
-  \"--TABLE_NAME\": \"cms_compliance.compliance_run_type\",
+  \"--TABLE_NAME\": \"cms_compliance.complianceruntype\",
   \"--S3_INPUT_PATH\": \"$INPUT\", \"--S3_FILE_NAME\": \"compliance_run_type.csv\",
   \"--PRIMARY_KEY\": \"run_ty\" }"
 
 aws glue start-job-run --job-name cms_compliance_metadata_load_dev --arguments "{
-  \"--TABLE_NAME\": \"cms_compliance.compliance_dataset_source_xwalk\",
+  \"--TABLE_NAME\": \"cms_compliance.compliancedatasetsourcexwalk\",
   \"--S3_INPUT_PATH\": \"$INPUT\", \"--S3_FILE_NAME\": \"compliance_dataset_source_xwalk.csv\",
-  \"--PRIMARY_KEY\": \"project_cd,table_nm,src_cd,run_ty,cmplnc_vrsn\" }"
-
-aws glue start-job-run --job-name cms_compliance_metadata_load_dev --arguments "{
-  \"--TABLE_NAME\": \"cms_compliance.compliance_request_intake\",
-  \"--S3_INPUT_PATH\": \"$INPUT\", \"--S3_FILE_NAME\": \"compliance_request_intake.csv\",
-  \"--PRIMARY_KEY\": \"intake_id\" }"
-
-aws glue start-job-run --job-name cms_compliance_metadata_load_dev --arguments "{
-  \"--TABLE_NAME\": \"cms_compliance.cms_compliance_exceptions_audit\",
-  \"--S3_INPUT_PATH\": \"$INPUT\", \"--S3_FILE_NAME\": \"cms_compliance_exceptions_audit.csv\",
-  \"--PRIMARY_KEY\": \"event_id\", \"--MODE\": \"insert_only\" }"
+  \"--PRIMARY_KEY\": \"project_cd,table_nm,src_cd,run_ty,effective_start_dt\" }"
 ```
+
+`ComplianceSourceFileConfig` and `ComplianceRuleBinding` load the same way once
+you add a CSV for them (primary keys `cfg_id` — omit it from the file and use
+`--MODE insert_only` for new rows — and
+`project_cd,table_nm,src_cd,rule_scope_cd,gre_rule_group,gre_rule_variant`).
 
 ## Loading any other table
 
@@ -235,12 +256,12 @@ No code change and no redeploy needed:
 
 ## How updates work day to day
 
-A later manual update (a new intake request, a corrected xwalk row, a
-source flagged inactive, a new exception/audit event) is: edit the
-relevant CSV under `aws/glue/code/seed_data/`, `terragrunt apply` to
-re-upload it, then run the job again with that table's parameters. The
-same job does inserts and updates: reference and intake tables upsert in
-place; the exceptions/audit log is append-only (`--MODE insert_only`).
+A later manual update (a corrected xwalk row, a source flagged inactive,
+a run type allowed to carry forward) is: edit the relevant CSV under
+`aws/glue/code/seed_data/`, `terragrunt apply` to re-upload it, then run
+the job again with that table's parameters. The same job does inserts and
+updates (upsert in place). Control and audit tables are written only by
+the framework.
 
 **Failure alerts** — set `alert_email` in the environment's `.tfvars` to
 get an email via SNS whenever the Glue job reports a `FAILED` state

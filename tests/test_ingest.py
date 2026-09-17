@@ -2,17 +2,16 @@ from datetime import date, datetime
 
 import pytest
 
-from framework.batches.scheduler import run_scheduler
-from framework.errors import TechnicalFailure
+from framework.common import TechnicalFailure
 
-from .helpers import TARGET, file_name, make_app, put_file, q1, qa, seed_config, utc
+from .helpers import create_batches, file_name, make_app, put_file, q1, qa, seed_config, utc
 
 
 @pytest.fixture
 def env(conn, tmp_path):
     seed_config(conn)
     app, clock, rules, connector = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
-    run_scheduler(conn, clock, app.settings)
+    create_batches(app)
     return app, clock, rules, connector
 
 
@@ -22,10 +21,9 @@ def ingest(app, name, rows, header=True, **kw):
 
 
 def core_rows(conn, src="S1"):
-    """metadata and data may be different databases: look the batch up first."""
-    ids = [r["btch_id"] for r in qa(conn, "SELECT Btch_ID FROM ComplianceRequestControl WHERE Src_Cd=%s", src)]
-    return qa(TARGET["conn"], """SELECT c.id, c.amount, c.current_ind, c.load_id FROM core_t.tbl_x c
-                                 WHERE c.btch_id = ANY(%s) ORDER BY c.load_id, c.id""", ids)
+    return qa(conn, """SELECT c.id, c.amount, c.current_ind, c.load_id FROM core_t.tbl_x c
+                        JOIN ComplianceRequestControl b ON b.Btch_ID = c.btch_id
+                       WHERE b.Src_Cd = %s ORDER BY c.load_id, c.id""", src)
 
 
 def test_o1_promote(env, conn):
@@ -57,7 +55,7 @@ def test_o2_replacement_latest_arrival_wins(env, conn):
     assert [(r["id"], r["current_ind"], r["load_id"]) for r in rows] == [
         (1, 0, first.load_id), (2, 0, first.load_id), (7, 1, second.load_id)]
     assert q1(conn, "SELECT Load_Stat FROM ComplianceFileLoad WHERE Load_ID=%s", first.load_id)["load_stat"] == "SUPERSEDED"
-    staged = qa(TARGET["conn"], "SELECT load_id FROM stg_t.tbl_x")
+    staged = qa(conn, "SELECT load_id FROM stg_t.tbl_x")
     assert {r["load_id"] for r in staged} == {second.load_id}    # D-05 delete by Btch_ID
 
 
@@ -83,9 +81,9 @@ def test_o3_o4_rules_failures(env, conn):
 
 
 def test_annotate_warnings_promote(conn, tmp_path):
-    seed_config(conn, rules_mode="ANNOTATE")
-    app, clock, rules, _ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
-    run_scheduler(conn, clock, app.settings)
+    seed_config(conn)
+    app, clock, rules, _ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0), file_rules_mode="ANNOTATE")
+    create_batches(app)
     rules.file_fail["S1"] = ["R_WARN"]
     out = ingest(app, file_name("S1"), ["1|1|a"])
     assert out.result == "PROMOTED"
@@ -138,7 +136,7 @@ def test_zero_byte_with_header_is_parse_error(env, conn):
 def test_zero_records(conn, tmp_path):
     seed_config(conn, allow_zero=0)
     app, clock, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
-    run_scheduler(conn, clock, app.settings)
+    create_batches(app)
     out = ingest(app, file_name("S1"), [])
     assert (out.result, out.event_ty) == ("RULES_FAILED", "FILE_ZERO_RECORDS_REJECTED")
     with conn.transaction():
@@ -187,7 +185,7 @@ def test_unsupported_file_type(conn, tmp_path):
         conn.execute("UPDATE ComplianceSourceFileConfig SET Src_File_Ty='.xlsx', "
                      "Src_File_Nm_Tmplt=replace(Src_File_Nm_Tmplt, '.txt', '.xlsx')")
     app, clock, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
-    run_scheduler(conn, clock, app.settings)
+    create_batches(app)
     out = ingest(app, file_name("S1").replace(".txt", ".xlsx"), ["1|1|a"])
     assert out.event_ty == "FILE_TYPE_NOT_SUPPORTED"
 
@@ -197,16 +195,24 @@ def test_trailer_count(conn, tmp_path):
     with conn.transaction():
         conn.execute("UPDATE ComplianceSourceFileConfig SET Src_File_Has_Trlr_Ind=1")
     app, clock, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0), trailer_count_check=True)
-    run_scheduler(conn, clock, app.settings)
+    create_batches(app)
     bad = ingest(app, file_name("S1"), ["1|1|a", "TRL|5"])
     assert bad.event_ty == "FILE_TRAILER_COUNT_MISMATCH"
     good = ingest(app, file_name("S1", ts=datetime(2026, 2, 1, 11, 0)), ["1|1|a", "TRL|1"])
     assert good.result == "PROMOTED"
 
 
-def test_replay_after_metadata_commit_failure_is_idempotent(env, conn, data, monkeypatch):
-    """The data-side swap commits before the metadata transaction; if the metadata commit fails the
-    restart must not duplicate core rows (metadata and data in different databases)."""
+def test_no_rule_binding_skips_file_rules(conn, tmp_path):
+    seed_config(conn, sources=("S1",), rules=False)
+    app, clock, rules, _ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
+    create_batches(app)
+    out = ingest(app, file_name("S1"), ["1|1|a"])
+    assert out.result == "PROMOTED" and "FILE_LEVEL" not in [c["scope"] for c in rules.calls]
+    assert q1(conn, "SELECT Rules_Stat FROM ComplianceFileLoad")["rules_stat"] == "NOT_RUN"
+
+
+def test_failure_during_promotion_rolls_back_core_and_control(env, conn, monkeypatch):
+    """Metadata and core share one database: a failure after the swap undoes both; the restart promotes once."""
     app, *_ = env
     first = ingest(app, file_name("S1", ts=datetime(2026, 2, 1, 9, 0, 0)), ["1|1|a"])
     name = file_name("S1", ts=datetime(2026, 2, 1, 10, 0, 0))
@@ -216,20 +222,16 @@ def test_replay_after_metadata_commit_failure_is_idempotent(env, conn, data, mon
     def flaky(event, **kw):
         if event == "FILE_PROMOTED" and calls["n"] == 0:
             calls["n"] += 1
-            raise RuntimeError("metadata database went away")
+            raise RuntimeError("database went away")
         return original(event, **kw)
     monkeypatch.setattr(app.pipeline.logger, "batch_event", flaky)
     with pytest.raises(RuntimeError):
         ingest(app, name, ["2|2|b", "3|3|c"])
     b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1' AND Run_Ty='MONTHLY'")
-    assert b["current_load_id"] == first.load_id                         # metadata rolled back
-    same_db = data is conn
-    cur = qa(data, "SELECT load_id FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", b["btch_id"])
-    assert {r["load_id"] for r in cur} == ({first.load_id} if same_db else {first.load_id + 1})
+    assert b["current_load_id"] == first.load_id
+    cur = qa(conn, "SELECT load_id FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", b["btch_id"])
+    assert {r["load_id"] for r in cur} == {first.load_id}
     again = app.pipeline.process_file("inbound", "prja/in/" + name)
     assert again.result == "PROMOTED"
-    rows = core_rows(conn)
-    assert [(r["id"], r["current_ind"], r["load_id"]) for r in rows] == [
+    assert [(r["id"], r["current_ind"], r["load_id"]) for r in core_rows(conn)] == [
         (1, 0, first.load_id), (2, 1, again.load_id), (3, 1, again.load_id)]
-    assert q1(conn, "SELECT Current_Load_ID FROM ComplianceRequestControl WHERE Req_ID=%s",
-              b["req_id"])["current_load_id"] == again.load_id

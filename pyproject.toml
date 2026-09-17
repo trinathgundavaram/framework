@@ -4,12 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cms-compliance-framework"
-version = "0.1.0"
+version = "0.2.0"
 description = "Project-agnostic, filename-driven CMS compliance file ingestion, validation, promotion and extract-trigger framework"
 requires-python = ">=3.10"
 dependencies = [
   "psycopg[binary]>=3.1",
-  "croniter>=1.4",
   "tzdata>=2023.3",   # Windows has no system time-zone database for zoneinfo
 ]
 
@@ -19,7 +18,7 @@ pandas = ["pandas>=1.5"]
 spark = ["pyspark>=3.3"]
 excel = ["pandas>=1.5", "openpyxl>=3.1"]
 parquet = ["pandas>=1.5", "pyarrow>=12"]
-dev   = ["pytest>=7", "pytest-cov>=4", "pandas>=1.5", "boto3>=1.28"]
+dev   = ["pytest>=7", "pytest-cov>=4", "pandas>=1.5", "boto3>=1.28", "pyflakes>=3"]
 
 [project.scripts]
 framework = "framework.cli:main"
@@ -28,7 +27,7 @@ framework = "framework.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-framework = ["sql/**/*.sql"]
+framework = ["sql/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

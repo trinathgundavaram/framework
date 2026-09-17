@@ -1,7 +1,8 @@
 # Local Postgres for development and tests:
 #   docker compose up -d
-#   export FRAMEWORK_DB_DSN=postgresql://framework:framework@localhost:5432/framework
-#   export TEST_DATABASE_URL=$FRAMEWORK_DB_DSN
+#   put FRAMEWORK_DB_DSN=postgresql://framework:framework@localhost:5432/framework in .env
+#   export TEST_DATABASE_URL=postgresql://framework:framework@localhost:5432/framework
+# (No Docker? Any local PostgreSQL 14+ works - see docs/framework-package.md.)
 #   framework init-db && pytest
 services:
   postgres:

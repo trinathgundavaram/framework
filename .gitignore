@@ -30,5 +30,4 @@ dist/
 build/
 .local_store/
 
-# local framework configuration (may contain credentials)
-framework.ini
+# local framework configuration (may contain credentials) - .env is ignored above; .env.example is committed

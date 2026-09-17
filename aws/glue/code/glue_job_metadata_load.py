@@ -18,7 +18,7 @@ uploaded to S3 alongside this script (see aws/glue/glue-job.tf).
 DESIGN
 ------
 - The input CSV's header IS the column list to load - by convention (see
-  ddl/create_metadata_tables.sql) every table's file layout matches the
+  src/framework/sql/schema.sql) every table's file layout matches the
   table layout exactly except for the audit columns the DB itself owns
   (created_dtts / updated_dtts / loaded_dtts / created_by / updated_by).
   Those never appear in the file, so there's nothing to strip - the job
@@ -35,8 +35,8 @@ DESIGN
 
   Re-running the job against the same table with a refreshed CSV (add a
   row, correct a row, flip a flag) is the update mechanism - there's no
-  separate "load" vs "update" job. Loading the framework's 5 metadata
-  tables (or any other table) is just 5 (or however many) separate manual
+  separate "load" vs "update" job. Loading the framework's 3 configuration
+  tables (or any other table) is just 3 (or however many) separate manual
   runs of this same job with different --TABLE_NAME / --S3_FILE_NAME /
   --PRIMARY_KEY values - see the README for the exact commands.
 
@@ -46,13 +46,14 @@ right tool.
 
 JOB PARAMETERS (set as Glue job arguments, all as --KEY VALUE)
   --TABLE_NAME      Schema-qualified Postgres table to load, e.g.
-                     cms_compliance.compliance_source_system. Must already exist.
+                     cms_compliance.compliancesourcesystem. Must already exist
+                     (framework table names are unquoted, so Postgres stores them lower-case).
   --S3_INPUT_PATH   s3://<bucket>/<prefix>/    Folder the input file lives in.
   --S3_FILE_NAME    <file_name>.csv            File inside that folder to load
                      (the job reads s3://<bucket>/<prefix>/<file_name>).
   --PRIMARY_KEY     Comma-separated primary key column(s) for the ON CONFLICT
                      target, e.g. src_cd
-                     or project_cd,table_nm,src_cd,run_ty,cmplnc_vrsn
+                     or project_cd,table_nm,src_cd,run_ty,effective_start_dt
   --MODE            Optional: "upsert" (default) or "insert_only" (append-only
                      table - audit/exception logs).
   --AUDIT_COLUMNS   Optional comma-separated list of audit columns the table

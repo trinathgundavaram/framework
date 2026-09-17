@@ -1,3 +1,4 @@
-run_ty,run_ty_desc,sla_days
-CMS,"Fixed CMS program-audit reporting period, daily runs within it",1
-DAILY,"Single business day per run, prior-day cadence",1
+run_ty,run_ty_desc,run_category_cd,sla_days,carry_fwd_ind,active_ind
+CMS,"Fixed CMS program-audit reporting period, daily runs within it",ROUTINE,1,1,1
+DAILY,"Single business day per run, prior-day cadence",ROUTINE,1,0,1
+ADHOC,"Ad hoc request from ComplianceRequestInTake",ADHOC,1,0,1
