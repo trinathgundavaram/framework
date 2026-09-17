@@ -6,7 +6,7 @@ import csv
 import io
 import re
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import Optional
 
 from ..config.models import FileConfig
 from ..errors import ConfigError, FileRejected
@@ -149,7 +149,3 @@ def read_file(path: str, cfg: FileConfig, expected_cols: int, settings: Settings
         return read_with_pandas(path, cfg, expected_cols, settings)
     raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} has no reader")
 
-
-def iter_chunks(rows: list, size: int) -> Iterator[list]:
-    for i in range(0, len(rows), size):
-        yield rows[i:i + size]

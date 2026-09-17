@@ -2,7 +2,8 @@
 
 The staging delete runs through psycopg; the append goes through Spark JDBC. A partial append is
 never promoted because promotion filters on Load_ID and checks the staged row count (§10.1).
-Requires `pyspark` and FRAMEWORK_SPARK_JDBC_URL (+ FRAMEWORK_SPARK_JDBC_PROPERTIES)."""
+Requires `pyspark` and the PostgreSQL JDBC driver. The JDBC URL, user and password come from the
+file config's target connection unless SPARK_JDBC_URL / SPARK_JDBC_PROPERTIES override them."""
 from __future__ import annotations
 
 from psycopg import sql

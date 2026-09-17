@@ -876,29 +876,37 @@ Session advisory locks (`pg_try_advisory_lock` / `pg_advisory_lock` with a timeo
 ## 15. Package Structure, Tests & Operations
 
 ### 15.1 Package
+The per-module description (purpose, scope, tables read and written, failure handling) is in `docs/module-reference.md`.
+
 ```
 framework/
-├── cli.py
-├── config/      connection.py  settings.py  repository.py  validator.py  templates.py (compile/match §9)
-├── common/      clock.py  btch_id.py  locks.py  status.py
+├── cli.py  app.py                     entry points; start-up and service wiring
+├── settings.py  connections.py  db.py settings, META/DATA connections (D-65 – D-67), init-db
+├── locks.py  clock.py  errors.py  health.py
+├── config/      models.py  repository.py  templates.py (§9)  validator.py (P1)
+├── common/      btch_id.py  status.py (§6.1)
 ├── audit/       event_logger.py
-├── batches/     period_strategies.py (+ sql/period_strategies/*.sql)  scheduler.py  catchup.py  intake_processor.py  crc_repository.py
-├── ingest/      pipeline.py  filename_matcher.py  file_reader.py  dedupe.py  resolution_engine.py
-├── load/        engine/{base,pandas_engine,spark_engine}.py  staging_loader.py  promoter.py  archive_restager.py
-├── overrides/   override_manager.py  decision_processor.py
+├── batches/     cron.py  period_strategies.py (+ sql/period_strategies/*.sql)  scheduler.py (P2, P3)
+│                intake_processor.py (P4)  crc_repository.py
+├── ingest/      pipeline.py (P5, P6)  resolution_engine.py (§8)  file_reader.py
+├── load/        engine/{base,pandas_engine,spark_engine}.py  tables.py  promoter.py (§10.2)  archive_restager.py
+├── overrides/   decision_processor.py (P7, P8)
 ├── validation/  gre_adapter.py
-├── extract/     control.py (refresh, eligibility)  combiner.py  evaluator.py  trigger.py  connectors/{glue_job,http_api}.py
-└── notify/      notifier.py (ses, sns)
+├── extract/     eligibility.py (§11.2)  control.py (P9, combine)  trigger.py (P11, P12)  evaluator.py (P10)
+│                connectors/{base,glue_job,http_api}.py
+├── notify/      notifier.py (P13)
+├── storage/     object_store.py (S3 / local)
+└── sql/         ddl/  seed/  period_strategies/  templates/approvals.sql
 ```
 
-**Key contracts** (all take an explicit `conn` and `clock`):
-- `templates.match(object_name) -> MatchResult | MatchError`
+**Key contracts** (services take the META connection or the connection manager, and a clock):
+- `TemplateMatcher.match(object_name) -> MatchResult` (raises `MatchError` with the quarantine code)
 - `resolution_engine.decide(ResolutionInput) -> ResolutionDecision` (a pure function)
-- `promoter.promote(conn, btch_id, load_id) -> PromotionResult`
+- `promoter.swap(data_conn, cfg, btch_id, load_id, expected_rows, now) -> PromotionResult`
 - `gre_adapter.run(data_conn, metadata_conn, bindings, run_params, mode) -> RuleOutcome`
-- `control.compute_eligibility(ExtractSnapshot, Policy, as_of) -> Eligibility`
-- `trigger.fire(conn, extract_id, trigger_ty, requested_by, ack) -> TriggerResult`
-- `connectors.*.call(rendered_params) -> CallResult(accepted, job_run_ref, response)`
+- `eligibility.compute(EligibilityInput, strict_waiver_auto) -> Eligibility` (a pure function)
+- `ExtractTriggerService.fire(extract_id, trigger_ty, requested_by, ack_warnings) -> TriggerOutcome`
+- `ExtractConnector.call(policy, rendered_params) -> CallResult(accepted, job_run_ref, response_txt, ambiguous)`
 
 ### 15.2 Tests
 - **Unit:**

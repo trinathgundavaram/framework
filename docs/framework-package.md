@@ -8,6 +8,8 @@ This is the implementation of [`docs/design/cms-compliance-framework-design.md`]
 
 ## Layout
 
+What each script does and where its scope ends: [`module-reference.md`](module-reference.md).
+
 ```
 pyproject.toml                  package metadata; `framework` console script
 framework.ini.example           sample config file (copy to framework.ini)
