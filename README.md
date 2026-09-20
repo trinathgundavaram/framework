@@ -28,6 +28,15 @@ framework ingest-path                           # sweep every configured inbound
 framework evaluate-extracts --project PRJA      # closes the runs whose data is complete
 ```
 
+Every job can also be started by **module name** - one entry point, the name picks what runs:
+
+```bash
+framework list-modules                                                       # names, aliases, parameters
+framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
+framework run --module FILE_LOAD --bucket inbound --prefix prja/in/          # or --key <object>; no args = every location
+framework run --module RULES_TRIGGER --project PRJA --run-type MONTHLY       # or --extract-id 12
+```
+
 ---
 
 # Metadata-load Glue job (Terragrunt / Terraform)

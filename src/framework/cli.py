@@ -14,6 +14,10 @@ Examples:
   framework ingest-path --bucket inbound --prefix prja/in/     # every object waiting at one location
   framework ingest-path                                        # every object at every configured location
   framework process-intake
+  framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
+  framework run --module FILE_LOAD --bucket inbound --prefix prja/in/     # or --key <object>, or no arguments
+  framework run --module RULES_TRIGGER --project PRJA --run-type MONTHLY  # or --extract-id 12
+  framework list-modules
   framework evaluate-extracts --project PRJA --set EXTRACT_GATING_MODE=BEST_EFFORT
   framework close-extract --extract-id 12 --closed-by jdoe --ack-warnings
 """
@@ -30,6 +34,7 @@ from .app import App
 from .common import FrameworkError, parse_as_of
 from .config import validate_all
 from .db import init_db, schema_exists
+from .modules import describe_modules, run_module
 from .settings import Settings
 
 log = logging.getLogger("framework")
@@ -71,6 +76,19 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--run-type", required=project_required)
 
     add("init-db", "apply schema and seed data")
+    add("list-modules", "list the modules that 'run --module' can call, with their parameters")
+    sp = add("run", "run one module by name (BATCH_CREATION, BATCH_INTAKE, FILE_LOAD, RULES_TRIGGER)")
+    sp.add_argument("--module", required=True, help="module name (see list-modules); case-insensitive")
+    scope(sp)
+    sp.add_argument("--period", help="BATCH_CREATION: name in period_sql.py (or in --period-file)")
+    sp.add_argument("--period-file", help="BATCH_CREATION: project .py file defining PERIOD_SQL")
+    sp.add_argument("--lookback-days", type=int, help="BATCH_CREATION")
+    sp.add_argument("--lookback-weeks", type=int, help="BATCH_CREATION")
+    sp.add_argument("--bucket", help="FILE_LOAD: inbound bucket")
+    sp.add_argument("--key", help="FILE_LOAD: one object (with --bucket)")
+    sp.add_argument("--prefix", help="FILE_LOAD: one location (with --bucket)")
+    sp.add_argument("--version-id", help="FILE_LOAD: object version of --key")
+    sp.add_argument("--extract-id", type=int, help="RULES_TRIGGER: one extract instead of a project scope")
     add("show-config", "print resolved settings (with their source) and the database target")
     add("test-connection", "connect to the database and check the schema")
     add("validate-config", "validate the configuration tables and target tables")
@@ -105,6 +123,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
     try:
+        if args.cmd == "list-modules":
+            _print(describe_modules())
+            return 0
         settings = Settings.load(overrides=dict(args.settings), env_file=args.env_file)
         if args.cmd in ("init-db", "test-connection", "show-config"):
             return _no_app(args, settings)
@@ -141,22 +162,32 @@ def _dispatch(app: App, args) -> int:
                 EventLogger(app.conn, app.clock).audit(
                     "CONFIG_VALIDATION_FAILED", description="; ".join(f"{i.code}: {i.message}" for i in errors)[:4000])
         return 1 if errors else 0
+    if c == "run":
+        params = {k: getattr(args, k) for k in ("project", "table", "run_type", "period", "period_file",
+                                                "lookback_days", "lookback_weeks", "bucket", "key", "prefix",
+                                                "version_id", "extract_id")}
+        out = run_module(app, args.module, params)
+        _print({"module": out.module, "result": out.result})
+        return out.exit_code
+    # the commands below are the same modules with fixed names (one code path, see modules.py)
     if c == "create-batches":
-        s = app.create_batches(project_cd=args.project, table_nm=args.table, run_ty=args.run_type,
-                               period=args.period, period_file=args.period_file,
-                               lookback_days=args.lookback_days, lookback_weeks=args.lookback_weeks)
-        _print(s)
-        return 1 if s.errors else 0
+        out = run_module(app, "BATCH_CREATION", {
+            "project": args.project, "table": args.table, "run_type": args.run_type, "period": args.period,
+            "period_file": args.period_file, "lookback_days": args.lookback_days,
+            "lookback_weeks": args.lookback_weeks})
+        _print(out.result)
+        return out.exit_code
     if c == "process-intake":
-        _print(app.intake.run())
+        _print(run_module(app, "BATCH_INTAKE").result)
         return 0
     if c == "ingest-file":
-        _print(app.pipeline.process_file(args.bucket, args.key, args.version_id))
+        _print(run_module(app, "FILE_LOAD", {"bucket": args.bucket, "key": args.key,
+                                             "version_id": args.version_id}).result)
         return 0
     if c == "ingest-path":
-        s = app.pipeline.process_path(args.bucket, args.prefix)
-        _print(s)
-        return 1 if s.errors else 0
+        out = run_module(app, "FILE_LOAD", {"bucket": args.bucket, "prefix": args.prefix})
+        _print(out.result)
+        return out.exit_code
     if c == "process-decisions":
         s = app.decisions.run()
         _print(s)

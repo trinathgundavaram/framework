@@ -47,6 +47,7 @@ What each file in `src/framework/` does, what it owns, and what it leaves to oth
    ▼
  app.py (App: one connection + services; wiring only)
    │
+   ├─ modules.py    module dispatcher: name -> BATCH_CREATION / BATCH_INTAKE / FILE_LOAD / RULES_TRIGGER
    ├─ batches.py    create-batches (period_sql.py), ad-hoc intake windows
    ├─ ingest.py     file pipeline (one object or a path sweep) + §8 decision tables ──► load.py (read, stage, swap)
    ├─ overrides.py  REUSE decisions: apply and expire
@@ -67,6 +68,8 @@ What each file in `src/framework/` does, what it owns, and what it leaves to oth
 
 | Command | Flow (§7) | Modules, in order |
 |---|---|---|
+| `run --module NAME` | any | `cli` → `modules.run_module` → the module's service (rows below); `create-batches`, `process-intake`, `ingest-file`, `ingest-path` are these same modules under fixed names |
+| `list-modules` | ops | `cli` → `modules.describe_modules` (no settings, no database) |
 | `init-db` | deploy | `cli` → `settings.connect` → `db.init_db` → `sql/schema.sql`, `sql/seed.sql` |
 | `show-config` | ops | `cli` → `settings.describe` / `settings.db_conninfo` (no password) |
 | `test-connection` | ops | `cli` → `settings.connect` → `db.schema_exists` |
@@ -80,6 +83,7 @@ What each file in `src/framework/` does, what it owns, and what it leaves to oth
 | `refresh-extract` | P9 | `extract.ExtractControlService.refresh` (`MANUAL_REFRESH`) |
 | `close-extract` | P11 | `extract.ExtractControlService.close` |
 | `notify` | P13 | `audit.NotificationDispatcher` → `adapters` (log / SES / SNS) |
+| `run --module RULES_TRIGGER` | P9 | `modules` → `extract.ExtractControlService.trigger_rules` → `refresh` (`MANUAL_REFRESH`) per open extract in scope |
 | `health` | ops | `app.App.health` → `ingest.IngestPipeline.health` + `overrides.DecisionProcessor.health` + `extract.ExtractControlService.health` |
 
 Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
@@ -123,6 +127,11 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 - `validate_all` (P1): event vocabulary, crosswalk ↔ file config coverage, inactive run types (warning), template grammar and extension, S3 paths, staging/core tables and their framework columns, template overlap, alias collisions.
 - **Out of scope:** schedules, periods, time zones — these are job settings now.
 
+### `modules.py`
+- The dispatcher behind `framework run --module NAME`: `MODULES` (name → `ModuleSpec` with required/optional `Param`s and a handler), `resolve_module` (case-insensitive, `-`/`_` interchangeable, aliases such as `create-batches` → `BATCH_CREATION`), `run_module(app, name, params)` → `ModuleOutcome(module, result, exit_code)`, `describe_modules`.
+- Validates before anything runs: unknown module, missing required parameter, parameter the module does not take, wrong type (`ConfigError`, exit 2). Handlers only map a name to the service that owns the work (`batches`, `ingest`, `extract`) - no SQL, no business rules; a new module is one handler plus one `MODULES` entry.
+- `BATCH_CREATION` → `App.create_batches`; `BATCH_INTAKE` → `IntakeProcessor.run`; `FILE_LOAD` → `process_file` (`--key`) or `process_path` (`--prefix`, or every configured location); `RULES_TRIGGER` → `ExtractControlService.trigger_rules`.
+
 ### `batches.py`
 - CRC and extract rows: `find_batch` / `find_extract` (per report period **and run date**), `get_batch`, `batches_of_extract`, `promoted_load` (the batch's current data, D-75), `create_batch` (idempotent per run date; skipped when the run is already closed).
 - Report period: `period_sql(name, period_file)` returns the SQL for a name from `period_sql.py` or from a project file that defines `PERIOD_SQL`; `compute_period` runs it for the run date and checks lookback parameters.
@@ -157,6 +166,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 - `compute_eligibility` (§11.2): SLA hold (`earliest_close_dt`, computed), STRICT_ALL_PASS / BEST_EFFORT, period-rule status. Carried sources count as received.
 - `ExtractControlService.refresh` (P9): recount (received = NEW_FILE + CARRY_FORWARD), `Carried_Src_Cds`, data signature over (Btch_ID, Load_ID) pairs — a carried batch contributes the reused batch's pair — combine + PERIOD_LEVEL rules (mode `PERIOD_RULES_MODE`), regenerate flag when the data of a closed run changed, eligibility.
 - `hold_date(extract)`: `Req_Dt_Key + (SLA_Days − 1)` from the run type (D-77).
+- `ExtractControlService.trigger_rules(extract_id | project[, table, run type])` (RULES_TRIGGER): forces the PERIOD_LEVEL rules on one extract or on the open extracts of a scope via `refresh(..., "MANUAL_REFRESH")`; a closed extract is reported `SKIPPED` (its batch list is what the submission was built from); a failure on one extract does not stop the others. Returns `RulesTriggerSummary`.
 - `ExtractControlService.close` (§11.3): refresh, check eligibility (`CloseBlocked` otherwise), try-lock every open batch (`CloseDeferred`), then close every batch (`EXCEPTION_PENDING` → `COMPLETED_WITH_EXCEPTION`; NEW_FILE or CARRY_FORWARD → `COMPLETED`; otherwise `DATA_NOT_PROVIDED` / `MISSING`) and the extract, storing `Closed_By`, `Close_Warning_Txt` and `Closed_Data_Signature`.
 - `ExtractEvaluator.run(project, table, run type)` (P10): sweeps open extracts whose hold has passed (SLA joined from `ComplianceRunType`), closes the AUTO-eligible ones when `AUTO_CLOSE_EXTRACTS` is on, and reports the runs that need regeneration; `after_late_promotion` refreshes a closed run after a late arrival or correction.
 - `ExtractControlService.health()`: runs past their SLA hold and still open, and runs needing regeneration — `extract.py` owns `ComplianceExtractControl` (§7), so its health queries live here rather than in `app.py`.
@@ -195,6 +205,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 | `test_ingest.py` | Promotion, replacement, quarantine reasons, structural failures, duplicates, zero records, GATE / ANNOTATE, no bindings, technical failure and replay, closed-batch overrides (late arrival, correction, retry after approval), batch selection by run date, `process_path` (one location, every configured location, mixed outcomes, listing/technical errors that don't stop the sweep). |
 | `test_overrides.py` | `REUSE`: apply, invalid cases, pending until approved, expiry, replacement by a real file, reuse chains; `LATE_ARRIVAL` / `CORRECTION` rows are left to the pipeline. |
 | `test_extract.py` | Automatic close after the hold, STRICT partial and rule failures, BEST_EFFORT manual close with acknowledged warnings, zero data, deferred close on a locked batch, period-rule errors, sweep scope and `AUTO_CLOSE_EXTRACTS`, per-run-date holds, regenerate reporting. |
+| `test_modules.py` | Module identification (names, aliases, unknown), parameter checks before anything runs, each module end to end (batch creation, intake, file load one object / one location / every location, rules trigger by extract and by scope, closed extracts skipped), `run --module` and `list-modules` on the CLI. |
 | `test_config_cli.py` | Validator, notifications, CLI end to end (with `.env`, `--set` and `close-extract`), `ingest-path` end to end, the composed `health` report, rules adapter contract. |
 
 ---

@@ -101,6 +101,39 @@ def data_signature(pairs: list[tuple[str, Optional[int]]]) -> str:
     return hashlib.sha256("|".join(f"{b}:{load}" for b, load in sorted(pairs)).encode("utf-8")).hexdigest()
 
 
+@dataclass
+class RuleTriggerResult:
+    """Outcome of triggering the period-level rules for one extract."""
+    extract_id: int
+    status: str                                   # PASSED | PASSED_WITH_WARNINGS | FAILED | ERROR | SKIPPED
+    failed_rules: list[str] = field(default_factory=list)
+    eligibility: Optional[str] = None
+    detail: Optional[str] = None                  # why it was skipped / what went wrong
+
+
+@dataclass
+class RulesTriggerSummary:
+    evaluated: int = 0
+    passed: int = 0
+    failed: int = 0
+    errors: int = 0
+    skipped: int = 0
+    results: list[RuleTriggerResult] = field(default_factory=list)
+
+    def tally(self, r: RuleTriggerResult) -> None:
+        self.results.append(r)
+        if r.status == "SKIPPED":
+            self.skipped += 1
+            return
+        self.evaluated += 1
+        if r.status in (PASSED, "PASSED_WITH_WARNINGS"):
+            self.passed += 1
+        elif r.status == FAILED:
+            self.failed += 1
+        else:
+            self.errors += 1
+
+
 class ExtractControlService:
     def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings, rule_engine: RuleEngine):
         self.conn = conn
@@ -182,6 +215,46 @@ class ExtractControlService:
                  combine_cnt, combined, now, combined, trigger_cd, combined, ",".join(btch_ids),
                  combined, signature, now, extract_id)).fetchone()
         return ExtractState(row, el, btch_ids, load_ids)
+
+    def trigger_rules(self, extract_id: Optional[int] = None, project_cd: Optional[str] = None,
+                      table_nm: Optional[str] = None, run_ty: Optional[str] = None) -> RulesTriggerSummary:
+        """Run the PERIOD_LEVEL rules on demand (the RULES_TRIGGER module).
+
+        Recounts and recombines each extract in scope and runs its rule bindings (mode
+        `PERIOD_RULES_MODE`), whether or not the data changed (`MANUAL_REFRESH`). Scope is one
+        `extract_id`, or the *open* extracts of a project (optionally one table / run type).
+        A closed extract is never recombined here - its batch list is what the submission was built
+        from - so it is reported as SKIPPED. A technical failure on one extract is recorded on its
+        result and does not stop the others.
+        """
+        if extract_id is None and project_cd is None:
+            raise ValueError("give an extract id or a project to trigger rules for")
+        s = RulesTriggerSummary()
+        if extract_id is not None:
+            rows = self.conn.execute("SELECT Extract_ID, Extract_Close_Ind FROM ComplianceExtractControl "
+                                     "WHERE Extract_ID=%s", (extract_id,)).fetchall()
+            if not rows:
+                raise LookupError(f"extract {extract_id} not found")
+        else:
+            rows = self.conn.execute(
+                """SELECT Extract_ID, Extract_Close_Ind FROM ComplianceExtractControl
+                    WHERE Extract_Close_Ind = 0 AND Project_Cd = %s
+                      AND (%s::text IS NULL OR Table_Nm = %s) AND (%s::text IS NULL OR Run_Ty = %s)
+                    ORDER BY Extract_ID""", (project_cd, table_nm, table_nm, run_ty, run_ty)).fetchall()
+        for r in rows:
+            ext = r["extract_id"]
+            if r["extract_close_ind"] == 1:
+                s.tally(RuleTriggerResult(ext, "SKIPPED", detail="extract is closed"))
+                continue
+            try:
+                st = self.refresh(ext, "MANUAL_REFRESH")
+            except (LockTimeout, psycopg.Error) as e:
+                log.warning("rules trigger failed for extract %s: %s", ext, e)
+                s.tally(RuleTriggerResult(ext, ERROR, detail=f"{type(e).__name__}: {e}"[:500]))
+                continue
+            failed = [x for x in (st.extract["failed_rule_refs"] or "").split(",") if x]
+            s.tally(RuleTriggerResult(ext, st.extract["extract_rules_stat"], failed, st.eligibility.code))
+        return s
 
     def hold_date(self, extract: dict) -> date:
         """SLA hold of the run, computed from its run date and the run type's SLA_Days (D-38, D-77)."""

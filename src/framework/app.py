@@ -23,6 +23,7 @@ from .common import Clock, ConfigError
 from .db import schema_exists
 from .extract import ExtractControlService, ExtractEvaluator
 from .ingest import IngestPipeline
+from .modules import ModuleOutcome, run_module
 from .overrides import DecisionProcessor
 from .settings import Settings
 
@@ -81,6 +82,10 @@ class App:
     @cached_property
     def intake(self) -> IntakeProcessor:
         return IntakeProcessor(self.conn, self.clock, self.settings)
+
+    def run_module(self, name: str, params: Optional[dict] = None) -> ModuleOutcome:
+        """Run a module by name (BATCH_CREATION, BATCH_INTAKE, FILE_LOAD, RULES_TRIGGER) - see modules.py."""
+        return run_module(self, name, params)
 
     def create_batches(self, **kw) -> ScheduleSummary:
         return create_batches(self.conn, self.clock, self.settings, **kw)

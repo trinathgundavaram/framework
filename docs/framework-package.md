@@ -21,6 +21,7 @@ src/framework/
   db.py                   init-db, advisory locks
   config.py               configuration rows, filename templates, validator
   period_sql.py           report-period SQL by name
+  modules.py              module dispatcher: a name (BATCH_CREATION, FILE_LOAD, RULES_TRIGGER, ...) selects the service
   batches.py              create-batches, intake, CRC/extract rows
   ingest.py               file pipeline (single object or a path sweep) + resolution decision tables
   load.py                 file reading, staging (pandas/COPY or Spark), core swap
@@ -174,6 +175,8 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 | Command | Purpose | Typical trigger |
 |---|---|---|
 | `init-db` | Schema (once) + event vocabulary | Deploy |
+| `run --module NAME [module parameters]` | Run one module by name: `BATCH_CREATION`, `BATCH_INTAKE`, `FILE_LOAD`, `RULES_TRIGGER` (see below). One Glue job / Step Functions state can start any of them | Any schedule or event |
+| `list-modules` | Module names, aliases and parameters (no database needed) | Ops |
 | `show-config` | Settings with value and source; database target (no password) | Ops |
 | `test-connection` | Connect and check the schema; exit 1 if not initialised | Deploy / ops |
 | `validate-config` | Configuration checks; exit 1 on errors, logs `CONFIG_VALIDATION_FAILED` | CI / before activating config |
@@ -189,6 +192,27 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 | `health` | Operational report (§15.3) | Ops |
 
 **Exit codes:** 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
+
+### Calling a module by name
+
+`framework run --module <NAME>` identifies the module from its name (case-insensitive; `-` and `_` are interchangeable, so `file-load` = `FILE_LOAD`), checks that the parameters belong to it, and calls the service that owns the work. An unknown module, a missing required parameter or a parameter the module does not take is exit 2 and nothing runs. The output is `{"module": ..., "result": ...}`; `create-batches`, `process-intake`, `ingest-file` and `ingest-path` are the same modules under fixed names and behave as before.
+
+| Module | Does | Parameters |
+|---|---|---|
+| `BATCH_CREATION` | Create the batches of one project / ROUTINE run type for the period of the run date | `--project --run-type --period` · `[--table] [--period-file] [--lookback-days] [--lookback-weeks]` |
+| `BATCH_INTAKE` | Create the batches of every open ad-hoc request window | none |
+| `FILE_LOAD` | Load inbound files: one object, one location, or every configured location | `--bucket --key [--version-id]` (one object) · `--bucket --prefix` (one location) · none (every configured location) |
+| `RULES_TRIGGER` | Run the PERIOD_LEVEL rules now (recount + combine + rules, `MANUAL_REFRESH`) for one extract, or for the open extracts of a scope. A closed extract is skipped, never recombined. Exit 1 if a rule fails or errors | `--extract-id`, or `--project [--table] [--run-type]` |
+
+```bash
+framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
+framework run --module FILE_LOAD --bucket inbound --key prja/in/<file>
+framework run --module RULES_TRIGGER --extract-id 12
+```
+
+From Python: `app.run_module("RULES_TRIGGER", {"project": "PRJA"})` returns a `ModuleOutcome(module, result, exit_code)`. To add a module, write one handler in `modules.py` that calls the owning service and register it in `MODULES` - the CLI, `list-modules` and parameter checks pick it up.
+
+In Glue, keep one job definition and pass the module and its parameters as job arguments (`--module FILE_LOAD --bucket ... --prefix ...`), or one definition per module if you want separate schedules and IAM.
 
 ## Overrides (manual SQL, D-12, D-74)
 
