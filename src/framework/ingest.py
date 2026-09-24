@@ -181,7 +181,7 @@ class IngestPipeline:
 
         Multiple files, multiple file configs and multiple batches in one call are safe: each object
         found is still handed to `process_file` on its own, so it is matched to exactly one config and
-        exactly one batch, under that batch's own lock, exactly as a single `ingest-file` call would.
+        exactly one batch, under that batch's own lock, exactly as a single `run --module FILE_LOAD --key ...` call would.
         This only spares the caller from enumerating objects and invoking the pipeline once per file.
         A problem listing one location, or a technical failure on one object, is recorded and does not
         stop the rest of the sweep.

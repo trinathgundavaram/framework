@@ -21,8 +21,8 @@ src/framework/
   db.py                   init-db, advisory locks
   config.py               configuration rows, filename templates, validator
   period_sql.py           report-period SQL by name
-  modules.py              module dispatcher: a name (BATCH_CREATION, FILE_LOAD, RULES_TRIGGER, ...) selects the service
-  batches.py              create-batches, intake, CRC/extract rows
+  modules.py              module dispatcher: a name (BATCH_CREATION, FILE_LOAD, RULES_TRIGGER) selects the service
+  batches.py              batch creation (scheduled + ad-hoc), CRC/extract rows
   ingest.py               file pipeline (single object or a path sweep) + resolution decision tables
   load.py                 file reading, staging (pandas/COPY or Spark), core swap
   overrides.py            REUSE decisions: apply and expire
@@ -79,7 +79,7 @@ The environment variable is `FRAMEWORK_<NAME>`; the job argument is `--set <NAME
 
 ### Report periods
 
-`create-batches --period <NAME>` picks a statement from `src/framework/period_sql.py`:
+`run --module BATCH_CREATION --period <NAME>` picks a statement from `src/framework/period_sql.py`:
 `SAME_DAY`, `PREV_DAY`, `PREV_N_DAYS` (`--lookback-days`), `PREV_WEEK_SAME_DAY` (`--lookback-weeks`), `PREV_CALENDAR_WEEK`, `CURRENT_CALENDAR_MONTH`, `PREV_CALENDAR_MONTH`, `ROLLING_1_MONTH`, `PREV_CALENDAR_QUARTER`, `PREV_CALENDAR_YEAR`.
 
 A project with its own calendar ships a file and passes it with `--period-file`:
@@ -150,17 +150,18 @@ Python 3.10+ and PostgreSQL 14+ with `btree_gist` (tested on 16). `TEST_METADATA
 4. **Schedule the project's jobs** (EventBridge / Step Functions / Glue triggers), for example:
 
    ```bash
-   # monthly, 06:00 on the 1st
-   framework create-batches --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
+   # monthly, 06:00 on the 1st: routine batches AND this project's pending ad-hoc requests, one trigger
+   framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
    # every 15 minutes: close the runs whose data is complete, then generate their extracts
    framework evaluate-extracts --project PRJA --set EXTRACT_GATING_MODE=STRICT_ALL_PASS
    # the next step of the project's chain reads the closed extract rows
    # (Combine_Btch_ID_List, Regenerate_Required_Ind) and builds the submission
-   # S3 event -> ingest-file (one object); or poll with ingest-path (every object waiting, one or all
-   # configured locations); also polling -> process-intake, process-decisions, notify
+   # S3 event -> run --module FILE_LOAD --bucket ... --key ... (one object); or poll with
+   # run --module FILE_LOAD (every object waiting, one or all configured locations);
+   # also polling -> process-decisions, notify
    ```
 
-   A missed `create-batches` run is recreated with `--as-of <missed date>`: the period follows that date; `Btch_ID` carries the actual creation date.
+   A missed `BATCH_CREATION` run is recreated with `--as-of <missed date>`: the period follows that date; `Btch_ID` carries the actual creation date.
 
 Filename template example (literal text plus exactly one of each placeholder, separated by literals):
 
@@ -175,15 +176,11 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 | Command | Purpose | Typical trigger |
 |---|---|---|
 | `init-db` | Schema (once) + event vocabulary | Deploy |
-| `run --module NAME [module parameters]` | Run one module by name: `BATCH_CREATION`, `BATCH_INTAKE`, `FILE_LOAD`, `RULES_TRIGGER` (see below). One Glue job / Step Functions state can start any of them | Any schedule or event |
+| `run --module NAME [module parameters]` | Run one module by name: `BATCH_CREATION`, `FILE_LOAD`, `RULES_TRIGGER` (see below). One Glue job / Step Functions state can start any of them | Any schedule or event |
 | `list-modules` | Module names, aliases and parameters (no database needed) | Ops |
 | `show-config` | Settings with value and source; database target (no password) | Ops |
 | `test-connection` | Connect and check the schema; exit 1 if not initialised | Deploy / ops |
 | `validate-config` | Configuration checks; exit 1 on errors, logs `CONFIG_VALIDATION_FAILED` | CI / before activating config |
-| `create-batches --project --run-type --period [--table] [--period-file] [--lookback-days] [--lookback-weeks]` | Batches of one project / ROUTINE run type for the period of the run date (one set per run date, D-77) | Project schedule |
-| `process-intake` | Ad-hoc intake: create the batches of today's run date for every open request window (D-79) | Poll |
-| `ingest-file --bucket --key [--version-id]` | One inbound object end to end | S3 event |
-| `ingest-path [--bucket --prefix]` | Every object waiting at one location, or - with no `--bucket`/`--prefix` - at every active file config's inbound location. Each object still resolves to exactly one config and one batch (D-26, D-33); this just saves enumerating objects and calling `ingest-file` once per file | Poll, or after a bulk drop |
 | `process-decisions` | Apply approved `REUSE` overrides and remove the ones that ran out | Poll |
 | `evaluate-extracts [--project] [--table] [--run-type]` | Refresh the runs past their SLA hold, close the AUTO-eligible ones, list the runs needing regeneration | Project schedule |
 | `refresh-extract --extract-id` | Recount / combine / evaluate one run | Manual |
@@ -195,20 +192,26 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 
 ### Calling a module by name
 
-`framework run --module <NAME>` identifies the module from its name (case-insensitive; `-` and `_` are interchangeable, so `file-load` = `FILE_LOAD`), checks that the parameters belong to it, and calls the service that owns the work. An unknown module, a missing required parameter or a parameter the module does not take is exit 2 and nothing runs. The output is `{"module": ..., "result": ...}`; `create-batches`, `process-intake`, `ingest-file` and `ingest-path` are the same modules under fixed names and behave as before.
+`framework run --module <NAME>` identifies the module from its name (case-insensitive; `-` and `_` are interchangeable, so `file-load` = `FILE_LOAD`), checks that the parameters belong to it, and calls the service that owns the work. An unknown module, a missing required parameter or a parameter the module does not take is exit 2 and nothing runs. The output is `{"module": ..., "result": ...}`. Batch creation (routine and ad-hoc) and file loading have no other entry point - there is no separate `create-batches` / `process-intake` / `ingest-file` / `ingest-path` command; `run --module BATCH_CREATION` / `run --module FILE_LOAD` is it.
 
 | Module | Does | Parameters |
 |---|---|---|
-| `BATCH_CREATION` | Create the batches of one project / ROUTINE run type for the period of the run date | `--project --run-type --period` · `[--table] [--period-file] [--lookback-days] [--lookback-weeks]` |
-| `BATCH_INTAKE` | Create the batches of every open ad-hoc request window | none |
+| `BATCH_CREATION` | One project, both kinds, in one call: routine batches (when `--run-type`/`--period` name a ROUTINE run type) *and* that project's pending ad-hoc intake requests (always attempted, project-scoped; scoped further to the run type when it names an ADHOC one) | `--project` · `[--run-type] [--period] [--table] [--period-file] [--lookback-days] [--lookback-weeks]` |
 | `FILE_LOAD` | Load inbound files: one object, one location, or every configured location | `--bucket --key [--version-id]` (one object) · `--bucket --prefix` (one location) · none (every configured location) |
 | `RULES_TRIGGER` | Run the PERIOD_LEVEL rules now (recount + combine + rules, `MANUAL_REFRESH`) for one extract, or for the open extracts of a scope. A closed extract is skipped, never recombined. Exit 1 if a rule fails or errors | `--extract-id`, or `--project [--table] [--run-type]` |
 
 ```bash
 framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
+framework run --module BATCH_CREATION --project PRJA                       # ad-hoc sweep only, no routine run
+framework run --module BATCH_CREATION --project PRJA --run-type ADHOC      # ad-hoc sweep scoped to that run type
 framework run --module FILE_LOAD --bucket inbound --key prja/in/<file>
 framework run --module RULES_TRIGGER --extract-id 12
 ```
+
+`BATCH_CREATION` is the single, per-project trigger for both kinds of batch creation (Glue job
+argument, EventBridge rule, cron line): it creates that project's routine batches and also picks up
+anything sitting in `ComplianceRequestInTake` for it, without a second trigger and without touching
+other projects' rows of either kind.
 
 From Python: `app.run_module("RULES_TRIGGER", {"project": "PRJA"})` returns a `ModuleOutcome(module, result, exit_code)`. To add a module, write one handler in `modules.py` that calls the owning service and register it in `MODULES` - the CLI, `list-modules` and parameter checks pick it up.
 
@@ -241,7 +244,7 @@ The framework applies GATE/ANNOTATE itself (`FILE_RULES_MODE`, `PERIOD_RULES_MOD
 
 ## Implementation status and open items
 
-**Implemented and tested:** every flow in design §7, the §8 decision tables, §9 templates, §10 promotion and combine, §11 eligibility and close, §12 locks and idempotency, the three override types (D-74), the per-run-date grain (D-77), ad-hoc request windows (D-79), the validator, notifications, the `ingest-path` multi-file/multi-config/multi-batch sweep, and health.
+**Implemented and tested:** every flow in design §7, the §8 decision tables, §9 templates, §10 promotion and combine, §11 eligibility and close, §12 locks and idempotency, the three override types (D-74), the per-run-date grain (D-77), ad-hoc request windows (D-79), the validator, notifications, the `FILE_LOAD` multi-file/multi-config/multi-batch sweep, and health.
 
 **Not yet verified:**
 - **Spark engine** (`LOAD_ENGINE=SPARK`): written against PySpark 3.x but not run here; test on Glue/Spark before enabling.

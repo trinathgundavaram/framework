@@ -5,6 +5,7 @@ parameters; the dispatcher identifies the module, checks the parameters and call
 A single Glue job / Step Functions state / cron line can therefore run any module:
 
     framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
+    framework run --module BATCH_CREATION --project PRJA                        # ad-hoc intake sweep only
     framework run --module FILE_LOAD --bucket inbound --key prja/in/<file>      # one object
     framework run --module FILE_LOAD --bucket inbound --prefix prja/in/         # one location
     framework run --module FILE_LOAD                                            # every configured location
@@ -18,22 +19,25 @@ From code (a Lambda, a notebook, another job):
     outcome.result, outcome.exit_code
 
 Modules
-  BATCH_CREATION  create the batches of one project / ROUTINE run type for the period of the run date
-  BATCH_INTAKE    create the batches of the pending ad-hoc requests (ComplianceRequestInTake)
+  BATCH_CREATION  one project's batches, both kinds, in one call:
+                    - routine (ROUTINE run type + --period): the batches of the period of the run date
+                    - ad-hoc (always, whether or not --run-type/--period are given): processes that
+                      project's pending ComplianceRequestInTake rows
   FILE_LOAD       load inbound files: one object, one location, or every configured location
   RULES_TRIGGER   run the period-level rules of one extract, or of the open extracts of a scope
 
-Names are case-insensitive and `-` / `_` are interchangeable (`file-load` = `FILE_LOAD`). An unknown
-module, a missing required parameter or a parameter the module does not take is a ConfigError (exit 2),
-so a typo never silently runs the wrong thing. The dispatcher holds no business logic and no SQL: it
-only maps a name to the service that already owns the work (`batches`, `ingest`, `extract`), the same
-split as `app.py`.
+Names are case-insensitive and `-` / `_` are interchangeable (`file-load` = `FILE_LOAD`) - that is the
+only name normalisation; there are no alternate names for a module. An unknown module, a missing
+required parameter or a parameter the module does not take is a ConfigError (exit 2), so a typo never
+silently runs the wrong thing. The dispatcher holds no business logic and no SQL: it only maps a name
+to the service that already owns the work (`batches`, `ingest`, `extract`), the same split as `app.py`.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
+from . import config as cfgmod
 from .common import ConfigError
 
 
@@ -74,15 +78,42 @@ def _key(name: str) -> str:
 
 
 # ============================================================================ handlers
+@dataclass
+class BatchCreationSummary:
+    """One BATCH_CREATION call's work for one project: the routine batches it created (only when
+    --run-type/--period were given, and that run type is ROUTINE) and the ad-hoc intake requests it
+    processed (always attempted, scoped to the project and, for an ADHOC --run-type, to that run type
+    too). `scheduled` is None when no routine creation was requested this call."""
+    scheduled: Optional[Any] = None      # batches.ScheduleSummary
+    adhoc: Optional[Any] = None          # batches.IntakeSummary
+
+
 def _batch_creation(app, p: dict) -> ModuleOutcome:
-    s = app.create_batches(project_cd=p["project"], table_nm=p.get("table"), run_ty=p["run_type"],
-                           period=p["period"], period_file=p.get("period_file"),
-                           lookback_days=p.get("lookback_days"), lookback_weeks=p.get("lookback_weeks"))
-    return ModuleOutcome("BATCH_CREATION", s, 1 if s.errors else 0)
-
-
-def _batch_intake(app, p: dict) -> ModuleOutcome:
-    return ModuleOutcome("BATCH_INTAKE", app.intake.run(), 0)
+    project, run_type = p["project"], p.get("run_type")
+    period_args = ("period", "period_file", "lookback_days", "lookback_weeks")
+    wants_period = any(k in p for k in period_args)
+    scheduled = adhoc_run_ty = None
+    if run_type:
+        rt = cfgmod.run_type(app.conn, run_type)
+        if rt is None or not rt.active:
+            raise ConfigError(f"run type {run_type} is unknown or inactive")
+        if rt.run_category_cd == "ROUTINE":
+            if "period" not in p:
+                raise ConfigError("BATCH_CREATION needs --period for a ROUTINE run type")
+            scheduled = app.create_batches(project_cd=project, table_nm=p.get("table"), run_ty=run_type,
+                                           period=p["period"], period_file=p.get("period_file"),
+                                           lookback_days=p.get("lookback_days"),
+                                           lookback_weeks=p.get("lookback_weeks"))
+        else:                                                  # ADHOC: the run type only scopes the intake sweep
+            if wants_period:
+                raise ConfigError(f"run type {run_type} is ADHOC; --period/--period-file/--lookback-* "
+                                  "only apply to a ROUTINE run type")
+            adhoc_run_ty = run_type
+    elif wants_period:
+        raise ConfigError("BATCH_CREATION: --period/--period-file/--lookback-* need --run-type")
+    adhoc = app.intake.run(project_cd=project, run_ty=adhoc_run_ty)   # always attempted, project-scoped
+    errors = bool(scheduled and scheduled.errors) or bool(adhoc.failed)
+    return ModuleOutcome("BATCH_CREATION", BatchCreationSummary(scheduled, adhoc), 1 if errors else 0)
 
 
 def _file_load(app, p: dict) -> ModuleOutcome:
@@ -115,23 +146,23 @@ _SCOPE = (Param("project", help="project code"), Param("table", help="table name
 
 MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
     ModuleSpec(
-        "BATCH_CREATION", "create the batches of one project / ROUTINE run type for the period of the run date",
-        required=(Param("project"), Param("run_type"), Param("period", help="name in period_sql.py")),
-        optional=(Param("table"), Param("period_file", help="project .py file defining PERIOD_SQL"),
+        "BATCH_CREATION",
+        "one project's batches: routine batches for a ROUTINE run type and period, and that project's "
+        "pending ad-hoc intake requests - both in one call, scoped to --project",
+        required=(Param("project"),),
+        optional=(Param("run_type"), Param("period", help="ROUTINE run types only: name in period_sql.py"),
+                  Param("table"), Param("period_file", help="project .py file defining PERIOD_SQL"),
                   Param("lookback_days", int), Param("lookback_weeks", int)),
-        handler=_batch_creation, aliases=("CREATE_BATCHES", "BATCHES", "BATCH")),
-    ModuleSpec(
-        "BATCH_INTAKE", "create the batches of the pending ad-hoc requests",
-        required=(), optional=(), handler=_batch_intake, aliases=("INTAKE", "PROCESS_INTAKE", "ADHOC_BATCHES")),
+        handler=_batch_creation),
     ModuleSpec(
         "FILE_LOAD", "load inbound files: one object (--bucket --key), one location (--bucket --prefix), "
                      "or every configured location (no arguments)",
         required=(), optional=(Param("bucket"), Param("key"), Param("prefix"), Param("version_id")),
-        handler=_file_load, aliases=("INGEST", "FILE_INGEST", "LOAD", "INGEST_FILE", "INGEST_PATH")),
+        handler=_file_load),
     ModuleSpec(
         "RULES_TRIGGER", "run the period-level rules of one extract, or of the open extracts of a scope",
         required=(), optional=(*_SCOPE, Param("extract_id", int)),
-        handler=_rules_trigger, aliases=("RULES", "TRIGGER_RULES", "RUN_RULES")),
+        handler=_rules_trigger),
 )}
 _LOOKUP: dict[str, str] = {}
 for _spec in MODULES.values():

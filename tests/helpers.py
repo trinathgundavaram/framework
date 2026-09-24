@@ -81,7 +81,7 @@ def seed_config(conn, *, sources=("S1", "S2"), sla=2, allow_zero=0, has_header=1
 
 
 def create_batches(app, period="PREV_CALENDAR_MONTH", **kw):
-    """What the project's scheduled create-batches job does."""
+    """What the routine half of the project's scheduled BATCH_CREATION job does."""
     return app.create_batches(project_cd="PRJA", run_ty="MONTHLY", period=period, **kw)
 
 

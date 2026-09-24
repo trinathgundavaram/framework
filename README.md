@@ -16,26 +16,24 @@ generates the extract afterwards. PostgreSQL + Python; runs locally or as AWS Gl
 
 | In tables (5 config + event vocabulary) | Outside tables |
 |---|---|
-| `ComplianceSourceSystem`, `ComplianceRunType` (incl. `Carry_Fwd_Ind`), `ComplianceDataSetSourceXwalk` (which project/table/source/run type apply, and when), `ComplianceSourceFileConfig` (file contract, paths, targets, recipients), `ComplianceRuleBinding` | Database connection: `.env` locally, Secrets Manager in AWS · Settings: `--set` job arguments > environment > `.env` · Report period: `create-batches --period <NAME>` (`period_sql.py`) · Gating mode and automatic close: arguments of the project's `evaluate-extracts` job |
+| `ComplianceSourceSystem`, `ComplianceRunType` (incl. `Carry_Fwd_Ind`), `ComplianceDataSetSourceXwalk` (which project/table/source/run type apply, and when), `ComplianceSourceFileConfig` (file contract, paths, targets, recipients), `ComplianceRuleBinding` | Database connection: `.env` locally, Secrets Manager in AWS · Settings: `--set` job arguments > environment > `.env` · Report period: `run --module BATCH_CREATION --period <NAME>` (`period_sql.py`) · Gating mode and automatic close: arguments of the project's `evaluate-extracts` job |
 
 ```bash
 pip install -e ".[dev]"
 cp .env.example .env                      # database + local settings
 framework init-db
-framework create-batches --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
-framework ingest-file --bucket inbound --key prja/in/PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.txt
-framework ingest-path                           # sweep every configured inbound location in one call
+framework list-modules                                                       # every module, its parameters
+framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
+framework run --module BATCH_CREATION --project PRJA                         # that project's ad-hoc requests only
+framework run --module FILE_LOAD --bucket inbound --key prja/in/PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.txt
+framework run --module FILE_LOAD                                              # sweep every configured inbound location
 framework evaluate-extracts --project PRJA      # closes the runs whose data is complete
 ```
 
-Every job can also be started by **module name** - one entry point, the name picks what runs:
-
-```bash
-framework list-modules                                                       # names, aliases, parameters
-framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
-framework run --module FILE_LOAD --bucket inbound --prefix prja/in/          # or --key <object>; no args = every location
-framework run --module RULES_TRIGGER --project PRJA --run-type MONTHLY       # or --extract-id 12
-```
+Every batch-creation and file-loading job is started through `run --module NAME` (modules.py) - one
+entry point per concern, the name picks what runs, and everything is scoped to `--project` where that
+applies. There is no separate `create-batches` / `process-intake` / `ingest-file` / `ingest-path`
+command; `BATCH_CREATION` and `FILE_LOAD` are it.
 
 ---
 

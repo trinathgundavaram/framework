@@ -307,7 +307,7 @@ def test_correction_needs_its_own_override_type_and_expires(env, conn):
 def test_process_path_scans_one_location_multiple_configs_and_batches(env, conn):
     """Two files for two different sources - different configs, different batches - sitting in the
     same inbound location are both picked up and promoted by one process_path() call. Each file is
-    still resolved to exactly one config and one batch (D-26), same as a separate ingest-file each."""
+    still resolved to exactly one config and one batch (D-26), same as a separate FILE_LOAD call each."""
     app, *_ = env
     put_file(app, file_name("S1"), ["1|1|a"])
     put_file(app, file_name("S2"), ["2|2|b"])

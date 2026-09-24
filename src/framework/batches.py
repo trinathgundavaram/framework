@@ -1,7 +1,7 @@
 """Batches: CRC / extract-row creation (§5.2), scheduled batch creation (P2) and ad-hoc intake (P4).
 
 Scheduling lives outside the framework (EventBridge / Step Functions / cron). Each scheduled run calls
-`create-batches` for one project and run type, naming the report-period SQL to use (period_sql.py).
+`run --module BATCH_CREATION` for one project and run type, naming the report-period SQL to use (period_sql.py).
 A missed run is re-created by running the same command with `--as-of <missed date>`.
 
 A batch is one (project, table, source, run type, report period, **run date**): a run type whose
@@ -217,7 +217,10 @@ class IntakeProcessor:
         self.settings = settings
         self.logger = EventLogger(conn, clock)
 
-    def run(self) -> IntakeSummary:
+    def run(self, project_cd: Optional[str] = None, run_ty: Optional[str] = None) -> IntakeSummary:
+        """Sweep pending ad-hoc requests. `BATCH_CREATION` (modules.py) always calls this with
+        `project_cd` set, so one project's trigger only ever touches that project's requests; pass
+        neither argument to sweep every project (a one-off, unscoped run)."""
         summary = IntakeSummary(run_date=self.clock.today(self.settings.business_tz))
         handled: set[str] = set()
         while True:
@@ -228,8 +231,9 @@ class IntakeProcessor:
                         """SELECT * FROM ComplianceRequestInTake
                             WHERE Intake_Stat IN ('NEW','IN_PROGRESS') AND Req_Start_Dt_Key <= %s
                               AND NOT (Intake_ID = ANY(%s))
+                              AND (%s::text IS NULL OR Project_Cd = %s) AND (%s::text IS NULL OR Run_Ty = %s)
                             ORDER BY Requested_Dtts, Intake_ID LIMIT 1 FOR UPDATE SKIP LOCKED""",
-                        (summary.run_date, list(handled))).fetchone()
+                        (summary.run_date, list(handled), project_cd, project_cd, run_ty, run_ty)).fetchone()
                     if row is None:
                         return summary
                     current = row["intake_id"]

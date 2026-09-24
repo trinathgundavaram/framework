@@ -2,7 +2,7 @@
 
 The scheduled job for a project names the period to use:
 
-    framework create-batches --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
+    framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
 
 A project can ship its own list instead: a .py file that defines PERIOD_SQL in the same shape,
 passed with `--period-file path/to/project_periods.py`.

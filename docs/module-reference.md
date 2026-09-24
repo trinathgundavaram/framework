@@ -47,8 +47,8 @@ What each file in `src/framework/` does, what it owns, and what it leaves to oth
    ▼
  app.py (App: one connection + services; wiring only)
    │
-   ├─ modules.py    module dispatcher: name -> BATCH_CREATION / BATCH_INTAKE / FILE_LOAD / RULES_TRIGGER
-   ├─ batches.py    create-batches (period_sql.py), ad-hoc intake windows
+   ├─ modules.py    module dispatcher: name -> BATCH_CREATION / FILE_LOAD / RULES_TRIGGER
+   ├─ batches.py    batch creation (period_sql.py), ad-hoc intake windows
    ├─ ingest.py     file pipeline (one object or a path sweep) + §8 decision tables ──► load.py (read, stage, swap)
    ├─ overrides.py  REUSE decisions: apply and expire
    ├─ extract.py    eligibility, refresh/combine, close, SLA sweep
@@ -68,16 +68,14 @@ What each file in `src/framework/` does, what it owns, and what it leaves to oth
 
 | Command | Flow (§7) | Modules, in order |
 |---|---|---|
-| `run --module NAME` | any | `cli` → `modules.run_module` → the module's service (rows below); `create-batches`, `process-intake`, `ingest-file`, `ingest-path` are these same modules under fixed names |
+| `run --module NAME` | any | `cli` → `modules.run_module` → the module's service (rows below) |
+| `run --module BATCH_CREATION` | P2, P4 | `modules` → `App.create_batches` for the project/run type/period when a ROUTINE run type is given, and always `batches.IntakeProcessor.run(project_cd=..., run_ty=...)` for that project - one project-scoped call for both routine and ad-hoc batch creation |
+| `run --module FILE_LOAD` | P5, P6 | `modules` → `ingest.IngestPipeline.process_file` (`--key`) or `process_path` (`--prefix`, or every configured location) |
 | `list-modules` | ops | `cli` → `modules.describe_modules` (no settings, no database) |
 | `init-db` | deploy | `cli` → `settings.connect` → `db.init_db` → `sql/schema.sql`, `sql/seed.sql` |
 | `show-config` | ops | `cli` → `settings.describe` / `settings.db_conninfo` (no password) |
 | `test-connection` | ops | `cli` → `settings.connect` → `db.schema_exists` |
 | `validate-config` | P1 | `config.validate_all` → `load.columns` |
-| `create-batches` | P2 | `batches.create_batches` → `batches.compute_period` (`period_sql.py` or `--period-file`) → `batches.create_batch` |
-| `process-intake` | P4 | `batches.IntakeProcessor` → `batches.create_batch` |
-| `ingest-file` | P5, P6 | `ingest.IngestPipeline` → `config.TemplateMatcher` → `adapters` (store) → `load.stage` → `adapters` (rules) → `ingest.decide` → `load.swap` → `extract.ExtractControlService.refresh` (early completion or regenerate flag) |
-| `ingest-path` | P5, P6 | `ingest.IngestPipeline.process_path` → `adapters` (store `list_objects`) → `IngestPipeline.process_file` per object found (same chain as `ingest-file`, once per object; several objects may resolve to different configs and different batches, D-26/D-33) |
 | `process-decisions` | P7 | `overrides.DecisionProcessor` → `extract` refresh |
 | `evaluate-extracts` | P10 | `extract.ExtractEvaluator` → `ExtractControlService.refresh` / `close` |
 | `refresh-extract` | P9 | `extract.ExtractControlService.refresh` (`MANUAL_REFRESH`) |
@@ -96,7 +94,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 - Parses arguments (options go **after** the command), loads `Settings` with `--set NAME=VALUE` overrides and `--env-file`, builds the `App`, calls one service, prints JSON, sets the exit code.
 - `init-db`, `show-config` and `test-connection` run without the `App` (the schema may not exist yet).
 - `validate-config` writes one `CONFIG_VALIDATION_FAILED` audit event when errors are found.
-- Scope arguments `--project / --table / --run-type` select what `create-batches` and `evaluate-extracts` work on, so one scheduled job per project carries that project's settings.
+- Scope arguments `--project / --table / --run-type` select what `run --module BATCH_CREATION` and `evaluate-extracts` work on, so one scheduled job per project carries that project's settings.
 
 ### `app.py`
 - `App.from_settings`: opens the connection, checks the schema, builds the object store and rules engine.
@@ -128,9 +126,9 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 - **Out of scope:** schedules, periods, time zones — these are job settings now.
 
 ### `modules.py`
-- The dispatcher behind `framework run --module NAME`: `MODULES` (name → `ModuleSpec` with required/optional `Param`s and a handler), `resolve_module` (case-insensitive, `-`/`_` interchangeable, aliases such as `create-batches` → `BATCH_CREATION`), `run_module(app, name, params)` → `ModuleOutcome(module, result, exit_code)`, `describe_modules`.
+- The dispatcher behind `framework run --module NAME`: `MODULES` (name → `ModuleSpec` with required/optional `Param`s and a handler), `resolve_module` (case-insensitive, `-`/`_` interchangeable - no other name variants), `run_module(app, name, params)` → `ModuleOutcome(module, result, exit_code)`, `describe_modules`.
 - Validates before anything runs: unknown module, missing required parameter, parameter the module does not take, wrong type (`ConfigError`, exit 2). Handlers only map a name to the service that owns the work (`batches`, `ingest`, `extract`) - no SQL, no business rules; a new module is one handler plus one `MODULES` entry.
-- `BATCH_CREATION` → `App.create_batches`; `BATCH_INTAKE` → `IntakeProcessor.run`; `FILE_LOAD` → `process_file` (`--key`) or `process_path` (`--prefix`, or every configured location); `RULES_TRIGGER` → `ExtractControlService.trigger_rules`.
+- `BATCH_CREATION` (the merged module, `BatchCreationSummary(scheduled, adhoc)`) → `App.create_batches` when `--run-type`/`--period` name a ROUTINE run type (`scheduled`, else `None`), and always `IntakeProcessor.run(project_cd=..., run_ty=...)` for that project (`adhoc`) - one call covers both routine and ad-hoc batch creation for a project, so a project needs only one trigger. `FILE_LOAD` → `process_file` (`--key`) or `process_path` (`--prefix`, or every configured location); `RULES_TRIGGER` → `ExtractControlService.trigger_rules`.
 
 ### `batches.py`
 - CRC and extract rows: `find_batch` / `find_extract` (per report period **and run date**), `get_batch`, `batches_of_extract`, `promoted_load` (the batch's current data, D-75), `create_batch` (idempotent per run date; skipped when the run is already closed).
@@ -145,7 +143,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 - `decide(ResolutionInput)` (§8): pure decision tables O-1 … O-5 (open batch) and C-1 … C-4 (closed batch); `required_override_ty(has_data)` says which override type a closed batch needs.
 - Batch selection (D-78): the open batch of the grain with the latest run date ≤ today; otherwise the most recent closed batch, which needs an approved, still-valid override. Without one the file is quarantined as `FILE_REJECTED_BATCH_CLOSED` — a **retryable** quarantine, so re-delivering the object after the approval reprocesses the same `Load_ID`.
 - `IngestPipeline.process_file` (P5): registers the object (C0 idempotency), matches the template, checks location, run type, effective crosswalk and batch, stages the file, runs FILE_LEVEL rules **when bindings exist** (mode `FILE_RULES_MODE`), resolves, promotes in the same transaction (superseding the previous `PROMOTED` load first, D-75), archives or quarantines, and handles replays and technical failures.
-- `IngestPipeline.process_path(bucket=None, prefix=None)`: lists objects at one location (`adapters.ObjectStore.list_objects`), or — with neither argument — at the distinct inbound location of every active file config (`_configured_locations`, de-duplicated, since several source configs commonly share one folder), and calls `process_file` once per object found. Each object still resolves to exactly one config and exactly one batch (D-26, D-33), under that batch's own lock, exactly as a separate `ingest-file` call would; a listing problem or a per-object technical failure is recorded on the returned `PathIngestSummary` and does not stop the rest of the sweep.
+- `IngestPipeline.process_path(bucket=None, prefix=None)`: lists objects at one location (`adapters.ObjectStore.list_objects`), or — with neither argument — at the distinct inbound location of every active file config (`_configured_locations`, de-duplicated, since several source configs commonly share one folder), and calls `process_file` once per object found. Each object still resolves to exactly one config and exactly one batch (D-26, D-33), under that batch's own lock, exactly as a separate `run --module FILE_LOAD --key ...` call would; a listing problem or a per-object technical failure is recorded on the returned `PathIngestSummary` and does not stop the rest of the sweep.
 - A file promoted into an open carried-forward batch clears `Reuse_Btch_ID` and logs `CARRY_FORWARD_REMOVED`; a promotion into a closed batch triggers the regenerate flag through the `on_late_promotion` hook.
 - `health()`: stale loads and quarantine counts by reason — `ingest.py` owns `ComplianceFileLoad` (§7), so its health queries live here rather than in `app.py`.
 
@@ -205,8 +203,8 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 | `test_ingest.py` | Promotion, replacement, quarantine reasons, structural failures, duplicates, zero records, GATE / ANNOTATE, no bindings, technical failure and replay, closed-batch overrides (late arrival, correction, retry after approval), batch selection by run date, `process_path` (one location, every configured location, mixed outcomes, listing/technical errors that don't stop the sweep). |
 | `test_overrides.py` | `REUSE`: apply, invalid cases, pending until approved, expiry, replacement by a real file, reuse chains; `LATE_ARRIVAL` / `CORRECTION` rows are left to the pipeline. |
 | `test_extract.py` | Automatic close after the hold, STRICT partial and rule failures, BEST_EFFORT manual close with acknowledged warnings, zero data, deferred close on a locked batch, period-rule errors, sweep scope and `AUTO_CLOSE_EXTRACTS`, per-run-date holds, regenerate reporting. |
-| `test_modules.py` | Module identification (names, aliases, unknown), parameter checks before anything runs, each module end to end (batch creation, intake, file load one object / one location / every location, rules trigger by extract and by scope, closed extracts skipped), `run --module` and `list-modules` on the CLI. |
-| `test_config_cli.py` | Validator, notifications, CLI end to end (with `.env`, `--set` and `close-extract`), `ingest-path` end to end, the composed `health` report, rules adapter contract. |
+| `test_modules.py` | Module identification (names, aliases, unknown), parameter checks before anything runs, each module end to end (`BATCH_CREATION` routine + ad-hoc together, ad-hoc-only, ADHOC-run-type-scoped, per-project scoping for both halves; file load one object / one location / every location; rules trigger by extract and by scope, closed extracts skipped), `run --module` and `list-modules` on the CLI. |
+| `test_config_cli.py` | Validator, notifications, CLI end to end (with `.env`, `--set`, `run --module` and `close-extract`), the `FILE_LOAD` path sweep end to end, the composed `health` report, rules adapter contract. |
 
 ---
 

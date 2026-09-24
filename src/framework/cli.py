@@ -4,20 +4,23 @@ Any setting can be passed as a job argument with --set NAME=VALUE (see settings.
 definition per project carries its own period and gating configuration. The framework closes a run
 when its data is complete; the project's job chain generates the extract afterwards (D-76).
 
+Batch creation and file loading are both reached through `run --module NAME` (modules.py) - one
+project's routine + ad-hoc batches, or one/many inbound files - rather than through separate
+per-purpose commands, so a project needs only one trigger per concern.
+
 Examples:
   framework init-db
   framework show-config
   framework test-connection
   framework validate-config
-  framework create-batches --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH --as-of 2026-02-01
-  framework ingest-file --bucket inbound --key prja/in/PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.txt
-  framework ingest-path --bucket inbound --prefix prja/in/     # every object waiting at one location
-  framework ingest-path                                        # every object at every configured location
-  framework process-intake
-  framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
-  framework run --module FILE_LOAD --bucket inbound --prefix prja/in/     # or --key <object>, or no arguments
-  framework run --module RULES_TRIGGER --project PRJA --run-type MONTHLY  # or --extract-id 12
   framework list-modules
+  framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
+  framework run --module BATCH_CREATION --project PRJA               # ad-hoc intake sweep for PRJA only
+  framework run --module FILE_LOAD --bucket inbound --key prja/in/PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.txt
+  framework run --module FILE_LOAD --bucket inbound --prefix prja/in/     # every object waiting at one location
+  framework run --module FILE_LOAD                                        # every object at every configured location
+  framework run --module RULES_TRIGGER --project PRJA --run-type MONTHLY  # or --extract-id 12
+  framework process-decisions
   framework evaluate-extracts --project PRJA --set EXTRACT_GATING_MODE=BEST_EFFORT
   framework close-extract --extract-id 12 --closed-by jdoe --ack-warnings
 """
@@ -77,10 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("init-db", "apply schema and seed data")
     add("list-modules", "list the modules that 'run --module' can call, with their parameters")
-    sp = add("run", "run one module by name (BATCH_CREATION, BATCH_INTAKE, FILE_LOAD, RULES_TRIGGER)")
+    sp = add("run", "run one module by name (BATCH_CREATION, FILE_LOAD, RULES_TRIGGER)")
     sp.add_argument("--module", required=True, help="module name (see list-modules); case-insensitive")
     scope(sp)
-    sp.add_argument("--period", help="BATCH_CREATION: name in period_sql.py (or in --period-file)")
+    sp.add_argument("--period", help="BATCH_CREATION: ROUTINE run types only - name in period_sql.py (or --period-file)")
     sp.add_argument("--period-file", help="BATCH_CREATION: project .py file defining PERIOD_SQL")
     sp.add_argument("--lookback-days", type=int, help="BATCH_CREATION")
     sp.add_argument("--lookback-weeks", type=int, help="BATCH_CREATION")
@@ -92,20 +95,6 @@ def build_parser() -> argparse.ArgumentParser:
     add("show-config", "print resolved settings (with their source) and the database target")
     add("test-connection", "connect to the database and check the schema")
     add("validate-config", "validate the configuration tables and target tables")
-    sp = add("create-batches", "create the batches of one project/run type for the period of the run date")
-    scope(sp, project_required=True)
-    sp.add_argument("--period", required=True, help="name in period_sql.py (or in --period-file)")
-    sp.add_argument("--period-file", help="project .py file defining PERIOD_SQL")
-    sp.add_argument("--lookback-days", type=int)
-    sp.add_argument("--lookback-weeks", type=int)
-    add("process-intake", "process NEW intake requests")
-    sp = add("ingest-file", "process one inbound object")
-    sp.add_argument("--bucket", required=True)
-    sp.add_argument("--key", required=True)
-    sp.add_argument("--version-id")
-    sp = add("ingest-path", "process every object at one location, or at every configured inbound location")
-    sp.add_argument("--bucket", help="with --prefix: scan this one location instead of every configured one")
-    sp.add_argument("--prefix")
     add("process-decisions", "apply approved reuse overrides and remove expired ones")
     scope(add("evaluate-extracts", "refresh extracts past their SLA hold and close the eligible ones"))
     sp = add("refresh-extract", "recount / combine / evaluate one extract")
@@ -168,25 +157,6 @@ def _dispatch(app: App, args) -> int:
                                                 "version_id", "extract_id")}
         out = run_module(app, args.module, params)
         _print({"module": out.module, "result": out.result})
-        return out.exit_code
-    # the commands below are the same modules with fixed names (one code path, see modules.py)
-    if c == "create-batches":
-        out = run_module(app, "BATCH_CREATION", {
-            "project": args.project, "table": args.table, "run_type": args.run_type, "period": args.period,
-            "period_file": args.period_file, "lookback_days": args.lookback_days,
-            "lookback_weeks": args.lookback_weeks})
-        _print(out.result)
-        return out.exit_code
-    if c == "process-intake":
-        _print(run_module(app, "BATCH_INTAKE").result)
-        return 0
-    if c == "ingest-file":
-        _print(run_module(app, "FILE_LOAD", {"bucket": args.bucket, "key": args.key,
-                                             "version_id": args.version_id}).result)
-        return 0
-    if c == "ingest-path":
-        out = run_module(app, "FILE_LOAD", {"bucket": args.bucket, "prefix": args.prefix})
-        _print(out.result)
         return out.exit_code
     if c == "process-decisions":
         s = app.decisions.run()

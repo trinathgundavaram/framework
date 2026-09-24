@@ -78,15 +78,16 @@ def test_cli_end_to_end(conn, tmp_path, monkeypatch, capsys):
     assert shown["settings"]["object_store"] == {"value": "local", "source": ".env"}
     assert shown["settings"]["extract_gating_mode"]["source"] == "argument"
     assert "password" not in shown["database"] and shown["database"]["schema"] == SCHEMA
-    assert main(["create-batches", "--project", "PRJA", "--run-type", "MONTHLY", "--period", "PREV_CALENDAR_MONTH",
-                 "--as-of", "2026-02-01T13:00:00+00:00"]) == 0
-    assert json.loads(capsys.readouterr().out)["created"] == 2
-    assert main(["create-batches", "--project", "PRJA", "--run-type", "MONTHLY", "--period", "NOPE"]) == 2
+    assert main(["run", "--module", "BATCH_CREATION", "--project", "PRJA", "--run-type", "MONTHLY",
+                 "--period", "PREV_CALENDAR_MONTH", "--as-of", "2026-02-01T13:00:00+00:00"]) == 0
+    assert json.loads(capsys.readouterr().out)["result"]["scheduled"]["created"] == 2
+    assert main(["run", "--module", "BATCH_CREATION", "--project", "PRJA", "--run-type", "MONTHLY",
+                 "--period", "NOPE"]) == 2
     app, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
     key = put_file(app, file_name("S1"), ["1|1|a"])
     capsys.readouterr()
-    assert main(["ingest-file", "--bucket", "inbound", "--key", key]) == 0
-    assert json.loads(capsys.readouterr().out)["result"] == "PROMOTED"
+    assert main(["run", "--module", "FILE_LOAD", "--bucket", "inbound", "--key", key]) == 0
+    assert json.loads(capsys.readouterr().out)["result"]["result"] == "PROMOTED"
     ext = q1(conn, "SELECT Extract_ID FROM ComplianceExtractControl")["extract_id"]
     capsys.readouterr()
     assert main(["close-extract", "--extract-id", str(ext), "--closed-by", "me"]) == 2     # not eligible -> exit 2
@@ -103,14 +104,14 @@ def test_cli_end_to_end(conn, tmp_path, monkeypatch, capsys):
         "stale_loads", "quarantine_by_reason", "pending_reviews", "overrides_expiring_soon",
         "extracts_past_hold_not_closed", "regenerate_required"}
     assert main(["process-decisions"]) == 0
-    assert main(["process-intake"]) == 0
+    assert main(["run", "--module", "BATCH_CREATION", "--project", "PRJA"]) == 0  # ad-hoc sweep only
     assert main(["notify"]) == 0
     assert main(["show-config", "--set", "NOT_A_SETTING=1"]) == 2
 
 
-def test_cli_ingest_path(conn, tmp_path, monkeypatch, capsys):
-    """`ingest-path` end to end: one CLI call picks up files for two different sources - two configs,
-    two batches - sitting at the same configured inbound location."""
+def test_cli_file_load_path(conn, tmp_path, monkeypatch, capsys):
+    """`run --module FILE_LOAD` with no `--key`: one CLI call picks up files for two different sources -
+    two configs, two batches - sitting at the same configured inbound location."""
     from .conftest import SCHEMA
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(f"FRAMEWORK_DB_DSN={os.environ['TEST_DATABASE_URL']}\n"
@@ -119,24 +120,24 @@ def test_cli_ingest_path(conn, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("FRAMEWORK_RULE_ENGINE", "none")
     assert main(["init-db"]) == 0
     seed_config(conn)
-    assert main(["create-batches", "--project", "PRJA", "--run-type", "MONTHLY", "--period", "PREV_CALENDAR_MONTH",
-                 "--as-of", "2026-02-01T13:00:00+00:00"]) == 0
+    assert main(["run", "--module", "BATCH_CREATION", "--project", "PRJA", "--run-type", "MONTHLY",
+                 "--period", "PREV_CALENDAR_MONTH", "--as-of", "2026-02-01T13:00:00+00:00"]) == 0
     app, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
     put_file(app, file_name("S1"), ["1|1|a"])
     put_file(app, file_name("S2"), ["2|2|b"])
 
     capsys.readouterr()
-    assert main(["ingest-path"]) == 0                        # no --bucket/--prefix: every configured location
-    out = json.loads(capsys.readouterr().out)
+    assert main(["run", "--module", "FILE_LOAD"]) == 0        # no --bucket/--prefix: every configured location
+    out = json.loads(capsys.readouterr().out)["result"]
     assert (out["scanned"], out["promoted"], out["errors"]) == (2, 2, [])
     assert out["locations"] == ["inbound/prja/in/"]
     assert {r["req_stat"] for r in qa(conn, "SELECT Req_Stat FROM ComplianceRequestControl")} == {"PROMOTED"}
 
     capsys.readouterr()                                       # nothing left to pick up
-    assert main(["ingest-path", "--bucket", "inbound", "--prefix", "prja/in/"]) == 0
-    assert json.loads(capsys.readouterr().out)["scanned"] == 0
+    assert main(["run", "--module", "FILE_LOAD", "--bucket", "inbound", "--prefix", "prja/in/"]) == 0
+    assert json.loads(capsys.readouterr().out)["result"]["scanned"] == 0
 
-    assert main(["ingest-path", "--bucket", "inbound"]) == 2   # --bucket without --prefix is rejected
+    assert main(["run", "--module", "FILE_LOAD", "--bucket", "inbound"]) == 2   # --bucket without --prefix
 
 
 def test_rule_engine_adapter_contract(conn):
