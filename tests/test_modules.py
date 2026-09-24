@@ -87,6 +87,32 @@ def test_batch_creation_module(conn, tmp_path):
     assert out.exit_code == 1 and out.result.errors                         # nothing effective: completed with problems
 
 
+def test_batch_creation_only_creates_for_the_input_project(conn, tmp_path):
+    """One trigger per project: PRJB has its own crosswalk rows, but a PRJA run never touches them."""
+    app, *_ = setup(conn, tmp_path)
+    with conn.transaction():
+        conn.execute("""INSERT INTO ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_Cd, Run_Ty,
+                          Effective_Start_Dt, Cmplnc_Vrsn)
+                        VALUES ('PRJB','tbl_y','S1','MONTHLY','2025-01-01','V2'),
+                               ('PRJB','tbl_y','S2','MONTHLY','2025-01-01','V2')""")
+    projects = lambda: sorted((r["project_cd"], r["src_cd"]) for r in qa(  # noqa: E731
+        conn, "SELECT Project_Cd, Src_Cd FROM ComplianceRequestControl"))
+
+    a = run_module(app, "BATCH_CREATION", BATCH_PARAMS)                       # PRJA trigger
+    assert a.result.created == 2 and projects() == [("PRJA", "S1"), ("PRJA", "S2")]
+    assert {r["project_cd"] for r in qa(conn, "SELECT Project_Cd FROM ComplianceExtractControl")} == {"PRJA"}
+
+    b = run_module(app, "BATCH_CREATION", {**BATCH_PARAMS, "project": "PRJB"})  # PRJB trigger
+    assert b.result.created == 2 and b.result.errors == []
+    assert sorted(r["btch_id"] for r in qa(conn, "SELECT Btch_ID FROM ComplianceRequestControl WHERE Project_Cd='PRJB'")) \
+        == ["20260201_PRJB_tbl_y_S1_MONTHLY_V2_1", "20260201_PRJB_tbl_y_S2_MONTHLY_V2_1"]
+    assert q1(conn, "SELECT count(*) n FROM ComplianceRequestControl WHERE Project_Cd='PRJA'")["n"] == 2   # untouched
+
+    none = run_module(app, "BATCH_CREATION", {**BATCH_PARAMS, "project": "PRJC"})   # unknown project: nothing created
+    assert none.exit_code == 1 and none.result.created == 0 and "PRJC" in none.result.errors[0]
+    assert q1(conn, "SELECT count(*) n FROM ComplianceRequestControl")["n"] == 4
+
+
 def test_batch_intake_module(conn, tmp_path):
     app, *_ = setup(conn, tmp_path)
     out = run_module(app, "BATCH_INTAKE")

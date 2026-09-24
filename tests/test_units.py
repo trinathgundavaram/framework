@@ -1,14 +1,14 @@
 """Pure unit tests (no database): templates, file reading, object store, eligibility, resolution, Btch_ID,
 Req_Stat transitions, settings and period SQL loading."""
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 import pytest
 
 from framework.adapters import LocalObjectStore, parse_uri
 from framework.batches import period_sql
 from framework.common import (ConfigError, FileRejected, InvalidStatusTransition, build_btch_id, check_transition,
-                              earliest_close_date)
+                              earliest_close_date, parse_as_of)
 from framework.config import FileConfig, MatchError, TemplateError, TemplateMatcher, parse_template, render
 from framework.extract import AUTO, MANUAL_ONLY, NOT_ELIGIBLE, EligibilityInput, compute_eligibility
 from framework.ingest import Action, IngestOutcome, PathIngestSummary, ResolutionInput, decide, required_override_ty
@@ -275,6 +275,45 @@ def test_hold(sla, expected):
 def test_hold_requires_positive_sla():
     with pytest.raises(ValueError):
         earliest_close_date(date(2026, 2, 1), 0)
+
+
+# ---------------------------------------------------------------- --as-of / business_tz
+def test_as_of_with_explicit_offset_is_honoured_exactly():
+    c = parse_as_of("2026-02-01T18:00:00+00:00", "America/Chicago")     # offset given: business_tz is ignored
+    assert c.now() == datetime(2026, 2, 1, 18, 0, tzinfo=timezone.utc)
+    assert c.today("America/Chicago") == date(2026, 2, 1)               # 12:00 CST
+
+
+def test_as_of_bare_date_is_midnight_in_business_tz_not_utc():
+    """A bare date used to be read as UTC midnight - the previous evening in Chicago (CST, UTC-6) -
+    which silently ran the wrong (December) report period. It must resolve to that calendar date."""
+    c = parse_as_of("2026-02-01", "America/Chicago")
+    assert c.now() == datetime(2026, 2, 1, 6, 0, tzinfo=timezone.utc)   # CST midnight = 06:00 UTC
+    assert c.today("America/Chicago") == date(2026, 2, 1)               # the intended run date
+    assert c.today("UTC") == date(2026, 2, 1)                           # not Jan 31 anywhere now
+
+
+def test_as_of_bare_timestamp_uses_business_tz_too():
+    c = parse_as_of("2026-02-01T09:30:00", "America/Chicago")           # no offset, has a time
+    assert c.now() == datetime(2026, 2, 1, 15, 30, tzinfo=timezone.utc)
+    assert c.today("America/Chicago") == date(2026, 2, 1)
+
+
+def test_as_of_default_business_tz_is_utc_unchanged():
+    c = parse_as_of("2026-02-01")                                       # business_tz omitted: old default
+    assert c.now() == datetime(2026, 2, 1, 0, 0, tzinfo=timezone.utc)
+
+
+def test_as_of_respects_dst_boundary():
+    # 2026-03-08 is the US spring-forward date; CDT (UTC-5) starts at 02:00 local that day
+    before = parse_as_of("2026-03-08", "America/Chicago")               # midnight is still CST (UTC-6)
+    assert before.now() == datetime(2026, 3, 8, 6, 0, tzinfo=timezone.utc)
+    after = parse_as_of("2026-03-09", "America/Chicago")                # next midnight is CDT (UTC-5)
+    assert after.now() == datetime(2026, 3, 9, 5, 0, tzinfo=timezone.utc)
+
+
+def test_as_of_none_returns_live_clock():
+    assert type(parse_as_of(None, "America/Chicago")).__name__ == "Clock"
 
 
 # ---------------------------------------------------------------- Req_Stat, settings, period SQL, job params

@@ -76,12 +76,22 @@ class FixedClock(Clock):
         self._at = at.astimezone(timezone.utc)
 
 
-def parse_as_of(value: str | None) -> Clock:
-    """`--as-of` accepts ISO-8601 (date or timestamp); naive values are treated as UTC."""
+def parse_as_of(value: str | None, business_tz: str = "UTC") -> Clock:
+    """`--as-of` accepts ISO-8601 (date or timestamp).
+
+    A value with an explicit UTC offset (`...+00:00`, `...Z`) is honoured exactly as given. A value
+    with **no** offset - including a bare date like `2026-02-01` - is interpreted in `business_tz`
+    (the job's `BUSINESS_TZ`, America/Chicago by default), not UTC: `--as-of 2026-02-01` means
+    midnight Feb 1 in that timezone, the same "today" a job actually running then would compute via
+    `Clock.today()`. Previously a bare date was read as UTC midnight, which is the previous evening in
+    Chicago and silently picked the wrong report period - this is what `business_tz` now prevents.
+    """
     if not value:
         return Clock()
     dt = datetime.fromisoformat(value.replace("Z", "+00:00"))  # py3.10 does not accept "Z"
-    return FixedClock(dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo(business_tz))
+    return FixedClock(dt)
 
 
 # ============================================================================ Btch_ID (design §4)

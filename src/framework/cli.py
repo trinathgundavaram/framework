@@ -129,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         settings = Settings.load(overrides=dict(args.settings), env_file=args.env_file)
         if args.cmd in ("init-db", "test-connection", "show-config"):
             return _no_app(args, settings)
-        with App.from_settings(settings, parse_as_of(args.as_of)) as app:
+        with App.from_settings(settings, parse_as_of(args.as_of, settings.business_tz)) as app:
             return _dispatch(app, args)
     except (FrameworkError, ValueError, LookupError) as e:
         log.error("%s: %s", type(e).__name__, e)
