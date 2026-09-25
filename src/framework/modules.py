@@ -52,7 +52,6 @@ class ModuleOutcome:
 class Param:
     name: str
     kind: type = str                 # str | int
-    help: str = ""
 
 
 @dataclass(frozen=True)
@@ -62,7 +61,6 @@ class ModuleSpec:
     required: tuple[Param, ...]
     optional: tuple[Param, ...]
     handler: Callable[[Any, dict], ModuleOutcome]
-    aliases: tuple[str, ...] = ()
 
     @property
     def params(self) -> dict[str, Param]:
@@ -141,8 +139,7 @@ def _rules_trigger(app, p: dict) -> ModuleOutcome:
 
 
 # ============================================================================ registry
-_SCOPE = (Param("project", help="project code"), Param("table", help="table name"),
-          Param("run_type", help="run type"))
+_SCOPE = (Param("project"), Param("table"), Param("run_type"))
 
 MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
     ModuleSpec(
@@ -150,8 +147,7 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
         "one project's batches: routine batches for a ROUTINE run type and period, and that project's "
         "pending ad-hoc intake requests - both in one call, scoped to --project",
         required=(Param("project"),),
-        optional=(Param("run_type"), Param("period", help="ROUTINE run types only: name in period_sql.py"),
-                  Param("table"), Param("period_file", help="project .py file defining PERIOD_SQL"),
+        optional=(Param("run_type"), Param("period"), Param("table"), Param("period_file"),
                   Param("lookback_days", int), Param("lookback_weeks", int)),
         handler=_batch_creation),
     ModuleSpec(
@@ -164,10 +160,6 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
         required=(), optional=(*_SCOPE, Param("extract_id", int)),
         handler=_rules_trigger),
 )}
-_LOOKUP: dict[str, str] = {}
-for _spec in MODULES.values():
-    for _n in (_spec.name, *_spec.aliases):
-        assert _LOOKUP.setdefault(normalize(_n), _spec.name) == _spec.name, f"duplicate module alias {_n}"
 
 
 def module_names() -> list[str]:
@@ -175,15 +167,15 @@ def module_names() -> list[str]:
 
 
 def resolve_module(name: str) -> ModuleSpec:
-    canonical = _LOOKUP.get(normalize(name))
-    if canonical is None:
+    spec = MODULES.get(normalize(name))
+    if spec is None:
         raise ConfigError(f"unknown module {name!r}; available: {', '.join(module_names())}")
-    return MODULES[canonical]
+    return spec
 
 
 def describe_modules() -> list[dict]:
-    """What `framework list-modules` prints: name, aliases, what it does and its parameters."""
-    return [{"module": m.name, "aliases": sorted(m.aliases), "description": m.description,
+    """What `framework list-modules` prints: name, what it does and its parameters."""
+    return [{"module": m.name, "description": m.description,
              "required": [p.name for p in m.required], "optional": [p.name for p in m.optional]}
             for m in MODULES.values()]
 

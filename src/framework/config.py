@@ -204,7 +204,8 @@ def parse_template(template: str) -> list[tuple[str, str]]:
         pos = m.end()
     if pos < len(template):
         parts.append(("lit", template[pos:]))
-    if "{" in "".join(t for k, t in parts if k == "lit") or "}" in "".join(t for k, t in parts if k == "lit"):
+    literal = "".join(t for k, t in parts if k == "lit")
+    if "{" in literal or "}" in literal:
         raise TemplateError(f"unbalanced braces in template {template!r}")
     names = [t for k, t in parts if k == "ph"]
     unknown = sorted(set(names) - set(PLACEHOLDERS))
@@ -250,7 +251,6 @@ def render(template: str, *, project: str, table: str, src: str, runty: str,
 
 class TemplateMatcher:
     def __init__(self, configs: Iterable[FileConfig], case_sensitive: bool = True):
-        self.case_sensitive = case_sensitive
         self._compiled: list[tuple[FileConfig, re.Pattern]] = []
         self.invalid: list[tuple[FileConfig, str]] = []
         for c in configs:
@@ -265,12 +265,7 @@ class TemplateMatcher:
         return [c for c, _ in self._compiled]
 
     def candidates(self, name: str) -> list[tuple[FileConfig, re.Match]]:
-        out = []
-        for c, rx in self._compiled:
-            m = rx.fullmatch(name)
-            if m:
-                out.append((c, m))
-        return out
+        return [(c, m) for c, rx in self._compiled if (m := rx.fullmatch(name))]
 
     def match(self, name: str) -> MatchResult:
         found = self.candidates(name)

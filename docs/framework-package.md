@@ -177,7 +177,7 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 |---|---|---|
 | `init-db` | Schema (once) + event vocabulary | Deploy |
 | `run --module NAME [module parameters]` | Run one module by name: `BATCH_CREATION`, `FILE_LOAD`, `RULES_TRIGGER` (see below). One Glue job / Step Functions state can start any of them | Any schedule or event |
-| `list-modules` | Module names, aliases and parameters (no database needed) | Ops |
+| `list-modules` | Module names and parameters (no database needed) | Ops |
 | `show-config` | Settings with value and source; database target (no password) | Ops |
 | `test-connection` | Connect and check the schema; exit 1 if not initialised | Deploy / ops |
 | `validate-config` | Configuration checks; exit 1 on errors, logs `CONFIG_VALIDATION_FAILED` | CI / before activating config |

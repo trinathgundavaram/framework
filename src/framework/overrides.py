@@ -13,22 +13,19 @@ stops the override, and the next run of this job removes an applied REUSE.
 """
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from functools import partial
 from typing import Callable, Optional
 
 import psycopg
 
 from . import config as cfgmod
+from . import db
 from .audit import EventLogger
 from .batches import get_batch, promoted_load
 from .common import CARRIED_FORWARD, OPEN_STATUSES, PENDING, Clock, check_transition
 from .settings import Settings
-
-log = logging.getLogger(__name__)
-
-REUSE, LATE_ARRIVAL, CORRECTION = "REUSE", "LATE_ARRIVAL", "CORRECTION"
 
 
 @dataclass
@@ -51,8 +48,8 @@ class DecisionProcessor:
         today = self.clock.today(self.settings.business_tz)
         self._expire(s, today)
         self._apply(s, today)
-        for ext in sorted(s.extracts_to_refresh):
-            if self.refresh_extract:
+        if self.refresh_extract:
+            for ext in sorted(s.extracts_to_refresh):
                 self.refresh_extract(ext)
         return s
 
@@ -74,13 +71,13 @@ class DecisionProcessor:
                 b = get_batch(self.conn, o["req_id"], for_update=True)
                 ctx = dict(ovrd_id=o["ovrd_id"], req_id=b["req_id"], extract_id=b["extract_id"], btch_id=b["btch_id"],
                            project_cd=b["project_cd"], table_nm=b["table_nm"], src_cd=b["src_cd"], run_ty=b["run_ty"])
-                problem = self._reuse_problem(o, b)
+                src = self._reuse_source(o, b)
+                problem = self._reuse_problem(o, b, src)
                 if problem:
                     self.logger.audit("OVERRIDE_INVALID_DETECTED", actor=o["apprvd_by"] or o["requested_by"],
                                       description=f"REUSE: {problem}", **ctx)
                     s.invalid.append(o["ovrd_id"])
                     continue
-                src = self._reuse_source(o, b)
                 check_transition(b["req_stat"], CARRIED_FORWARD)
                 self.conn.execute(
                     """UPDATE ComplianceRequestControl SET Resolution_Ty='CARRY_FORWARD', Reuse_Btch_ID=%s,
@@ -132,7 +129,7 @@ class DecisionProcessor:
         """Approvals awaiting review, and approved overrides expiring within a week - all three override
         types, not just the REUSE rows this job applies: overrides.py owns ComplianceBatchOverride, so
         its health queries live here rather than in app.py."""
-        q = lambda text, *p: self.conn.execute(text, p).fetchall()  # noqa: E731
+        q = partial(db.fetch_all, self.conn)
         today = self.clock.today(self.settings.business_tz)
         return {
             "pending_reviews": q("""SELECT Ovrd_ID, Override_Ty, Req_ID, Btch_ID, Created_Dtts
@@ -145,7 +142,7 @@ class DecisionProcessor:
         }
 
     # ------------------------------------------------------------------ validation
-    def _reuse_problem(self, o: dict, b: dict) -> Optional[str]:
+    def _reuse_problem(self, o: dict, b: dict, src: Optional[dict]) -> Optional[str]:
         rt = cfgmod.run_type(self.conn, b["run_ty"])
         if rt is None or not rt.carry_fwd:
             return f"run type {b['run_ty']} does not allow carry-forward (Carry_Fwd_Ind = 0)"
@@ -153,7 +150,7 @@ class DecisionProcessor:
             return "batch is closed"
         if promoted_load(self.conn, b["btch_id"]) is not None:
             return "batch already has promoted data"
-        if self._reuse_source(o, b) is None:
+        if src is None:
             return ("no earlier closed batch with data"
                     + (f" matches Reuse_Btch_ID {o['reuse_btch_id']}" if o["reuse_btch_id"] else ""))
         return None

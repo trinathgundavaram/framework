@@ -89,9 +89,7 @@ class ReadResult:
 
 def delimiter_for(cfg: "FileConfig") -> str:
     d = cfg.delmtr_cd
-    if d is None or d == "":
-        return ","
-    return _DELIMS.get(d.upper(), d)
+    return _DELIMS.get(d.upper(), d) if d else ","
 
 
 def _check_terminator(cfg: "FileConfig") -> None:
@@ -163,9 +161,7 @@ def scan_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "
         with open(path, "r", encoding=settings.file_encoding, newline="") as f:
             reader = csv.reader(f, delimiter=delimiter_for(cfg), quotechar=settings.quote_char or None, strict=True)
             for i, rec in enumerate(reader):
-                if i == 0 and cfg.has_header:
-                    continue
-                if not rec:
+                if not rec or (i == 0 and cfg.has_header):
                     continue
                 if len(rec) != expected_cols:
                     raise FileRejected("FILE_COLUMN_COUNT_MISMATCH",
@@ -280,11 +276,6 @@ def _stage_spark(conn, settings, spark, file_path, cfg, stg_columns, btch_id, lo
 class PromotionResult:
     disabled_cnt: int
     appended_cnt: int
-
-
-def staged_row_count(conn, cfg: "FileConfig", btch_id: str, load_id: int) -> int:
-    return int(conn.execute(sql.SQL("SELECT count(*) AS n FROM {} WHERE btch_id=%s AND load_id=%s")
-                            .format(_ident(cfg.stg_schema_nm, cfg.stg_tblnm)), (btch_id, load_id)).fetchone()["n"])
 
 
 def swap(conn, cfg: "FileConfig", btch_id: str, load_id: int, expected_rows: int, now: datetime) -> PromotionResult:

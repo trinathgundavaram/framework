@@ -185,8 +185,7 @@ class S3ObjectStore(ObjectStore):
         src = {"Bucket": src_bucket, "Key": src_key}
         if version_id:
             src["VersionId"] = version_id
-        self.s3.copy({**src}, dst_bucket, dst_key,
-                     ExtraArgs={"ServerSideEncryption": "aws:kms"})
+        self.s3.copy(src, dst_bucket, dst_key, ExtraArgs={"ServerSideEncryption": "aws:kms"})
 
     def delete(self, bucket, key):
         self.s3.delete_object(Bucket=bucket, Key=key)

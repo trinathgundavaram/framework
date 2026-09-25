@@ -26,6 +26,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import Enum
+from functools import partial
 from typing import Callable, Optional
 
 import psycopg
@@ -212,15 +213,12 @@ class IngestPipeline:
         """The distinct (bucket, prefix) inbound locations of every active file config. Several configs
         - one per source alias - commonly share a folder, matched purely by filename template, so this
         de-duplicates before listing."""
-        seen: set[tuple[str, str]] = set()
-        for c in cfgmod.active_file_configs(self.conn):
-            seen.add(parse_uri(c.s3_src_file_path))
-        return sorted(seen)
+        return sorted({parse_uri(c.s3_src_file_path) for c in cfgmod.active_file_configs(self.conn)})
 
     def health(self) -> dict[str, list[dict]]:
         """Loads stuck mid-pipeline, and current quarantine counts by reason (design §15.3): ingest.py
         owns ComplianceFileLoad, so its health queries live here rather than in app.py."""
-        q = lambda text, *p: self.conn.execute(text, p).fetchall()  # noqa: E731
+        q = partial(db.fetch_all, self.conn)
         stale_before = self.clock.now() - timedelta(minutes=self.settings.heartbeat_stale_minutes)
         return {
             "stale_loads": q(
@@ -515,10 +513,9 @@ class IngestPipeline:
                                 ovrd_id=row["ovrd_id"] if row else None,
                                 detail=f"reuse of {b['reuse_btch_id']} replaced by load {load_id}")
 
-    def _supersede(self, load_id: Optional[int]) -> None:
-        if load_id:
-            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='SUPERSEDED', Updated_Dtts=%s "
-                              "WHERE Load_ID=%s AND Load_Stat='PROMOTED'", (self.clock.now(), load_id))
+    def _supersede(self, load_id: int) -> None:
+        self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='SUPERSEDED', Updated_Dtts=%s "
+                          "WHERE Load_ID=%s AND Load_Stat='PROMOTED'", (self.clock.now(), load_id))
 
     def _rules_failed(self, load_id, rules_stat, detail, now) -> None:
         self.conn.execute(
@@ -534,12 +531,14 @@ class IngestPipeline:
                 """UPDATE ComplianceFileLoad SET Load_Stat='QUARANTINED', Quarantine_Rsn_Cd=%s, Error_Txt=%s,
                           Cfg_ID=COALESCE(%s, Cfg_ID), Heartbeat_Dtts=NULL, Updated_Dtts=%s WHERE Load_ID=%s""",
                 (event_ty, message, cfg.cfg_id if cfg else None, self.clock.now(), load_id))
-            self.logger.audit(
-                event_ty, load_id=load_id, file_ref=s3_ref(info.bucket, info.key), description=message,
-                project_cd=cfg.project_cd if cfg else None, table_nm=cfg.table_nm if cfg else None,
-                src_cd=cfg.src_cd if cfg else None, run_ty=batch["run_ty"] if batch else None,
-                req_id=batch["req_id"] if batch else None, btch_id=batch["btch_id"] if batch else None,
-                extract_id=batch["extract_id"] if batch else None)
+            ctx = {}
+            if cfg:
+                ctx.update(project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_cd=cfg.src_cd)
+            if batch:
+                ctx.update(run_ty=batch["run_ty"], req_id=batch["req_id"], btch_id=batch["btch_id"],
+                           extract_id=batch["extract_id"])
+            self.logger.audit(event_ty, load_id=load_id, file_ref=s3_ref(info.bucket, info.key),
+                              description=message, **ctx)
         dest = cfg.s3_quarantine_path if cfg else self.settings.default_quarantine_uri
         self._move(info, dest, f"{event_ty}/", load_id)
         return IngestOutcome(load_id, "QUARANTINED", event_ty=event_ty, message=message,

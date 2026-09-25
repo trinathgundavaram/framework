@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
@@ -21,7 +22,7 @@ from . import config as cfg
 from . import db
 from .audit import EventLogger
 from .common import PENDING, Clock, ConfigError, build_btch_id
-from .config import RunType, XwalkRow
+from .config import XwalkRow
 from .period_sql import PERIOD_SQL
 from .settings import Settings
 
@@ -70,7 +71,7 @@ def promoted_load(conn: psycopg.Connection, btch_id: str) -> Optional[dict]:
 
 
 def create_batch(conn: psycopg.Connection, clock: Clock, logger: EventLogger, *, xwalk: XwalkRow,
-                 run_type: RunType, rpt_start: date, rpt_end: date, req_dt: date, created_by: str,
+                 rpt_start: date, rpt_end: date, req_dt: date, created_by: str,
                  required_cnt: int, intake_id: Optional[str] = None) -> CreateResult:
     """Idempotent: created=False when the batch for (period, run date) already exists (D-30)."""
     x = xwalk
@@ -177,11 +178,9 @@ def create_batches(conn: psycopg.Connection, clock: Clock, settings: Settings, *
             if x.effective_on(s.run_date)]
     if not rows:
         s.errors.append(f"no effective crosswalk rows for {project_cd}/{table_nm or '*'}/{run_ty} on {s.run_date}")
-    required: dict[str, int] = {}
+    required = Counter(x.table_nm for x in rows)
     for x in rows:
-        required[x.table_nm] = required.get(x.table_nm, 0) + 1
-    for x in rows:
-        res = create_batch(conn, clock, logger, xwalk=x, run_type=rt, rpt_start=s.rpt_start, rpt_end=s.rpt_end,
+        res = create_batch(conn, clock, logger, xwalk=x, rpt_start=s.rpt_start, rpt_end=s.rpt_end,
                            req_dt=s.run_date, created_by="SCHEDULER", required_cnt=required[x.table_nm])
         if res.created:
             s.created += 1
@@ -266,7 +265,7 @@ class IntakeProcessor:
         msgs = []
         if run_date <= it["req_end_dt_key"]:                       # inside the request window
             for x in targets:
-                res = create_batch(self.conn, self.clock, self.logger, xwalk=x, run_type=rt,
+                res = create_batch(self.conn, self.clock, self.logger, xwalk=x,
                                    rpt_start=it["rpt_start_dt_key"], rpt_end=it["rpt_end_dt_key"], req_dt=run_date,
                                    created_by="ADHOC_INTAKE", required_cnt=len(targets), intake_id=it["intake_id"])
                 if res.created:

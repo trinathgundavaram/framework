@@ -34,6 +34,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 
 from .app import App
+from .audit import EventLogger
 from .common import FrameworkError, parse_as_of
 from .config import validate_all
 from .db import init_db, schema_exists
@@ -146,7 +147,6 @@ def _dispatch(app: App, args) -> int:
         _print([asdict(i) for i in issues])
         errors = [i for i in issues if i.severity == "ERROR"]
         if errors:
-            from .audit import EventLogger
             with app.conn.transaction():
                 EventLogger(app.conn, app.clock).audit(
                     "CONFIG_VALIDATION_FAILED", description="; ".join(f"{i.code}: {i.message}" for i in errors)[:4000])

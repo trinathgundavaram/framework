@@ -83,8 +83,7 @@ def parse_as_of(value: str | None, business_tz: str = "UTC") -> Clock:
     with **no** offset - including a bare date like `2026-02-01` - is interpreted in `business_tz`
     (the job's `BUSINESS_TZ`, America/Chicago by default), not UTC: `--as-of 2026-02-01` means
     midnight Feb 1 in that timezone, the same "today" a job actually running then would compute via
-    `Clock.today()`. Previously a bare date was read as UTC midnight, which is the previous evening in
-    Chicago and silently picked the wrong report period - this is what `business_tz` now prevents.
+    `Clock.today()` (a UTC midnight would be the previous evening in Chicago - the wrong report period).
     """
     if not value:
         return Clock()
@@ -127,7 +126,6 @@ COMPLETED_WITH_EXCEPTION = "COMPLETED_WITH_EXCEPTION"
 DATA_NOT_PROVIDED = "DATA_NOT_PROVIDED"
 
 OPEN_STATUSES = (PENDING, PROMOTED, CARRIED_FORWARD, EXCEPTION_PENDING)
-CLOSED_STATUSES = (COMPLETED, COMPLETED_WITH_EXCEPTION, DATA_NOT_PROVIDED)
 
 TRANSITIONS: dict[str, set[str]] = {
     PENDING: {PROMOTED, EXCEPTION_PENDING, CARRIED_FORWARD, DATA_NOT_PROVIDED},

@@ -25,6 +25,10 @@ def connect(dsn: str, schema: Optional[str] = None) -> psycopg.Connection:
                            application_name="cms-compliance-framework", **kw)
 
 
+def fetch_all(conn: psycopg.Connection, query: str, *params) -> list[dict]:
+    return conn.execute(query, params).fetchall()
+
+
 def sql_text(name: str) -> str:
     return resources.files("framework").joinpath("sql", name).read_text(encoding="utf-8")
 

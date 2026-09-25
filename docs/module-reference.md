@@ -151,7 +151,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 - Table introspection: `columns`, `staging_business_columns`, `core_insert_columns` (identity / generated / serial columns are skipped).
 - File reading (§9.4 C12–C14): `read_file`, `read_delimited`, `scan_delimited` (streaming), `read_with_pandas` (xlsx / parquet), `sanitize_db_error`.
 - `stage(conn, settings, ...)`: delete staging rows of the batch (D-05) and load the file; `LOAD_ENGINE=PANDAS` (reader + COPY) or `SPARK` (streaming scan + JDBC append; needs `SPARK_JDBC_URL`).
-- `staged_row_count`; `swap` (D-01) disables the current core rows of the batch and appends the load's rows, checking the row count.
+- `swap` (D-01) disables the current core rows of the batch and appends the load's rows, checking the row count.
 
 ### `overrides.py`
 - `DecisionProcessor.run` (P7, D-74): handles `REUSE` only — `LATE_ARRIVAL` and `CORRECTION` are read by the ingest pipeline.
@@ -203,7 +203,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 | `test_ingest.py` | Promotion, replacement, quarantine reasons, structural failures, duplicates, zero records, GATE / ANNOTATE, no bindings, technical failure and replay, closed-batch overrides (late arrival, correction, retry after approval), batch selection by run date, `process_path` (one location, every configured location, mixed outcomes, listing/technical errors that don't stop the sweep). |
 | `test_overrides.py` | `REUSE`: apply, invalid cases, pending until approved, expiry, replacement by a real file, reuse chains; `LATE_ARRIVAL` / `CORRECTION` rows are left to the pipeline. |
 | `test_extract.py` | Automatic close after the hold, STRICT partial and rule failures, BEST_EFFORT manual close with acknowledged warnings, zero data, deferred close on a locked batch, period-rule errors, sweep scope and `AUTO_CLOSE_EXTRACTS`, per-run-date holds, regenerate reporting. |
-| `test_modules.py` | Module identification (names, aliases, unknown), parameter checks before anything runs, each module end to end (`BATCH_CREATION` routine + ad-hoc together, ad-hoc-only, ADHOC-run-type-scoped, per-project scoping for both halves; file load one object / one location / every location; rules trigger by extract and by scope, closed extracts skipped), `run --module` and `list-modules` on the CLI. |
+| `test_modules.py` | Module identification (names, no aliases, unknown), parameter checks before anything runs, each module end to end (`BATCH_CREATION` routine + ad-hoc together, ad-hoc-only, ADHOC-run-type-scoped, per-project scoping for both halves; file load one object / one location / every location; rules trigger by extract and by scope, closed extracts skipped), `run --module` and `list-modules` on the CLI. |
 | `test_config_cli.py` | Validator, notifications, CLI end to end (with `.env`, `--set`, `run --module` and `close-extract`), the `FILE_LOAD` path sweep end to end, the composed `health` report, rules adapter contract. |
 
 ---

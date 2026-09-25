@@ -13,12 +13,12 @@ Database (one PostgreSQL database holds the metadata schema and the staging/core
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
 import typing
 from dataclasses import dataclass, field, fields
-from datetime import date
 from typing import Any, Callable, Mapping, Optional
 
 import psycopg
@@ -223,11 +223,16 @@ def _secret_loader(region: str) -> Callable[[str], dict]:
     return load
 
 
+@functools.cache
+def _type_hints() -> dict[str, Any]:
+    return typing.get_type_hints(Settings)
+
+
 def _coerce(name: str, raw: Any) -> Any:
     """Convert a text value to the declared type of setting `name`."""
     if not isinstance(raw, str):
         return raw
-    typ = typing.get_type_hints(Settings)[name]
+    typ = _type_hints()[name]
     text = raw.strip()
     if typing.get_origin(typ) is typing.Union:                     # Optional[X]
         if text == "" or text.lower() in ("none", "null"):
@@ -241,16 +246,9 @@ def _coerce(name: str, raw: Any) -> Any:
         raise ValueError(f"{raw!r} is not a boolean")
     if typ is int:
         return int(text)
-    if typ is date:
-        return date.fromisoformat(text)
     if typing.get_origin(typ) is list:
         items = [x.strip() for x in text.split(",") if x.strip()]
         return [i.lower() for i in items] if name == "supported_file_types" else items
-    if typ is dict:
-        value = json.loads(text) if text else {}
-        if not isinstance(value, dict):
-            raise ValueError("expected a JSON object")
-        return value
     if name == "quote_char":
         return raw
     if name.endswith(("_mode", "_engine", "_basis")) and name != "rule_engine":

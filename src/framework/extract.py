@@ -12,13 +12,14 @@ import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import date
+from functools import partial
 from typing import Optional
 
 import psycopg
 
 from . import config as cfgmod
 from . import db
-from .adapters import ERROR, FAILED, PASSED, RuleEngine
+from .adapters import ERROR, FAILED, PASSED, PASSED_WITH_WARNINGS, RuleEngine
 from .audit import EventLogger
 from .batches import batches_of_extract
 from .common import (COMPLETED, COMPLETED_WITH_EXCEPTION, DATA_NOT_PROVIDED, EXCEPTION_PENDING, Clock,
@@ -34,7 +35,6 @@ AUTO = "AUTO"
 MANUAL_ONLY = "MANUAL_ONLY"
 NOT_ELIGIBLE = "NOT_ELIGIBLE"
 STRICT = "STRICT_ALL_PASS"
-BEST_EFFORT = "BEST_EFFORT"
 
 
 # ============================================================================ eligibility (§11.2), pure
@@ -65,7 +65,7 @@ def compute_eligibility(inp: EligibilityInput) -> Eligibility:
         return Eligibility(NOT_ELIGIBLE, "period rules have not been evaluated for the current data")
     if inp.rules_stat == "ERROR":
         return Eligibility(NOT_ELIGIBLE, "period rules failed technically; refresh required")
-    rules_clean = inp.rules_stat in ("PASSED", "PASSED_WITH_WARNINGS")
+    rules_clean = inp.rules_stat in (PASSED, PASSED_WITH_WARNINGS)
     if inp.received >= inp.required and rules_clean:
         return Eligibility(AUTO, "all sources have data and period rules passed")
 
@@ -126,7 +126,7 @@ class RulesTriggerSummary:
             self.skipped += 1
             return
         self.evaluated += 1
-        if r.status in (PASSED, "PASSED_WITH_WARNINGS"):
+        if r.status in (PASSED, PASSED_WITH_WARNINGS):
             self.passed += 1
         elif r.status == FAILED:
             self.failed += 1
@@ -265,7 +265,7 @@ class ExtractControlService:
         """Runs past their SLA hold and still open, and runs whose closed data was superseded by a
         later promotion (design §15.3): extract.py owns ComplianceExtractControl, so its health
         queries live here rather than in app.py."""
-        q = lambda text, *p: self.conn.execute(text, p).fetchall()  # noqa: E731
+        q = partial(db.fetch_all, self.conn)
         today = self.clock.today(self.settings.business_tz)
         return {
             "extracts_past_hold_not_closed": q(
@@ -313,7 +313,7 @@ class ExtractControlService:
 
     # ------------------------------------------------------------------ close (§11.3, D-39)
     def close(self, extract_id: int, closed_by: str, ack_warnings: bool = False,
-              automatic: bool = False) -> "CloseOutcome":
+              automatic: bool = False) -> CloseOutcome:
         """Close the run: every open batch of the extract is resolved and closed. The extract job that
         generates the submission runs afterwards, outside the framework."""
         with db.held(self.conn, db.extract_key(extract_id), self.settings.lock_timeout_seconds):
@@ -354,7 +354,7 @@ class ExtractControlService:
                 for key in held:
                     db.unlock(self.conn, key)
 
-    def _close_locked(self, st: ExtractState, closed_by: str, ack: bool) -> "CloseOutcome":
+    def _close_locked(self, st: ExtractState, closed_by: str, ack: bool) -> CloseOutcome:
         e = st.extract
         warnings = st.eligibility.warnings
         now = self.clock.now()

@@ -97,8 +97,4 @@ class App:
         """Operational report (design §15.3), composed from the service that owns each set of tables:
         stale loads and quarantine counts from the ingest pipeline, pending/expiring overrides from the
         decision processor, and open-past-hold/regenerate-required runs from extract control."""
-        report: dict[str, list[dict]] = {}
-        report.update(self.pipeline.health())
-        report.update(self.decisions.health())
-        report.update(self.control.health())
-        return report
+        return {**self.pipeline.health(), **self.decisions.health(), **self.control.health()}

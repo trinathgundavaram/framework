@@ -104,8 +104,7 @@ def read_csv_from_s3(s3_input_path: str, file_name: str) -> pd.DataFrame:
     logger.info("Reading s3://%s/%s", bucket, key)
     obj = s3.get_object(Bucket=bucket, Key=key)
     df = pd.read_csv(io.BytesIO(obj["Body"].read()), dtype=str, keep_default_na=False)
-    df = df.replace({"": None})
-    return df
+    return df.replace({"": None})
 
 
 def upsert_file(conn, table: str, s3_input_path: str, file_name: str,
@@ -135,31 +134,18 @@ def upsert_file(conn, table: str, s3_input_path: str, file_name: str,
     values_sql = ", ".join([row_placeholder] * len(records))
     params = [value for row in records for value in row]
 
-    if mode == "insert_only":
-        # Append-only log: never touch a row once it exists.
-        sql = (
-            f"INSERT INTO {table} ({col_list}) VALUES {values_sql} "
-            f"ON CONFLICT ({', '.join(pk_cols)}) DO NOTHING"
-        )
-    elif mode == "upsert":
-        update_cols = [c for c in columns if c not in pk_cols]
-        set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
-        if "updated_dtts" in audit_columns:
-            set_clause = (set_clause + ", " if set_clause else "") + "updated_dtts = now()"
-        if not set_clause:
-            # Table is pure-PK with no other columns and no updated_dtts audit
-            # column - nothing to update, fall back to DO NOTHING.
-            sql = (
-                f"INSERT INTO {table} ({col_list}) VALUES {values_sql} "
-                f"ON CONFLICT ({', '.join(pk_cols)}) DO NOTHING"
-            )
-        else:
-            sql = (
-                f"INSERT INTO {table} ({col_list}) VALUES {values_sql} "
-                f"ON CONFLICT ({', '.join(pk_cols)}) DO UPDATE SET {set_clause}"
-            )
-    else:
+    if mode not in ("upsert", "insert_only"):
         raise ValueError(f"[{table}] unknown --MODE: {mode} (expected upsert or insert_only)")
+
+    # insert_only (append-only log) never touches a row once it exists. upsert sets every non-PK
+    # column from EXCLUDED and bumps updated_dtts; a pure-PK table has nothing to update -> DO NOTHING.
+    set_parts = []
+    if mode == "upsert":
+        set_parts = [f"{c} = EXCLUDED.{c}" for c in columns if c not in pk_cols]
+        if "updated_dtts" in audit_columns:
+            set_parts.append("updated_dtts = now()")
+    action = f"DO UPDATE SET {', '.join(set_parts)}" if set_parts else "DO NOTHING"
+    sql = f"INSERT INTO {table} ({col_list}) VALUES {values_sql} ON CONFLICT ({', '.join(pk_cols)}) {action}"
 
     cur = conn.cursor()
     try:
