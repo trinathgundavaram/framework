@@ -1,0 +1,143 @@
+"""Shared primitives: exceptions, the injectable clock, Btch_ID rules and the Req_Stat model."""
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+
+# ============================================================================ exceptions
+class FrameworkError(Exception):
+    """Base class. Business outcomes are NOT exceptions; these signal control flow or technical failures."""
+
+
+class ConfigError(FrameworkError):
+    """Configuration is missing or invalid."""
+
+
+class LockTimeout(FrameworkError):
+    """An advisory lock could not be acquired in time (retry later)."""
+
+
+class InvalidStatusTransition(FrameworkError):
+    """A Req_Stat move not listed in TRANSITIONS."""
+
+
+class TechnicalFailure(FrameworkError):
+    """Retryable infrastructure failure (DB, rules engine, object store...)."""
+
+
+class RuleEngineNotConfigured(TechnicalFailure):
+    """The GRE entry point is not configured (open question Q-12)."""
+
+
+class FileRejected(FrameworkError):
+    """A file failed a structural pre-check; carries the quarantine event code."""
+
+    def __init__(self, event_ty: str, message: str):
+        super().__init__(message)
+        self.event_ty = event_ty
+
+
+class RowCountMismatch(FrameworkError):
+    """Core swap appended a different number of rows than were staged."""
+
+
+class CloseBlocked(FrameworkError):
+    """The extract is not eligible to be closed."""
+
+
+class CloseDeferred(FrameworkError):
+    """One or more batches of the extract are locked by another process; try again later."""
+
+
+# ============================================================================ clock
+class Clock:
+    """Injected time source. Services never call datetime.now() / date.today() directly."""
+
+    def now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def today(self, tz: str) -> date:
+        return self.now().astimezone(ZoneInfo(tz)).date()
+
+
+class FixedClock(Clock):
+    """Clock pinned to a moment (the CLI --as-of argument, tests)."""
+
+    def __init__(self, at: datetime):
+        self.set(at)
+
+    def now(self) -> datetime:
+        return self._at
+
+    def set(self, at: datetime) -> None:
+        if at.tzinfo is None:
+            raise ValueError("timezone-aware datetime required")
+        self._at = at.astimezone(timezone.utc)
+
+
+def parse_as_of(value: str | None, business_tz: str = "UTC") -> Clock:
+    """`--as-of` accepts ISO-8601 (date or timestamp).
+
+    A value with an explicit UTC offset (`...+00:00`, `...Z`) is honoured exactly as given. A value
+    with **no** offset - including a bare date like `2026-02-01` - is interpreted in `business_tz`
+    (the job's `BUSINESS_TZ`, America/Chicago by default), not UTC: `--as-of 2026-02-01` means
+    midnight Feb 1 in that timezone, the same "today" a job actually running then would compute via
+    `Clock.today()` (a UTC midnight would be the previous evening in Chicago - the wrong report period).
+    """
+    if not value:
+        return Clock()
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))  # py3.10 does not accept "Z"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo(business_tz))
+    return FixedClock(dt)
+
+
+# ============================================================================ Btch_ID (design §4)
+BTCH_ID_MAX_LEN = 250
+
+
+def build_btch_id(req_dt: date, project_cd: str, table_nm: str, src_id: str, run_ty: str,
+                  cmplnc_vrsn: str, seq: int) -> str:
+    """{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Src}_{Run_Ty}_{Vrsn}_{Seq}"""
+    if seq < 1:
+        raise ValueError("seq must be >= 1")
+    value = f"{req_dt:%Y%m%d}_{project_cd}_{table_nm}_{src_id}_{run_ty}_{cmplnc_vrsn}_{seq}"
+    if len(value) > BTCH_ID_MAX_LEN:
+        raise ValueError(f"Btch_ID exceeds {BTCH_ID_MAX_LEN} characters: {value}")
+    return value
+
+
+def earliest_close_date(req_dt: date, sla_days: int) -> date:
+    """D-38: the SLA hold, computed when it is needed - never stored.
+    SLA 1 = the run date itself, SLA 2 = the next day, ... (calendar days)."""
+    if sla_days < 1:
+        raise ValueError("SLA_Days must be >= 1")
+    return req_dt + timedelta(days=sla_days - 1)
+
+
+# ============================================================================ Req_Stat (design §6.1)
+PENDING = "PENDING"
+PROMOTED = "PROMOTED"
+CARRIED_FORWARD = "CARRIED_FORWARD"
+EXCEPTION_PENDING = "EXCEPTION_PENDING"
+COMPLETED = "COMPLETED"
+COMPLETED_WITH_EXCEPTION = "COMPLETED_WITH_EXCEPTION"
+DATA_NOT_PROVIDED = "DATA_NOT_PROVIDED"
+
+OPEN_STATUSES = (PENDING, PROMOTED, CARRIED_FORWARD, EXCEPTION_PENDING)
+
+TRANSITIONS: dict[str, set[str]] = {
+    PENDING: {PROMOTED, EXCEPTION_PENDING, CARRIED_FORWARD, DATA_NOT_PROVIDED},
+    PROMOTED: {EXCEPTION_PENDING, COMPLETED},
+    CARRIED_FORWARD: {PROMOTED, EXCEPTION_PENDING, PENDING, COMPLETED},
+    EXCEPTION_PENDING: {PROMOTED, CARRIED_FORWARD, PENDING, COMPLETED_WITH_EXCEPTION},
+    COMPLETED: {COMPLETED},                      # reopen promotion
+    COMPLETED_WITH_EXCEPTION: {COMPLETED},
+    DATA_NOT_PROVIDED: {COMPLETED},
+}
+
+
+def check_transition(from_stat: str, to_stat: str) -> None:
+    if from_stat != to_stat and to_stat not in TRANSITIONS.get(from_stat, ()):
+        raise InvalidStatusTransition(f"Req_Stat {from_stat} -> {to_stat} is not an allowed transition")

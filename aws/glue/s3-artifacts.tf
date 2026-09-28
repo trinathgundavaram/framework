@@ -6,8 +6,8 @@
 # newer aws_s3_object, to match convention. Holds:
 #   python_code/glue_job_metadata_load.py
 #   python_code/rds_conn.py
-#   ddl/create_metadata_tables.sql  (reference only - DDL/tables are assumed
-#                                    to already exist; the job never applies it)
+#   ddl/schema.sql          (copy of src/framework/sql/schema.sql; reference only - tables are
+#                            created by `framework init-db`; the job never applies it)
 #   seed_data/<table>.csv   (one-time seed + refreshed for later manual updates)
 #
 # No config file is uploaded - the job takes --TABLE_NAME/--S3_FILE_NAME/
@@ -71,12 +71,13 @@ resource "aws_s3_bucket_object" "rds_conn_module" {
   tags = var.required_common_tags
 }
 
-# --- DDL (reference only - assumed already applied, job does not run this) ---
+# --- DDL (reference only - applied by `framework init-db`; this job never runs it) ---
+# Single source of truth: the framework package's schema file.
 resource "aws_s3_bucket_object" "ddl_script" {
   bucket = aws_s3_bucket.artifacts.id
-  key    = "${var.artifacts_bucket_key}/ddl/create_metadata_tables.sql"
-  source = "${path.module}/code/ddl/create_metadata_tables.sql"
-  etag   = filemd5("${path.module}/code/ddl/create_metadata_tables.sql")
+  key    = "${var.artifacts_bucket_key}/ddl/schema.sql"
+  source = "${path.module}/../../src/framework/sql/schema.sql"
+  etag   = filemd5("${path.module}/../../src/framework/sql/schema.sql")
 
   tags = var.required_common_tags
 }

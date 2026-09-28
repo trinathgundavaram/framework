@@ -1,2 +1,0 @@
-intake_id,project_cd,table_nm,src_cd,req_dt_key,req_ty,requested_by,requested_dtts,rsn,processed_ind,processed_dtts
-INT-0001,ODR,ROPENS,64,2026-01-10,CORRECTION_REQUEST,mgarcia,2026-01-12 13:00:00,"ESI's Jan 10 file passed rules validation but manual review found incorrect data - requesting corrected file from vendor",Y,2026-01-12 13:05:00

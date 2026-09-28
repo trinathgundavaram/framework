@@ -1,0 +1,150 @@
+"""Audit trail and email notifications (design §5.3, P13, D-54).
+
+EventLogger is the only writer of ComplianceRequestFileDetail and CMS_ComplianceExceptionsAudit.
+Callers pass ids, counts and codes only - never file content (no PHI in audit text). Writes
+participate in the caller's open transaction.
+
+The event vocabulary lives here (it used to be the ComplianceEventType table): BATCH_EVENTS go to the
+batch timeline; AUDIT_EVENTS go to the exceptions audit with their category, default severity and
+whether they are emailed. An unknown event code is a programming error (ConfigError).
+"""
+from __future__ import annotations
+
+import logging
+from typing import NamedTuple, Optional
+
+import psycopg
+
+from . import config as cfgmod
+from .adapters import Channel, Message
+from .common import Clock, ConfigError
+from .settings import Settings
+
+log = logging.getLogger(__name__)
+
+BATCH_EVENTS = frozenset({
+    "BATCH_CREATED", "BATCH_CLOSED", "FILE_RECEIVED", "FILE_REPLACED_BEFORE_CLOSE", "FILE_PROMOTED",
+    "FILE_RULES_FAILED", "LATE_ARRIVAL_PROMOTED", "CORRECTION_PROMOTED", "CARRY_FORWARD_APPLIED",
+    "CARRY_FORWARD_REMOVED",
+})
+
+
+class AuditEvent(NamedTuple):
+    category: str        # EXCEPTION -> failure recipients, AUDIT -> success recipients
+    severity: str        # INFO | WARNING | ERROR
+    notify: bool
+
+
+_EXC_ERROR, _EXC_WARN = AuditEvent("EXCEPTION", "ERROR", True), AuditEvent("EXCEPTION", "WARNING", True)
+AUDIT_EVENTS: dict[str, AuditEvent] = {
+    # intake
+    "INTAKE_FAILED": _EXC_ERROR,
+    "BATCH_CREATE_SKIPPED_EXTRACT_CLOSED": _EXC_WARN,
+    # file intake (quarantine codes)
+    **dict.fromkeys(("FILE_REJECTED_UNPARSEABLE", "FILE_REJECTED_AMBIGUOUS_TEMPLATE", "FILE_REJECTED_INVALID_TOKEN",
+                     "FILE_REJECTED_RUNTY_NOT_CONFIGURED", "FILE_REJECTED_NO_BATCH", "FILE_REJECTED_BATCH_CLOSED",
+                     "FILE_PARSE_ERROR", "FILE_COLUMN_COUNT_MISMATCH", "FILE_TRAILER_COUNT_MISMATCH",
+                     "FILE_ZERO_RECORDS_REJECTED", "FILE_TYPE_NOT_SUPPORTED"), _EXC_ERROR),
+    "FILE_REJECTED_DUPLICATE": _EXC_WARN,
+    "FILE_SAME_CONTENT_OTHER_BATCH": _EXC_WARN,
+    "FILE_EVENT_REPLAY_IGNORED": AuditEvent("AUDIT", "INFO", False),
+    "FILE_MOVE_FAILED": AuditEvent("EXCEPTION", "WARNING", False),
+    # validation / load
+    "RULES_VALIDATION_FAILED": _EXC_ERROR,
+    "RULES_ENGINE_TECHNICAL_FAILURE": _EXC_ERROR,
+    "CORE_LOAD_ROWCOUNT_MISMATCH": _EXC_ERROR,
+    # manual decisions
+    "OVERRIDE_APPROVED": AuditEvent("AUDIT", "WARNING", True),
+    "OVERRIDE_INVALID_DETECTED": _EXC_ERROR,
+    "OVERRIDE_EXPIRED": AuditEvent("AUDIT", "WARNING", True),
+    # extract
+    "PERIOD_RULES_FAILED": _EXC_ERROR,
+    "EXTRACT_ELIGIBILITY_CHANGED": AuditEvent("AUDIT", "INFO", False),
+    "EXTRACT_CLOSED": AuditEvent("AUDIT", "INFO", True),
+    "EXTRACT_CLOSED_WITH_WARNINGS": AuditEvent("AUDIT", "WARNING", True),
+    "EXTRACT_CLOSE_BLOCKED": AuditEvent("AUDIT", "WARNING", False),
+    "EXTRACT_CLOSE_DEFERRED_LOCKED": AuditEvent("AUDIT", "INFO", False),
+    "EXTRACT_REGENERATE_REQUIRED": _EXC_WARN,
+    "SOURCE_MISSING_AT_CLOSE": _EXC_WARN,
+    # config
+    "CONFIG_VALIDATION_FAILED": _EXC_ERROR,
+}
+
+
+class EventLogger:
+    def __init__(self, conn: psycopg.Connection, clock: Clock):
+        self.conn = conn
+        self.clock = clock
+
+    def batch_event(self, event_ty: str, *, req_id: int, btch_id: str, actor: str = "SYSTEM",
+                    load_id: Optional[int] = None, ovrd_id: Optional[int] = None, intake_id: Optional[int] = None,
+                    detail: Optional[str] = None) -> None:
+        if event_ty not in BATCH_EVENTS:
+            raise ConfigError(f"{event_ty} is not a batch timeline event")
+        self.conn.execute(
+            """INSERT INTO ComplianceRequestFileDetail (Req_ID, Btch_ID, Load_ID, Ovrd_ID, Intake_ID, Event_Ty, Actor,
+                 Event_Txt, Event_Dtts) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (req_id, btch_id, load_id, ovrd_id, intake_id, event_ty, actor, detail, self.clock.now()))
+        log.info("batch_event %s req_id=%s btch_id=%s load_id=%s %s", event_ty, req_id, btch_id, load_id, detail or "")
+
+    def audit(self, event_ty: str, *, actor: str = "SYSTEM", severity: Optional[str] = None,
+              description: Optional[str] = None, project_cd: Optional[str] = None,
+              table_nm: Optional[str] = None, src_id: Optional[str] = None, run_ty: Optional[str] = None,
+              req_id: Optional[int] = None, load_id: Optional[int] = None, ovrd_id: Optional[int] = None,
+              extract_id: Optional[int] = None, intake_id: Optional[int] = None,
+              btch_id: Optional[str] = None, file_ref: Optional[str] = None) -> None:
+        et = AUDIT_EVENTS.get(event_ty)
+        if et is None:
+            raise ConfigError(f"{event_ty} is not an exceptions-audit event")
+        sev = severity or et.severity
+        self.conn.execute(
+            """INSERT INTO CMS_ComplianceExceptionsAudit (Event_Ty, Sevrty, Project_Cd, Table_Nm, Src_ID, Run_Ty,
+                 Req_ID, Load_ID, Ovrd_ID, Extract_ID, Intake_ID, Btch_ID, File_Ref, Actor, Event_Txt, Event_Dtts,
+                 Notified_Ind)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (event_ty, sev, project_cd, table_nm, src_id, run_ty, req_id, load_id, ovrd_id, extract_id, intake_id,
+             btch_id, file_ref, actor, description, self.clock.now(), 0 if et.notify else 1))
+        level = logging.ERROR if sev == "ERROR" else logging.WARNING if sev == "WARNING" else logging.INFO
+        log.log(level, "audit %s extract=%s req=%s load=%s %s", event_ty, extract_id, req_id, load_id, description or "")
+
+
+_BODY_KEYS = ("event_id", "event_ty", "event_dtts", "project_cd", "table_nm", "src_id", "run_ty", "btch_id",
+              "req_id", "load_id", "extract_id", "ovrd_id", "intake_id", "file_ref", "actor", "event_txt")
+
+
+class NotificationDispatcher:
+    """Emails unsent exceptions-audit events (ids, codes and counts only). Only notifiable events are
+    written with Notified_Ind = 0, so every such row is sent once."""
+
+    def __init__(self, conn: psycopg.Connection, settings: Settings, channel: Channel):
+        self.conn, self.settings, self.channel = conn, settings, channel
+
+    def run(self, limit: int = 500) -> int:
+        rows = self.conn.execute("SELECT * FROM CMS_ComplianceExceptionsAudit WHERE Notified_Ind = 0 "
+                                 "ORDER BY Event_ID LIMIT %s", (limit,)).fetchall()
+        sent = 0
+        configs: dict[tuple, Optional[cfgmod.FileConfig]] = {}     # one lookup per source per run
+        for r in rows:
+            key = (r["project_cd"], r["table_nm"], r["src_id"])
+            if key not in configs:
+                configs[key] = cfgmod.file_config(self.conn, *key) if all(key) else None
+            cfg = configs[key]
+            if cfg:
+                failure = AUDIT_EVENTS.get(r["event_ty"], _EXC_ERROR).category == "EXCEPTION"
+                raw = cfg.failr_email_notfn_id if failure else cfg.sucs_email_notfn_id
+                recipients = [x.strip() for x in (raw or "").split(",") if x.strip()]
+            else:
+                recipients = list(self.settings.default_notify_emails)
+            prefix = f"{cfg.email_subjct_txt} - " if cfg and cfg.email_subjct_txt else ""
+            msg = Message(f"{prefix}[{r['sevrty']}] {r['event_ty']}",
+                          "\n".join(f"{k}: {r[k]}" for k in _BODY_KEYS if r.get(k) is not None), recipients)
+            try:
+                self.channel.send(msg)
+            except Exception:  # noqa: BLE001 - never roll back pipeline state for a notification
+                log.exception("notification for event %s failed", r["event_id"])
+                continue
+            with self.conn.transaction():
+                self.conn.execute("UPDATE CMS_ComplianceExceptionsAudit SET Notified_Ind=1 WHERE Event_ID=%s",
+                                  (r["event_id"],))
+            sent += 1
+        return sent

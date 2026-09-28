@@ -13,9 +13,12 @@ class for anyone who's worked with the original.
 """
 
 import json
+import logging
 
 import boto3
 import pg8000
+
+logger = logging.getLogger(__name__)
 
 
 class RdsClient:
@@ -34,18 +37,14 @@ class RdsClient:
         """
         client = boto3.client("secretsmanager", region_name=self.region)
         try:
-            get_secret_value_response = client.get_secret_value(SecretId=self.secret_name)
-        except Exception as e:
-            print(f"Failed with exception {e}", exc_info=True)
-            raise e
-        else:
-            # Decrypts secret using the associated KMS CMK.
-            # Depending on whether the secret is a string or binary, one of these fields will be populated.
-            if "SecretString" in get_secret_value_response:
-                secret_string = get_secret_value_response["SecretString"]
-                secret = json.loads(secret_string)
-                print("Got the secret manager credentials")
-                return secret
+            response = client.get_secret_value(SecretId=self.secret_name)
+        except Exception:
+            logger.exception("Failed to read secret %s", self.secret_name)
+            raise
+        # Depending on whether the secret is a string or binary, one of these fields will be populated.
+        if "SecretString" in response:
+            logger.info("Got the secret manager credentials")
+            return json.loads(response["SecretString"])
 
     def set_rds_connection_details(self):
         rds_account_secret_val = self.get_secret()
@@ -65,12 +64,7 @@ class RdsClient:
         return self.rds_jdbc_url, self.rds_connection_properties
 
     def connect(self):
-        try:
-            jdbc_url, connection_properties = self.set_rds_connection_details()
-        except Exception as e:
-            print(f"Failed with exception {e}", exc_info=True)
-            raise e
-
+        self.set_rds_connection_details()
         conn = pg8000.connect(
             host=self.rds_jdbc_hostname,
             port=int(self.rds_jdbc_port),
@@ -80,8 +74,8 @@ class RdsClient:
             ssl=True,
         )
 
-        print(f"Connected host='{self.rds_jdbc_hostname}', "
-              f"db='{self.rds_database_name}', user='{self.rds_username}'")
+        logger.info("Connected host='%s', db='%s', user='%s'",
+                    self.rds_jdbc_hostname, self.rds_database_name, self.rds_username)
         return conn
 
     def ping_table(self, table_name) -> int:
@@ -89,11 +83,13 @@ class RdsClient:
         self.table_name = table_name
         try:
             cursor = conn.cursor()
-            cursor.execute(f"SELECT COUNT(*) FROM {self.table_name}")
-            count = cursor.fetchone()[0]
-            print(f"Table '{self.table_name}' reachable. Row count = {count}")
+            try:
+                cursor.execute(f"SELECT COUNT(*) FROM {self.table_name}")
+                count = cursor.fetchone()[0]
+            finally:
+                cursor.close()
+            logger.info("Table '%s' reachable. Row count = %s", self.table_name, count)
             return count
         finally:
-            cursor.close()
             conn.close()
-            print("Connection closed")
+            logger.info("Connection closed")

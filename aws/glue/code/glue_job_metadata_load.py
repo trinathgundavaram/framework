@@ -18,7 +18,7 @@ uploaded to S3 alongside this script (see aws/glue/glue-job.tf).
 DESIGN
 ------
 - The input CSV's header IS the column list to load - by convention (see
-  ddl/create_metadata_tables.sql) every table's file layout matches the
+  src/framework/sql/schema.sql) every table's file layout matches the
   table layout exactly except for the audit columns the DB itself owns
   (created_dtts / updated_dtts / loaded_dtts / created_by / updated_by).
   Those never appear in the file, so there's nothing to strip - the job
@@ -35,9 +35,9 @@ DESIGN
 
   Re-running the job against the same table with a refreshed CSV (add a
   row, correct a row, flip a flag) is the update mechanism - there's no
-  separate "load" vs "update" job. Loading the framework's 5 metadata
-  tables (or any other table) is just 5 (or however many) separate manual
-  runs of this same job with different --TABLE_NAME / --S3_FILE_NAME /
+  separate "load" vs "update" job. Loading the framework's configuration
+  tables (or any other table) is just one separate manual run per table
+  of this same job with different --TABLE_NAME / --S3_FILE_NAME /
   --PRIMARY_KEY values - see the README for the exact commands.
 
 This is a Glue **Python Shell** job (not Spark) - these are small
@@ -46,13 +46,14 @@ right tool.
 
 JOB PARAMETERS (set as Glue job arguments, all as --KEY VALUE)
   --TABLE_NAME      Schema-qualified Postgres table to load, e.g.
-                     cms_compliance.compliance_source_system. Must already exist.
+                     cms_compliance.compliancesourcesystem. Must already exist
+                     (framework table names are unquoted, so Postgres stores them lower-case).
   --S3_INPUT_PATH   s3://<bucket>/<prefix>/    Folder the input file lives in.
   --S3_FILE_NAME    <file_name>.csv            File inside that folder to load
                      (the job reads s3://<bucket>/<prefix>/<file_name>).
   --PRIMARY_KEY     Comma-separated primary key column(s) for the ON CONFLICT
-                     target, e.g. src_cd
-                     or project_cd,table_nm,src_cd,run_ty,cmplnc_vrsn
+                     target, e.g. src_id
+                     or project_cd,table_nm,src_id,run_ty,effective_start_dt_key
   --MODE            Optional: "upsert" (default) or "insert_only" (append-only
                      table - audit/exception logs).
   --AUDIT_COLUMNS   Optional comma-separated list of audit columns the table
@@ -75,6 +76,7 @@ Glue job setup notes (see aws/glue/glue-job.tf):
 """
 
 import io
+import re
 import sys
 import logging
 
@@ -94,6 +96,19 @@ DEFAULT_AUDIT_COLUMNS = {
     "created_dtts", "updated_dtts", "loaded_dtts", "created_by", "updated_by",
 }
 
+# PostgreSQL accepts at most 65535 bind parameters per statement; a larger file is sent in chunks.
+MAX_PARAMS = 65535
+
+# Table and column names come from job arguments and the CSV header and are placed in the SQL
+# unquoted (PostgreSQL folds them to lower case), so each must be a plain identifier.
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+
+def check_identifiers(what: str, names) -> None:
+    bad = [n for n in names if not _IDENT.match(n)]
+    if bad:
+        raise ValueError(f"{what}: not a plain SQL identifier: {bad}")
+
 
 def read_csv_from_s3(s3_input_path: str, file_name: str) -> pd.DataFrame:
     """Read s3://.../<file_name> into a DataFrame. Empty file -> empty frame."""
@@ -103,8 +118,7 @@ def read_csv_from_s3(s3_input_path: str, file_name: str) -> pd.DataFrame:
     logger.info("Reading s3://%s/%s", bucket, key)
     obj = s3.get_object(Bucket=bucket, Key=key)
     df = pd.read_csv(io.BytesIO(obj["Body"].read()), dtype=str, keep_default_na=False)
-    df = df.replace({"": None})
-    return df
+    return df.replace({"": None})
 
 
 def upsert_file(conn, table: str, s3_input_path: str, file_name: str,
@@ -127,43 +141,39 @@ def upsert_file(conn, table: str, s3_input_path: str, file_name: str,
     if missing_pk:
         raise ValueError(f"[{table}] file {file_name} is missing primary key column(s): {missing_pk}")
 
-    records = list(df[columns].itertuples(index=False, name=None))
+    check_identifiers(f"[{table}] --TABLE_NAME", table.split("."))
+    check_identifiers(f"[{table}] columns of {file_name}", columns)
+    check_identifiers(f"[{table}] --PRIMARY_KEY", pk_cols)
+    check_identifiers(f"[{table}] --AUDIT_COLUMNS", audit_columns)
 
+    records = list(df[columns].itertuples(index=False, name=None))
     col_list = ", ".join(columns)
     row_placeholder = "(" + ", ".join(["%s"] * len(columns)) + ")"
-    values_sql = ", ".join([row_placeholder] * len(records))
-    params = [value for row in records for value in row]
 
-    if mode == "insert_only":
-        # Append-only log: never touch a row once it exists.
-        sql = (
-            f"INSERT INTO {table} ({col_list}) VALUES {values_sql} "
-            f"ON CONFLICT ({', '.join(pk_cols)}) DO NOTHING"
-        )
-    elif mode == "upsert":
-        update_cols = [c for c in columns if c not in pk_cols]
-        set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
-        if "updated_dtts" in audit_columns:
-            set_clause = (set_clause + ", " if set_clause else "") + "updated_dtts = now()"
-        if not set_clause:
-            # Table is pure-PK with no other columns and no updated_dtts audit
-            # column - nothing to update, fall back to DO NOTHING.
-            sql = (
-                f"INSERT INTO {table} ({col_list}) VALUES {values_sql} "
-                f"ON CONFLICT ({', '.join(pk_cols)}) DO NOTHING"
-            )
-        else:
-            sql = (
-                f"INSERT INTO {table} ({col_list}) VALUES {values_sql} "
-                f"ON CONFLICT ({', '.join(pk_cols)}) DO UPDATE SET {set_clause}"
-            )
-    else:
+    if mode not in ("upsert", "insert_only"):
         raise ValueError(f"[{table}] unknown --MODE: {mode} (expected upsert or insert_only)")
 
+    # insert_only (append-only log) never touches a row once it exists. upsert sets every non-PK
+    # column from EXCLUDED and bumps updated_dtts; a pure-PK table has nothing to update -> DO NOTHING.
+    set_parts = []
+    if mode == "upsert":
+        set_parts = [f"{c} = EXCLUDED.{c}" for c in columns if c not in pk_cols]
+        if "updated_dtts" in audit_columns:
+            set_parts.append("updated_dtts = now()")
+    action = f"DO UPDATE SET {', '.join(set_parts)}" if set_parts else "DO NOTHING"
+
+    # One statement when the file fits in the parameter limit (every file that loaded before still
+    # loads exactly as before); otherwise chunks, all committed together below.
+    chunk = max(1, MAX_PARAMS // len(columns))
+    row_count = 0
     cur = conn.cursor()
     try:
-        cur.execute(sql, params)
-        row_count = cur.rowcount
+        for start in range(0, len(records), chunk):
+            part = records[start:start + chunk]
+            values_sql = ", ".join([row_placeholder] * len(part))
+            sql = f"INSERT INTO {table} ({col_list}) VALUES {values_sql} ON CONFLICT ({', '.join(pk_cols)}) {action}"
+            cur.execute(sql, [value for row in part for value in row])
+            row_count += cur.rowcount
     finally:
         cur.close()
 
