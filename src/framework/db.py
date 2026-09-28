@@ -1,7 +1,7 @@
 """Database helpers: schema install, query helpers and advisory locks.
 
 Connections are autocommit; every unit of work uses an explicit `with conn.transaction():` block.
-Lock order is always EXT -> BTCH (design §12.2). Session locks are released if the session dies.
+Batch locks (BTCH) serialise work on one batch (design §12.2). Session locks are released if the session dies.
 """
 from __future__ import annotations
 
@@ -51,10 +51,6 @@ def init_db(conn: psycopg.Connection, schema: str = "cms_compliance") -> list[st
 
 
 # ============================================================================ advisory locks
-def extract_key(extract_id: int) -> str:
-    return f"EXT:{extract_id}"
-
-
 def batch_key(btch_id: str) -> str:
     return f"BTCH:{btch_id}"
 

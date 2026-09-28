@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from functools import partial
-from typing import Callable, Optional
+from typing import Optional
 
 import psycopg
 
@@ -33,14 +33,11 @@ class DecisionSummary:
     applied: list[int] = field(default_factory=list)       # REUSE overrides applied to their batch
     expired: list[int] = field(default_factory=list)       # applied REUSE overrides that ran out
     invalid: list[int] = field(default_factory=list)
-    extracts_to_refresh: set[int] = field(default_factory=set)
 
 
 class DecisionProcessor:
-    def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings,
-                 refresh_extract: Optional[Callable[[int], None]] = None):
+    def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings):
         self.conn, self.clock, self.settings = conn, clock, settings
-        self.refresh_extract = refresh_extract
         self.logger = EventLogger(conn, clock)
 
     def run(self) -> DecisionSummary:
@@ -48,9 +45,6 @@ class DecisionProcessor:
         today = self.clock.today(self.settings.business_tz)
         self._expire(s, today)
         self._apply(s, today)
-        if self.refresh_extract:
-            for ext in sorted(s.extracts_to_refresh):
-                self.refresh_extract(ext)
         return s
 
     # ------------------------------------------------------------------ REUSE: apply
@@ -70,7 +64,7 @@ class DecisionProcessor:
                 if o is None:
                     continue
                 b = get_batch(self.conn, o["req_id"], for_update=True)
-                ctx = dict(ovrd_id=o["ovrd_id"], req_id=b["req_id"], extract_id=b["extract_id"], btch_id=b["btch_id"],
+                ctx = dict(ovrd_id=o["ovrd_id"], req_id=b["req_id"], btch_id=b["btch_id"],
                            project_cd=b["project_cd"], table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"])
                 src = self._reuse_source(o, b)
                 problem = self._reuse_problem(o, b, src, run_types.get(b["run_ty"]))
@@ -93,7 +87,6 @@ class DecisionProcessor:
                                         ovrd_id=o["ovrd_id"], actor=o["reviewed_by"] or "SYSTEM",
                                         detail=f"reuses {src['btch_id']} through {o['valid_thru_dt_key']}")
                 s.applied.append(o["ovrd_id"])
-                s.extracts_to_refresh.add(b["extract_id"])
 
     # ------------------------------------------------------------------ REUSE: expire
     def _expire(self, s: DecisionSummary, today: date) -> None:
@@ -117,13 +110,12 @@ class DecisionProcessor:
                     """UPDATE ComplianceRequestControl SET Resolution_Ty=NULL, Reuse_Btch_ID=NULL, Req_Stat=%s,
                               Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, self.clock.now(), b["req_id"]))
                 self.logger.audit("OVERRIDE_EXPIRED", ovrd_id=r["ovrd_id"], req_id=b["req_id"], btch_id=b["btch_id"],
-                                  extract_id=b["extract_id"], project_cd=b["project_cd"], table_nm=b["table_nm"],
+                                  project_cd=b["project_cd"], table_nm=b["table_nm"],
                                   src_id=b["src_id"], run_ty=b["run_ty"],
                                   description=f"REUSE of {b['reuse_btch_id']} is no longer valid")
                 self.logger.batch_event("CARRY_FORWARD_REMOVED", req_id=b["req_id"], btch_id=b["btch_id"],
                                         ovrd_id=r["ovrd_id"], detail=f"reuse of {b['reuse_btch_id']} expired")
                 s.expired.append(r["ovrd_id"] or b["req_id"])
-                s.extracts_to_refresh.add(b["extract_id"])
 
     # ------------------------------------------------------------------ health (design §15.3)
     def health(self) -> dict[str, list[dict]]:

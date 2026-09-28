@@ -44,18 +44,16 @@ def test_create_batches_one_batch_per_run_date(conn, tmp_path):
     rows = qa(conn, "SELECT * FROM ComplianceRequestControl ORDER BY Src_ID")
     assert [r["btch_id"] for r in rows] == ["20260201_PRJA_tbl_x_S1_MONTHLY_V1_1", "20260201_PRJA_tbl_x_S2_MONTHLY_V1_1"]
     assert (rows[0]["req_dt_key"], rows[0]["req_stat"]) == (date(2026, 2, 1), "PENDING")
-    e = q1(conn, "SELECT * FROM ComplianceExtractControl")
-    assert (e["required_src_cnt"], e["req_dt_key"], e["extract_close_ind"]) == (2, date(2026, 2, 1), 0)
     assert q1(conn, "SELECT count(*) n FROM ComplianceRequestFileDetail WHERE Event_Ty='BATCH_CREATED'")["n"] == 2
     # nothing stores an SLA date: the hold is Req_Dt_Key + (SLA_Days - 1), computed when needed
     cols = {r["column_name"] for r in qa(conn, """SELECT column_name FROM information_schema.columns
                                                    WHERE table_name='compliancerequestcontrol'
                                                      AND table_schema = current_schema()""")}
-    assert not cols & {"earliest_close_dt", "intake_id", "current_load_id", "created_by", "cmplnc_vrsn"}
+    assert not cols & {"earliest_close_dt", "intake_id", "current_load_id", "created_by", "cmplnc_vrsn", "extract_id"}
 
 
-def test_daily_runs_of_the_same_period_get_their_own_batch_and_extract(conn, tmp_path):
-    """A CMS-style run type: the same report period, one batch and one extract per run date."""
+def test_daily_runs_of_the_same_period_get_their_own_batch(conn, tmp_path):
+    """A CMS-style run type: the same report period, one batch per run date."""
     seed_config(conn, sources=("S1",))
     app, clock, *_ = make_app(conn, tmp_path, utc(2026, 2, 2, 13, 0))
     assert create_batches(app, period="CURRENT_CALENDAR_MONTH").created == 1
@@ -64,7 +62,6 @@ def test_daily_runs_of_the_same_period_get_their_own_batch_and_extract(conn, tmp
     rows = qa(conn, "SELECT * FROM ComplianceRequestControl ORDER BY Req_Dt_Key")
     assert [(r["req_dt_key"], r["rpt_start_dt_key"]) for r in rows] == [
         (date(2026, 2, 2), date(2026, 2, 1)), (date(2026, 2, 3), date(2026, 2, 1))]
-    assert len({r["extract_id"] for r in rows}) == 2
     assert [r["btch_id"][-1] for r in rows] == ["1", "1"]
 
 
@@ -86,26 +83,10 @@ def test_effective_window_scope_and_errors(conn, tmp_path):
                      "WHERE Run_Ty='MONTHLY' AND Src_ID='S2'")
     app, clock, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 12, 0))
     s = create_batches(app)
-    assert s.created == 1 and q1(conn, "SELECT Required_Src_Cnt n FROM ComplianceExtractControl")["n"] == 1
+    assert s.created == 1 and [r["src_id"] for r in qa(conn, "SELECT Src_ID FROM ComplianceRequestControl")] == ["S1"]
     assert create_batches(app, table_nm="other").errors                 # nothing effective in that scope
     with pytest.raises(ConfigError, match="not ROUTINE"):
         app.create_batches(project_cd="PRJA", run_ty="ADHOC", period="SAME_DAY")
-
-
-def test_no_batch_added_to_closed_extract(conn, tmp_path):
-    seed_config(conn, sources=("S1",))
-    app, clock, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
-    create_batches(app)
-    with conn.transaction():
-        conn.execute("UPDATE ComplianceExtractControl SET Extract_Close_Ind=1, Extract_Closed_Dtts=now(), "
-                     "Extract_Closed_By='ops'")
-        conn.execute("INSERT INTO ComplianceSourceSystem (Src_ID, Src_Nm, Src_Ty) VALUES ('S3','s3','VENDOR')")
-        conn.execute("""INSERT INTO ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty,
-                        Effective_Start_Dt_Key, Cmplnc_Vrsn) VALUES ('PRJA','tbl_x','S3','MONTHLY','2025-01-01','V1')""")
-    s = create_batches(app)
-    assert s.created == 0 and s.skipped == 1
-    assert q1(conn, "SELECT count(*) n FROM CMS_ComplianceExceptionsAudit "
-                    "WHERE Event_Ty='BATCH_CREATE_SKIPPED_EXTRACT_CLOSED'")["n"] == 1
 
 
 # ---------------------------------------------------------------- ad-hoc intake (P4)
@@ -136,7 +117,6 @@ def test_one_off_request_creates_one_run(app, conn):
     assert last_run(conn, iid) == date(2026, 4, 2)
     rows = qa(conn, "SELECT * FROM ComplianceRequestControl WHERE Run_Ty='ADHOC' ORDER BY Src_ID")
     assert {r["req_dt_key"] for r in rows} == {date(2026, 4, 2)} and len(rows) == 2
-    assert q1(conn, "SELECT Required_Src_Cnt n FROM ComplianceExtractControl WHERE Run_Ty='ADHOC'")["n"] == 2
     assert q1(conn, "SELECT count(*) n FROM ComplianceRequestFileDetail WHERE Intake_ID=%s", iid)["n"] == 2
     assert a.intake.run().handled == 0                        # already handled for this run date
     clock.set(utc(2026, 4, 3, 15, 0))
@@ -144,7 +124,7 @@ def test_one_off_request_creates_one_run(app, conn):
 
 
 def test_request_window_creates_batches_daily_for_the_same_period(app, conn):
-    """10-day window, same report dates: one batch per source per run date, each with its own extract."""
+    """10-day window, same report dates: one batch per source per run date."""
     a, clock, _ = app
     iid = intake(conn, src="S1", req_start="2026-04-02", req_end="2026-04-11")
     for day in (2, 3, 4):
@@ -154,7 +134,6 @@ def test_request_window_creates_batches_daily_for_the_same_period(app, conn):
     rows = qa(conn, "SELECT * FROM ComplianceRequestControl WHERE Run_Ty='ADHOC' ORDER BY Req_Dt_Key")
     assert [r["req_dt_key"] for r in rows] == [date(2026, 4, 2), date(2026, 4, 3), date(2026, 4, 4)]
     assert {(r["rpt_start_dt_key"], r["rpt_end_dt_key"]) for r in rows} == {(date(2026, 3, 1), date(2026, 3, 31))}
-    assert len({r["extract_id"] for r in rows}) == 3
     assert [r["btch_id"] for r in rows] == [f"2026040{d}_PRJA_tbl_x_S1_ADHOC_V1_1" for d in (2, 3, 4)]
     assert a.intake.run().handled == 0                        # same day twice: idempotent
     with conn.transaction():                                  # even if re-run after a reset, batches already exist
@@ -194,4 +173,4 @@ def test_schema_follows_the_ddl_standard(conn):
     assert rows and not [r for r in rows if r["contype"] == "c"]
     assert all(r["conname"].startswith(("pk_", "fk_", "uq_")) for r in rows)
     assert not qa(conn, "SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() "
-                        "AND table_name = 'complianceeventtype'")
+                        "AND table_name IN ('complianceeventtype', 'complianceextractcontrol')")

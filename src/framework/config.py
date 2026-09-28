@@ -93,7 +93,6 @@ class RuleBinding:
     table_nm: str                    # '*' = every table of the project
     src_id: str                      # '*' = every source
     run_ty: str                      # '*' = every run type
-    rule_scope_cd: str
     gre_rule_group: str
     gre_rule_variant: str
 
@@ -150,22 +149,21 @@ def file_config_by_id(conn: psycopg.Connection, cfg_id: int) -> Optional[FileCon
     return FileConfig.from_row(r) if r else None
 
 
-def rule_bindings(conn, project_cd: str, table_nm: str, src_id: str, run_ty: str, scope: str) -> list[RuleBinding]:
-    """Every active binding that applies (additive): each of Table_Nm, Src_ID and Run_Ty equals the given
-    value or is '*'. Pass src_id='*' for PERIOD_LEVEL. A rule group/variant bound at several levels is
-    returned once (its most specific binding), in group/variant order."""
+def rule_bindings(conn, project_cd: str, table_nm: str, src_id: str, run_ty: str) -> list[RuleBinding]:
+    """Every active binding that applies to a file (additive): each of Table_Nm, Src_ID and Run_Ty equals
+    the given value or is '*'. A rule group/variant bound at several levels is returned once (its most
+    specific binding), in group/variant order."""
     rows = conn.execute(
         """SELECT * FROM ComplianceRuleBinding
             WHERE Project_Cd = %(p)s AND Table_Nm IN (%(t)s, '*') AND Src_ID IN (%(s)s, '*')
-              AND Run_Ty IN (%(r)s, '*') AND Rule_Scope_Cd = %(scope)s AND Active_Ind = 1
+              AND Run_Ty IN (%(r)s, '*') AND Active_Ind = 1
             ORDER BY Gre_Rule_Group, Gre_Rule_Variant,
                      (Table_Nm = '*')::int + (Src_ID = '*')::int + (Run_Ty = '*')::int""",
-        {"p": project_cd, "t": table_nm, "s": src_id, "r": run_ty, "scope": scope}).fetchall()
+        {"p": project_cd, "t": table_nm, "s": src_id, "r": run_ty}).fetchall()
     out: dict[tuple[str, str], RuleBinding] = {}
     for r in rows:
         out.setdefault((r["gre_rule_group"], r["gre_rule_variant"]), RuleBinding(
-            r["project_cd"], r["table_nm"], r["src_id"], r["run_ty"], r["rule_scope_cd"], r["gre_rule_group"],
-            r["gre_rule_variant"]))
+            r["project_cd"], r["table_nm"], r["src_id"], r["run_ty"], r["gre_rule_group"], r["gre_rule_variant"]))
     return list(out.values())
 
 
@@ -346,16 +344,12 @@ def validate_all(conn: psycopg.Connection, case_sensitive: bool = True) -> list[
             elif missing := [x for x in required if x not in found]:
                 add("TARGET_TABLE", f"{label}: {kind} table {schema}.{table} lacks {missing}")
 
-    # rule bindings: a known scope, PERIOD_LEVEL for all sources, and every named table / source / run type
-    # must exist in the project's crosswalk - a typo would otherwise silently match nothing
+    # rule bindings: every named table / source / run type must exist in the project's crosswalk -
+    # a typo would otherwise silently match nothing
     for r in conn.execute("SELECT * FROM ComplianceRuleBinding WHERE Active_Ind = 1 "
-                          "ORDER BY Project_Cd, Table_Nm, Src_ID, Run_Ty, Rule_Scope_Cd").fetchall():
-        label = (f"rule binding {r['project_cd']}/{r['table_nm']}/{r['src_id']}/{r['run_ty']} {r['rule_scope_cd']} "
+                          "ORDER BY Project_Cd, Table_Nm, Src_ID, Run_Ty").fetchall():
+        label = (f"rule binding {r['project_cd']}/{r['table_nm']}/{r['src_id']}/{r['run_ty']} "
                  f"{r['gre_rule_group']}:{r['gre_rule_variant']}")
-        if r["rule_scope_cd"] not in ("FILE_LEVEL", "PERIOD_LEVEL"):
-            add("RULE_BINDING", f"{label}: scope must be FILE_LEVEL or PERIOD_LEVEL")
-        elif r["rule_scope_cd"] == "PERIOD_LEVEL" and r["src_id"] != "*":
-            add("RULE_BINDING", f"{label}: a PERIOD_LEVEL rule covers every source, so Src_ID must be '*'")
         if not any(x.project_cd == r["project_cd"] and r["table_nm"] in ("*", x.table_nm)
                    and r["src_id"] in ("*", x.src_id) and r["run_ty"] in ("*", x.run_ty) for x in xw):
             add("RULE_BINDING_NO_XWALK", f"{label}: matches no active crosswalk row")

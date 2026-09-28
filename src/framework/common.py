@@ -43,11 +43,11 @@ class RowCountMismatch(FrameworkError):
 
 
 class CloseBlocked(FrameworkError):
-    """The extract is not eligible to be closed."""
+    """The batch may not be closed (already closed, or its SLA hold has not passed)."""
 
 
 class CloseDeferred(FrameworkError):
-    """One or more batches of the extract are locked by another process; try again later."""
+    """The batch is locked by another process; try again later."""
 
 
 # ============================================================================ clock

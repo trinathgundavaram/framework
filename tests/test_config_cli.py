@@ -76,11 +76,11 @@ def test_cli_end_to_end(conn, tmp_path, monkeypatch, capsys):
     assert main(["validate-config"]) == 0
     assert main(["test-connection"]) == 0
     capsys.readouterr()
-    assert main(["show-config", "--set", "extract_gating_mode=BEST_EFFORT"]) == 0
+    assert main(["show-config", "--set", "file_rules_mode=ANNOTATE"]) == 0
     shown = json.loads(capsys.readouterr().out)
     assert shown["settings"]["rule_engine"] == {"value": "none", "source": "env"}
     assert shown["settings"]["object_store"] == {"value": "local", "source": ".env"}
-    assert shown["settings"]["extract_gating_mode"]["source"] == "argument"
+    assert shown["settings"]["file_rules_mode"] == {"value": "ANNOTATE", "source": "argument"}
     assert "password" not in shown["database"] and shown["database"]["schema"] == SCHEMA
     assert main(["run", "--module", "BATCH_CREATION", "--project", "PRJA", "--run-type", "MONTHLY",
                  "--period", "PREV_CALENDAR_MONTH", "--as-of", "2026-02-01T13:00:00+00:00"]) == 0
@@ -92,21 +92,21 @@ def test_cli_end_to_end(conn, tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert main(["run", "--module", "FILE_LOAD", "--bucket", "inbound", "--key", key]) == 0
     assert json.loads(capsys.readouterr().out)["result"]["result"] == "PROMOTED"
-    ext = q1(conn, "SELECT Extract_ID FROM ComplianceExtractControl")["extract_id"]
+    s2 = q1(conn, "SELECT Btch_ID FROM ComplianceRequestControl WHERE Src_ID='S2'")["btch_id"]
+    feb1, feb3 = ["--as-of", "2026-02-01T13:00:00+00:00"], ["--as-of", "2026-02-03T13:00:00+00:00"]
+    assert main(["close-batch", "--btch-id", s2, "--closed-by", "me", *feb1]) == 2   # SLA hold -> exit 2
     capsys.readouterr()
-    assert main(["close-extract", "--extract-id", str(ext), "--closed-by", "me"]) == 2     # not eligible -> exit 2
-    assert main(["refresh-extract", "--extract-id", str(ext)]) == 0
-    assert main(["evaluate-extracts", "--project", "PRJA"]) == 0                  # still inside the SLA hold
-    capsys.readouterr()
-    assert main(["close-extract", "--extract-id", str(ext), "--closed-by", "me", "--ack-warnings",
-                 "--as-of", "2026-02-03T13:00:00+00:00",
-                 "--set", "extract_gating_mode=BEST_EFFORT"]) == 0
-    assert json.loads(capsys.readouterr().out)["closed_batches"] == 2
-    capsys.readouterr()
-    assert main(["health"]) == 0                        # composed from ingest/overrides/extract control (§15.3)
+    assert main(["close-batches", "--project", "PRJA", *feb1]) == 0                # still inside the SLA hold
+    assert json.loads(capsys.readouterr().out)["evaluated"] == 0
+    assert main(["close-batches", "--project", "PRJA", *feb3]) == 0                # S1 has data: closed
+    out = json.loads(capsys.readouterr().out)
+    assert (len(out["closed"]), out["waiting"]) == (1, [s2])                       # S2 has none: a person decides
+    assert main(["close-batch", "--btch-id", s2, "--closed-by", "me", *feb3]) == 0
+    assert json.loads(capsys.readouterr().out)["req_stat"] == "DATA_NOT_PROVIDED"
+    assert main(["health"]) == 0                        # composed from ingest/overrides/batch close (§15.3)
     assert set(json.loads(capsys.readouterr().out)) == {
         "stale_loads", "quarantine_by_reason", "pending_reviews", "overrides_expiring_soon",
-        "extracts_past_hold_not_closed", "regenerate_required"}
+        "batches_past_hold_not_closed"}
     assert main(["process-decisions"]) == 0
     assert main(["run", "--module", "BATCH_CREATION", "--project", "PRJA"]) == 0  # ad-hoc sweep only
     assert main(["notify"]) == 0
@@ -145,7 +145,7 @@ def test_cli_file_load_path(conn, tmp_path, monkeypatch, capsys):
 
 
 def test_rule_engine_adapter_contract(conn):
-    b = [RuleBinding("P", "T", "S", "*", "FILE_LEVEL", "g", "v")]
+    b = [RuleBinding("P", "T", "S", "*", "g", "v")]
     seen = []
     ok = CallableRuleEngine(lambda c, g, v, p: seen.append((c, g, v)) or [{"rule_ref": "R1", "passed": True}])
     assert ok.run(conn, b, {}, "GATE").status == "PASSED" and seen == [(conn, "g", "v")]
@@ -160,57 +160,46 @@ def test_rule_engine_adapter_contract(conn):
 
 
 # ---------------------------------------------------------------- rule binding levels (additive)
-def rules_for(conn, src, run_ty, scope="FILE_LEVEL"):
+def rules_for(conn, src, run_ty):
     from framework.config import rule_bindings
-    return [f"{b.gre_rule_group}:{b.gre_rule_variant}" for b in rule_bindings(conn, "PRJA", "tbl_x", src, run_ty, scope)]
+    return [f"{b.gre_rule_group}:{b.gre_rule_variant}" for b in rule_bindings(conn, "PRJA", "tbl_x", src, run_ty)]
 
 
 def test_rule_bindings_apply_at_every_level_and_add_up(conn):
     seed_config(conn, rules=False)
     with conn.transaction():
-        bind(conn, "FILE_LEVEL", "g", "project", table="*")                    # every table of the project
-        bind(conn, "FILE_LEVEL", "g", "table")                                 # every source of tbl_x
-        bind(conn, "FILE_LEVEL", "g", "adhoc_only", run_ty="ADHOC")            # tbl_x, ADHOC runs only
-        bind(conn, "FILE_LEVEL", "g", "s1_only", src="S1")                     # one source
-        bind(conn, "FILE_LEVEL", "g", "table", src="S1")                       # same rule at two levels: runs once
-        bind(conn, "FILE_LEVEL", "g", "other_table", table="tbl_other")        # a different table
-        bind(conn, "PERIOD_LEVEL", "p", "monthly", run_ty="MONTHLY")
-        bind(conn, "PERIOD_LEVEL", "p", "project", table="*")
+        bind(conn, "g", "project", table="*")                                  # every table of the project
+        bind(conn, "g", "table")                                               # every source of tbl_x
+        bind(conn, "g", "adhoc_only", run_ty="ADHOC")                          # tbl_x, ADHOC runs only
+        bind(conn, "g", "s1_only", src="S1")                                   # one source
+        bind(conn, "g", "table", src="S1")                                     # same rule at two levels: runs once
+        bind(conn, "g", "other_table", table="tbl_other")                      # a different table
         conn.execute("UPDATE ComplianceRuleBinding SET Active_Ind=0 WHERE Gre_Rule_Variant='other_table'")
     assert rules_for(conn, "S1", "MONTHLY") == ["g:project", "g:s1_only", "g:table"]
     assert rules_for(conn, "S2", "MONTHLY") == ["g:project", "g:table"]
     assert rules_for(conn, "S2", "ADHOC") == ["g:adhoc_only", "g:project", "g:table"]
-    # seed_config also binds g_period:all at table level
-    assert rules_for(conn, "*", "MONTHLY", "PERIOD_LEVEL") == ["g_period:all", "p:monthly", "p:project"]
-    assert rules_for(conn, "*", "ADHOC", "PERIOD_LEVEL") == ["g_period:all", "p:project"]
 
 
 def test_table_level_rules_reach_the_rules_engine(conn, tmp_path):
-    """Universe-style: rules bound once at project/table level run for every source's file and for the run."""
+    """Universe-style: a rule bound once at project/table level runs for every source's file."""
     seed_config(conn, rules=False)
     with conn.transaction():
         conn.execute("DELETE FROM ComplianceRuleBinding")
-        bind(conn, "FILE_LEVEL", "u_file", "all_sources")
-        bind(conn, "PERIOD_LEVEL", "u_period", "all_runs")
+        bind(conn, "u_file", "all_sources")
     app, clock, rules = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
     create_batches(app)
     for src in ("S1", "S2"):
         assert app.pipeline.process_file("inbound", put_file(app, file_name(src), ["1|1|a"])).result == "PROMOTED"
-    file_calls = [c for c in rules.calls if c["scope"] == "FILE_LEVEL"]
-    assert [(c["src_id"], c["rules"]) for c in file_calls] == [("S1", ["u_file:all_sources"]),
+    assert [(c["src_id"], c["rules"]) for c in rules.calls] == [("S1", ["u_file:all_sources"]),
                                                                ("S2", ["u_file:all_sources"])]
-    assert [c["rules"] for c in rules.calls if c["scope"] == "PERIOD_LEVEL"] == [["u_period:all_runs"]]
 
 
 def test_validator_checks_rule_bindings(conn):
     seed_config(conn)
     assert codes(validate_all(conn)) == []
     with conn.transaction():
-        bind(conn, "PERIOD_LEVEL", "p", "one_source", src="S1")               # period rules cover all sources
-        bind(conn, "FILE_LEVEL", "g", "typo", run_ty="WEEKLY")                 # no such run type in the crosswalk
-        bind(conn, "FILE_LEVEL", "g", "typo", table="tbl_nope")                # no such table
-        bind(conn, "EXTRACT", "g", "bad_scope")
+        bind(conn, "g", "typo", run_ty="WEEKLY")                               # no such run type in the crosswalk
+        bind(conn, "g", "typo", table="tbl_nope")                              # no such table
+        bind(conn, "g", "typo", src="S9")                                      # no such source
     issues = validate_all(conn)
-    assert codes(issues) == ["RULE_BINDING", "RULE_BINDING_NO_XWALK"]
-    assert sum(i.code == "RULE_BINDING_NO_XWALK" for i in issues) == 2
-    assert sum(i.code == "RULE_BINDING" for i in issues) == 2
+    assert codes(issues) == ["RULE_BINDING_NO_XWALK"] and len(issues) == 3

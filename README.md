@@ -1,22 +1,22 @@
 # CMS Compliance Framework
 
 A project-agnostic, filename-driven framework for CMS compliance source files: batch registration,
-file intake, validation, promotion to core, manual overrides (reuse, late arrival, correction),
-period validation and **closing the run** when its data is complete. The project's own job chain
-generates the extract afterwards. PostgreSQL + Python; runs locally or as AWS Glue jobs.
+file intake, validation, promotion to core, manual overrides (reuse, late arrival, correction) and
+**closing each batch** after its SLA hold. The extract is produced by a separate process that reads
+the batches. PostgreSQL + Python; runs locally or as AWS Glue jobs.
 
 | Start here | |
 |---|---|
 | Setup, settings, commands, onboarding | [`docs/framework-package.md`](docs/framework-package.md) |
 | What each module does | [`docs/module-reference.md`](docs/module-reference.md) |
-| Design and decisions (v5) | [`docs/design/cms-compliance-framework-design.md`](docs/design/cms-compliance-framework-design.md) |
+| Design and decisions (v6) | [`docs/design/cms-compliance-framework-design.md`](docs/design/cms-compliance-framework-design.md) |
 | Schema (source of truth) | [`src/framework/sql/schema.sql`](src/framework/sql/schema.sql) |
 
-**What lives where (v5)**
+**What lives where (v6)**
 
-| In tables (5 config + event vocabulary) | Outside tables |
+| In tables (6 reference / configuration) | Outside tables |
 |---|---|
-| `ComplianceSourceSystem`, `ComplianceRunType` (incl. `Carry_Fwd_Ind`), `ComplianceDataSetSourceXwalk` (which project/table/source/run type apply, and when), `ComplianceSourceFileConfig` (file contract, paths, targets, recipients), `ComplianceRuleBinding` | Database connection: `.env` locally, Secrets Manager in AWS · Settings: `--set` job arguments > environment > `.env` · Report period: `run --module BATCH_CREATION --period <NAME>` (`period_sql.py`) · Gating mode and automatic close: arguments of the project's `evaluate-extracts` job |
+| `ComplianceProject`, `ComplianceSourceSystem`, `ComplianceRunType` (incl. `SLA_Days`, `Carry_Fwd_Ind`), `ComplianceDataSetSourceXwalk` (which project/table/source/run type apply, and when), `ComplianceSourceFileConfig` (file contract, paths, targets, recipients), `ComplianceRuleBinding` (file rules at project / table / run type / source level) | Database connection: `.env` locally, Secrets Manager in AWS · Settings: `--set` job arguments > environment > `.env` · Report period: `run --module BATCH_CREATION --period <NAME>` (`period_sql.py`) · Event vocabulary: `audit.py` |
 
 ```bash
 pip install -e ".[dev]"
@@ -27,7 +27,8 @@ framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period
 framework run --module BATCH_CREATION --project PRJA                         # that project's ad-hoc requests only
 framework run --module FILE_LOAD --bucket inbound --key prja/in/PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.txt
 framework run --module FILE_LOAD                                              # sweep every configured inbound location
-framework evaluate-extracts --project PRJA      # closes the runs whose data is complete
+framework close-batches --project PRJA                                        # SLA sweep: closes batches with data
+framework close-batch --btch-id <Btch_ID> --closed-by jdoe                    # a person closes a batch without data
 ```
 
 Every batch-creation and file-loading job is started through `run --module NAME` (modules.py) - one

@@ -41,8 +41,6 @@ def test_o1_promote(env, conn):
     events = [r["event_ty"] for r in qa(conn, "SELECT Event_Ty FROM ComplianceRequestFileDetail WHERE Req_ID=%s "
                                               "ORDER BY Detail_ID", b["req_id"])]
     assert events == ["BATCH_CREATED", "FILE_RECEIVED", "FILE_PROMOTED"]
-    e = q1(conn, "SELECT * FROM ComplianceExtractControl")
-    assert e["received_src_cnt"] == 1 and e["combine_last_run_dtts"] is None        # partial: no combine yet
 
 
 def test_o2_replacement_latest_arrival_wins(env, conn):
@@ -242,12 +240,12 @@ def test_failure_during_promotion_rolls_back_core_and_control(env, conn, monkeyp
 def test_file_for_a_closed_batch_needs_an_approved_override(conn, tmp_path):
     """A closed batch only accepts a file when an approved, still-valid override says so (D-74)."""
     seed_config(conn)
-    app, clock, rules = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0), extract_gating_mode="BEST_EFFORT")
+    app, clock, rules = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
     create_batches(app)
     ingest(app, file_name("S1"), ["1|1|a"])
     clock.set(utc(2026, 2, 2, 12, 0))
-    ext = q1(conn, "SELECT Extract_ID FROM ComplianceExtractControl")["extract_id"]
-    app.control.close(ext, "ops", ack_warnings=True)
+    s2 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID='S2'")
+    app.closer.close(s2["btch_id"], "ops")                                     # no data: a person closes it
     s2 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID='S2'")
     assert (s2["batch_close_ind"], s2["req_stat"], s2["resolution_ty"]) == (1, "DATA_NOT_PROVIDED", "MISSING")
 
@@ -268,10 +266,10 @@ def test_file_for_a_closed_batch_needs_an_approved_override(conn, tmp_path):
     b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Req_ID=%s", s2["req_id"])
     assert (b["batch_close_ind"], b["req_stat"], b["resolution_ty"]) == (1, "COMPLETED", "NEW_FILE")
     assert qa(conn, "SELECT id FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", b["btch_id"]) == [{"id": 5}]
-    e = q1(conn, "SELECT * FROM ComplianceExtractControl")
-    assert e["regenerate_required_ind"] == 1 and e["received_src_cnt"] == 2
-    assert q1(conn, "SELECT count(*) n FROM CMS_ComplianceExceptionsAudit "
-                    "WHERE Event_Ty='EXTRACT_REGENERATE_REQUIRED'")["n"] == 1
+    # the separate extract process sees the late data through the batch timeline
+    assert [r["event_ty"] for r in qa(conn, "SELECT Event_Ty FROM ComplianceRequestFileDetail WHERE Req_ID=%s "
+                                            "ORDER BY Detail_ID", b["req_id"])][-2:] == ["FILE_RECEIVED",
+                                                                                       "LATE_ARRIVAL_PROMOTED"]
 
 
 def test_correction_needs_its_own_override_type_and_expires(env, conn):
@@ -279,8 +277,7 @@ def test_correction_needs_its_own_override_type_and_expires(env, conn):
     first = ingest(app, file_name("S1"), ["1|1|a"])
     ingest(app, file_name("S2"), ["2|2|b"])
     clock.set(utc(2026, 2, 2, 12, 0))
-    ext = q1(conn, "SELECT Extract_ID FROM ComplianceExtractControl")["extract_id"]
-    app.control.close(ext, "SYSTEM", automatic=True)
+    assert len(app.closer.run().closed) == 2                                   # both have data: closed by the sweep
     s1 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID='S1'")
 
     clock.set(utc(2026, 2, 4, 12, 0))

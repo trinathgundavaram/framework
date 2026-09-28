@@ -1,4 +1,4 @@
-"""Module dispatcher: a module name selects batch creation, file load or the rules trigger (modules.py).
+"""Module dispatcher: a module name selects batch creation or file load (modules.py).
 
 BATCH_CREATION is the merged module (D: combine routine + ad-hoc into one project-scoped call): it
 creates the routine batches of a project/ROUTINE run type/period when those are given, and *always*
@@ -7,7 +7,7 @@ either way, so one project's trigger never touches another project's rows of eit
 """
 import json
 import os
-from datetime import date, datetime
+from datetime import date
 
 import pytest
 
@@ -39,7 +39,7 @@ def test_batch_creation_name_is_case_and_dash_insensitive(name):
 
 
 @pytest.mark.parametrize("name,expected", [("file-load", "FILE_LOAD"), ("file_load", "FILE_LOAD"),
-                                           ("rules_trigger", "RULES_TRIGGER"), ("Rules Trigger", "RULES_TRIGGER")])
+                                           ("File Load", "FILE_LOAD")])
 def test_other_modules_are_identified(name, expected):
     assert resolve_module(name).name == expected
 
@@ -47,7 +47,7 @@ def test_other_modules_are_identified(name, expected):
 @pytest.mark.parametrize("name", ["create-batches", "BATCHES", "batch-intake", "intake", "process-intake",
                                   "adhoc-batches", "CREATE_BATCHES", "BATCH_INTAKE", "INTAKE", "PROCESS_INTAKE",
                                   "ADHOC_BATCHES", "INGEST", "FILE_INGEST", "LOAD", "INGEST_FILE", "INGEST_PATH",
-                                  "RULES", "TRIGGER_RULES", "RUN_RULES"])
+                                  "RULES", "TRIGGER_RULES", "RUN_RULES", "RULES_TRIGGER"])
 def test_old_aliases_no_longer_resolve(name):
     """This is a brand-new system: there is no legacy caller to keep these names working for, so a module
     is reached only by its canonical name (case/dash normalised) - nothing else resolves."""
@@ -56,14 +56,14 @@ def test_old_aliases_no_longer_resolve(name):
 
 
 def test_unknown_module_lists_the_available_ones():
-    with pytest.raises(ConfigError, match="unknown module 'NOPE'.*BATCH_CREATION.*FILE_LOAD.*RULES_TRIGGER"):
+    with pytest.raises(ConfigError, match="unknown module 'NOPE'.*BATCH_CREATION.*FILE_LOAD"):
         resolve_module("NOPE")
     with pytest.raises(ConfigError):
         run_module(None, "")
 
 
 def test_registry_is_consistent():
-    assert module_names() == ["BATCH_CREATION", "FILE_LOAD", "RULES_TRIGGER"]         # one module, not two
+    assert module_names() == ["BATCH_CREATION", "FILE_LOAD"]
     assert [d["module"] for d in describe_modules()] == list(MODULES)
     for spec in MODULES.values():                       # every required parameter is a declared parameter
         assert {p.name for p in spec.required} <= set(spec.params)
@@ -85,16 +85,12 @@ def test_parameters_are_checked_before_anything_runs():
         run_module(None, "FILE_LOAD", {"bucket": "b", "key": "k", "prefix": "p/"})
     with pytest.raises(ConfigError, match="only applies to a single object"):
         run_module(None, "FILE_LOAD", {"bucket": "b", "prefix": "p/", "version_id": "v1"})
-    with pytest.raises(ConfigError, match="RULES_TRIGGER needs --extract-id, or --project"):
-        run_module(None, "RULES_TRIGGER", {"table": "tbl_x"})
-    with pytest.raises(ConfigError, match="not both"):
-        run_module(None, "RULES_TRIGGER", {"extract_id": 1, "project": "PRJA"})
 
 
 def test_list_modules_needs_no_database(capsys):
     assert main(["list-modules"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert {m["module"] for m in out} == {"BATCH_CREATION", "FILE_LOAD", "RULES_TRIGGER"}
+    assert {m["module"] for m in out} == {"BATCH_CREATION", "FILE_LOAD"}
 
 
 # ------------------------------------------------------------------ database
@@ -133,7 +129,7 @@ def test_batch_creation_project_only_runs_ad_hoc_only(conn, tmp_path):
     out = run_module(app, "BATCH_CREATION", {"project": "PRJA"})
     assert out.result.scheduled is None and out.result.adhoc.created == 2 and out.exit_code == 0
     assert q1(conn, "SELECT count(*) n FROM ComplianceRequestControl")["n"] == 2            # ad-hoc batches only
-    assert q1(conn, "SELECT count(*) n FROM ComplianceExtractControl WHERE Run_Ty='MONTHLY'")["n"] == 0
+    assert q1(conn, "SELECT count(*) n FROM ComplianceRequestControl WHERE Run_Ty='MONTHLY'")["n"] == 0
 
 
 def test_batch_creation_with_adhoc_run_type_scopes_the_sweep_and_rejects_period(conn, tmp_path):
@@ -204,52 +200,6 @@ def test_file_load_module_one_location_and_errors(conn, tmp_path):
         run_module(app, "FILE_LOAD", {"bucket": "inbound"})
 
 
-def _ingest_both(app):
-    for src in ("S1", "S2"):
-        app.pipeline.process_file("inbound", put_file(app, file_name(src, ts=datetime(2026, 2, 1, 9, 30)),
-                                                      ["1|1|a"]))
-
-
-def test_rules_trigger_module_reruns_period_rules(conn, tmp_path):
-    app, clock, rules = setup(conn, tmp_path)
-    run_module(app, "BATCH_CREATION", BATCH_PARAMS)
-    _ingest_both(app)
-    ext = q1(conn, "SELECT * FROM ComplianceExtractControl")
-    assert ext["extract_rules_stat"] == "PASSED"
-    before = len([c for c in rules.calls if c["scope"] == "PERIOD_LEVEL"])
-
-    out = run_module(app, "RULES_TRIGGER", {"project": "PRJA", "run_type": "MONTHLY"})
-    assert (out.module, out.exit_code, out.result.evaluated, out.result.passed) == ("RULES_TRIGGER", 0, 1, 1)
-    assert len([c for c in rules.calls if c["scope"] == "PERIOD_LEVEL"]) == before + 1     # forced, data unchanged
-
-    rules.period_fail = ["P_TOTALS"]                                        # a rule now fails: exit 1, one extract by id
-    out = run_module(app, "rules-trigger", {"extract_id": str(ext["extract_id"])})
-    assert (out.exit_code, out.result.failed) == (1, 1)
-    assert out.result.results[0].failed_rules == ["P_TOTALS"]
-    assert q1(conn, "SELECT Extract_Rules_Stat s FROM ComplianceExtractControl")["s"] == "FAILED"
-
-
-def test_rules_trigger_scope_and_closed_extracts(conn, tmp_path):
-    app, clock, rules = setup(conn, tmp_path)
-    run_module(app, "BATCH_CREATION", BATCH_PARAMS)
-    _ingest_both(app)
-    ext = q1(conn, "SELECT Extract_ID FROM ComplianceExtractControl")["extract_id"]
-
-    other = run_module(app, "RULES_TRIGGER", {"project": "PRJA", "run_type": "ADHOC"})
-    assert other.result.evaluated == 0 and other.exit_code == 0             # nothing of that run type
-    with pytest.raises(LookupError):
-        run_module(app, "RULES_TRIGGER", {"extract_id": 999999})
-
-    clock.set(utc(2026, 2, 3, 12, 0))
-    app.evaluator.run()                                                      # past the hold: auto-closed
-    assert q1(conn, "SELECT Extract_Close_Ind i FROM ComplianceExtractControl")["i"] == 1
-    calls = len(rules.calls)
-    out = run_module(app, "RULES_TRIGGER", {"extract_id": ext})              # closed: never recombined
-    assert (out.result.evaluated, out.result.skipped, out.exit_code) == (0, 1, 0)
-    assert out.result.results[0].detail == "extract is closed" and len(rules.calls) == calls
-    assert run_module(app, "RULES_TRIGGER", {"project": "PRJA"}).result.evaluated == 0   # scope sweeps open runs only
-
-
 # ------------------------------------------------------------------ CLI
 def test_cli_run_module(conn, tmp_path, monkeypatch, capsys):
     from .conftest import SCHEMA
@@ -277,12 +227,6 @@ def test_cli_run_module(conn, tmp_path, monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["module"] == "FILE_LOAD" and (out["result"]["scanned"], out["result"]["promoted"]) == (2, 2)
 
-    # A1 (an ad-hoc intake row seeded above) opened a second, ADHOC extract for PRJA/tbl_x -
-    # scope to MONTHLY so this checks the RULES_TRIGGER wiring against the one extract with data
-    assert main(["run", "--module", "RULES_TRIGGER", "--project", "PRJA", "--run-type", "MONTHLY",
-                 *asof]) == 0
-    out = json.loads(capsys.readouterr().out)
-    assert out["module"] == "RULES_TRIGGER" and out["result"]["evaluated"] == 1
 
     # identification errors are exit code 2 and change nothing
     assert main(["run", "--module", "NOPE"]) == 2

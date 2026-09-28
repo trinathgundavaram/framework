@@ -39,7 +39,6 @@ _EXC_ERROR, _EXC_WARN = AuditEvent("EXCEPTION", "ERROR", True), AuditEvent("EXCE
 AUDIT_EVENTS: dict[str, AuditEvent] = {
     # intake
     "INTAKE_FAILED": _EXC_ERROR,
-    "BATCH_CREATE_SKIPPED_EXTRACT_CLOSED": _EXC_WARN,
     # file intake (quarantine codes)
     **dict.fromkeys(("FILE_REJECTED_UNPARSEABLE", "FILE_REJECTED_AMBIGUOUS_TEMPLATE", "FILE_REJECTED_INVALID_TOKEN",
                      "FILE_REJECTED_RUNTY_NOT_CONFIGURED", "FILE_REJECTED_NO_BATCH", "FILE_REJECTED_BATCH_CLOSED",
@@ -57,14 +56,9 @@ AUDIT_EVENTS: dict[str, AuditEvent] = {
     "OVERRIDE_APPROVED": AuditEvent("AUDIT", "WARNING", True),
     "OVERRIDE_INVALID_DETECTED": _EXC_ERROR,
     "OVERRIDE_EXPIRED": AuditEvent("AUDIT", "WARNING", True),
-    # extract
-    "PERIOD_RULES_FAILED": _EXC_ERROR,
-    "EXTRACT_ELIGIBILITY_CHANGED": AuditEvent("AUDIT", "INFO", False),
-    "EXTRACT_CLOSED": AuditEvent("AUDIT", "INFO", True),
-    "EXTRACT_CLOSED_WITH_WARNINGS": AuditEvent("AUDIT", "WARNING", True),
-    "EXTRACT_CLOSE_BLOCKED": AuditEvent("AUDIT", "WARNING", False),
-    "EXTRACT_CLOSE_DEFERRED_LOCKED": AuditEvent("AUDIT", "INFO", False),
-    "EXTRACT_REGENERATE_REQUIRED": _EXC_WARN,
+    # batch close
+    "BATCH_CLOSE_BLOCKED": AuditEvent("AUDIT", "WARNING", False),
+    "BATCH_CLOSE_DEFERRED_LOCKED": AuditEvent("AUDIT", "INFO", False),
     "SOURCE_MISSING_AT_CLOSE": _EXC_WARN,
     # config
     "CONFIG_VALIDATION_FAILED": _EXC_ERROR,
@@ -91,7 +85,7 @@ class EventLogger:
               description: Optional[str] = None, project_cd: Optional[str] = None,
               table_nm: Optional[str] = None, src_id: Optional[str] = None, run_ty: Optional[str] = None,
               req_id: Optional[int] = None, load_id: Optional[int] = None, ovrd_id: Optional[int] = None,
-              extract_id: Optional[int] = None, intake_id: Optional[int] = None,
+              intake_id: Optional[int] = None,
               btch_id: Optional[str] = None, file_ref: Optional[str] = None) -> None:
         et = AUDIT_EVENTS.get(event_ty)
         if et is None:
@@ -99,17 +93,16 @@ class EventLogger:
         sev = severity or et.severity
         self.conn.execute(
             """INSERT INTO CMS_ComplianceExceptionsAudit (Event_Ty, Sevrty, Project_Cd, Table_Nm, Src_ID, Run_Ty,
-                 Req_ID, Load_ID, Ovrd_ID, Extract_ID, Intake_ID, Btch_ID, File_Ref, Actor, Event_Txt, Event_Dtts,
-                 Notified_Ind)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (event_ty, sev, project_cd, table_nm, src_id, run_ty, req_id, load_id, ovrd_id, extract_id, intake_id,
+                 Req_ID, Load_ID, Ovrd_ID, Intake_ID, Btch_ID, File_Ref, Actor, Event_Txt, Event_Dtts, Notified_Ind)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (event_ty, sev, project_cd, table_nm, src_id, run_ty, req_id, load_id, ovrd_id, intake_id,
              btch_id, file_ref, actor, description, self.clock.now(), 0 if et.notify else 1))
         level = logging.ERROR if sev == "ERROR" else logging.WARNING if sev == "WARNING" else logging.INFO
-        log.log(level, "audit %s extract=%s req=%s load=%s %s", event_ty, extract_id, req_id, load_id, description or "")
+        log.log(level, "audit %s req=%s load=%s %s", event_ty, req_id, load_id, description or "")
 
 
 _BODY_KEYS = ("event_id", "event_ty", "event_dtts", "project_cd", "table_nm", "src_id", "run_ty", "btch_id",
-              "req_id", "load_id", "extract_id", "ovrd_id", "intake_id", "file_ref", "actor", "event_txt")
+              "req_id", "load_id", "ovrd_id", "intake_id", "file_ref", "actor", "event_txt")
 
 
 class NotificationDispatcher:

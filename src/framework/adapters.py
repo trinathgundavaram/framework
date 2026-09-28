@@ -1,8 +1,7 @@
 """Adapters to external systems: object storage (S3 / local), the GRE rules engine and email
 notification channels (log / SES). Heavy SDKs are imported lazily.
 
-The framework does not call the extract job itself (D-76): the project's job chain generates the
-extract after the framework closes the run."""
+The framework does not produce or call the extract (D-76): a separate process does."""
 from __future__ import annotations
 
 import hashlib
@@ -209,7 +208,7 @@ def build_object_store(settings: Settings) -> ObjectStore:
 #     def run_rules(conn, rule_group: str, rule_variant: str, run_params: dict) -> list[dict]
 #         # one dict per executed rule: {"rule_ref": str, "passed": bool, "detail": str | None}
 #         # raise any exception for a technical failure
-# The framework applies GATE/ANNOTATE itself (FILE_RULES_MODE / PERIOD_RULES_MODE job settings).
+# The framework applies GATE/ANNOTATE itself (FILE_RULES_MODE job setting).
 PASSED, PASSED_WITH_WARNINGS, FAILED, ERROR = "PASSED", "PASSED_WITH_WARNINGS", "FAILED", "ERROR"
 
 

@@ -21,11 +21,10 @@ def utc(*a) -> datetime:
 
 
 class FakeRules:
-    """Rule engine double: set `file_fail` / `period_fail` / `error` per scope."""
+    """Rule engine double: set `file_fail` (per source) or `error` (the FILE_LEVEL scope raises)."""
 
     def __init__(self):
         self.file_fail: dict[str, list[str]] = {}     # src_id -> failing rules
-        self.period_fail: list[str] = []
         self.error: set[str] = set()                  # scopes that raise technical errors
         self.calls: list[dict] = []
 
@@ -35,7 +34,7 @@ class FakeRules:
         scope = run_params["scope"]
         if scope in self.error:
             return RuleOutcome("ERROR", error="boom")
-        failed = self.file_fail.get(run_params.get("src_id"), []) if scope == "FILE_LEVEL" else self.period_fail
+        failed = self.file_fail.get(run_params.get("src_id"), [])
         if not failed:
             return RuleOutcome("PASSED")
         if mode == "GATE":
@@ -78,17 +77,13 @@ def seed_config(conn, *, sources=("S1", "S2"), sla=2, allow_zero=0, has_header=1
                            'stg_t','tbl_x','core_t','ops@example.com')""",
                 (s, template(s), has_header, allow_zero))
             if rules:
-                conn.execute("INSERT INTO ComplianceRuleBinding (Project_Cd, Table_Nm, Src_ID, Rule_Scope_Cd, "
-                             "Gre_Rule_Group, Gre_Rule_Variant) VALUES ('PRJA','tbl_x',%s,'FILE_LEVEL','g_file',%s)",
-                             (s, s))
-        bind(conn, "PERIOD_LEVEL", "g_period", "all")
+                bind(conn, "g_file", s, src=s)
 
 
-def bind(conn, scope, group, variant, *, project="PRJA", table="tbl_x", src="*", run_ty="*"):
+def bind(conn, group, variant, *, project="PRJA", table="tbl_x", src="*", run_ty="*"):
     """One ComplianceRuleBinding row; '*' = all tables / sources / run types."""
-    conn.execute("""INSERT INTO ComplianceRuleBinding (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rule_Scope_Cd,
-                      Gre_Rule_Group, Gre_Rule_Variant) VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-                 (project, table, src, run_ty, scope, group, variant))
+    conn.execute("""INSERT INTO ComplianceRuleBinding (Project_Cd, Table_Nm, Src_ID, Run_Ty, Gre_Rule_Group,
+                      Gre_Rule_Variant) VALUES (%s,%s,%s,%s,%s,%s)""", (project, table, src, run_ty, group, variant))
 
 
 def create_batches(app, period="PREV_CALENDAR_MONTH", **kw):

@@ -72,11 +72,6 @@ class Settings:
     lock_timeout_seconds: int = 300
     heartbeat_stale_minutes: int = 30
 
-    # --- extract close (job level) ---
-    extract_gating_mode: str = "STRICT_ALL_PASS"  # STRICT_ALL_PASS | BEST_EFFORT
-    period_rules_mode: str = "GATE"               # GATE | ANNOTATE
-    auto_close_extracts: bool = True              # evaluate-extracts closes AUTO-eligible extracts
-
     # --- email notifications ---
     notify_backend: str = "log"                   # log | ses
     notify_from_email: Optional[str] = None
@@ -118,8 +113,6 @@ class Settings:
         if not _IDENT.match(self.metadata_schema or ""):
             raise ConfigError(f"METADATA_SCHEMA {self.metadata_schema!r} is not a valid identifier")
         for name, allowed in (("load_engine", ("PANDAS", "SPARK")), ("file_rules_mode", ("GATE", "ANNOTATE")),
-                              ("period_rules_mode", ("GATE", "ANNOTATE")),
-                              ("extract_gating_mode", ("STRICT_ALL_PASS", "BEST_EFFORT")),
                               ("file_effective_date_basis", ("RPT_START", "RPT_END")),
                               ("notify_backend", ("log", "ses")), ("object_store", ("s3", "local"))):
             if getattr(self, name) not in allowed:

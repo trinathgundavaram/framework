@@ -1,4 +1,4 @@
-"""Pure unit tests (no database): templates, file reading, object store, eligibility, resolution, Btch_ID,
+"""Pure unit tests (no database): templates, file reading, object store, close rules, resolution, Btch_ID,
 Req_Stat transitions, settings and period SQL loading."""
 from dataclasses import replace
 from datetime import date, datetime, timezone
@@ -7,10 +7,10 @@ import pytest
 
 from framework.adapters import LocalObjectStore, parse_uri
 from framework.batches import period_sql
+from framework.closing import close_resolution, closes_automatically
 from framework.common import (ConfigError, FileRejected, InvalidStatusTransition, build_btch_id, check_transition,
                               earliest_close_date, parse_as_of)
 from framework.config import FileConfig, MatchError, TemplateError, TemplateMatcher, parse_template, render
-from framework.extract import AUTO, MANUAL_ONLY, NOT_ELIGIBLE, EligibilityInput, compute_eligibility
 from framework.ingest import Action, IngestOutcome, PathIngestSummary, ResolutionInput, decide, required_override_ty
 from framework.load import read_file, scan_delimited, stage
 from framework.settings import Settings, read_env_file
@@ -182,51 +182,18 @@ def test_spark_engine_requires_jdbc_url():
         stage(None, s, file_path="x", cfg=cfg(), btch_id="b", load_id=1, src_file_nm="x", loaded_at=None)
 
 
-# ---------------------------------------------------------------- eligibility
-D = date(2026, 2, 2)
-
-
-def inp(**kw):
-    base = dict(gating_md="STRICT_ALL_PASS", required=2, received=2, rules_stat="PASSED",
-                failed_rules=(), today=D, earliest_close_dt=D)
-    base.update(kw)
-    return EligibilityInput(**base)
-
-
-def test_hold_blocks_everything():
-    e = compute_eligibility(inp(today=date(2026, 2, 1)))
-    assert e.code == NOT_ELIGIBLE and "SLA hold" in e.reason
-
-
-@pytest.mark.parametrize("mode", ["STRICT_ALL_PASS", "BEST_EFFORT"])
-def test_complete_and_passed_is_auto(mode):
-    assert compute_eligibility(inp(gating_md=mode)).code == AUTO
-    assert compute_eligibility(inp(gating_md=mode, rules_stat="PASSED_WITH_WARNINGS")).code == AUTO
-
-
-@pytest.mark.parametrize("stat", ["PENDING", "ERROR"])
-def test_rules_not_available(stat):
-    assert compute_eligibility(inp(rules_stat=stat)).code == NOT_ELIGIBLE
-    assert compute_eligibility(inp(rules_stat=stat, gating_md="BEST_EFFORT")).code == NOT_ELIGIBLE
-
-
-def test_strict_blocks_missing_sources_and_failed_rules():
-    e = compute_eligibility(inp(received=1))
-    assert e.code == NOT_ELIGIBLE and "1 of 2" in e.reason
-    e = compute_eligibility(inp(rules_stat="FAILED", failed_rules=("R1",)))
-    assert e.code == NOT_ELIGIBLE and "R1" in e.reason
-
-
-def test_best_effort_warnings():
-    e = compute_eligibility(inp(gating_md="BEST_EFFORT", received=1, rules_stat="FAILED", failed_rules=("R9",)))
-    assert e.code == MANUAL_ONLY
-    assert any("1 of 2" in w for w in e.warnings) and any("R9" in w for w in e.warnings)
-    z = compute_eligibility(inp(gating_md="BEST_EFFORT", received=0))
-    assert z.code == MANUAL_ONLY and any("no source has data" in w for w in z.warnings)
-
-
-def test_no_required_sources():
-    assert compute_eligibility(inp(required=0, received=0)).code == NOT_ELIGIBLE
+# ---------------------------------------------------------------- batch close rules
+@pytest.mark.parametrize("req_stat, resolution, expected, auto", [
+    ("PROMOTED", "NEW_FILE", ("COMPLETED", "NEW_FILE"), True),
+    ("CARRIED_FORWARD", "CARRY_FORWARD", ("COMPLETED", "CARRY_FORWARD"), True),
+    ("EXCEPTION_PENDING", None, ("COMPLETED_WITH_EXCEPTION", "MISSING"), True),
+    ("EXCEPTION_PENDING", "NEW_FILE", ("COMPLETED_WITH_EXCEPTION", "NEW_FILE"), True),
+    ("PENDING", None, ("DATA_NOT_PROVIDED", "MISSING"), False),                 # no data: a person closes it
+])
+def test_close_resolution(req_stat, resolution, expected, auto):
+    b = {"req_stat": req_stat, "resolution_ty": resolution}
+    assert close_resolution(b) == expected and closes_automatically(b) is auto
+    check_transition(req_stat, expected[0])
 
 
 # ---------------------------------------------------------------- resolution tables
@@ -337,11 +304,11 @@ def test_settings_precedence_and_coercion(tmp_path):
                         "FRAMEWORK_SUPPORTED_FILE_TYPES=.TXT, .csv  # comment\nFRAMEWORK_DB_NAME=\"fw\"\n")
     assert read_env_file(str(env_file))["FRAMEWORK_DB_NAME"] == "fw"
     s = Settings.load(env={"FRAMEWORK_LOCK_TIMEOUT_SECONDS": "5", "FRAMEWORK_ENV_FILE": str(env_file)},
-                      overrides={"extract_gating_mode": "best_effort", "FRAMEWORK_EMPTY_AS_NULL": "no"})
+                      overrides={"file_rules_mode": "annotate", "FRAMEWORK_EMPTY_AS_NULL": "no"})
     assert (s.lock_timeout_seconds, s.sources["lock_timeout_seconds"]) == (5, "env")
     assert (s.object_store, s.sources["object_store"]) == ("local", ".env")
     assert s.supported_file_types == [".txt", ".csv"]
-    assert (s.extract_gating_mode, s.sources["extract_gating_mode"]) == ("BEST_EFFORT", "argument")
+    assert (s.file_rules_mode, s.sources["file_rules_mode"]) == ("ANNOTATE", "argument")
     assert s.empty_as_null is False and s.sources.get("rule_engine") is None
     with pytest.raises(ConfigError):
         Settings.load(env={"FRAMEWORK_METADATA_SCHEMA": "bad-name;drop"})

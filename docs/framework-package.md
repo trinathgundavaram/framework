@@ -1,11 +1,11 @@
 # CMS Compliance Framework: Python Package
 
-Implementation of [`design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md) (v5). File-by-file detail: [`module-reference.md`](module-reference.md).
+Implementation of [`design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md) (v6). File-by-file detail: [`module-reference.md`](module-reference.md).
 
-- **Project-agnostic:** projects, tables, sources and run types are rows in five configuration tables. The code has no project-specific branches.
+- **Project-agnostic:** projects, tables, sources and run types are rows in six reference / configuration tables. The code has no project-specific branches.
 - **Filename-driven:** incoming files are recognised by the templates in `ComplianceSourceFileConfig`.
 - **Job-level settings:** connections, runtime settings and the report period are **not** tables. They come from `.env` (local), AWS Secrets Manager (database credentials) and the arguments of each project's scheduled job.
-- **The framework closes the run; it does not generate the extract** (D-76). `evaluate-extracts` / `close-extract` freeze the run's batch list; the next job in the project's chain builds the submission.
+- **The framework closes batches; it does not build or track the extract** (D-76). `close-batches` closes each batch with data after its SLA hold and `close-batch` lets a person close one without data; a separate process produces the extract from the batches and their current core rows.
 
 ## Layout
 
@@ -21,12 +21,12 @@ src/framework/
   db.py                   init-db, advisory locks
   config.py               configuration rows, filename templates, validator
   period_sql.py           report-period SQL by name
-  modules.py              module dispatcher: a name (BATCH_CREATION, FILE_LOAD, RULES_TRIGGER) selects the service
-  batches.py              batch creation (scheduled + ad-hoc), CRC/extract rows
+  modules.py              module dispatcher: a name (BATCH_CREATION, FILE_LOAD) selects the service
+  batches.py              batch creation (scheduled + ad-hoc), CRC rows
   ingest.py               file pipeline (single object or a path sweep) + resolution decision tables
   load.py                 file reading, staging (pandas/COPY or Spark), core swap
   overrides.py            REUSE decisions: apply and expire
-  extract.py              eligibility, refresh/combine, close, SLA sweep
+  closing.py              batch close: SLA sweep and manual close
   audit.py                audit writer, event vocabulary, email notifications
   adapters.py             S3/local store, GRE rules engine, email (log / SES)
   sql/schema.sql          schema (source of truth, CREATE-only, no CHECK constraints)
@@ -69,11 +69,8 @@ The environment variable is `FRAMEWORK_<NAME>`; the job argument is `--set <NAME
 | `LOAD_ENGINE` | `PANDAS` | `SPARK` for large delimited files (needs `SPARK_JDBC_URL`). (Was `Engine_Cd`.) |
 | `SPARK_JDBC_URL`, `SPARK_WRITE_PARTITIONS`, `SPARK_BATCH_SIZE` | —, `4`, `10000` | User and password come from the open connection. |
 | `FILE_RULES_MODE` | `GATE` | `ANNOTATE` promotes with warnings. (Was `Rules_Vld_Md`.) File rules run when the source has FILE_LEVEL bindings. |
-| `PERIOD_RULES_MODE` | `GATE` | (Was `Period_Rules_Vld_Md`.) |
 | `RULE_ENGINE`, `GRE_ENTRYPOINT` | `gre`, — | **Q-12**. `none` disables rules; `module:Class` plugs in another engine. |
 | `LOCK_TIMEOUT_SECONDS`, `HEARTBEAT_STALE_MINUTES` | `300`, `30` | A load not updated for `HEARTBEAT_STALE_MINUTES` is reported by `health`. |
-| `EXTRACT_GATING_MODE` | `STRICT_ALL_PASS` | or `BEST_EFFORT`. (Was `Extract_Gating_Md`.) |
-| `AUTO_CLOSE_EXTRACTS` | `true` | `false` makes `evaluate-extracts` refresh only, leaving every close to a person. |
 | `NOTIFY_BACKEND`, `NOTIFY_FROM_EMAIL`, `DEFAULT_NOTIFY_EMAILS` | `log`, —, — | D-54. All notifications are email: `ses` sends through SES, `log` only logs them. `DEFAULT_NOTIFY_EMAILS` receives events not tied to one file config. |
 
 ### Report periods
@@ -145,7 +142,7 @@ Python 3.10+ and PostgreSQL 14+ (tested on 16); no extensions are needed. `TEST_
    3. `ComplianceRunType` — `SLA_Days` ≥ 1 (the hold is `Req_Dt_Key + SLA_Days − 1`); `Carry_Fwd_Ind = 1` if batches of this run type may reuse the previous batch's data after approval; code letters/digits only.
    4. `ComplianceDataSetSourceXwalk` — one effective-dated row per project / table / source / run type. Nothing else.
    5. `ComplianceSourceFileConfig` — one active row per project / table / source: filename template (project, table and source written literally, e.g. `PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt`; its extension is the file type), delimiter, header/trailer flags, inbound and archive paths, staging table, core schema (the core table is `Table_Nm`), email recipients.
-   6. `ComplianceRuleBinding` — GRE rules at any level: `'*'` in `Table_Nm`, `Src_ID` or `Run_Ty` means all. Every matching binding runs (additive); a rule bound at two levels runs once. FILE_LEVEL is optional (no match = no file rules); PERIOD_LEVEL always uses `Src_ID = '*'`.
+   6. `ComplianceRuleBinding` — GRE rules run on each staged file, bound at any level: `'*'` in `Table_Nm`, `Src_ID` or `Run_Ty` means all. Every matching binding runs (additive); a rule bound at two levels runs once. Optional: a file with no matching binding skips the rules.
 
       | Level | `Table_Nm` | `Src_ID` | `Run_Ty` |
       |---|---|---|---|
@@ -160,10 +157,11 @@ Python 3.10+ and PostgreSQL 14+ (tested on 16); no extensions are needed. `TEST_
    ```bash
    # monthly, 06:00 on the 1st: routine batches AND this project's pending ad-hoc requests, one trigger
    framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
-   # every 15 minutes: close the runs whose data is complete, then generate their extracts
-   framework evaluate-extracts --project PRJA --set EXTRACT_GATING_MODE=STRICT_ALL_PASS
-   # the next step of the project's chain reads the closed extract rows
-   # (Combine_Btch_ID_List, Regenerate_Required_Ind) and builds the submission
+   # daily (or more often): close the batches past their SLA hold that have data or are in exception
+   framework close-batches --project PRJA
+   # batches past the hold without data are listed as "waiting" (and in `health`); a person closes them:
+   #   framework close-batch --btch-id <Btch_ID> --closed-by <user>
+   # the extract is produced by a separate process from the batches and their current core rows
    # S3 event -> run --module FILE_LOAD --bucket ... --key ... (one object); or poll with
    # run --module FILE_LOAD (every object waiting, one or all configured locations);
    # also polling -> process-decisions, notify
@@ -185,15 +183,14 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 | Command | Purpose | Typical trigger |
 |---|---|---|
 | `init-db` | Schema (once) | Deploy |
-| `run --module NAME [module parameters]` | Run one module by name: `BATCH_CREATION`, `FILE_LOAD`, `RULES_TRIGGER` (see below). One Glue job / Step Functions state can start any of them | Any schedule or event |
+| `run --module NAME [module parameters]` | Run one module by name: `BATCH_CREATION`, `FILE_LOAD` (see below). One Glue job / Step Functions state can start any of them | Any schedule or event |
 | `list-modules` | Module names and parameters (no database needed) | Ops |
 | `show-config` | Settings with value and source; database target (no password) | Ops |
 | `test-connection` | Connect and check the schema; exit 1 if not initialised | Deploy / ops |
 | `validate-config` | Configuration checks; exit 1 on errors, logs `CONFIG_VALIDATION_FAILED` | CI / before activating config |
 | `process-decisions` | Apply approved `REUSE` overrides and remove the ones that ran out | Poll |
-| `evaluate-extracts [--project] [--table] [--run-type]` | Refresh the runs past their SLA hold, close the AUTO-eligible ones, list the runs needing regeneration | Project schedule |
-| `refresh-extract --extract-id` | Recount / combine / evaluate one run | Manual |
-| `close-extract --extract-id --closed-by [--ack-warnings]` | Close one run and its batches (exit 2 if blocked) | Human |
+| `close-batches [--project] [--table] [--run-type]` | SLA sweep: close every open batch past its hold that has data (`COMPLETED`) or is in exception (`COMPLETED_WITH_EXCEPTION`); list the ones without data as `waiting`; exit 1 if a batch was locked | Project schedule |
+| `close-batch --btch-id --closed-by` | Close one batch past its hold, with or without data (no data → `DATA_NOT_PROVIDED`); exit 2 if still inside the hold or already closed | Human |
 | `notify` | Email pending notifications | Poll |
 | `health` | Operational report (§15.3) | Ops |
 
@@ -207,14 +204,12 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 |---|---|---|
 | `BATCH_CREATION` | One project, both kinds, in one call: routine batches (when `--run-type`/`--period` name a ROUTINE run type) *and* that project's pending ad-hoc intake requests (always attempted, project-scoped; scoped further to the run type when it names an ADHOC one) | `--project` · `[--run-type] [--period] [--table] [--period-file] [--lookback-days] [--lookback-weeks]` |
 | `FILE_LOAD` | Load inbound files: one object, one location, or every configured location | `--bucket --key [--version-id]` (one object) · `--bucket --prefix` (one location) · none (every configured location) |
-| `RULES_TRIGGER` | Run the PERIOD_LEVEL rules now (recount + combine + rules, `MANUAL_REFRESH`) for one extract, or for the open extracts of a scope. A closed extract is skipped, never recombined. Exit 1 if a rule fails or errors | `--extract-id`, or `--project [--table] [--run-type]` |
 
 ```bash
 framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
 framework run --module BATCH_CREATION --project PRJA                       # ad-hoc sweep only, no routine run
 framework run --module BATCH_CREATION --project PRJA --run-type ADHOC      # ad-hoc sweep scoped to that run type
 framework run --module FILE_LOAD --bucket inbound --key prja/in/<file>
-framework run --module RULES_TRIGGER --extract-id 12
 ```
 
 `BATCH_CREATION` is the single, per-project trigger for both kinds of batch creation (Glue job
@@ -222,7 +217,7 @@ argument, EventBridge rule, cron line): it creates that project's routine batche
 anything sitting in `ComplianceRequestInTake` for it, without a second trigger and without touching
 other projects' rows of either kind.
 
-From Python: `app.run_module("RULES_TRIGGER", {"project": "PRJA"})` returns a `ModuleOutcome(module, result, exit_code)`. To add a module, write one handler in `modules.py` that calls the owning service and register it in `MODULES` - the CLI, `list-modules` and parameter checks pick it up.
+From Python: `app.run_module("FILE_LOAD", {"bucket": "inbound", "prefix": "prja/in/"})` returns a `ModuleOutcome(module, result, exit_code)`. To add a module, write one handler in `modules.py` that calls the owning service and register it in `MODULES` - the CLI, `list-modules` and parameter checks pick it up.
 
 In Glue, keep one job definition and pass the module and its parameters as job arguments (`--module FILE_LOAD --bucket ... --prefix ...`), or one definition per module if you want separate schedules and IAM.
 
@@ -233,7 +228,7 @@ Use the templates in `src/framework/sql/approvals.sql`. Every statement must rep
 - **`REUSE` (D-70):** for an open batch with no data, when the run type has `Carry_Fwd_Ind = 1`. Optionally name `Reuse_Btch_ID`; otherwise the latest earlier closed batch with data is used. `process-decisions` applies it (the batch becomes `CARRIED_FORWARD` and counts as received, combining the reused batch's current core rows) and removes it again when it runs out. A file that arrives later for the open batch replaces the carried data.
 - **`LATE_ARRIVAL`:** lets a file be promoted into a **closed** batch that has no data.
 - **`CORRECTION`:** lets a file replace the data of a **closed** batch that has data.
-- Both of the last two are read by the ingest pipeline: with a valid override the file is promoted and the run is marked `Regenerate_Required_Ind = 1`; without one it is quarantined as `FILE_REJECTED_BATCH_CLOSED`, and re-delivering the same object after the approval reprocesses it.
+- Both of the last two are read by the ingest pipeline: with a valid override the file is promoted (logged as `LATE_ARRIVAL_PROMOTED` / `CORRECTION_PROMOTED` on the batch timeline, which the extract process can watch); without one it is quarantined as `FILE_REJECTED_BATCH_CLOSED`, and re-delivering the same object after the approval reprocesses it.
 
 ## GRE integration contract (Q-12)
 
@@ -245,20 +240,18 @@ def run_rules(conn, rule_group: str, rule_variant: str, run_params: dict) -> lis
     # raise on technical failure (treated as ERROR -> retry, never as a data failure)
 ```
 
-`conn` is the framework database (metadata, staging and core). `run_params`:
-- **FILE_LEVEL:** `btch_id`, `load_id`, `stg_schema_nm`, `stg_table_nm`, `project_cd` / `table_nm` / `src_id` / `run_ty` and report dates.
-- **PERIOD_LEVEL:** `extract_id`, `btch_id_list`, `load_id_list`, `core_schema_nm`, `core_table_nm` and the extract grain. For a carried source the lists contain the reused batch.
+`conn` is the framework database (metadata, staging and core). Rules run on each staged file; `run_params`: `scope` (`FILE_LEVEL`), `btch_id`, `load_id`, `stg_schema_nm`, `stg_table_nm`, `project_cd` / `table_nm` / `src_id` / `run_ty` and the report and run dates.
 
-The framework applies GATE/ANNOTATE itself (`FILE_RULES_MODE`, `PERIOD_RULES_MODE`).
+The framework applies GATE/ANNOTATE itself (`FILE_RULES_MODE`).
 
 ## Implementation status and open items
 
-**Implemented and tested:** every flow in design §7, the §8 decision tables, §9 templates, §10 promotion and combine, §11 eligibility and close, §12 locks and idempotency, the three override types (D-74), the per-run-date grain (D-77), ad-hoc request windows (D-79), the validator, notifications, the `FILE_LOAD` multi-file/multi-config/multi-batch sweep, and health.
+**Implemented and tested:** every flow in design §7, the §8 decision tables, §9 templates, §10 promotion, §11 batch close, §12 locks and idempotency, the three override types (D-74), the per-run-date grain (D-77), ad-hoc request windows (D-79), the validator, notifications, the `FILE_LOAD` multi-file/multi-config/multi-batch sweep, and health.
 
 **Not yet verified:**
 - **Spark engine** (`LOAD_ENGINE=SPARK`): written against PySpark 3.x but not run here; test on Glue/Spark before enabling.
 - **AWS adapters** (S3 store, SES, Secrets Manager): written against boto3; the database secret is covered by a unit test with a fake loader.
 
-**Waiting on decisions** (defaults are configurable; see design §16): Q-02 file types, encoding and trailer layout; Q-03 case sensitivity; Q-04 effective-date basis; Q-05 ad-hoc source additions; Q-11 PostgreSQL version; Q-12 GRE entry point; Q-13 – Q-15 orchestration, rollout, security; Q-16 regeneration downstream; Q-17 alerting on runs that stay open.
+**Waiting on decisions** (defaults are configurable; see design §16): Q-02 file types, encoding and trailer layout; Q-03 case sensitivity; Q-04 effective-date basis; Q-05 ad-hoc source additions; Q-11 PostgreSQL version; Q-12 GRE entry point; Q-13 – Q-15 orchestration, rollout, security; Q-17 alerting on batches that stay open.
 
 **Not built:** Glue / Step Functions wrappers for the framework commands, their Terraform, CI pipeline.

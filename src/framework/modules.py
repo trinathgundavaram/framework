@@ -9,8 +9,6 @@ A single Glue job / Step Functions state / cron line can therefore run any modul
     framework run --module FILE_LOAD --bucket inbound --key prja/in/<file>      # one object
     framework run --module FILE_LOAD --bucket inbound --prefix prja/in/         # one location
     framework run --module FILE_LOAD                                            # every configured location
-    framework run --module RULES_TRIGGER --project PRJA --run-type MONTHLY      # open extracts of a scope
-    framework run --module RULES_TRIGGER --extract-id 12                        # one extract
 
 From code (a Lambda, a notebook, another job):
 
@@ -24,13 +22,12 @@ Modules
                     - ad-hoc (always, whether or not --run-type/--period are given): processes that
                       project's pending ComplianceRequestInTake rows
   FILE_LOAD       load inbound files: one object, one location, or every configured location
-  RULES_TRIGGER   run the period-level rules of one extract, or of the open extracts of a scope
 
 Names are case-insensitive and `-` / `_` are interchangeable (`file-load` = `FILE_LOAD`) - that is the
 only name normalisation; there are no alternate names for a module. An unknown module, a missing
 required parameter or a parameter the module does not take is a ConfigError (exit 2), so a typo never
 silently runs the wrong thing. The dispatcher holds no business logic and no SQL: it only maps a name
-to the service that already owns the work (`batches`, `ingest`, `extract`), the same split as `app.py`.
+to the service that already owns the work (`batches`, `ingest`), the same split as `app.py`.
 """
 from __future__ import annotations
 
@@ -128,19 +125,7 @@ def _file_load(app, p: dict) -> ModuleOutcome:
     return ModuleOutcome("FILE_LOAD", s, 1 if s.errors else 0)
 
 
-def _rules_trigger(app, p: dict) -> ModuleOutcome:
-    if p.get("extract_id") is None and not p.get("project"):
-        raise ConfigError("RULES_TRIGGER needs --extract-id, or --project (optionally --table / --run-type)")
-    if p.get("extract_id") is not None and any(p.get(k) for k in ("project", "table", "run_type")):
-        raise ConfigError("RULES_TRIGGER takes --extract-id or a project scope, not both")
-    s = app.control.trigger_rules(extract_id=p.get("extract_id"), project_cd=p.get("project"),
-                                  table_nm=p.get("table"), run_ty=p.get("run_type"))
-    return ModuleOutcome("RULES_TRIGGER", s, 1 if (s.failed or s.errors) else 0)
-
-
 # ============================================================================ registry
-_SCOPE = (Param("project"), Param("table"), Param("run_type"))
-
 MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
     ModuleSpec(
         "BATCH_CREATION",
@@ -155,10 +140,6 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
                      "or every configured location (no arguments)",
         required=(), optional=(Param("bucket"), Param("key"), Param("prefix"), Param("version_id")),
         handler=_file_load),
-    ModuleSpec(
-        "RULES_TRIGGER", "run the period-level rules of one extract, or of the open extracts of a scope",
-        required=(), optional=(*_SCOPE, Param("extract_id", int)),
-        handler=_rules_trigger),
 )}
 
 

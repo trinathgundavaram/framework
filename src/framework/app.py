@@ -5,7 +5,7 @@ from Settings and call one service. One database connection serves metadata, sta
 
 App itself carries no table-specific SQL: `health()` composes the report from each service that owns
 the tables it queries (`ingest.IngestPipeline`, `overrides.DecisionProcessor`,
-`extract.ExtractControlService`), the same ownership split as design §15.1's "who writes which table" -
+`closing.BatchCloser`), the same ownership split as design §15.1's "who writes which table" -
 generic wiring here, business/table-specific logic in the domain modules.
 """
 from __future__ import annotations
@@ -19,9 +19,9 @@ import psycopg
 from .adapters import ObjectStore, RuleEngine, build_channel, build_object_store, build_rule_engine
 from .audit import NotificationDispatcher
 from .batches import IntakeProcessor, ScheduleSummary, create_batches
+from .closing import BatchCloser
 from .common import Clock, ConfigError
 from .db import schema_exists
-from .extract import ExtractControlService, ExtractEvaluator
 from .ingest import IngestPipeline
 from .modules import ModuleOutcome, run_module
 from .overrides import DecisionProcessor
@@ -60,31 +60,23 @@ class App:
         self.close()
 
     @cached_property
-    def control(self) -> ExtractControlService:
-        return ExtractControlService(self.conn, self.clock, self.settings, self.rules)
-
-    @cached_property
-    def evaluator(self) -> ExtractEvaluator:
-        return ExtractEvaluator(self.conn, self.clock, self.settings, self.control)
+    def closer(self) -> BatchCloser:
+        return BatchCloser(self.conn, self.clock, self.settings)
 
     @cached_property
     def pipeline(self) -> IngestPipeline:
-        return IngestPipeline(self.conn, self.clock, self.settings, self.store, self.rules,
-                              on_promoted=lambda ext: ext and self.control.refresh(ext, "EARLY_COMPLETE"),
-                              on_late_promotion=lambda ext: ext and self.evaluator.after_late_promotion(ext),
-                              spark=self.spark)
+        return IngestPipeline(self.conn, self.clock, self.settings, self.store, self.rules, spark=self.spark)
 
     @cached_property
     def decisions(self) -> DecisionProcessor:
-        return DecisionProcessor(self.conn, self.clock, self.settings,
-                                 refresh_extract=lambda ext: self.control.refresh(ext, "OVERRIDE_DECISION"))
+        return DecisionProcessor(self.conn, self.clock, self.settings)
 
     @cached_property
     def intake(self) -> IntakeProcessor:
         return IntakeProcessor(self.conn, self.clock, self.settings)
 
     def run_module(self, name: str, params: Optional[dict] = None) -> ModuleOutcome:
-        """Run a module by name (BATCH_CREATION, BATCH_INTAKE, FILE_LOAD, RULES_TRIGGER) - see modules.py."""
+        """Run a module by name (BATCH_CREATION, FILE_LOAD) - see modules.py."""
         return run_module(self, name, params)
 
     def create_batches(self, **kw) -> ScheduleSummary:
@@ -96,5 +88,5 @@ class App:
     def health(self) -> dict[str, list[dict]]:
         """Operational report (design §15.3), composed from the service that owns each set of tables:
         stale loads and quarantine counts from the ingest pipeline, pending/expiring overrides from the
-        decision processor, and open-past-hold/regenerate-required runs from extract control."""
-        return {**self.pipeline.health(), **self.decisions.health(), **self.control.health()}
+        decision processor, and open batches past their SLA hold from the batch closer."""
+        return {**self.pipeline.health(), **self.decisions.health(), **self.closer.health()}

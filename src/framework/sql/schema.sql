@@ -113,16 +113,15 @@ CREATE TABLE ComplianceSourceFileConfig (
 CREATE UNIQUE INDEX uq_compliancesourcefileconfig_active
   ON ComplianceSourceFileConfig (Project_Cd, Table_Nm, Src_ID) WHERE Active_Ind = 1;
 
--- GRE rule groups, bound at any level: '*' in Table_Nm, Src_ID or Run_Ty means "all". Additive: every
--- binding that matches a file (FILE_LEVEL) or a run (PERIOD_LEVEL, Src_ID = '*') runs; a rule group/
--- variant bound at several levels runs once. A file with no matching FILE_LEVEL binding skips file rules.
+-- GRE rule groups run on each staged file, bound at any level: '*' in Table_Nm, Src_ID or Run_Ty means
+-- "all". Additive: every binding that matches the file runs; a rule group/variant bound at several levels
+-- runs once. A file with no matching binding skips the rules.
 --   project  ('*', '*', '*')   table ('T', '*', '*')   table + run type ('T', '*', 'R')   source ('T', 'S', '*')
 CREATE TABLE ComplianceRuleBinding (
   Project_Cd       VARCHAR(30)  NOT NULL,
   Table_Nm         VARCHAR(63)  NOT NULL,                  -- '*' = every table of the project
-  Src_ID           VARCHAR(30)  NOT NULL,                  -- '*' = every source (always '*' for PERIOD_LEVEL)
+  Src_ID           VARCHAR(30)  NOT NULL,                  -- '*' = every source
   Run_Ty           VARCHAR(20)  NOT NULL DEFAULT '*',      -- '*' = every run type
-  Rule_Scope_Cd    VARCHAR(20)  NOT NULL,                  -- FILE_LEVEL | PERIOD_LEVEL
   Gre_Rule_Group   VARCHAR(100) NOT NULL,
   Gre_Rule_Variant VARCHAR(100) NOT NULL,
   Active_Ind       SMALLINT     NOT NULL DEFAULT 1,
@@ -130,8 +129,7 @@ CREATE TABLE ComplianceRuleBinding (
   Created_By       VARCHAR(100) NOT NULL DEFAULT current_user,
   Updated_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Updated_By       VARCHAR(100) NOT NULL DEFAULT current_user,
-  CONSTRAINT pk_compliancerulebinding PRIMARY KEY (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rule_Scope_Cd, Gre_Rule_Group,
-                                                   Gre_Rule_Variant),
+  CONSTRAINT pk_compliancerulebinding PRIMARY KEY (Project_Cd, Table_Nm, Src_ID, Run_Ty, Gre_Rule_Group, Gre_Rule_Variant),
   CONSTRAINT fk_compliancerulebinding_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject
 );
 
@@ -161,40 +159,10 @@ CREATE TABLE ComplianceRequestInTake (
   CONSTRAINT fk_compliancerequestintake_runtype FOREIGN KEY (Run_Ty) REFERENCES ComplianceRunType
 );
 
--- One row per (project, table, run type, report period, run date): what must be collected before that
--- run's extract may be generated. Included / missing / carried sources are read from its batches.
-CREATE TABLE ComplianceExtractControl (
-  Extract_ID              BIGINT       GENERATED ALWAYS AS IDENTITY,
-  Project_Cd              VARCHAR(30)  NOT NULL,
-  Table_Nm                VARCHAR(63)  NOT NULL,
-  Run_Ty                  VARCHAR(20)  NOT NULL,
-  Rpt_Start_Dt_Key        DATE         NOT NULL,
-  Rpt_End_Dt_Key          DATE         NOT NULL,
-  Req_Dt_Key              DATE         NOT NULL,           -- run date; with SLA_Days gives the hold
-  Required_Src_Cnt        INT          NOT NULL,
-  Received_Src_Cnt        INT          NOT NULL DEFAULT 0,
-  Extract_Rules_Stat      VARCHAR(25)  NOT NULL DEFAULT 'PENDING',       -- PENDING | PASSED | PASSED_WITH_WARNINGS | FAILED | ERROR
-  Failed_Rule_List        TEXT,                                          -- GATE-failed period rules
-  Eligibility_Cd          VARCHAR(15)  NOT NULL DEFAULT 'NOT_ELIGIBLE',  -- NOT_ELIGIBLE | MANUAL_ONLY | AUTO
-  Eligibility_Rsn_Txt     VARCHAR(1000),
-  Extract_Close_Ind       SMALLINT     NOT NULL DEFAULT 0,
-  Extract_Closed_Dtts     TIMESTAMPTZ,
-  Extract_Closed_By       VARCHAR(100),
-  Regenerate_Required_Ind SMALLINT     NOT NULL DEFAULT 0,               -- data changed after close
-  Combine_Btch_ID_List    TEXT,                                          -- batches whose current rows make the extract
-  Combine_Last_Run_Dtts   TIMESTAMPTZ,
-  Data_Signature          CHAR(64),                                      -- hash of (Btch_ID, promoted Load_ID) pairs
-  Closed_Data_Signature   CHAR(64),                                      -- Data_Signature at close
-  Created_Dtts            TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  Updated_Dtts            TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  CONSTRAINT pk_complianceextractcontrol PRIMARY KEY (Extract_ID),
-  CONSTRAINT uq_complianceextractcontrol UNIQUE (Project_Cd, Table_Nm, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key),
-  CONSTRAINT fk_complianceextractcontrol_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject,
-  CONSTRAINT fk_complianceextractcontrol_runtype FOREIGN KEY (Run_Ty) REFERENCES ComplianceRunType
-);
-
 -- One row per batch: (project, table, source, run type, report period, run date). Whether it was
--- scheduled or requested follows from Run_Ty's Run_Category_Cd.
+-- scheduled or requested follows from Run_Ty's Run_Category_Cd. A batch closes on its own: automatically
+-- after its run type's SLA hold (Req_Dt_Key + SLA_Days - 1) when it has data or is in exception, or by a
+-- person (`close-batch`). The extract is produced by a separate process.
 CREATE TABLE ComplianceRequestControl (
   Req_ID           BIGINT       GENERATED ALWAYS AS IDENTITY,
   Project_Cd       VARCHAR(30)  NOT NULL,
@@ -205,7 +173,6 @@ CREATE TABLE ComplianceRequestControl (
   Rpt_End_Dt_Key   DATE         NOT NULL,
   Req_Dt_Key       DATE         NOT NULL,                  -- run date (D-29)
   Btch_ID          VARCHAR(250) NOT NULL,
-  Extract_ID       BIGINT       NOT NULL,
   Req_Stat         VARCHAR(30)  NOT NULL,                  -- see common.TRANSITIONS
   Resolution_Ty    VARCHAR(15),                            -- NEW_FILE | CARRY_FORWARD | MISSING
   Reuse_Btch_ID    VARCHAR(250),                           -- CARRY_FORWARD: batch whose data is reused
@@ -217,10 +184,8 @@ CREATE TABLE ComplianceRequestControl (
   CONSTRAINT uq_compliancerequestcontrol UNIQUE (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key),
   CONSTRAINT fk_compliancerequestcontrol_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject,
   CONSTRAINT fk_compliancerequestcontrol_source  FOREIGN KEY (Src_ID) REFERENCES ComplianceSourceSystem,
-  CONSTRAINT fk_compliancerequestcontrol_runtype FOREIGN KEY (Run_Ty) REFERENCES ComplianceRunType,
-  CONSTRAINT fk_compliancerequestcontrol_extract FOREIGN KEY (Extract_ID) REFERENCES ComplianceExtractControl
+  CONSTRAINT fk_compliancerequestcontrol_runtype FOREIGN KEY (Run_Ty) REFERENCES ComplianceRunType
 );
-CREATE INDEX ix_compliancerequestcontrol_extract ON ComplianceRequestControl (Extract_ID);
 
 -- One row per S3 object, including quarantined files. The batch's current data is its row with
 -- Load_Stat = 'PROMOTED'. Report period and run type come from the batch (Req_ID).
@@ -309,7 +274,6 @@ CREATE TABLE CMS_ComplianceExceptionsAudit (
   Req_ID       BIGINT,
   Load_ID      BIGINT,
   Ovrd_ID      BIGINT,
-  Extract_ID   BIGINT,
   Intake_ID    BIGINT,
   Btch_ID      VARCHAR(250),
   File_Ref     VARCHAR(1100),
@@ -321,7 +285,6 @@ CREATE TABLE CMS_ComplianceExceptionsAudit (
   CONSTRAINT fk_cms_complianceexceptionsaudit_batch    FOREIGN KEY (Req_ID) REFERENCES ComplianceRequestControl,
   CONSTRAINT fk_cms_complianceexceptionsaudit_load     FOREIGN KEY (Load_ID) REFERENCES ComplianceFileLoad,
   CONSTRAINT fk_cms_complianceexceptionsaudit_override FOREIGN KEY (Ovrd_ID) REFERENCES ComplianceBatchOverride,
-  CONSTRAINT fk_cms_complianceexceptionsaudit_extract  FOREIGN KEY (Extract_ID) REFERENCES ComplianceExtractControl,
   CONSTRAINT fk_cms_complianceexceptionsaudit_intake   FOREIGN KEY (Intake_ID) REFERENCES ComplianceRequestInTake
 );
 CREATE INDEX ix_cms_complianceexceptionsaudit_unsent ON CMS_ComplianceExceptionsAudit (Event_ID) WHERE Notified_Ind = 0;

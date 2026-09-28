@@ -1,17 +1,16 @@
-"""Batches: CRC / extract-row creation (§5.2), scheduled batch creation (P2) and ad-hoc intake (P4).
+"""Batches: CRC rows (§5.2), scheduled batch creation (P2) and ad-hoc intake (P4).
 
 Scheduling lives outside the framework (EventBridge / Step Functions / cron). Each scheduled run calls
 `run --module BATCH_CREATION` for one project and run type, naming the report-period SQL to use (period_sql.py).
 A missed run is re-created by running the same command with `--as-of <missed date>`.
 
 A batch is one (project, table, source, run type, report period, **run date**): a run type whose
-period spans several days (a CMS universe, say) gets one batch - and one extract - per run date.
+period spans several days (a CMS universe, say) gets one batch per run date.
 """
 from __future__ import annotations
 
 import importlib.util
 import logging
-from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
@@ -29,13 +28,11 @@ from .settings import Settings
 log = logging.getLogger(__name__)
 
 
-# ============================================================================ CRC / extract rows
+# ============================================================================ CRC rows
 @dataclass
 class CreateResult:
-    req_id: Optional[int]
-    created: bool
-    skipped_reason: Optional[str] = None
-    extract_id: Optional[int] = None
+    req_id: int
+    created: bool                    # False: the batch for that period and run date already existed
 
 
 def find_batch(conn, project_cd, table_nm, src_id, run_ty, rpt_start: date, rpt_end: date, req_dt: date,
@@ -51,19 +48,6 @@ def get_batch(conn: psycopg.Connection, req_id: int, for_update: bool = False) -
                         (req_id,)).fetchone()
 
 
-def batches_of_extract(conn: psycopg.Connection, extract_id: int, open_only: bool = False) -> list[dict]:
-    return conn.execute("SELECT * FROM ComplianceRequestControl WHERE Extract_ID=%s"
-                        + (" AND Batch_Close_Ind=0 ORDER BY Src_ID FOR UPDATE" if open_only else " ORDER BY Src_ID"),
-                        (extract_id,)).fetchall()
-
-
-def find_extract(conn, project_cd, table_nm, run_ty, rpt_start: date, rpt_end: date, req_dt: date) -> Optional[dict]:
-    return conn.execute(
-        """SELECT * FROM ComplianceExtractControl WHERE Project_Cd=%s AND Table_Nm=%s AND Run_Ty=%s
-              AND Rpt_Start_Dt_Key=%s AND Rpt_End_Dt_Key=%s AND Req_Dt_Key=%s""",
-        (project_cd, table_nm, run_ty, rpt_start, rpt_end, req_dt)).fetchone()
-
-
 def promoted_load(conn: psycopg.Connection, btch_id: str) -> Optional[dict]:
     """The batch's current data: its single PROMOTED load (D-75, replaces CRC.Current_Load_ID)."""
     return conn.execute("SELECT * FROM ComplianceFileLoad WHERE Btch_ID=%s AND Load_Stat='PROMOTED'",
@@ -71,26 +55,14 @@ def promoted_load(conn: psycopg.Connection, btch_id: str) -> Optional[dict]:
 
 
 def create_batch(conn: psycopg.Connection, clock: Clock, logger: EventLogger, *, xwalk: XwalkRow,
-                 rpt_start: date, rpt_end: date, req_dt: date, required_cnt: int,
-                 intake_id: Optional[int] = None) -> CreateResult:
+                 rpt_start: date, rpt_end: date, req_dt: date, intake_id: Optional[int] = None) -> CreateResult:
     """Idempotent: created=False when the batch for (period, run date) already exists (D-30)."""
     x = xwalk
     with conn.transaction():
         db.xact_lock(conn, db.seq_key(x.project_cd, x.table_nm, x.src_id, x.run_ty))
         existing = find_batch(conn, x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt)
         if existing:
-            return CreateResult(existing["req_id"], False, "EXISTS", existing["extract_id"])
-        conn.execute(
-            """INSERT INTO ComplianceExtractControl (Project_Cd, Table_Nm, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key,
-                 Req_Dt_Key, Required_Src_Cnt) VALUES (%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (Project_Cd, Table_Nm, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key) DO NOTHING""",
-            (x.project_cd, x.table_nm, x.run_ty, rpt_start, rpt_end, req_dt, required_cnt))
-        ext = find_extract(conn, x.project_cd, x.table_nm, x.run_ty, rpt_start, rpt_end, req_dt)
-        if ext["extract_close_ind"] == 1:
-            logger.audit("BATCH_CREATE_SKIPPED_EXTRACT_CLOSED", project_cd=x.project_cd, table_nm=x.table_nm,
-                         src_id=x.src_id, run_ty=x.run_ty, extract_id=ext["extract_id"], intake_id=intake_id,
-                         description=f"run date {req_dt}, period {rpt_start}..{rpt_end} is closed; batch not created")
-            return CreateResult(None, False, "EXTRACT_CLOSED", ext["extract_id"])
+            return CreateResult(existing["req_id"], False)
         seq = 1 + conn.execute(
             """SELECT count(*) AS n FROM ComplianceRequestControl WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s
                   AND Run_Ty=%s AND Req_Dt_Key=%s""",
@@ -99,16 +71,13 @@ def create_batch(conn: psycopg.Connection, clock: Clock, logger: EventLogger, *,
         now = clock.now()
         row = conn.execute(
             """INSERT INTO ComplianceRequestControl (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key,
-                 Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Extract_ID, Req_Stat, Created_Dtts, Updated_Dtts)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING Req_ID""",
-            (x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt, btch, ext["extract_id"],
-             PENDING, now, now)).fetchone()
-        if required_cnt > ext["required_src_cnt"]:          # a later source joined the same run (ad-hoc intake)
-            conn.execute("UPDATE ComplianceExtractControl SET Required_Src_Cnt=%s, Updated_Dtts=%s WHERE Extract_ID=%s",
-                         (required_cnt, now, ext["extract_id"]))
+                 Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Req_Stat, Created_Dtts, Updated_Dtts)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING Req_ID""",
+            (x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt, btch, PENDING, now,
+             now)).fetchone()
         logger.batch_event("BATCH_CREATED", req_id=row["req_id"], btch_id=btch, intake_id=intake_id,
                            detail=f"run_date={req_dt} period={rpt_start}..{rpt_end}")
-        return CreateResult(row["req_id"], True, None, ext["extract_id"])
+        return CreateResult(row["req_id"], True)
 
 
 # ============================================================================ report period (§5.1)
@@ -158,7 +127,6 @@ class ScheduleSummary:
     rpt_end: Optional[date] = None
     created: int = 0
     existing: int = 0
-    skipped: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -177,16 +145,12 @@ def create_batches(conn: psycopg.Connection, clock: Clock, settings: Settings, *
             if x.effective_on(s.run_date)]
     if not rows:
         s.errors.append(f"no effective crosswalk rows for {project_cd}/{table_nm or '*'}/{run_ty} on {s.run_date}")
-    required = Counter(x.table_nm for x in rows)
     for x in rows:
-        res = create_batch(conn, clock, logger, xwalk=x, rpt_start=s.rpt_start, rpt_end=s.rpt_end,
-                           req_dt=s.run_date, required_cnt=required[x.table_nm])
+        res = create_batch(conn, clock, logger, xwalk=x, rpt_start=s.rpt_start, rpt_end=s.rpt_end, req_dt=s.run_date)
         if res.created:
             s.created += 1
-        elif res.skipped_reason == "EXISTS":
-            s.existing += 1
         else:
-            s.skipped += 1
+            s.existing += 1
     return s
 
 
@@ -263,22 +227,12 @@ class IntakeProcessor:
         if not targets:
             self._fail(it, summary, "no active, effective crosswalk source for this request")
             return
-        created = existing = 0
-        msgs = []
-        for x in targets:
-            res = create_batch(self.conn, self.clock, self.logger, xwalk=x, rpt_start=it["rpt_start_dt_key"],
-                               rpt_end=it["rpt_end_dt_key"], req_dt=summary.run_date, required_cnt=len(targets),
-                               intake_id=it["intake_id"])
-            if res.created:
-                created += 1
-            elif res.skipped_reason == "EXISTS":
-                existing += 1
-            else:
-                msgs.append(f"{x.src_id}: {res.skipped_reason}")
+        created = sum(create_batch(self.conn, self.clock, self.logger, xwalk=x, rpt_start=it["rpt_start_dt_key"],
+                                   rpt_end=it["rpt_end_dt_key"], req_dt=summary.run_date,
+                                   intake_id=it["intake_id"]).created for x in targets)
         summary.created += created
-        summary.existing += existing
-        summary.details.append(f"{it['intake_id']}: created={created} existing={existing}"
-                               + (f" {'; '.join(msgs)}" if msgs else ""))
+        summary.existing += len(targets) - created
+        summary.details.append(f"{it['intake_id']}: created={created} existing={len(targets) - created}")
 
     def _fail(self, it: dict, summary: IntakeSummary, reason: str) -> None:
         self.logger.audit("INTAKE_FAILED", intake_id=it["intake_id"], project_cd=it["project_cd"],

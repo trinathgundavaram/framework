@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import Enum
 from functools import partial
-from typing import Callable, Optional
+from typing import Optional
 
 import psycopg
 
@@ -102,7 +102,6 @@ class IngestOutcome:
     rule: Optional[str] = None
     event_ty: Optional[str] = None
     req_id: Optional[int] = None
-    extract_id: Optional[int] = None
     ovrd_id: Optional[int] = None
     message: Optional[str] = None
 
@@ -145,15 +144,12 @@ class PathIngestSummary:
 
 class IngestPipeline:
     def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings, store: ObjectStore,
-                 rule_engine: RuleEngine, on_promoted: Optional[Callable[[int], None]] = None,
-                 on_late_promotion: Optional[Callable[[int], None]] = None, spark=None):
+                 rule_engine: RuleEngine, spark=None):
         self.conn = conn
         self.clock = clock
         self.settings = settings
         self.store = store
         self.rules = rule_engine
-        self.on_promoted = on_promoted                  # extract refresh hook (early completion, D-21)
-        self.on_late_promotion = on_late_promotion      # refresh + regenerate flag for a closed extract
         self.spark = spark
         self.logger = EventLogger(conn, clock)
         self._sweep_config: Optional[tuple[TemplateMatcher, tuple[str, ...]]] = None   # set for one process_path call
@@ -316,12 +312,7 @@ class IngestPipeline:
             return self._quarantine(load_id, info, "FILE_PARSE_ERROR", "zero-byte file but a header is expected",
                                     cfg, batch)
         with db.held(self.conn, db.batch_key(batch["btch_id"]), self.settings.lock_timeout_seconds):
-            outcome = self._process_locked(load_id, info, cfg, batch["req_id"])
-        if outcome.result == "PROMOTED" and self.on_promoted:
-            self.on_promoted(outcome.extract_id)
-        elif outcome.result in ("LATE_PROMOTED", "CORRECTION_PROMOTED") and self.on_late_promotion:
-            self.on_late_promotion(outcome.extract_id)
-        return outcome
+            return self._process_locked(load_id, info, cfg, batch["req_id"])
 
     def _resolve_run_type(self, token: str, codes: tuple[str, ...]) -> Optional[str]:
         if token in codes:
@@ -401,8 +392,7 @@ class IngestPipeline:
         rules_stat = "NOT_RUN"
         if staged_rows == 0 and not cfg.allow_zero_records:                      # D-60
             passed, failure_event, detail = False, "FILE_ZERO_RECORDS_REJECTED", "file has no data rows"
-        elif bindings := cfgmod.rule_bindings(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_id,
-                                              batch["run_ty"], "FILE_LEVEL"):
+        elif bindings := cfgmod.rule_bindings(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_id, batch["run_ty"]):
             with self.conn.transaction():
                 self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='RULES_RUNNING', Updated_Dtts=%s "
                                   "WHERE Load_ID=%s", (self.clock.now(), load_id))
@@ -443,9 +433,8 @@ class IngestPipeline:
             d = decide(ResolutionInput(batch_closed=closed, has_data=has_data, file_passed=passed,
                                        override_ty=ovrd["override_ty"] if ovrd else None))
             ctx = dict(project_cd=b["project_cd"], table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"],
-                       req_id=req_id, btch_id=b["btch_id"], load_id=load_id, extract_id=b["extract_id"], file_ref=ref)
-            out = IngestOutcome(load_id, "", d.rule, req_id=req_id, extract_id=b["extract_id"],
-                                ovrd_id=ovrd["ovrd_id"] if ovrd else None)
+                       req_id=req_id, btch_id=b["btch_id"], load_id=load_id, file_ref=ref)
+            out = IngestOutcome(load_id, "", d.rule, req_id=req_id, ovrd_id=ovrd["ovrd_id"] if ovrd else None)
             self.logger.batch_event("FILE_RECEIVED", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
                                     detail=f"{ref} rule={d.rule}")
 
@@ -533,8 +522,7 @@ class IngestPipeline:
             if cfg:
                 ctx.update(project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_id=cfg.src_id)
             if batch:
-                ctx.update(run_ty=batch["run_ty"], req_id=batch["req_id"], btch_id=batch["btch_id"],
-                           extract_id=batch["extract_id"])
+                ctx.update(run_ty=batch["run_ty"], req_id=batch["req_id"], btch_id=batch["btch_id"])
             self.logger.audit(event_ty, load_id=load_id, file_ref=s3_ref(info.bucket, info.key),
                               description=message, **ctx)
         self._move(info, self.settings.quarantine_uri, f"{event_ty}/", load_id)
