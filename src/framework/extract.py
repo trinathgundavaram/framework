@@ -151,8 +151,10 @@ class ExtractControlService:
             raise ValueError(f"unknown combine trigger {trigger_cd}")
         now = self.clock.now()
         with self.conn.transaction():
-            e = self.conn.execute("SELECT * FROM ComplianceExtractControl WHERE Extract_ID=%s FOR UPDATE",
-                                  (extract_id,)).fetchone()
+            e = self.conn.execute(
+                """SELECT e.*, r.SLA_Days FROM ComplianceExtractControl e
+                     LEFT JOIN ComplianceRunType r ON r.Run_Ty = e.Run_Ty
+                    WHERE e.Extract_ID=%s FOR UPDATE OF e""", (extract_id,)).fetchone()
             if e is None:
                 raise LookupError(f"extract {extract_id} not found")
             batches = batches_of_extract(self.conn, extract_id)
@@ -246,9 +248,14 @@ class ExtractControlService:
         return s
 
     def hold_date(self, extract: dict) -> date:
-        """SLA hold of the run, computed from its run date and the run type's SLA_Days (D-38, D-77)."""
-        rt = cfgmod.run_type(self.conn, extract["run_ty"])
-        return earliest_close_date(extract["req_dt_key"], rt.sla_days if rt else 1)
+        """SLA hold of the run, computed from its run date and the run type's SLA_Days (D-38, D-77).
+        Uses the row's `sla_days` when it was read with it (refresh does), else looks the run type up."""
+        if "sla_days" in extract:
+            sla = extract["sla_days"]
+        else:
+            rt = cfgmod.run_type(self.conn, extract["run_ty"])
+            sla = rt.sla_days if rt else None
+        return earliest_close_date(extract["req_dt_key"], 1 if sla is None else sla)
 
     def health(self) -> dict[str, list[dict]]:
         """Runs past their SLA hold and still open, and runs whose closed data was superseded by a

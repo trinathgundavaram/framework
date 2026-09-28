@@ -22,7 +22,7 @@ from . import config as cfg
 from . import db
 from .audit import EventLogger
 from .common import PENDING, Clock, ConfigError, build_btch_id
-from .config import XwalkRow
+from .config import RunType, XwalkRow
 from .period_sql import PERIOD_SQL
 from .settings import Settings
 
@@ -222,6 +222,7 @@ class IntakeProcessor:
         `project_cd` set, so one project's trigger only ever touches that project's requests; pass
         neither argument to sweep every project (a one-off, unscoped run)."""
         summary = IntakeSummary(run_date=self.clock.today(self.settings.business_tz))
+        run_types: Optional[dict[str, RunType]] = None                 # read once, when the first request is due
         while True:
             current = None
             try:
@@ -237,7 +238,9 @@ class IntakeProcessor:
                         return summary
                     current = row["intake_id"]
                     summary.handled += 1
-                    self._process(row, summary)
+                    if run_types is None:
+                        run_types = cfg.run_types(self.conn)
+                    self._process(row, summary, run_types)
             except Exception as e:  # unexpected error: record it and continue with the next intake
                 if current is None:
                     raise
@@ -248,9 +251,9 @@ class IntakeProcessor:
                 summary.failed += 1
 
     # ------------------------------------------------------------------
-    def _process(self, it: dict, summary: IntakeSummary) -> None:
+    def _process(self, it: dict, summary: IntakeSummary, run_types: dict[str, RunType]) -> None:
         self._mark_run(it["intake_id"])
-        rt = cfg.run_type(self.conn, it["run_ty"])
+        rt = run_types.get(it["run_ty"])
         if rt is None or not rt.active or rt.run_category_cd != "ADHOC":
             self._fail(it, summary, f"run type {it['run_ty']} is unknown, inactive or not ADHOC")
             return

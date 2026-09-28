@@ -53,12 +53,16 @@ def dirname(key: str) -> str:
     return key.rsplit("/", 1)[0] + "/" if "/" in key else ""
 
 
-def sha256_file(path: str) -> str:
-    h = hashlib.sha256()
+def _hash_file(path, algorithm: str) -> str:
+    h = hashlib.new(algorithm)
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def sha256_file(path: str) -> str:
+    return _hash_file(path, "sha256")
 
 
 class ObjectStore(ABC):
@@ -112,7 +116,7 @@ class LocalObjectStore(ObjectStore):
         p = self._path(bucket, key)
         if not p.is_file():
             raise FileNotFoundError(f"local://{bucket}/{key}")
-        return ObjectInfo(bucket, key, None, hashlib.md5(p.read_bytes()).hexdigest(), p.stat().st_size)
+        return ObjectInfo(bucket, key, None, _hash_file(p, "md5"), p.stat().st_size)
 
     def exists(self, bucket, key):
         return self._path(bucket, key).is_file()
@@ -123,7 +127,7 @@ class LocalObjectStore(ObjectStore):
         d = self._path(bucket, prefix)
         if not d.is_dir():
             return []
-        return [ObjectInfo(bucket, f"{prefix}{p.name}", None, hashlib.md5(p.read_bytes()).hexdigest(), p.stat().st_size)
+        return [ObjectInfo(bucket, f"{prefix}{p.name}", None, _hash_file(p, "md5"), p.stat().st_size)
                 for p in sorted(d.iterdir()) if p.is_file()]
 
     def download(self, bucket, key, dest, version_id=None):

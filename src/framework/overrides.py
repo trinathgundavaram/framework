@@ -62,6 +62,7 @@ class DecisionProcessor:
                 WHERE o.Override_Ty = 'REUSE' AND o.Apprvl_Stat = 'APPROVED' AND o.Valid_Thru_Dt_Key >= %s
                   AND c.Batch_Close_Ind = 0 AND c.Resolution_Ty IS DISTINCT FROM 'CARRY_FORWARD'
                 ORDER BY o.Ovrd_ID""", (today,)).fetchall()
+        run_types = cfgmod.run_types(self.conn) if rows else {}
         for r in rows:
             with self.conn.transaction():
                 o = self.conn.execute("SELECT * FROM ComplianceBatchOverride WHERE Ovrd_ID=%s FOR UPDATE SKIP LOCKED",
@@ -72,7 +73,7 @@ class DecisionProcessor:
                 ctx = dict(ovrd_id=o["ovrd_id"], req_id=b["req_id"], extract_id=b["extract_id"], btch_id=b["btch_id"],
                            project_cd=b["project_cd"], table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"])
                 src = self._reuse_source(o, b)
-                problem = self._reuse_problem(o, b, src)
+                problem = self._reuse_problem(o, b, src, run_types.get(b["run_ty"]))
                 if problem:
                     self.logger.audit("OVERRIDE_INVALID_DETECTED", actor=o["reviewed_by"] or o["created_by"],
                                       description=f"REUSE: {problem}", **ctx)
@@ -142,8 +143,7 @@ class DecisionProcessor:
         }
 
     # ------------------------------------------------------------------ validation
-    def _reuse_problem(self, o: dict, b: dict, src: Optional[dict]) -> Optional[str]:
-        rt = cfgmod.run_type(self.conn, b["run_ty"])
+    def _reuse_problem(self, o: dict, b: dict, src: Optional[dict], rt: Optional[cfgmod.RunType]) -> Optional[str]:
         if rt is None or not rt.carry_fwd:
             return f"run type {b['run_ty']} does not allow carry-forward (Carry_Fwd_Ind = 0)"
         if b["batch_close_ind"] == 1:

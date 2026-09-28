@@ -156,6 +156,7 @@ class IngestPipeline:
         self.on_late_promotion = on_late_promotion      # refresh + regenerate flag for a closed extract
         self.spark = spark
         self.logger = EventLogger(conn, clock)
+        self._sweep_config: Optional[tuple[TemplateMatcher, tuple[str, ...]]] = None   # set for one process_path call
 
     # ------------------------------------------------------------------ entry point
     def process_file(self, bucket: str, key: str, version_id: Optional[str] = None) -> IngestOutcome:
@@ -192,6 +193,14 @@ class IngestPipeline:
         locations = [(bucket, prefix if not prefix or prefix.endswith("/") else prefix + "/")] if bucket \
             else self._configured_locations()
         summary = PathIngestSummary(locations=[f"{b}/{p}" for b, p in locations])
+        self._sweep_config = self._load_config()      # the configuration is read once per sweep, not per object
+        try:
+            self._sweep(locations, summary)
+        finally:
+            self._sweep_config = None
+        return summary
+
+    def _sweep(self, locations: list[tuple[str, str]], summary: PathIngestSummary) -> None:
         for loc_bucket, loc_prefix in locations:
             try:
                 objects = self.store.list_objects(loc_bucket, loc_prefix)
@@ -207,7 +216,11 @@ class IngestPipeline:
                     summary.errors.append(f"{loc_bucket}/{info.key}: {type(e).__name__}: {e}")
                     continue
                 summary.tally(out)
-        return summary
+
+    def _load_config(self) -> tuple[TemplateMatcher, tuple[str, ...]]:
+        """The compiled filename templates of every active file config, and the run type codes."""
+        return (TemplateMatcher(cfgmod.active_file_configs(self.conn), self.settings.filename_case_sensitive),
+                tuple(cfgmod.run_types(self.conn)))
 
     def _configured_locations(self) -> list[tuple[str, str]]:
         """The distinct (bucket, prefix) inbound locations of every active file config. Several configs
@@ -269,7 +282,7 @@ class IngestPipeline:
 
     def _process(self, load_id: int, info: ObjectInfo) -> IngestOutcome:
         name = basename(info.key)
-        matcher = TemplateMatcher(cfgmod.active_file_configs(self.conn), self.settings.filename_case_sensitive)
+        matcher, run_type_codes = self._sweep_config or self._load_config()
         try:
             m = matcher.match(name)
         except MatchError as e:
@@ -279,7 +292,7 @@ class IngestPipeline:
         if info.bucket != bucket or dirname(info.key) != prefix:
             return self._quarantine(load_id, info, "FILE_REJECTED_UNPARSEABLE",
                                     f"{name} matched Cfg_ID {cfg.cfg_id} but is not in its inbound location", cfg)
-        run_ty = self._resolve_run_type(m.run_ty)
+        run_ty = self._resolve_run_type(m.run_ty, run_type_codes)
         ref_date = m.rpt_start if self.settings.file_effective_date_basis == "RPT_START" else m.rpt_end
         x = cfgmod.effective_xwalk(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_id, run_ty, ref_date) if run_ty else None
         if x is None:
@@ -310,8 +323,7 @@ class IngestPipeline:
             self.on_late_promotion(outcome.extract_id)
         return outcome
 
-    def _resolve_run_type(self, token: str) -> Optional[str]:
-        codes = cfgmod.run_types(self.conn)
+    def _resolve_run_type(self, token: str, codes: tuple[str, ...]) -> Optional[str]:
         if token in codes:
             return token
         if not self.settings.filename_case_sensitive:

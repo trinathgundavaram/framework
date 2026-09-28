@@ -76,6 +76,7 @@ Glue job setup notes (see aws/glue/glue-job.tf):
 """
 
 import io
+import re
 import sys
 import logging
 
@@ -94,6 +95,19 @@ logger = logging.getLogger("cms_metadata_load")
 DEFAULT_AUDIT_COLUMNS = {
     "created_dtts", "updated_dtts", "loaded_dtts", "created_by", "updated_by",
 }
+
+# PostgreSQL accepts at most 65535 bind parameters per statement; a larger file is sent in chunks.
+MAX_PARAMS = 65535
+
+# Table and column names come from job arguments and the CSV header and are placed in the SQL
+# unquoted (PostgreSQL folds them to lower case), so each must be a plain identifier.
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+
+def check_identifiers(what: str, names) -> None:
+    bad = [n for n in names if not _IDENT.match(n)]
+    if bad:
+        raise ValueError(f"{what}: not a plain SQL identifier: {bad}")
 
 
 def read_csv_from_s3(s3_input_path: str, file_name: str) -> pd.DataFrame:
@@ -127,12 +141,14 @@ def upsert_file(conn, table: str, s3_input_path: str, file_name: str,
     if missing_pk:
         raise ValueError(f"[{table}] file {file_name} is missing primary key column(s): {missing_pk}")
 
-    records = list(df[columns].itertuples(index=False, name=None))
+    check_identifiers(f"[{table}] --TABLE_NAME", table.split("."))
+    check_identifiers(f"[{table}] columns of {file_name}", columns)
+    check_identifiers(f"[{table}] --PRIMARY_KEY", pk_cols)
+    check_identifiers(f"[{table}] --AUDIT_COLUMNS", audit_columns)
 
+    records = list(df[columns].itertuples(index=False, name=None))
     col_list = ", ".join(columns)
     row_placeholder = "(" + ", ".join(["%s"] * len(columns)) + ")"
-    values_sql = ", ".join([row_placeholder] * len(records))
-    params = [value for row in records for value in row]
 
     if mode not in ("upsert", "insert_only"):
         raise ValueError(f"[{table}] unknown --MODE: {mode} (expected upsert or insert_only)")
@@ -145,12 +161,19 @@ def upsert_file(conn, table: str, s3_input_path: str, file_name: str,
         if "updated_dtts" in audit_columns:
             set_parts.append("updated_dtts = now()")
     action = f"DO UPDATE SET {', '.join(set_parts)}" if set_parts else "DO NOTHING"
-    sql = f"INSERT INTO {table} ({col_list}) VALUES {values_sql} ON CONFLICT ({', '.join(pk_cols)}) {action}"
 
+    # One statement when the file fits in the parameter limit (every file that loaded before still
+    # loads exactly as before); otherwise chunks, all committed together below.
+    chunk = max(1, MAX_PARAMS // len(columns))
+    row_count = 0
     cur = conn.cursor()
     try:
-        cur.execute(sql, params)
-        row_count = cur.rowcount
+        for start in range(0, len(records), chunk):
+            part = records[start:start + chunk]
+            values_sql = ", ".join([row_placeholder] * len(part))
+            sql = f"INSERT INTO {table} ({col_list}) VALUES {values_sql} ON CONFLICT ({', '.join(pk_cols)}) {action}"
+            cur.execute(sql, [value for row in part for value in row])
+            row_count += cur.rowcount
     finally:
         cur.close()
 

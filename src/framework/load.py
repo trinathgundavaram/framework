@@ -10,11 +10,11 @@ Staging and core tables live in the framework database (schema-qualified in the 
 from __future__ import annotations
 
 import csv
-import io
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Optional
+from itertools import islice
+from typing import TYPE_CHECKING, Iterable, Iterator, Optional
 
 import psycopg
 from psycopg import sql
@@ -90,29 +90,50 @@ def _normalise(values: list[str], empty_as_null: bool) -> list[Optional[str]]:
     return [None if (empty_as_null and v == "") else v for v in values]
 
 
+def _file_lines(path: str, encoding: str) -> Iterator[str]:
+    """The lines `str.splitlines(keepends=True)` finds in the file, read incrementally."""
+    with open(path, "r", encoding=encoding, newline="") as f:
+        for line in f:
+            yield from line.splitlines(keepends=True)
+
+
+def _lf_lines(parts: Iterable[str]) -> Iterator[str]:
+    """Re-split text on '\\n' only - what iterating an io.StringIO of the same text yields."""
+    buf = ""
+    for part in parts:
+        buf += part
+        if "\n" in buf:
+            *done, buf = buf.split("\n")
+            for d in done:
+                yield d + "\n"
+    if buf:
+        yield buf
+
+
 def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> Rows:
-    """LF and CRLF line endings are both accepted."""
+    """LF and CRLF line endings are both accepted; trailing blank lines are ignored. The file is read
+    in two streaming passes (never held in memory as text): the first checks the encoding and finds the
+    last non-blank line - the trailer when the file has one - and the second parses the records."""
     delim = delimiter_for(cfg)
+    content_cnt, last = 0, ""
     try:
-        with open(path, "r", encoding=settings.file_encoding, newline="") as f:
-            text = f.read()
+        for n, line in enumerate(_file_lines(path, settings.file_encoding), 1):
+            if line.strip() != "":
+                content_cnt, last = n, line
     except UnicodeDecodeError as e:
         raise FileRejected("FILE_PARSE_ERROR", f"file is not valid {settings.file_encoding}: {e.reason}")
-    lines = text.splitlines(keepends=True)
-    while lines and lines[-1].strip() == "":
-        lines.pop()
     trailer_count = None
     if cfg.has_trailer:
-        if not lines:
+        if not content_cnt:
             raise FileRejected("FILE_PARSE_ERROR", "trailer expected but file is empty")
-        trailer = lines.pop()
+        content_cnt -= 1
         if settings.trailer_count_check:
-            m = re.search(settings.trailer_count_regex, trailer)
+            m = re.search(settings.trailer_count_regex, last)
             if not m:
                 raise FileRejected("FILE_TRAILER_COUNT_MISMATCH", "trailer record count not found")
             trailer_count = int(m.group(1))
-    reader = csv.reader(io.StringIO("".join(lines)), delimiter=delim, quotechar=settings.quote_char or None,
-                        strict=True)
+    reader = csv.reader(_lf_lines(islice(_file_lines(path, settings.file_encoding), content_cnt)),
+                        delimiter=delim, quotechar=settings.quote_char or None, strict=True)
     rows: Rows = []
     seen_header = False
     try:

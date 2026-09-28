@@ -392,3 +392,19 @@ def test_file_matches_the_open_batch_of_the_latest_run_date(conn, tmp_path):
     assert b["req_dt_key"] == date(2026, 2, 3)
     assert q1(conn, "SELECT Req_Stat FROM ComplianceRequestControl WHERE Req_Dt_Key='2026-02-02'")["req_stat"] == "PENDING"
 
+
+def test_process_path_reads_the_configuration_once_per_sweep(env, conn, monkeypatch):
+    """Templates and run types are loaded once for the whole sweep, not once per object."""
+    from framework import config as cfgmod
+    app, *_ = env
+    for i, src in enumerate(("S1", "S2")):
+        put_file(app, file_name(src, ts=datetime(2026, 2, 1, 9, i)), [f"{i}|1|a"])
+    calls = {"configs": 0, "run_types": 0}
+    real_configs, real_run_types = cfgmod.active_file_configs, cfgmod.run_types
+    monkeypatch.setattr(cfgmod, "active_file_configs",
+                        lambda c: calls.__setitem__("configs", calls["configs"] + 1) or real_configs(c))
+    monkeypatch.setattr(cfgmod, "run_types",
+                        lambda c: calls.__setitem__("run_types", calls["run_types"] + 1) or real_run_types(c))
+    summary = app.pipeline.process_path("inbound", "prja/in/")
+    assert (summary.scanned, summary.promoted) == (2, 2)
+    assert calls == {"configs": 1, "run_types": 1}

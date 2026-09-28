@@ -123,9 +123,12 @@ class NotificationDispatcher:
         rows = self.conn.execute("SELECT * FROM CMS_ComplianceExceptionsAudit WHERE Notified_Ind = 0 "
                                  "ORDER BY Event_ID LIMIT %s", (limit,)).fetchall()
         sent = 0
+        configs: dict[tuple, Optional[cfgmod.FileConfig]] = {}     # one lookup per source per run
         for r in rows:
-            cfg = (cfgmod.file_config(self.conn, r["project_cd"], r["table_nm"], r["src_id"])
-                   if r["project_cd"] and r["table_nm"] and r["src_id"] else None)
+            key = (r["project_cd"], r["table_nm"], r["src_id"])
+            if key not in configs:
+                configs[key] = cfgmod.file_config(self.conn, *key) if all(key) else None
+            cfg = configs[key]
             if cfg:
                 failure = AUDIT_EVENTS.get(r["event_ty"], _EXC_ERROR).category == "EXCEPTION"
                 raw = cfg.failr_email_notfn_id if failure else cfg.sucs_email_notfn_id
