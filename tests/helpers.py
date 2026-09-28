@@ -9,10 +9,12 @@ from framework.common import FixedClock
 from framework.config import render
 from framework.settings import Settings
 
-TEMPLATE = "{PROJECT}_{TABLE}_{SRC}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt"
 TZ = "America/Chicago"
 
 
+def template(src: str) -> str:
+    """Each source's file config spells project, table and source out literally."""
+    return f"PRJA_TBLX_{src}_{{RUNTY}}_{{RPTSTART}}_{{RPTEND}}_{{TS}}.txt"
 
 def utc(*a) -> datetime:
     return datetime(*a, tzinfo=timezone.utc)
@@ -22,7 +24,7 @@ class FakeRules:
     """Rule engine double: set `file_fail` / `period_fail` / `error` per scope."""
 
     def __init__(self):
-        self.file_fail: dict[str, list[str]] = {}     # src_cd -> failing rules
+        self.file_fail: dict[str, list[str]] = {}     # src_id -> failing rules
         self.period_fail: list[str] = []
         self.error: set[str] = set()                  # scopes that raise technical errors
         self.calls: list[dict] = []
@@ -32,7 +34,7 @@ class FakeRules:
         scope = run_params["scope"]
         if scope in self.error:
             return RuleOutcome("ERROR", error="boom")
-        failed = self.file_fail.get(run_params.get("src_cd"), []) if scope == "FILE_LEVEL" else self.period_fail
+        failed = self.file_fail.get(run_params.get("src_id"), []) if scope == "FILE_LEVEL" else self.period_fail
         if not failed:
             return RuleOutcome("PASSED")
         if mode == "GATE":
@@ -55,25 +57,25 @@ def make_app(conn, tmp_path, now: datetime, **overrides) -> tuple[App, FixedCloc
 def seed_config(conn, *, sources=("S1", "S2"), sla=2, allow_zero=0, has_header=1, carry_fwd=0, rules=True,
                 adhoc_sla=1):
     with conn.transaction():
+        conn.execute("INSERT INTO ComplianceProject (Project_Cd, Project_Desc) VALUES ('PRJA','Project A'), "
+                     "('PRJB','Project B')")
         for s in sources:
-            conn.execute("INSERT INTO ComplianceSourceSystem (Src_Cd, Src_Nm, Src_Ty) VALUES (%s,%s,'VENDOR')", (s, s))
+            conn.execute("INSERT INTO ComplianceSourceSystem (Src_ID, Src_Nm, Src_Ty) VALUES (%s,%s,'VENDOR')", (s, s))
         conn.execute("""INSERT INTO ComplianceRunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind)
                         VALUES ('MONTHLY','monthly','ROUTINE',%s,%s), ('ADHOC','ad hoc','ADHOC',%s,%s)""",
                      (sla, carry_fwd, adhoc_sla, carry_fwd))
         for s in sources:
             for rt in ("MONTHLY", "ADHOC"):
-                conn.execute("""INSERT INTO ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_Cd, Run_Ty,
-                                  Effective_Start_Dt, Cmplnc_Vrsn) VALUES ('PRJA','tbl_x',%s,%s,'2025-01-01','V1')""",
+                conn.execute("""INSERT INTO ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty,
+                                  Effective_Start_Dt_Key, Cmplnc_Vrsn) VALUES ('PRJA','tbl_x',%s,%s,'2025-01-01','V1')""",
                              (s, rt))
             conn.execute(
-                """INSERT INTO ComplianceSourceFileConfig (Project_Cd, Table_Nm, Src_Cd, Src_File_Nm_Tmplt, Project_Alias,
-                     Table_Alias, Src_Alias, Src_File_Ty, Delmtr_Cd, Src_File_Has_Hdr_Ind, Src_File_Has_Trlr_Ind,
-                     Allow_Zero_Rcd_Ind, S3_Src_File_Path, Src_File_Archive_Path, S3_Quarantine_Path, Stg_Schema_Nm,
-                     Stg_Tblnm, Core_Schema_Nm, Core_Tblnm, Failr_Email_Notfn_Id)
-                   VALUES ('PRJA','tbl_x',%s,%s,'PRJA','TBLX',%s,'.txt','|',%s,0,%s,
-                           's3://inbound/prja/in/','s3://inbound/prja/archive/','s3://inbound/prja/quarantine/',
-                           'stg_t','tbl_x','core_t','tbl_x','ops@example.com')""",
-                (s, TEMPLATE, s, has_header, allow_zero))
+                """INSERT INTO ComplianceSourceFileConfig (Project_Cd, Table_Nm, Src_ID, Src_File_Nm_Tmplt, Delmtr_Cd,
+                     Src_File_Has_Hdr_Ind, Src_File_Has_Trlr_Ind, Allow_Zero_Rcd_Ind, S3_Src_File_Path,
+                     Src_File_Archive_Path, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Failr_Email_Notfn_Id)
+                   VALUES ('PRJA','tbl_x',%s,%s,'|',%s,0,%s,'s3://inbound/prja/in/','s3://inbound/prja/archive/',
+                           'stg_t','tbl_x','core_t','ops@example.com')""",
+                (s, template(s), has_header, allow_zero))
             if rules:
                 conn.execute("INSERT INTO ComplianceRuleBinding VALUES ('PRJA','tbl_x',%s,'FILE_LEVEL','g_file',%s,1)",
                              (s, s))
@@ -87,7 +89,7 @@ def create_batches(app, period="PREV_CALENDAR_MONTH", **kw):
 
 def file_name(src="S1", runty="MONTHLY", start=date(2026, 1, 1), end=date(2026, 1, 31),
               ts=datetime(2026, 2, 1, 9, 30, 0)) -> str:
-    return render(TEMPLATE, project="PRJA", table="TBLX", src=src, runty=runty, rpt_start=start, rpt_end=end, ts=ts)
+    return render(template(src), runty=runty, rpt_start=start, rpt_end=end, ts=ts)
 
 
 def put_file(app, name: str, rows: list[str], header: bool = True, key_prefix="prja/in/") -> str:
@@ -111,11 +113,9 @@ def add_override(conn, req_id: int, override_ty: str, valid_thru, *, reuse_btch_
     with conn.transaction():
         return conn.execute(
             """INSERT INTO ComplianceBatchOverride
-                 (Override_Ty, Req_ID, Project_Cd, Table_Nm, Src_Cd, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key,
-                  Req_Dt_Key, Btch_ID, Reuse_Btch_ID, Rsn, Requested_By, Apprvl_Stat, Apprvd_By, Apprvd_Dtts,
-                  Valid_Thru_Dt_Key)
-               SELECT %s, Req_ID, Project_Cd, Table_Nm, Src_Cd, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key,
-                      Req_Dt_Key, Btch_ID, %s, 'test', %s,
+                 (Override_Ty, Req_ID, Btch_ID, Reuse_Btch_ID, Rsn_Txt, Created_By, Apprvl_Stat, Reviewed_By,
+                  Reviewed_Dtts, Valid_Thru_Dt_Key)
+               SELECT %s, Req_ID, Btch_ID, %s, 'test', %s,
                       CASE WHEN %s THEN 'APPROVED' ELSE 'PENDING_REVIEW' END,
                       CASE WHEN %s THEN %s END, CASE WHEN %s THEN now() END,
                       CASE WHEN %s THEN %s::date END

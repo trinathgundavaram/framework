@@ -211,7 +211,7 @@ class IngestPipeline:
 
     def _configured_locations(self) -> list[tuple[str, str]]:
         """The distinct (bucket, prefix) inbound locations of every active file config. Several configs
-        - one per source alias - commonly share a folder, matched purely by filename template, so this
+        - one per source - commonly share a folder, matched purely by filename template, so this
         de-duplicates before listing."""
         return sorted({parse_uri(c.s3_src_file_path) for c in cfgmod.active_file_configs(self.conn)})
 
@@ -222,9 +222,9 @@ class IngestPipeline:
         stale_before = self.clock.now() - timedelta(minutes=self.settings.heartbeat_stale_minutes)
         return {
             "stale_loads": q(
-                """SELECT Load_ID, S3_Key, Load_Stat, Heartbeat_Dtts FROM ComplianceFileLoad
+                """SELECT Load_ID, S3_Key, Load_Stat, Updated_Dtts FROM ComplianceFileLoad
                     WHERE Load_Stat IN ('RECEIVED','STAGING','STAGED','RULES_RUNNING','FAILED_TECHNICAL')
-                      AND COALESCE(Heartbeat_Dtts, Updated_Dtts) < %s ORDER BY Load_ID""", stale_before),
+                      AND Updated_Dtts < %s ORDER BY Load_ID""", stale_before),
             "quarantine_by_reason": q("""SELECT Quarantine_Rsn_Cd, count(*) AS n FROM ComplianceFileLoad
                                           WHERE Load_Stat='QUARANTINED' GROUP BY Quarantine_Rsn_Cd ORDER BY n DESC"""),
         }
@@ -240,12 +240,12 @@ class IngestPipeline:
         with self.conn.transaction():
             row = self.conn.execute(
                 """INSERT INTO ComplianceFileLoad (S3_Bucket, S3_Key, S3_Version_Id, S3_ETag, File_Size_Byte,
-                                                  Received_Dtts, Load_Stat, Created_Dtts, Updated_Dtts)
-                   VALUES (%s,%s,%s,%s,%s,%s,'RECEIVED',%s,%s)
+                                                  Load_Stat, Created_Dtts, Updated_Dtts)
+                   VALUES (%s,%s,%s,%s,%s,'RECEIVED',%s,%s)
                    ON CONFLICT (S3_Bucket, S3_Key, COALESCE(S3_Version_Id, S3_ETag)) DO NOTHING
                    RETURNING *""",
                 (info.bucket, info.key, info.version_id, info.etag, info.size, self.clock.now(),
-                 self.clock.now(), self.clock.now())).fetchone()
+                 self.clock.now())).fetchone()
             if row:
                 return row, True
             row = self.conn.execute(
@@ -261,11 +261,9 @@ class IngestPipeline:
                               description=f"load already {load['load_stat']}")
         # finish an interrupted archive/quarantine move (E-27)
         if self.store.exists(info.bucket, info.key):
-            cfg = cfgmod.file_config_by_id(self.conn, load["cfg_id"]) if load["cfg_id"] else None
             if load["load_stat"] == "QUARANTINED":
-                self._move(info, (cfg.s3_quarantine_path if cfg else self.settings.default_quarantine_uri),
-                           f"{load['quarantine_rsn_cd']}/", load["load_id"])
-            elif cfg and load["load_stat"] in ARCHIVE_LOAD_STATS:
+                self._move(info, self.settings.quarantine_uri, f"{load['quarantine_rsn_cd']}/", load["load_id"])
+            elif load["load_stat"] in ARCHIVE_LOAD_STATS and (cfg := cfgmod.file_config_by_id(self.conn, load["cfg_id"])):
                 self._move(info, cfg.src_file_archive_path, "", load["load_id"])
         return IngestOutcome(load["load_id"], "REPLAY_IGNORED", req_id=load["req_id"])
 
@@ -283,30 +281,24 @@ class IngestPipeline:
                                     f"{name} matched Cfg_ID {cfg.cfg_id} but is not in its inbound location", cfg)
         run_ty = self._resolve_run_type(m.run_ty)
         ref_date = m.rpt_start if self.settings.file_effective_date_basis == "RPT_START" else m.rpt_end
-        x = cfgmod.effective_xwalk(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_cd, run_ty, ref_date) if run_ty else None
+        x = cfgmod.effective_xwalk(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_id, run_ty, ref_date) if run_ty else None
         if x is None:
             return self._quarantine(load_id, info, "FILE_REJECTED_RUNTY_NOT_CONFIGURED",
                                     f"run type {m.run_ty!r} is not configured/effective for "
-                                    f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_cd} on {ref_date}", cfg)
+                                    f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id} on {ref_date}", cfg)
         batch, override = self._select_batch(cfg, run_ty, m.rpt_start, m.rpt_end)
         if batch is None:
             event = "FILE_REJECTED_BATCH_CLOSED" if override == "CLOSED" else "FILE_REJECTED_NO_BATCH"
             detail = ("every batch for this period is closed and no approved, valid override exists"
                       if override == "CLOSED" else "no batch exists for this period")
             return self._quarantine(load_id, info, event,
-                                    f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_cd}/{run_ty} "
+                                    f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}/{run_ty} "
                                     f"{m.rpt_start}..{m.rpt_end}: {detail}", cfg)
         with self.conn.transaction():
             self.conn.execute(
-                """UPDATE ComplianceFileLoad SET Cfg_ID=%s, Req_ID=%s, Btch_ID=%s,
-                          Parsed_Project_Alias=%s, Parsed_Table_Alias=%s, Parsed_Src_Alias=%s, Parsed_Run_Ty=%s,
-                          Parsed_Rpt_Start_Dt_Key=%s, Parsed_Rpt_End_Dt_Key=%s, Parsed_File_Ts=%s,
-                          Load_Stat='STAGING', Attempt_Cnt=Attempt_Cnt+1, Heartbeat_Dtts=%s, Error_Txt=NULL,
-                          Updated_Dtts=%s
-                    WHERE Load_ID=%s""",
-                (cfg.cfg_id, batch["req_id"], batch["btch_id"], cfg.project_alias, cfg.table_alias,
-                 cfg.src_alias, run_ty, m.rpt_start, m.rpt_end, m.file_ts, self.clock.now(), self.clock.now(),
-                 load_id))
+                """UPDATE ComplianceFileLoad SET Cfg_ID=%s, Req_ID=%s, Btch_ID=%s, Load_Stat='STAGING', Error_Txt=NULL,
+                          Updated_Dtts=%s WHERE Load_ID=%s""",
+                (cfg.cfg_id, batch["req_id"], batch["btch_id"], self.clock.now(), load_id))
         if info.size == 0 and cfg.has_header:                                     # C1
             return self._quarantine(load_id, info, "FILE_PARSE_ERROR", "zero-byte file but a header is expected",
                                     cfg, batch)
@@ -333,10 +325,10 @@ class IngestPipeline:
         'CLOSED' when only closed batches exist and none of them may accept the file."""
         rows = self.conn.execute(
             """SELECT * FROM ComplianceRequestControl
-                WHERE Project_Cd=%s AND Table_Nm=%s AND Src_Cd=%s AND Run_Ty=%s
+                WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s AND Run_Ty=%s
                   AND Rpt_Start_Dt_Key=%s AND Rpt_End_Dt_Key=%s
                 ORDER BY Req_Dt_Key DESC, Req_ID DESC""",
-            (cfg.project_cd, cfg.table_nm, cfg.src_cd, run_ty, rpt_start, rpt_end)).fetchall()
+            (cfg.project_cd, cfg.table_nm, cfg.src_id, run_ty, rpt_start, rpt_end)).fetchall()
         if not rows:
             return None, None
         today = self.clock.today(self.settings.business_tz)
@@ -379,37 +371,34 @@ class IngestPipeline:
                 with self.conn.transaction():
                     self.logger.audit("FILE_SAME_CONTENT_OTHER_BATCH", load_id=load_id, req_id=req_id,
                                       btch_id=batch["btch_id"], file_ref=s3_ref(info.bucket, info.key),
-                                      project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_cd=cfg.src_cd,
+                                      project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_id=cfg.src_id,
                                       run_ty=batch["run_ty"],
                                       description=f"same content as load {other['load_id']} ({other['btch_id']})")
             try:
-                staged = stage(self.conn, self.settings, file_path=path, cfg=cfg, btch_id=batch["btch_id"],
+                staged_rows = stage(self.conn, self.settings, file_path=path, cfg=cfg, btch_id=batch["btch_id"],
                                load_id=load_id, src_file_nm=basename(info.key), loaded_at=self.clock.now(),
                                spark=self.spark)
             except FileRejected as e:
                 return self._quarantine(load_id, info, e.event_ty, str(e), cfg, batch)
         with self.conn.transaction():
-            self.conn.execute(
-                """UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Src_Rcd_Cnt=%s, Trlr_Rcd_Cnt=%s, Stg_Rcd_Cnt=%s,
-                          Heartbeat_Dtts=%s, Updated_Dtts=%s WHERE Load_ID=%s""",
-                (staged.data_rows, staged.trailer_count, staged.data_rows, self.clock.now(), self.clock.now(),
-                 load_id))
+            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, Updated_Dtts=%s "
+                              "WHERE Load_ID=%s", (staged_rows, self.clock.now(), load_id))
 
         failure_event = None
         detail = None
         rules_stat = "NOT_RUN"
-        if staged.data_rows == 0 and not cfg.allow_zero_records:                      # D-60
+        if staged_rows == 0 and not cfg.allow_zero_records:                      # D-60
             passed, failure_event, detail = False, "FILE_ZERO_RECORDS_REJECTED", "file has no data rows"
-        elif bindings := cfgmod.rule_bindings(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_cd, "FILE_LEVEL"):
+        elif bindings := cfgmod.rule_bindings(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_id, "FILE_LEVEL"):
             with self.conn.transaction():
-                self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='RULES_RUNNING', Heartbeat_Dtts=%s "
+                self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='RULES_RUNNING', Updated_Dtts=%s "
                                   "WHERE Load_ID=%s", (self.clock.now(), load_id))
             outcome = self.rules.run(self.conn, bindings, {
                 "scope": "FILE_LEVEL", "btch_id": batch["btch_id"], "load_id": load_id,
-                "project_cd": cfg.project_cd, "table_nm": cfg.table_nm, "src_cd": cfg.src_cd,
+                "project_cd": cfg.project_cd, "table_nm": cfg.table_nm, "src_id": cfg.src_id,
                 "run_ty": batch["run_ty"], "rpt_start_dt_key": batch["rpt_start_dt_key"],
                 "rpt_end_dt_key": batch["rpt_end_dt_key"], "req_dt_key": batch["req_dt_key"],
-                "stg_schema_nm": cfg.stg_schema_nm, "stg_tblnm": cfg.stg_tblnm}, self.settings.file_rules_mode)
+                "stg_schema_nm": cfg.stg_schema_nm, "stg_table_nm": cfg.stg_table_nm}, self.settings.file_rules_mode)
             if outcome.status == ERROR:
                 with self.conn.transaction():
                     self.conn.execute("UPDATE ComplianceFileLoad SET Rules_Stat='ERROR' WHERE Load_ID=%s", (load_id,))
@@ -440,12 +429,12 @@ class IngestPipeline:
             ovrd = self.active_override(b, required_override_ty(has_data), today) if closed else None
             d = decide(ResolutionInput(batch_closed=closed, has_data=has_data, file_passed=passed,
                                        override_ty=ovrd["override_ty"] if ovrd else None))
-            ctx = dict(project_cd=b["project_cd"], table_nm=b["table_nm"], src_cd=b["src_cd"], run_ty=b["run_ty"],
+            ctx = dict(project_cd=b["project_cd"], table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"],
                        req_id=req_id, btch_id=b["btch_id"], load_id=load_id, extract_id=b["extract_id"], file_ref=ref)
             out = IngestOutcome(load_id, "", d.rule, req_id=req_id, extract_id=b["extract_id"],
                                 ovrd_id=ovrd["ovrd_id"] if ovrd else None)
             self.logger.batch_event("FILE_RECEIVED", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
-                                    file_ref=ref, detail=f"rule={d.rule}")
+                                    detail=f"{ref} rule={d.rule}")
 
             if d.action in (Action.PROMOTE, Action.PROMOTE_REPLACE, Action.PROMOTE_LATE, Action.PROMOTE_CORRECTION):
                 to_stat = COMPLETED if closed else PROMOTED
@@ -459,10 +448,8 @@ class IngestPipeline:
                 self.conn.execute(
                     """UPDATE ComplianceRequestControl SET Resolution_Ty='NEW_FILE', Req_Stat=%s, Reuse_Btch_ID=NULL,
                               Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, now, req_id))
-                self.conn.execute(
-                    """UPDATE ComplianceFileLoad SET Load_Stat='PROMOTED', Rules_Stat=%s, Core_Appended_Cnt=%s,
-                              Core_Disabled_Cnt=%s, Promoted_Dtts=%s, Heartbeat_Dtts=NULL, Updated_Dtts=%s
-                        WHERE Load_ID=%s""", (rules_stat, res.appended_cnt, res.disabled_cnt, now, now, load_id))
+                self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='PROMOTED', Rules_Stat=%s, Updated_Dtts=%s "
+                                  "WHERE Load_ID=%s", (rules_stat, now, load_id))
                 if d.action == Action.PROMOTE_REPLACE:
                     self.logger.batch_event(
                         "FILE_REPLACED_BEFORE_CLOSE", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
@@ -473,8 +460,7 @@ class IngestPipeline:
                 promoted_event = {Action.PROMOTE_LATE: "LATE_ARRIVAL_PROMOTED",
                                   Action.PROMOTE_CORRECTION: "CORRECTION_PROMOTED"}.get(d.action, "FILE_PROMOTED")
                 self.logger.batch_event(promoted_event, req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
-                                        ovrd_id=out.ovrd_id, entry_ty="MANUAL" if closed else "AUTO",
-                                        detail=f"appended={res.appended_cnt} disabled={res.disabled_cnt}"
+                                        ovrd_id=out.ovrd_id, detail=f"appended={res.appended_cnt} disabled={res.disabled_cnt}"
                                                + (f"; {detail}" if detail else ""))
                 out.result = {Action.PROMOTE_LATE: "LATE_PROMOTED",
                               Action.PROMOTE_CORRECTION: "CORRECTION_PROMOTED"}.get(d.action, "PROMOTED")
@@ -505,10 +491,9 @@ class IngestPipeline:
     def _end_carry_forward(self, b: dict, load_id: int, now) -> None:
         """A real file replaced an applied carry-forward: stop the reuse and record it."""
         row = self.conn.execute(
-            """UPDATE ComplianceBatchOverride SET Valid_Thru_Dt_Key=%s, Updated_Dtts=%s, Updated_By='SYSTEM',
-                      Rsn = COALESCE(Rsn || ' | ', '') || %s
+            """UPDATE ComplianceBatchOverride SET Valid_Thru_Dt_Key=%s, Updated_Dtts=%s, Updated_By='SYSTEM'
                 WHERE Req_ID=%s AND Override_Ty='REUSE' AND Apprvl_Stat='APPROVED' RETURNING Ovrd_ID""",
-            (b["req_dt_key"], now, f"superseded by file load {load_id}", b["req_id"])).fetchone()
+            (b["req_dt_key"], now, b["req_id"])).fetchone()
         self.logger.batch_event("CARRY_FORWARD_REMOVED", req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id,
                                 ovrd_id=row["ovrd_id"] if row else None,
                                 detail=f"reuse of {b['reuse_btch_id']} replaced by load {load_id}")
@@ -519,8 +504,8 @@ class IngestPipeline:
 
     def _rules_failed(self, load_id, rules_stat, detail, now) -> None:
         self.conn.execute(
-            """UPDATE ComplianceFileLoad SET Load_Stat='RULES_FAILED', Rules_Stat=%s, Error_Txt=%s,
-                      Heartbeat_Dtts=NULL, Updated_Dtts=%s WHERE Load_ID=%s""",
+            """UPDATE ComplianceFileLoad SET Load_Stat='RULES_FAILED', Rules_Stat=%s, Error_Txt=%s, Updated_Dtts=%s
+                WHERE Load_ID=%s""",
             (rules_stat, detail, now, load_id))
 
     # ------------------------------------------------------------------ quarantine / move / failure
@@ -529,18 +514,17 @@ class IngestPipeline:
         with self.conn.transaction():
             self.conn.execute(
                 """UPDATE ComplianceFileLoad SET Load_Stat='QUARANTINED', Quarantine_Rsn_Cd=%s, Error_Txt=%s,
-                          Cfg_ID=COALESCE(%s, Cfg_ID), Heartbeat_Dtts=NULL, Updated_Dtts=%s WHERE Load_ID=%s""",
+                          Cfg_ID=COALESCE(%s, Cfg_ID), Updated_Dtts=%s WHERE Load_ID=%s""",
                 (event_ty, message, cfg.cfg_id if cfg else None, self.clock.now(), load_id))
             ctx = {}
             if cfg:
-                ctx.update(project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_cd=cfg.src_cd)
+                ctx.update(project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_id=cfg.src_id)
             if batch:
                 ctx.update(run_ty=batch["run_ty"], req_id=batch["req_id"], btch_id=batch["btch_id"],
                            extract_id=batch["extract_id"])
             self.logger.audit(event_ty, load_id=load_id, file_ref=s3_ref(info.bucket, info.key),
                               description=message, **ctx)
-        dest = cfg.s3_quarantine_path if cfg else self.settings.default_quarantine_uri
-        self._move(info, dest, f"{event_ty}/", load_id)
+        self._move(info, self.settings.quarantine_uri, f"{event_ty}/", load_id)
         return IngestOutcome(load_id, "QUARANTINED", event_ty=event_ty, message=message,
                              req_id=batch["req_id"] if batch else None)
 
@@ -557,8 +541,8 @@ class IngestPipeline:
         try:
             with self.conn.transaction():
                 self.conn.execute(
-                    """UPDATE ComplianceFileLoad SET Load_Stat='FAILED_TECHNICAL', Error_Txt=%s, Heartbeat_Dtts=NULL,
-                              Updated_Dtts=%s WHERE Load_ID=%s AND Load_Stat <> ALL(%s)""",
+                    """UPDATE ComplianceFileLoad SET Load_Stat='FAILED_TECHNICAL', Error_Txt=%s, Updated_Dtts=%s
+                        WHERE Load_ID=%s AND Load_Stat <> ALL(%s)""",
                     (sanitize_db_error(f"{type(err).__name__}: {err}"), self.clock.now(), load_id,
                      list(TERMINAL_LOAD_STATS)))
                 if isinstance(err, RowCountMismatch):

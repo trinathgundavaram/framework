@@ -97,12 +97,12 @@ def parse_as_of(value: str | None, business_tz: str = "UTC") -> Clock:
 BTCH_ID_MAX_LEN = 250
 
 
-def build_btch_id(req_dt: date, project_cd: str, table_nm: str, src_cd: str, run_ty: str,
+def build_btch_id(req_dt: date, project_cd: str, table_nm: str, src_id: str, run_ty: str,
                   cmplnc_vrsn: str, seq: int) -> str:
     """{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Src}_{Run_Ty}_{Vrsn}_{Seq}"""
     if seq < 1:
         raise ValueError("seq must be >= 1")
-    value = f"{req_dt:%Y%m%d}_{project_cd}_{table_nm}_{src_cd}_{run_ty}_{cmplnc_vrsn}_{seq}"
+    value = f"{req_dt:%Y%m%d}_{project_cd}_{table_nm}_{src_id}_{run_ty}_{cmplnc_vrsn}_{seq}"
     if len(value) > BTCH_ID_MAX_LEN:
         raise ValueError(f"Btch_ID exceeds {BTCH_ID_MAX_LEN} characters: {value}")
     return value

@@ -1,336 +1,331 @@
 -- =============================================================================
--- CMS Compliance Framework - schema (single source of truth; design doc §5 describes it)
--- Target: PostgreSQL 14+ (tested on 16). Requires the btree_gist extension.
--- Applied by `framework init-db`, which creates the metadata schema (FRAMEWORK_METADATA_SCHEMA),
--- sets search_path to it and installs btree_gist first. Object names are intentionally unqualified.
--- Tables are created in dependency order; there are no ALTER statements.
+-- CMS Compliance Framework - schema v6 (single source of truth; design doc §5 describes it)
+-- Target: PostgreSQL 14+ (tested on 16). Applied by `framework init-db`, which creates the metadata
+-- schema (FRAMEWORK_METADATA_SCHEMA) and sets search_path to it; object names are unqualified.
 --
--- Not stored here (v4/v5 simplification):
---   * database connections  -> .env file locally, AWS Secrets Manager in AWS
---   * runtime settings      -> environment / .env / job arguments
---   * report-period logic   -> framework/period_sql.py (name passed when the job is scheduled)
---   * extract job           -> the scheduled job chain runs the extract after the framework closes it
---   * Req_Stat values       -> fixed CHECK list below (transitions enforced in code)
---   * SLA hold              -> computed as Req_Dt_Key + (SLA_Days - 1); never stored
+-- DDL standards
+--   * Tables are created in dependency order; no ALTER statements, no CHECK constraints (values are
+--     validated by the framework and by the loads that populate the configuration tables).
+--   * Every constraint and index is named: pk_<table>, fk_<table>_<parent>, uq_<table>[_<what>], ix_<table>_<what>.
+--   * Column names follow ComplianceRequestControl: Title_Case words and a class-word suffix
+--       _ID identifier   _Cd code     _Nm name        _Desc description  _Ty type    _Stat status
+--       _Ind 0/1 flag    _Cnt count   _Dt_Key date    _Dtts timestamptz  _Txt text   _List comma list   _By user
+--   * Unquoted identifiers: PostgreSQL stores them lower-case (Req_ID is column req_id).
+--   * Tables people maintain carry Created_Dtts/Created_By/Updated_Dtts/Updated_By; tables only the
+--     framework writes carry Created_Dtts/Updated_Dtts; append-only logs carry Event_Dtts.
+--   * Only indexes that enforce a rule or serve a query the framework runs on a growing table.
+--
+-- Not stored here: database connections (.env / Secrets Manager), runtime settings (environment /
+-- job arguments), report-period SQL (framework/period_sql.py), the event vocabulary (framework/audit.py),
+-- the SLA hold (computed as Req_Dt_Key + (SLA_Days - 1)).
 -- =============================================================================
--- ================= lookups =================
+
+-- ================= reference =================
+CREATE TABLE ComplianceProject (
+  Project_Cd    VARCHAR(30)  NOT NULL,
+  Project_Desc  VARCHAR(200) NOT NULL,
+  Active_Ind    SMALLINT     NOT NULL DEFAULT 1,
+  Created_Dtts  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Created_By    VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Updated_By    VARCHAR(100) NOT NULL DEFAULT current_user,
+  CONSTRAINT pk_complianceproject PRIMARY KEY (Project_Cd)
+);
+
 CREATE TABLE ComplianceSourceSystem (
-  Src_Cd       VARCHAR(30)  PRIMARY KEY,
-  Src_Nm       VARCHAR(100) NOT NULL,
-  Src_Ty       VARCHAR(20)  NOT NULL CHECK (Src_Ty IN ('VENDOR','INTERNAL')),
-  Active_Ind   SMALLINT     NOT NULL DEFAULT 1 CHECK (Active_Ind IN (0,1)),
-  Created_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Created_By VARCHAR(100) NOT NULL DEFAULT current_user,
-  Updated_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Updated_By VARCHAR(100) NOT NULL DEFAULT current_user
+  Src_ID        VARCHAR(30)  NOT NULL,
+  Src_Nm        VARCHAR(100) NOT NULL,
+  Src_Ty        VARCHAR(20)  NOT NULL,                     -- VENDOR | INTERNAL
+  Active_Ind    SMALLINT     NOT NULL DEFAULT 1,
+  Created_Dtts  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Created_By    VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Updated_By    VARCHAR(100) NOT NULL DEFAULT current_user,
+  CONSTRAINT pk_compliancesourcesystem PRIMARY KEY (Src_ID)
 );
 
 CREATE TABLE ComplianceRunType (
-  Run_Ty          VARCHAR(20)  PRIMARY KEY CHECK (Run_Ty ~ '^[A-Za-z0-9]+$'),   -- must be usable as {RUNTY}
+  Run_Ty          VARCHAR(20)  NOT NULL,                   -- letters/digits only: it is the {RUNTY} token
   Run_Ty_Desc     VARCHAR(200) NOT NULL,
-  Run_Category_Cd VARCHAR(10)  NOT NULL CHECK (Run_Category_Cd IN ('ROUTINE','ADHOC')),
-  SLA_Days        INT          NOT NULL CHECK (SLA_Days >= 1),                  -- D-38: minimum hold before close
-  Carry_Fwd_Ind   SMALLINT     NOT NULL DEFAULT 0 CHECK (Carry_Fwd_Ind IN (0,1)),  -- D-70: REUSE overrides allowed
-  Active_Ind      SMALLINT     NOT NULL DEFAULT 1 CHECK (Active_Ind IN (0,1)),
-  Created_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Created_By VARCHAR(100) NOT NULL DEFAULT current_user,
-  Updated_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Updated_By VARCHAR(100) NOT NULL DEFAULT current_user
-);
-
-CREATE TABLE ComplianceEventType (
-  Event_Ty          VARCHAR(60) PRIMARY KEY,
-  Log_Tbl_Cd        VARCHAR(20) NOT NULL CHECK (Log_Tbl_Cd IN ('FILE_DETAIL','EXCEPTIONS_AUDIT')),
-  Event_Ctgy        VARCHAR(20) NOT NULL CHECK (Event_Ctgy IN ('AUDIT','EXCEPTION')),
-  Default_Sevrty    VARCHAR(10) NOT NULL CHECK (Default_Sevrty IN ('INFO','WARNING','ERROR')),
-  Notify_Ind        SMALLINT    NOT NULL DEFAULT 0 CHECK (Notify_Ind IN (0,1)),
-  Notify_Channel_Cd VARCHAR(10) NOT NULL DEFAULT 'SES' CHECK (Notify_Channel_Cd IN ('SES','SNS','BOTH')),
-  Event_Desc        VARCHAR(300)
+  Run_Category_Cd VARCHAR(10)  NOT NULL,                   -- ROUTINE (scheduled) | ADHOC (intake)
+  SLA_Days        INT          NOT NULL,                   -- >= 1; minimum hold before close (D-38)
+  Carry_Fwd_Ind   SMALLINT     NOT NULL DEFAULT 0,         -- REUSE overrides allowed (D-70)
+  Active_Ind      SMALLINT     NOT NULL DEFAULT 1,
+  Created_Dtts    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Created_By      VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Updated_By      VARCHAR(100) NOT NULL DEFAULT current_user,
+  CONSTRAINT pk_complianceruntype PRIMARY KEY (Run_Ty)
 );
 
 -- ================= configuration =================
--- Which (project, table, source, run type) combinations apply, and when. Nothing else.
+-- Which (project, table, source, run type) combinations apply, and when. `validate-config` reports
+-- overlapping effective windows.
 CREATE TABLE ComplianceDataSetSourceXwalk (
-  Project_Cd         VARCHAR(30) NOT NULL,
-  Table_Nm           VARCHAR(63) NOT NULL,                              -- physical core table (D-25)
-  Src_Cd             VARCHAR(30) NOT NULL REFERENCES ComplianceSourceSystem,
-  Run_Ty             VARCHAR(20) NOT NULL REFERENCES ComplianceRunType,
-  Effective_Start_Dt DATE        NOT NULL,
-  Effective_End_Dt   DATE,
-  Cmplnc_Vrsn        VARCHAR(10) NOT NULL,                              -- D-51
-  Active_Ind         SMALLINT    NOT NULL DEFAULT 1 CHECK (Active_Ind IN (0,1)),
-  Created_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Created_By VARCHAR(100) NOT NULL DEFAULT current_user,
-  Updated_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Updated_By VARCHAR(100) NOT NULL DEFAULT current_user,
-  PRIMARY KEY (Project_Cd, Table_Nm, Src_Cd, Run_Ty, Effective_Start_Dt),
-  CHECK (Effective_End_Dt IS NULL OR Effective_End_Dt >= Effective_Start_Dt),
-  CONSTRAINT ex_xwalk_no_overlap EXCLUDE USING gist (
-    Project_Cd WITH =, Table_Nm WITH =, Src_Cd WITH =, Run_Ty WITH =,
-    daterange(Effective_Start_Dt, Effective_End_Dt, '[]') WITH &&) WHERE (Active_Ind = 1)
+  Project_Cd             VARCHAR(30)  NOT NULL,
+  Table_Nm               VARCHAR(63)  NOT NULL,            -- physical core table (D-25)
+  Src_ID                 VARCHAR(30)  NOT NULL,
+  Run_Ty                 VARCHAR(20)  NOT NULL,
+  Effective_Start_Dt_Key DATE         NOT NULL,
+  Effective_End_Dt_Key   DATE,
+  Cmplnc_Vrsn            VARCHAR(10)  NOT NULL,            -- part of Btch_ID (D-51)
+  Active_Ind             SMALLINT     NOT NULL DEFAULT 1,
+  Created_Dtts           TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Created_By             VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts           TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Updated_By             VARCHAR(100) NOT NULL DEFAULT current_user,
+  CONSTRAINT pk_compliancedatasetsourcexwalk PRIMARY KEY (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key),
+  CONSTRAINT fk_compliancedatasetsourcexwalk_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject,
+  CONSTRAINT fk_compliancedatasetsourcexwalk_source  FOREIGN KEY (Src_ID) REFERENCES ComplianceSourceSystem,
+  CONSTRAINT fk_compliancedatasetsourcexwalk_runtype FOREIGN KEY (Run_Ty) REFERENCES ComplianceRunType
 );
 
--- File shape and location per (project, table, source). Staging/core tables live in the same
--- PostgreSQL database as the framework tables (schema-qualified here).
+-- File shape and location per (project, table, source). The filename template spells the project,
+-- table and source out literally; the file type is the template's extension. Staging tables live in
+-- the framework database; the core table is <Core_Schema_Nm>.<Table_Nm>.
 CREATE TABLE ComplianceSourceFileConfig (
-  Cfg_ID                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  Cfg_ID                 BIGINT       GENERATED ALWAYS AS IDENTITY,
   Project_Cd             VARCHAR(30)  NOT NULL,
   Table_Nm               VARCHAR(63)  NOT NULL,
-  Src_Cd                 VARCHAR(30)  NOT NULL REFERENCES ComplianceSourceSystem,
-  Src_File_Nm_Tmplt      VARCHAR(255) NOT NULL,                         -- §9 (validator checks grammar)
-  Project_Alias          VARCHAR(50)  NOT NULL,
-  Table_Alias            VARCHAR(80)  NOT NULL,
-  Src_Alias              VARCHAR(50)  NOT NULL,
-  Src_File_Ty            VARCHAR(10)  NOT NULL,                         -- allowed set: SUPPORTED_FILE_TYPES
-  Delmtr_Cd              VARCHAR(5),
-  Line_Term_Cd           VARCHAR(5),
-  Src_File_Has_Hdr_Ind   SMALLINT NOT NULL CHECK (Src_File_Has_Hdr_Ind IN (0,1)),
-  Src_File_Has_Trlr_Ind  SMALLINT NOT NULL CHECK (Src_File_Has_Trlr_Ind IN (0,1)),
-  Allow_Zero_Rcd_Ind     SMALLINT NOT NULL CHECK (Allow_Zero_Rcd_Ind IN (0,1)),         -- D-60
-  S3_Src_File_Path       VARCHAR(500) NOT NULL,
+  Src_ID                 VARCHAR(30)  NOT NULL,
+  Src_File_Nm_Tmplt      VARCHAR(255) NOT NULL,            -- §9, e.g. PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt
+  Delmtr_Cd              VARCHAR(10),                      -- NULL = comma; TAB | PIPE | COMMA | SEMICOLON | literal
+  Src_File_Has_Hdr_Ind   SMALLINT     NOT NULL,
+  Src_File_Has_Trlr_Ind  SMALLINT     NOT NULL,
+  Allow_Zero_Rcd_Ind     SMALLINT     NOT NULL,            -- D-60
+  S3_Src_File_Path       VARCHAR(500) NOT NULL,            -- inbound folder (s3://bucket/prefix/)
   Src_File_Archive_Path  VARCHAR(500) NOT NULL,
-  S3_Quarantine_Path     VARCHAR(500) NOT NULL,
   Stg_Schema_Nm          VARCHAR(63)  NOT NULL,
-  Stg_Tblnm              VARCHAR(63)  NOT NULL,
+  Stg_Table_Nm           VARCHAR(63)  NOT NULL,
   Core_Schema_Nm         VARCHAR(63)  NOT NULL,
-  Core_Tblnm             VARCHAR(63)  NOT NULL,
-  Bus_Email_Id           VARCHAR(500),
-  Bus_Usr_Grp_Nm         VARCHAR(100),
-  Dlvry_Ownr_Grp_Nm      VARCHAR(100),
-  Sucs_Email_Notfn_Id    TEXT,
-  Failr_Email_Notfn_Id   TEXT,
-  Email_Subjct_Txt       TEXT,
-  Email_Cntnt_Txt        TEXT,
-  Notify_Channel_Cd      VARCHAR(10) CHECK (Notify_Channel_Cd IN ('SES','SNS','BOTH')),  -- overrides event default;
-                                                                                         -- SNS topic = FRAMEWORK_SNS_TOPIC_ARN
-  Active_Ind             SMALLINT NOT NULL DEFAULT 1 CHECK (Active_Ind IN (0,1)),
-  Created_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Created_By VARCHAR(100) NOT NULL DEFAULT current_user,
-  Updated_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Updated_By VARCHAR(100) NOT NULL DEFAULT current_user,
-  CHECK (Core_Tblnm = Table_Nm)
+  Sucs_Email_Notfn_Id    TEXT,                             -- comma-separated recipients of AUDIT events
+  Failr_Email_Notfn_Id   TEXT,                             -- comma-separated recipients of EXCEPTION events
+  Email_Subjct_Txt       VARCHAR(200),                     -- subject prefix
+  Active_Ind             SMALLINT     NOT NULL DEFAULT 1,
+  Created_Dtts           TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Created_By             VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts           TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Updated_By             VARCHAR(100) NOT NULL DEFAULT current_user,
+  CONSTRAINT pk_compliancesourcefileconfig PRIMARY KEY (Cfg_ID),
+  CONSTRAINT fk_compliancesourcefileconfig_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject,
+  CONSTRAINT fk_compliancesourcefileconfig_source  FOREIGN KEY (Src_ID) REFERENCES ComplianceSourceSystem
 );
-CREATE UNIQUE INDEX ux_filecfg_one_active ON ComplianceSourceFileConfig (Project_Cd, Table_Nm, Src_Cd) WHERE Active_Ind = 1;
-CREATE UNIQUE INDEX ux_filecfg_alias_active ON ComplianceSourceFileConfig (Project_Alias, Table_Alias, Src_Alias) WHERE Active_Ind = 1;
+CREATE UNIQUE INDEX uq_compliancesourcefileconfig_active
+  ON ComplianceSourceFileConfig (Project_Cd, Table_Nm, Src_ID) WHERE Active_Ind = 1;
 
--- GRE rule groups. FILE_LEVEL rules run when at least one binding exists for the source.
+-- GRE rule groups. FILE_LEVEL rules run when at least one binding exists for the source;
+-- PERIOD_LEVEL bindings use Src_ID = '*'.
 CREATE TABLE ComplianceRuleBinding (
   Project_Cd       VARCHAR(30)  NOT NULL,
   Table_Nm         VARCHAR(63)  NOT NULL,
-  Src_Cd           VARCHAR(30)  NOT NULL,                               -- '*' for PERIOD_LEVEL
-  Rule_Scope_Cd    VARCHAR(20)  NOT NULL CHECK (Rule_Scope_Cd IN ('FILE_LEVEL','PERIOD_LEVEL')),
+  Src_ID           VARCHAR(30)  NOT NULL,
+  Rule_Scope_Cd    VARCHAR(20)  NOT NULL,                  -- FILE_LEVEL | PERIOD_LEVEL
   Gre_Rule_Group   VARCHAR(100) NOT NULL,
   Gre_Rule_Variant VARCHAR(100) NOT NULL,
-  Active_Ind       SMALLINT NOT NULL DEFAULT 1 CHECK (Active_Ind IN (0,1)),
-  PRIMARY KEY (Project_Cd, Table_Nm, Src_Cd, Rule_Scope_Cd, Gre_Rule_Group, Gre_Rule_Variant),
-  CHECK ((Rule_Scope_Cd = 'PERIOD_LEVEL') = (Src_Cd = '*'))
+  Active_Ind       SMALLINT     NOT NULL DEFAULT 1,
+  Created_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Created_By       VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Updated_By       VARCHAR(100) NOT NULL DEFAULT current_user,
+  CONSTRAINT pk_compliancerulebinding PRIMARY KEY (Project_Cd, Table_Nm, Src_ID, Rule_Scope_Cd, Gre_Rule_Group, Gre_Rule_Variant),
+  CONSTRAINT fk_compliancerulebinding_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject
 );
 
 -- ================= control =================
--- Ad-hoc requests only (the run type must be in the ADHOC category). One row asks for batches to be
--- created for the SAME report period on every run date from Req_Start_Dt_Key to Req_End_Dt_Key
--- (a one-off request has the same start and end date).
+-- Ad-hoc requests (the run type must be in the ADHOC category). One row asks for batches for the SAME
+-- report period on every run date from Req_Start_Dt_Key to Req_End_Dt_Key (equal dates = one-off).
+-- The daily sweep handles each request once per run date and records that date in Last_Run_Dt_Key;
+-- outcomes (batches created, failures) are in the audit tables under the Intake_ID.
 CREATE TABLE ComplianceRequestInTake (
-  Intake_ID        VARCHAR(50)  PRIMARY KEY,
+  Intake_ID        BIGINT       GENERATED ALWAYS AS IDENTITY,
   Project_Cd       VARCHAR(30)  NOT NULL,
   Table_Nm         VARCHAR(63)  NOT NULL,
-  Run_Ty           VARCHAR(20)  NOT NULL REFERENCES ComplianceRunType,
-  Src_Cd           VARCHAR(30)  REFERENCES ComplianceSourceSystem,      -- NULL = every effective source
-  Req_Ty           VARCHAR(30)  NOT NULL,                               -- project's own ad-hoc request type
-  Rpt_Start_Dt_Key DATE         NOT NULL,                               -- report period of every batch created
+  Src_ID           VARCHAR(30),                            -- NULL = every effective source
+  Run_Ty           VARCHAR(20)  NOT NULL,
+  Rpt_Start_Dt_Key DATE         NOT NULL,                  -- report period of every batch created
   Rpt_End_Dt_Key   DATE         NOT NULL,
-  Req_Start_Dt_Key DATE         NOT NULL,                               -- first run date batches are created for
-  Req_End_Dt_Key   DATE         NOT NULL,                               -- last run date (same value = one-off)
-  Rsn              TEXT,
-  Requested_By     VARCHAR(100) NOT NULL,
-  Requested_Dtts   TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  Intake_Stat      VARCHAR(20)  NOT NULL DEFAULT 'NEW'
-                   CHECK (Intake_Stat IN ('NEW','IN_PROGRESS','COMPLETED','FAILED')),
-  Last_Created_Dt_Key DATE,                                             -- last run date batches were created for
-  Processed_Dtts   TIMESTAMPTZ,
-  Error_Txt        TEXT,
-  Created_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Updated_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CHECK (Rpt_End_Dt_Key >= Rpt_Start_Dt_Key),
-  CHECK (Req_End_Dt_Key >= Req_Start_Dt_Key)
+  Req_Start_Dt_Key DATE         NOT NULL,                  -- first run date
+  Req_End_Dt_Key   DATE         NOT NULL,                  -- last run date
+  Last_Run_Dt_Key  DATE,                                   -- last run date the sweep handled this row
+  Created_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Created_By       VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Updated_By       VARCHAR(100) NOT NULL DEFAULT current_user,
+  CONSTRAINT pk_compliancerequestintake PRIMARY KEY (Intake_ID),
+  CONSTRAINT fk_compliancerequestintake_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject,
+  CONSTRAINT fk_compliancerequestintake_source  FOREIGN KEY (Src_ID) REFERENCES ComplianceSourceSystem,
+  CONSTRAINT fk_compliancerequestintake_runtype FOREIGN KEY (Run_Ty) REFERENCES ComplianceRunType
 );
-CREATE INDEX ix_intake_open ON ComplianceRequestInTake (Req_Start_Dt_Key) WHERE Intake_Stat IN ('NEW','IN_PROGRESS');
 
--- One row per (project, table, run type, report period, run date): everything the framework must
--- collect before that run's extract may be generated.
+-- One row per (project, table, run type, report period, run date): what must be collected before that
+-- run's extract may be generated. Included / missing / carried sources are read from its batches.
 CREATE TABLE ComplianceExtractControl (
-  Extract_ID                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  Project_Cd                VARCHAR(30) NOT NULL,
-  Table_Nm                  VARCHAR(63) NOT NULL,
-  Run_Ty                    VARCHAR(20) NOT NULL REFERENCES ComplianceRunType,
-  Rpt_Start_Dt_Key          DATE NOT NULL,
-  Rpt_End_Dt_Key            DATE NOT NULL,
-  Req_Dt_Key                DATE NOT NULL,                              -- run date; with SLA_Days gives the hold
-  Required_Src_Cnt          INT  NOT NULL CHECK (Required_Src_Cnt >= 0),
-  Received_Src_Cnt          INT  NOT NULL DEFAULT 0,
-  Included_Src_Cds TEXT, Missing_Src_Cds TEXT,
-  Carried_Src_Cds           TEXT,          -- sources counted as received through an approved REUSE (D-70)
-  Extract_Stat              VARCHAR(10) NOT NULL DEFAULT 'PENDING' CHECK (Extract_Stat IN ('PENDING','PARTIAL','COMPLETE')),
-  Extract_Rules_Stat        VARCHAR(25) NOT NULL DEFAULT 'PENDING'
-                            CHECK (Extract_Rules_Stat IN ('PENDING','PASSED','PASSED_WITH_WARNINGS','FAILED','ERROR')),
-  Failed_Rule_Refs          TEXT,          -- GATE-failed period rules of the last combine
-  Eligibility_Cd            VARCHAR(15) NOT NULL DEFAULT 'NOT_ELIGIBLE'
-                            CHECK (Eligibility_Cd IN ('NOT_ELIGIBLE','MANUAL_ONLY','AUTO')),
-  Eligibility_Rsn_Txt       VARCHAR(1000),
-  Extract_Close_Ind         SMALLINT NOT NULL DEFAULT 0 CHECK (Extract_Close_Ind IN (0,1)),
-  Extract_Closed_Dtts       TIMESTAMPTZ,
-  Closed_By                 VARCHAR(100),
-  Close_Warning_Txt         TEXT,
-  Regenerate_Required_Ind   SMALLINT NOT NULL DEFAULT 0 CHECK (Regenerate_Required_Ind IN (0,1)),  -- data changed after close
-  Combine_Run_Cnt           INT NOT NULL DEFAULT 0,
-  Combine_Last_Run_Dtts     TIMESTAMPTZ,
-  Combine_Last_Trigger_Cd   VARCHAR(20) CHECK (Combine_Last_Trigger_Cd IN
-                              ('EARLY_COMPLETE','SLA_EVALUATION','MANUAL_CLOSE','LATE_PROMOTION',
-                               'OVERRIDE_DECISION','MANUAL_REFRESH')),
-  Combine_Btch_ID_List      TEXT,
-  Data_Signature            CHAR(64),      -- hash of the (Btch_ID, promoted Load_ID) pairs at the last combine
-  Closed_Data_Signature     CHAR(64),      -- Data_Signature when the extract was closed
-  Created_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Updated_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (Project_Cd, Table_Nm, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key),
-  CHECK (Rpt_End_Dt_Key >= Rpt_Start_Dt_Key),
-  CHECK (Extract_Close_Ind = 0 OR (Extract_Closed_Dtts IS NOT NULL AND Closed_By IS NOT NULL))
+  Extract_ID              BIGINT       GENERATED ALWAYS AS IDENTITY,
+  Project_Cd              VARCHAR(30)  NOT NULL,
+  Table_Nm                VARCHAR(63)  NOT NULL,
+  Run_Ty                  VARCHAR(20)  NOT NULL,
+  Rpt_Start_Dt_Key        DATE         NOT NULL,
+  Rpt_End_Dt_Key          DATE         NOT NULL,
+  Req_Dt_Key              DATE         NOT NULL,           -- run date; with SLA_Days gives the hold
+  Required_Src_Cnt        INT          NOT NULL,
+  Received_Src_Cnt        INT          NOT NULL DEFAULT 0,
+  Extract_Rules_Stat      VARCHAR(25)  NOT NULL DEFAULT 'PENDING',       -- PENDING | PASSED | PASSED_WITH_WARNINGS | FAILED | ERROR
+  Failed_Rule_List        TEXT,                                          -- GATE-failed period rules
+  Eligibility_Cd          VARCHAR(15)  NOT NULL DEFAULT 'NOT_ELIGIBLE',  -- NOT_ELIGIBLE | MANUAL_ONLY | AUTO
+  Eligibility_Rsn_Txt     VARCHAR(1000),
+  Extract_Close_Ind       SMALLINT     NOT NULL DEFAULT 0,
+  Extract_Closed_Dtts     TIMESTAMPTZ,
+  Extract_Closed_By       VARCHAR(100),
+  Regenerate_Required_Ind SMALLINT     NOT NULL DEFAULT 0,               -- data changed after close
+  Combine_Btch_ID_List    TEXT,                                          -- batches whose current rows make the extract
+  Combine_Last_Run_Dtts   TIMESTAMPTZ,
+  Data_Signature          CHAR(64),                                      -- hash of (Btch_ID, promoted Load_ID) pairs
+  Closed_Data_Signature   CHAR(64),                                      -- Data_Signature at close
+  Created_Dtts            TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Updated_Dtts            TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  CONSTRAINT pk_complianceextractcontrol PRIMARY KEY (Extract_ID),
+  CONSTRAINT uq_complianceextractcontrol UNIQUE (Project_Cd, Table_Nm, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key),
+  CONSTRAINT fk_complianceextractcontrol_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject,
+  CONSTRAINT fk_complianceextractcontrol_runtype FOREIGN KEY (Run_Ty) REFERENCES ComplianceRunType
 );
-CREATE INDEX ix_extract_open ON ComplianceExtractControl (Req_Dt_Key) WHERE Extract_Close_Ind = 0;
 
--- One row per batch: (project, table, source, run type, report period, run date).
+-- One row per batch: (project, table, source, run type, report period, run date). Whether it was
+-- scheduled or requested follows from Run_Ty's Run_Category_Cd.
 CREATE TABLE ComplianceRequestControl (
-  Req_ID               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  Project_Cd           VARCHAR(30)  NOT NULL,
-  Table_Nm             VARCHAR(63)  NOT NULL,
-  Src_Cd               VARCHAR(30)  NOT NULL REFERENCES ComplianceSourceSystem,
-  Run_Ty               VARCHAR(20)  NOT NULL REFERENCES ComplianceRunType,
-  Rpt_Start_Dt_Key     DATE         NOT NULL,
-  Rpt_End_Dt_Key       DATE         NOT NULL,
-  Req_Dt_Key           DATE         NOT NULL,                           -- run date the batch was created for (D-29)
-  Btch_ID              VARCHAR(250) NOT NULL UNIQUE,
-  Cmplnc_Vrsn          VARCHAR(10)  NOT NULL,
-  Extract_ID           BIGINT       NOT NULL REFERENCES ComplianceExtractControl,
-  Req_Stat             VARCHAR(30)  NOT NULL CHECK (Req_Stat IN ('PENDING','PROMOTED','CARRIED_FORWARD',
-                         'EXCEPTION_PENDING','COMPLETED','COMPLETED_WITH_EXCEPTION','DATA_NOT_PROVIDED')),
-  Resolution_Ty        VARCHAR(15)  CHECK (Resolution_Ty IN ('NEW_FILE','CARRY_FORWARD','MISSING')),
-  Reuse_Btch_ID        VARCHAR(250),                                    -- CARRY_FORWARD: batch whose data is reused
-  Batch_Close_Ind      SMALLINT     NOT NULL DEFAULT 0 CHECK (Batch_Close_Ind IN (0,1)),
-  Created_By           VARCHAR(15)  NOT NULL CHECK (Created_By IN ('SCHEDULER','ADHOC_INTAKE')),
-  Created_Dtts         TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  Updated_Dtts         TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  UNIQUE (Project_Cd, Table_Nm, Src_Cd, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key),   -- D-30
-  CHECK (Rpt_End_Dt_Key >= Rpt_Start_Dt_Key),
-  CHECK ((Resolution_Ty = 'CARRY_FORWARD') = (Reuse_Btch_ID IS NOT NULL)),
-  CHECK (Batch_Close_Ind = 0 OR Resolution_Ty IS NOT NULL)
+  Req_ID           BIGINT       GENERATED ALWAYS AS IDENTITY,
+  Project_Cd       VARCHAR(30)  NOT NULL,
+  Table_Nm         VARCHAR(63)  NOT NULL,
+  Src_ID           VARCHAR(30)  NOT NULL,
+  Run_Ty           VARCHAR(20)  NOT NULL,
+  Rpt_Start_Dt_Key DATE         NOT NULL,
+  Rpt_End_Dt_Key   DATE         NOT NULL,
+  Req_Dt_Key       DATE         NOT NULL,                  -- run date (D-29)
+  Btch_ID          VARCHAR(250) NOT NULL,
+  Extract_ID       BIGINT       NOT NULL,
+  Req_Stat         VARCHAR(30)  NOT NULL,                  -- see common.TRANSITIONS
+  Resolution_Ty    VARCHAR(15),                            -- NEW_FILE | CARRY_FORWARD | MISSING
+  Reuse_Btch_ID    VARCHAR(250),                           -- CARRY_FORWARD: batch whose data is reused
+  Batch_Close_Ind  SMALLINT     NOT NULL DEFAULT 0,
+  Created_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Updated_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  CONSTRAINT pk_compliancerequestcontrol PRIMARY KEY (Req_ID),
+  CONSTRAINT uq_compliancerequestcontrol_btch UNIQUE (Btch_ID),
+  CONSTRAINT uq_compliancerequestcontrol UNIQUE (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key),
+  CONSTRAINT fk_compliancerequestcontrol_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject,
+  CONSTRAINT fk_compliancerequestcontrol_source  FOREIGN KEY (Src_ID) REFERENCES ComplianceSourceSystem,
+  CONSTRAINT fk_compliancerequestcontrol_runtype FOREIGN KEY (Run_Ty) REFERENCES ComplianceRunType,
+  CONSTRAINT fk_compliancerequestcontrol_extract FOREIGN KEY (Extract_ID) REFERENCES ComplianceExtractControl
 );
-CREATE INDEX ix_crc_extract ON ComplianceRequestControl (Extract_ID);
-CREATE INDEX ix_crc_open    ON ComplianceRequestControl (Extract_ID) WHERE Batch_Close_Ind = 0;
+CREATE INDEX ix_compliancerequestcontrol_extract ON ComplianceRequestControl (Extract_ID);
 
--- One row per physical S3 object, including quarantined files. The batch's current data is the
--- row with Load_Stat = 'PROMOTED' (promotion supersedes the previous one).
+-- One row per S3 object, including quarantined files. The batch's current data is its row with
+-- Load_Stat = 'PROMOTED'. Report period and run type come from the batch (Req_ID).
 CREATE TABLE ComplianceFileLoad (
-  Load_ID                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  S3_Bucket               VARCHAR(100)  NOT NULL,
-  S3_Key                  VARCHAR(1024) NOT NULL,
-  S3_Version_Id           VARCHAR(200),
-  S3_ETag                 VARCHAR(200)  NOT NULL,
-  File_Size_Byte          BIGINT        NOT NULL,
-  File_Sha256             CHAR(64),
-  Received_Dtts           TIMESTAMPTZ   NOT NULL DEFAULT now(),
-  Parsed_Project_Alias    VARCHAR(50), Parsed_Table_Alias VARCHAR(80), Parsed_Src_Alias VARCHAR(50),
-  Parsed_Run_Ty           VARCHAR(20), Parsed_Rpt_Start_Dt_Key DATE, Parsed_Rpt_End_Dt_Key DATE,
-  Parsed_File_Ts          TIMESTAMP,
-  Cfg_ID                  BIGINT REFERENCES ComplianceSourceFileConfig,
-  Req_ID                  BIGINT REFERENCES ComplianceRequestControl,
-  Btch_ID                 VARCHAR(250),
-  Load_Stat               VARCHAR(25) NOT NULL CHECK (Load_Stat IN ('RECEIVED','QUARANTINED','STAGING','STAGED',
-                            'RULES_RUNNING','RULES_FAILED','PROMOTED','SUPERSEDED','FAILED_TECHNICAL')),
-  Rules_Stat              VARCHAR(25) NOT NULL DEFAULT 'NOT_RUN'
-                          CHECK (Rules_Stat IN ('NOT_RUN','PASSED','PASSED_WITH_WARNINGS','FAILED','ERROR')),
-  Quarantine_Rsn_Cd       VARCHAR(60) REFERENCES ComplianceEventType,
-  Src_Rcd_Cnt BIGINT, Trlr_Rcd_Cnt BIGINT, Stg_Rcd_Cnt BIGINT, Core_Appended_Cnt BIGINT, Core_Disabled_Cnt BIGINT,
-  Attempt_Cnt             INT NOT NULL DEFAULT 0,
-  Heartbeat_Dtts          TIMESTAMPTZ,
-  Promoted_Dtts           TIMESTAMPTZ,
-  Error_Txt               TEXT,
-  Created_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Updated_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CHECK (Load_Stat <> 'QUARANTINED' OR Quarantine_Rsn_Cd IS NOT NULL),
-  CHECK (Load_Stat IN ('RECEIVED','QUARANTINED') OR (Req_ID IS NOT NULL AND Btch_ID IS NOT NULL))
+  Load_ID           BIGINT        GENERATED ALWAYS AS IDENTITY,
+  S3_Bucket         VARCHAR(100)  NOT NULL,
+  S3_Key            VARCHAR(1024) NOT NULL,
+  S3_Version_Id     VARCHAR(200),
+  S3_ETag           VARCHAR(200)  NOT NULL,
+  File_Size_Byte    BIGINT        NOT NULL,
+  File_Sha256       CHAR(64),
+  Cfg_ID            BIGINT,
+  Req_ID            BIGINT,
+  Btch_ID           VARCHAR(250),
+  Load_Stat         VARCHAR(25)   NOT NULL,                -- RECEIVED | STAGING | STAGED | RULES_RUNNING | PROMOTED |
+                                                           -- SUPERSEDED | RULES_FAILED | QUARANTINED | FAILED_TECHNICAL
+  Rules_Stat        VARCHAR(25)   NOT NULL DEFAULT 'NOT_RUN',
+  Quarantine_Rsn_Cd VARCHAR(60),                           -- the quarantine event code
+  Stg_Rcd_Cnt       BIGINT,
+  Error_Txt         TEXT,
+  Created_Dtts      TIMESTAMPTZ   NOT NULL DEFAULT now(),  -- received
+  Updated_Dtts      TIMESTAMPTZ   NOT NULL DEFAULT now(),  -- last progress (stale-load health check)
+  CONSTRAINT pk_compliancefileload PRIMARY KEY (Load_ID),
+  CONSTRAINT fk_compliancefileload_config FOREIGN KEY (Cfg_ID) REFERENCES ComplianceSourceFileConfig,
+  CONSTRAINT fk_compliancefileload_batch  FOREIGN KEY (Req_ID) REFERENCES ComplianceRequestControl
 );
-CREATE UNIQUE INDEX ux_fileload_s3obj ON ComplianceFileLoad (S3_Bucket, S3_Key, COALESCE(S3_Version_Id, S3_ETag));
-CREATE UNIQUE INDEX ux_fileload_promoted ON ComplianceFileLoad (Btch_ID) WHERE Load_Stat = 'PROMOTED';
-CREATE INDEX ix_fileload_btch ON ComplianceFileLoad (Btch_ID, Load_Stat);
-CREATE INDEX ix_fileload_sha  ON ComplianceFileLoad (File_Sha256);
+CREATE UNIQUE INDEX uq_compliancefileload_object   ON ComplianceFileLoad (S3_Bucket, S3_Key, COALESCE(S3_Version_Id, S3_ETag));
+CREATE UNIQUE INDEX uq_compliancefileload_promoted ON ComplianceFileLoad (Btch_ID) WHERE Load_Stat = 'PROMOTED';
+CREATE INDEX ix_compliancefileload_sha ON ComplianceFileLoad (File_Sha256);
 
--- Manual decisions, one shape for all three cases (D-70, D-74):
+-- Manual decisions, one shape for three cases (D-70, D-74):
 --   REUSE         an open batch without data reuses an earlier batch's data (run type Carry_Fwd_Ind = 1)
 --   LATE_ARRIVAL  a file may still be promoted into a closed batch that has no data
 --   CORRECTION    a corrected file may replace the data of a closed batch
--- An approval is valid through Valid_Thru_Dt_Key; to stop it early, set that date in the past.
+-- Created_By requests, Reviewed_By approves or rejects. An approval is valid through Valid_Thru_Dt_Key.
 CREATE TABLE ComplianceBatchOverride (
-  Ovrd_ID              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  Override_Ty          VARCHAR(20) NOT NULL CHECK (Override_Ty IN ('REUSE','LATE_ARRIVAL','CORRECTION')),
-  Req_ID               BIGINT NOT NULL REFERENCES ComplianceRequestControl,
-  Project_Cd           VARCHAR(30) NOT NULL,
-  Table_Nm             VARCHAR(63) NOT NULL,
-  Src_Cd               VARCHAR(30) NOT NULL,
-  Run_Ty               VARCHAR(20) NOT NULL,
-  Rpt_Start_Dt_Key     DATE NOT NULL,
-  Rpt_End_Dt_Key       DATE NOT NULL,
-  Req_Dt_Key           DATE NOT NULL,
-  Btch_ID              VARCHAR(250) NOT NULL,
-  Reuse_Btch_ID        VARCHAR(250),                                    -- REUSE: optional; else the latest is used
-  Apprvl_Stat          VARCHAR(20) NOT NULL DEFAULT 'PENDING_REVIEW'
-                       CHECK (Apprvl_Stat IN ('PENDING_REVIEW','APPROVED','REJECTED')),
-  Valid_Thru_Dt_Key    DATE,                                            -- required once APPROVED
-  Rsn                  TEXT,
-  Requested_By         VARCHAR(100) NOT NULL DEFAULT current_user,
-  Apprvd_By  VARCHAR(100), Apprvd_Dtts  TIMESTAMPTZ,
-  Rejected_By VARCHAR(100), Rejected_Dtts TIMESTAMPTZ,
-  Created_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(), Updated_Dtts TIMESTAMPTZ NOT NULL DEFAULT now(),
-  Updated_By   VARCHAR(100) NOT NULL DEFAULT current_user,
-  CHECK (Apprvl_Stat <> 'APPROVED' OR (Apprvd_By IS NOT NULL AND Valid_Thru_Dt_Key IS NOT NULL)),
-  CHECK (Apprvl_Stat <> 'REJECTED' OR Rejected_By IS NOT NULL),
-  CHECK (Override_Ty <> 'REUSE' OR Reuse_Btch_ID IS DISTINCT FROM Btch_ID)
-);
-CREATE UNIQUE INDEX ux_ovrd_active ON ComplianceBatchOverride (Req_ID, Override_Ty)
-  WHERE Apprvl_Stat IN ('PENDING_REVIEW','APPROVED');
-CREATE INDEX ix_ovrd_pending ON ComplianceBatchOverride (Ovrd_ID) WHERE Apprvl_Stat = 'PENDING_REVIEW';
-
--- ================= audit =================
-CREATE TABLE ComplianceRequestFileDetail (
-  Detail_ID         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  Req_ID            BIGINT NOT NULL REFERENCES ComplianceRequestControl,
+  Ovrd_ID           BIGINT       GENERATED ALWAYS AS IDENTITY,
+  Override_Ty       VARCHAR(20)  NOT NULL,
+  Req_ID            BIGINT       NOT NULL,
   Btch_ID           VARCHAR(250) NOT NULL,
-  Load_ID           BIGINT REFERENCES ComplianceFileLoad,
-  Ovrd_ID           BIGINT REFERENCES ComplianceBatchOverride,
-  Intake_ID         VARCHAR(50) REFERENCES ComplianceRequestInTake,
-  Event_Ty          VARCHAR(60) NOT NULL REFERENCES ComplianceEventType,
-  Entry_Ty          VARCHAR(6)  NOT NULL CHECK (Entry_Ty IN ('AUTO','MANUAL')),
-  Received_File_Ref VARCHAR(1100),
-  Actor             VARCHAR(100) NOT NULL,
-  Detail_Txt        TEXT,
-  Event_Dtts        TIMESTAMPTZ NOT NULL DEFAULT now()
+  Reuse_Btch_ID     VARCHAR(250),                          -- REUSE: optional; else the latest is used
+  Apprvl_Stat       VARCHAR(20)  NOT NULL DEFAULT 'PENDING_REVIEW',  -- PENDING_REVIEW | APPROVED | REJECTED
+  Valid_Thru_Dt_Key DATE,                                  -- required once APPROVED
+  Rsn_Txt           TEXT,
+  Reviewed_By       VARCHAR(100),
+  Reviewed_Dtts     TIMESTAMPTZ,
+  Created_Dtts      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Created_By        VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Updated_By        VARCHAR(100) NOT NULL DEFAULT current_user,
+  CONSTRAINT pk_compliancebatchoverride PRIMARY KEY (Ovrd_ID),
+  CONSTRAINT fk_compliancebatchoverride_batch FOREIGN KEY (Req_ID) REFERENCES ComplianceRequestControl
 );
-CREATE INDEX ix_filedetail_req ON ComplianceRequestFileDetail (Req_ID, Event_Dtts);
+CREATE UNIQUE INDEX uq_compliancebatchoverride_active
+  ON ComplianceBatchOverride (Req_ID, Override_Ty) WHERE Apprvl_Stat IN ('PENDING_REVIEW', 'APPROVED');
 
+-- ================= audit (append-only; written only through audit.EventLogger) =================
+-- Batch timeline.
+CREATE TABLE ComplianceRequestFileDetail (
+  Detail_ID   BIGINT       GENERATED ALWAYS AS IDENTITY,
+  Req_ID      BIGINT       NOT NULL,
+  Btch_ID     VARCHAR(250) NOT NULL,
+  Load_ID     BIGINT,
+  Ovrd_ID     BIGINT,
+  Intake_ID   BIGINT,
+  Event_Ty    VARCHAR(60)  NOT NULL,
+  Actor       VARCHAR(100) NOT NULL,
+  Event_Txt   TEXT,
+  Event_Dtts  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  CONSTRAINT pk_compliancerequestfiledetail PRIMARY KEY (Detail_ID),
+  CONSTRAINT fk_compliancerequestfiledetail_batch    FOREIGN KEY (Req_ID) REFERENCES ComplianceRequestControl,
+  CONSTRAINT fk_compliancerequestfiledetail_load     FOREIGN KEY (Load_ID) REFERENCES ComplianceFileLoad,
+  CONSTRAINT fk_compliancerequestfiledetail_override FOREIGN KEY (Ovrd_ID) REFERENCES ComplianceBatchOverride,
+  CONSTRAINT fk_compliancerequestfiledetail_intake   FOREIGN KEY (Intake_ID) REFERENCES ComplianceRequestInTake
+);
+
+-- Exceptions and notable events; Notified_Ind = 0 rows are waiting to be emailed.
 CREATE TABLE CMS_ComplianceExceptionsAudit (
-  Event_ID     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  Event_Ty     VARCHAR(60) NOT NULL REFERENCES ComplianceEventType,
-  Event_Ctgy   VARCHAR(20) NOT NULL CHECK (Event_Ctgy IN ('AUDIT','EXCEPTION')),
-  Sevrty       VARCHAR(10) NOT NULL CHECK (Sevrty IN ('INFO','WARNING','ERROR')),
-  Project_Cd VARCHAR(30), Table_Nm VARCHAR(63), Src_Cd VARCHAR(30), Run_Ty VARCHAR(20),
-  Req_ID       BIGINT REFERENCES ComplianceRequestControl,
-  Load_ID      BIGINT REFERENCES ComplianceFileLoad,
-  Ovrd_ID      BIGINT REFERENCES ComplianceBatchOverride,
-  Extract_ID   BIGINT REFERENCES ComplianceExtractControl,
-  Intake_ID    VARCHAR(50) REFERENCES ComplianceRequestInTake,
+  Event_ID     BIGINT        GENERATED ALWAYS AS IDENTITY,
+  Event_Ty     VARCHAR(60)   NOT NULL,
+  Sevrty       VARCHAR(10)   NOT NULL,                     -- INFO | WARNING | ERROR
+  Project_Cd   VARCHAR(30),
+  Table_Nm     VARCHAR(63),
+  Src_ID       VARCHAR(30),
+  Run_Ty       VARCHAR(20),
+  Req_ID       BIGINT,
+  Load_ID      BIGINT,
+  Ovrd_ID      BIGINT,
+  Extract_ID   BIGINT,
+  Intake_ID    BIGINT,
   Btch_ID      VARCHAR(250),
   File_Ref     VARCHAR(1100),
-  Actor        VARCHAR(100) NOT NULL,
-  Event_Dtts   TIMESTAMPTZ NOT NULL DEFAULT now(),
-  Description  TEXT,
-  Notified_Ind SMALLINT NOT NULL DEFAULT 0 CHECK (Notified_Ind IN (0,1))
+  Actor        VARCHAR(100)  NOT NULL,
+  Event_Txt    TEXT,
+  Event_Dtts   TIMESTAMPTZ   NOT NULL DEFAULT now(),
+  Notified_Ind SMALLINT      NOT NULL DEFAULT 0,
+  CONSTRAINT pk_cms_complianceexceptionsaudit PRIMARY KEY (Event_ID),
+  CONSTRAINT fk_cms_complianceexceptionsaudit_batch    FOREIGN KEY (Req_ID) REFERENCES ComplianceRequestControl,
+  CONSTRAINT fk_cms_complianceexceptionsaudit_load     FOREIGN KEY (Load_ID) REFERENCES ComplianceFileLoad,
+  CONSTRAINT fk_cms_complianceexceptionsaudit_override FOREIGN KEY (Ovrd_ID) REFERENCES ComplianceBatchOverride,
+  CONSTRAINT fk_cms_complianceexceptionsaudit_extract  FOREIGN KEY (Extract_ID) REFERENCES ComplianceExtractControl,
+  CONSTRAINT fk_cms_complianceexceptionsaudit_intake   FOREIGN KEY (Intake_ID) REFERENCES ComplianceRequestInTake
 );
-CREATE INDEX ix_excaudit_btch   ON CMS_ComplianceExceptionsAudit (Btch_ID);
-CREATE INDEX ix_excaudit_notify ON CMS_ComplianceExceptionsAudit (Event_ID) WHERE Notified_Ind = 0;
+CREATE INDEX ix_cms_complianceexceptionsaudit_unsent ON CMS_ComplianceExceptionsAudit (Event_ID) WHERE Notified_Ind = 0;
 
 -- ================= target-table framework columns (per staging / core table) =================
 -- ALTER TABLE <stg>  ADD COLUMN Btch_ID VARCHAR(250) NOT NULL, ADD COLUMN Load_ID BIGINT NOT NULL,
 --                    ADD COLUMN Src_File_Nm VARCHAR(1024) NOT NULL, ADD COLUMN Stg_Load_Dtts TIMESTAMPTZ NOT NULL;
--- CREATE INDEX ON <stg> (Btch_ID, Load_ID);
 -- ALTER TABLE <core> ADD COLUMN Btch_ID VARCHAR(250) NOT NULL, ADD COLUMN Load_ID BIGINT NOT NULL,
 --                    ADD COLUMN Current_Ind SMALLINT NOT NULL, ADD COLUMN Load_Dtts TIMESTAMPTZ NOT NULL,
 --                    ADD COLUMN End_Dtts TIMESTAMPTZ;
--- CREATE INDEX ON <core> (Btch_ID) WHERE Current_Ind = 1;  CREATE INDEX ON <core> (Load_ID);
+-- CREATE INDEX ON <stg> (Btch_ID); CREATE INDEX ON <core> (Btch_ID) WHERE Current_Ind = 1;

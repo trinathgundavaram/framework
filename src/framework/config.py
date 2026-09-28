@@ -1,10 +1,12 @@
 """Configuration: typed rows, read access, filename templates (§9) and the configuration validator (P1).
 
-Configuration tables: ComplianceRunType, ComplianceSourceSystem, ComplianceDataSetSourceXwalk,
-ComplianceSourceFileConfig, ComplianceRuleBinding. Everything else is job-level (settings.py).
+Configuration tables: ComplianceProject, ComplianceRunType, ComplianceSourceSystem,
+ComplianceDataSetSourceXwalk, ComplianceSourceFileConfig, ComplianceRuleBinding. Everything else is
+job-level (settings.py).
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -34,7 +36,7 @@ class RunType:
 class XwalkRow:
     project_cd: str
     table_nm: str
-    src_cd: str
+    src_id: str
     run_ty: str
     effective_start_dt: date
     effective_end_dt: Optional[date]
@@ -43,8 +45,8 @@ class XwalkRow:
 
     @classmethod
     def from_row(cls, r: dict) -> "XwalkRow":
-        return cls(r["project_cd"], r["table_nm"], r["src_cd"], r["run_ty"], r["effective_start_dt"],
-                   r["effective_end_dt"], r["cmplnc_vrsn"], r["active_ind"] == 1)
+        return cls(r["project_cd"], r["table_nm"], r["src_id"], r["run_ty"], r["effective_start_dt_key"],
+                   r["effective_end_dt_key"], r["cmplnc_vrsn"], r["active_ind"] == 1)
 
     def effective_on(self, d: date) -> bool:
         return self.active and self.effective_start_dt <= d and (self.effective_end_dt is None or d <= self.effective_end_dt)
@@ -54,47 +56,42 @@ class XwalkRow:
 class FileConfig:
     cfg_id: int
     project_cd: str
-    table_nm: str
-    src_cd: str
+    table_nm: str                    # also the core table's name (D-25)
+    src_id: str
     src_file_nm_tmplt: str
-    project_alias: str
-    table_alias: str
-    src_alias: str
-    src_file_ty: str
     delmtr_cd: Optional[str]
-    line_term_cd: Optional[str]
     has_header: bool
     has_trailer: bool
     allow_zero_records: bool
     s3_src_file_path: str
     src_file_archive_path: str
-    s3_quarantine_path: str
     stg_schema_nm: str
-    stg_tblnm: str
+    stg_table_nm: str
     core_schema_nm: str
-    core_tblnm: str
     sucs_email_notfn_id: Optional[str] = None
     failr_email_notfn_id: Optional[str] = None
-    notify_channel_cd: Optional[str] = None
     email_subjct_txt: Optional[str] = None
     active: bool = True
 
+    @property
+    def src_file_ty(self) -> str:
+        """The template's extension, e.g. '.txt'."""
+        return os.path.splitext(self.src_file_nm_tmplt)[1].lower()
+
     @classmethod
     def from_row(cls, r: dict) -> "FileConfig":
-        return cls(r["cfg_id"], r["project_cd"], r["table_nm"], r["src_cd"], r["src_file_nm_tmplt"],
-                   r["project_alias"], r["table_alias"], r["src_alias"], r["src_file_ty"].lower(),
-                   r["delmtr_cd"], r["line_term_cd"], r["src_file_has_hdr_ind"] == 1,
-                   r["src_file_has_trlr_ind"] == 1, r["allow_zero_rcd_ind"] == 1, r["s3_src_file_path"],
-                   r["src_file_archive_path"], r["s3_quarantine_path"], r["stg_schema_nm"], r["stg_tblnm"],
-                   r["core_schema_nm"], r["core_tblnm"], r["sucs_email_notfn_id"], r["failr_email_notfn_id"],
-                   r["notify_channel_cd"], r["email_subjct_txt"], r["active_ind"] == 1)
+        return cls(r["cfg_id"], r["project_cd"], r["table_nm"], r["src_id"], r["src_file_nm_tmplt"], r["delmtr_cd"],
+                   r["src_file_has_hdr_ind"] == 1, r["src_file_has_trlr_ind"] == 1, r["allow_zero_rcd_ind"] == 1,
+                   r["s3_src_file_path"], r["src_file_archive_path"], r["stg_schema_nm"], r["stg_table_nm"],
+                   r["core_schema_nm"], r["sucs_email_notfn_id"], r["failr_email_notfn_id"], r["email_subjct_txt"],
+                   r["active_ind"] == 1)
 
 
 @dataclass(frozen=True)
 class RuleBinding:
     project_cd: str
     table_nm: str
-    src_cd: str
+    src_id: str
     rule_scope_cd: str
     gre_rule_group: str
     gre_rule_variant: str
@@ -111,20 +108,20 @@ def run_types(conn: psycopg.Connection) -> dict[str, RunType]:
 
 
 def xwalk_rows(conn: psycopg.Connection, *, project_cd: Optional[str] = None, table_nm: Optional[str] = None,
-               src_cd: Optional[str] = None, run_ty: Optional[str] = None) -> list[XwalkRow]:
+               src_id: Optional[str] = None, run_ty: Optional[str] = None) -> list[XwalkRow]:
     """Active crosswalk rows, optionally filtered."""
     where, params = ["Active_Ind = 1"], []
-    for col, val in (("Project_Cd", project_cd), ("Table_Nm", table_nm), ("Src_Cd", src_cd), ("Run_Ty", run_ty)):
+    for col, val in (("Project_Cd", project_cd), ("Table_Nm", table_nm), ("Src_ID", src_id), ("Run_Ty", run_ty)):
         if val is not None:
             where.append(f"{col} = %s")
             params.append(val)
     rows = conn.execute(f"SELECT * FROM ComplianceDataSetSourceXwalk WHERE {' AND '.join(where)} "
-                        "ORDER BY Project_Cd, Table_Nm, Src_Cd, Run_Ty, Effective_Start_Dt", params).fetchall()
+                        "ORDER BY Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key", params).fetchall()
     return [XwalkRow.from_row(r) for r in rows]
 
 
-def effective_xwalk(conn, project_cd, table_nm, src_cd, run_ty, on_date: date) -> Optional[XwalkRow]:
-    return next((x for x in xwalk_rows(conn, project_cd=project_cd, table_nm=table_nm, src_cd=src_cd, run_ty=run_ty)
+def effective_xwalk(conn, project_cd, table_nm, src_id, run_ty, on_date: date) -> Optional[XwalkRow]:
+    return next((x for x in xwalk_rows(conn, project_cd=project_cd, table_nm=table_nm, src_id=src_id, run_ty=run_ty)
                  if x.effective_on(on_date)), None)
 
 
@@ -138,12 +135,12 @@ def active_file_configs(conn: psycopg.Connection) -> list[FileConfig]:
     return [FileConfig.from_row(r) for r in rows]
 
 
-def file_config(conn, project_cd: str, table_nm: str, src_cd: Optional[str] = None) -> Optional[FileConfig]:
-    """Active file config of a source; with src_cd=None any source of the table (all share the core table)."""
+def file_config(conn, project_cd: str, table_nm: str, src_id: Optional[str] = None) -> Optional[FileConfig]:
+    """Active file config of a source; with src_id=None any source of the table (all share the core table)."""
     r = conn.execute(
         """SELECT * FROM ComplianceSourceFileConfig WHERE Project_Cd=%s AND Table_Nm=%s
-              AND (%s::text IS NULL OR Src_Cd=%s) AND Active_Ind=1 ORDER BY Cfg_ID LIMIT 1""",
-        (project_cd, table_nm, src_cd, src_cd)).fetchone()
+              AND (%s::text IS NULL OR Src_ID=%s) AND Active_Ind=1 ORDER BY Cfg_ID LIMIT 1""",
+        (project_cd, table_nm, src_id, src_id)).fetchone()
     return FileConfig.from_row(r) if r else None
 
 
@@ -152,25 +149,27 @@ def file_config_by_id(conn: psycopg.Connection, cfg_id: int) -> Optional[FileCon
     return FileConfig.from_row(r) if r else None
 
 
-def rule_bindings(conn, project_cd: str, table_nm: str, src_cd: str, scope: str) -> list[RuleBinding]:
+def rule_bindings(conn, project_cd: str, table_nm: str, src_id: str, scope: str) -> list[RuleBinding]:
     rows = conn.execute(
         """SELECT * FROM ComplianceRuleBinding
-            WHERE Project_Cd=%s AND Table_Nm=%s AND Src_Cd=%s AND Rule_Scope_Cd=%s AND Active_Ind=1
-            ORDER BY Gre_Rule_Group, Gre_Rule_Variant""", (project_cd, table_nm, src_cd, scope)).fetchall()
-    return [RuleBinding(r["project_cd"], r["table_nm"], r["src_cd"], r["rule_scope_cd"],
+            WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s AND Rule_Scope_Cd=%s AND Active_Ind=1
+            ORDER BY Gre_Rule_Group, Gre_Rule_Variant""", (project_cd, table_nm, src_id, scope)).fetchall()
+    return [RuleBinding(r["project_cd"], r["table_nm"], r["src_id"], r["rule_scope_cd"],
                         r["gre_rule_group"], r["gre_rule_variant"]) for r in rows]
 
 
 # ============================================================================ filename templates (§9)
-# A template is literal text plus exactly one of each placeholder:
-#   {PROJECT} {TABLE} {SRC}  -> the config row's aliases, literally (D-31)
+# A template is the file name with literal text (project, table and source spelled out) plus exactly one
+# of each placeholder:
 #   {RUNTY}                  -> [A-Za-z0-9]+, must equal a Run_Ty code exactly (D-31)
 #   {RPTSTART} {RPTEND}      -> YYYYMMDD (D-32)
 #   {TS}                     -> YYYYMMDDHHMMSS, uniqueness only (D-36, D-37)
-# Adjacent placeholders must be separated by literal text.
+# Adjacent placeholders must be separated by literal text; the extension is the file type.
 
-PLACEHOLDERS = ("PROJECT", "TABLE", "SRC", "RUNTY", "RPTSTART", "RPTEND", "TS")
+PLACEHOLDERS = ("RUNTY", "RPTSTART", "RPTEND", "TS")
 _TOKEN = re.compile(r"\{([^{}]*)\}")
+_PATTERNS = {"RUNTY": r"(?P<runty>[A-Za-z0-9]+)", "RPTSTART": r"(?P<rptstart>\d{8})",
+             "RPTEND": r"(?P<rptend>\d{8})", "TS": r"(?P<ts>\d{14})"}
 
 
 class TemplateError(ValueError):
@@ -223,29 +222,15 @@ def parse_template(template: str) -> list[tuple[str, str]]:
     return parts
 
 
-def compile_template(template: str, project_alias: str, table_alias: str, src_alias: str,
-                     case_sensitive: bool = True) -> re.Pattern:
-    aliases = {"PROJECT": project_alias, "TABLE": table_alias, "SRC": src_alias}
-    out = []
-    for kind, text in parse_template(template):
-        if kind == "lit":
-            out.append(re.escape(text))
-        elif text in aliases:
-            out.append(f"(?P<{text.lower()}>{re.escape(aliases[text])})")
-        elif text == "RUNTY":
-            out.append(r"(?P<runty>[A-Za-z0-9]+)")
-        elif text in ("RPTSTART", "RPTEND"):
-            out.append(rf"(?P<{text.lower()}>\d{{8}})")
-        elif text == "TS":
-            out.append(r"(?P<ts>\d{14})")
-    return re.compile("".join(out), 0 if case_sensitive else re.IGNORECASE)
+def compile_template(template: str, case_sensitive: bool = True) -> re.Pattern:
+    out = "".join(re.escape(text) if kind == "lit" else _PATTERNS[text] for kind, text in parse_template(template))
+    return re.compile(out, 0 if case_sensitive else re.IGNORECASE)
 
 
-def render(template: str, *, project: str, table: str, src: str, runty: str,
-           rpt_start: date, rpt_end: date, ts: datetime) -> str:
+def render(template: str, *, runty: str, rpt_start: date, rpt_end: date, ts: datetime) -> str:
     """Build a file name from a template (used by validator overlap tests and by tests)."""
-    values = {"PROJECT": project, "TABLE": table, "SRC": src, "RUNTY": runty,
-              "RPTSTART": f"{rpt_start:%Y%m%d}", "RPTEND": f"{rpt_end:%Y%m%d}", "TS": f"{ts:%Y%m%d%H%M%S}"}
+    values = {"RUNTY": runty, "RPTSTART": f"{rpt_start:%Y%m%d}", "RPTEND": f"{rpt_end:%Y%m%d}",
+              "TS": f"{ts:%Y%m%d%H%M%S}"}
     return "".join(values[t] if k == "ph" else t for k, t in parse_template(template))
 
 
@@ -255,8 +240,7 @@ class TemplateMatcher:
         self.invalid: list[tuple[FileConfig, str]] = []
         for c in configs:
             try:
-                self._compiled.append((c, compile_template(c.src_file_nm_tmplt, c.project_alias,
-                                                           c.table_alias, c.src_alias, case_sensitive)))
+                self._compiled.append((c, compile_template(c.src_file_nm_tmplt, case_sensitive)))
             except TemplateError as e:
                 self.invalid.append((c, str(e)))
 
@@ -290,14 +274,6 @@ class TemplateMatcher:
 
 
 # ============================================================================ validator (P1)
-REQUIRED_EVENTS = (
-    "BATCH_CREATED", "BATCH_CLOSED", "FILE_RECEIVED", "FILE_PROMOTED", "FILE_REJECTED_UNPARSEABLE",
-    "FILE_REJECTED_NO_BATCH", "FILE_REJECTED_BATCH_CLOSED", "EXTRACT_CLOSED", "EXTRACT_CLOSE_BLOCKED",
-    "CONFIG_VALIDATION_FAILED", "LATE_ARRIVAL_PROMOTED", "CORRECTION_PROMOTED", "SOURCE_MISSING_AT_CLOSE",
-    "CARRY_FORWARD_APPLIED", "CARRY_FORWARD_REMOVED", "OVERRIDE_APPROVED", "OVERRIDE_EXPIRED",
-)
-
-
 @dataclass(frozen=True)
 class Issue:
     code: str
@@ -306,42 +282,53 @@ class Issue:
 
 
 def validate_all(conn: psycopg.Connection, case_sensitive: bool = True) -> list[Issue]:
-    """Validate the configuration tables and the target tables they point to. Empty list = valid."""
+    """Validate the configuration tables and the target tables they point to. Empty list = valid.
+    The schema has no CHECK constraints, so value rules the database used to enforce are checked here."""
     issues: list[Issue] = []
 
     def add(code: str, msg: str, severity: str = "ERROR") -> None:
         issues.append(Issue(code, msg, severity))
 
-    have = {r["event_ty"] for r in conn.execute("SELECT Event_Ty FROM ComplianceEventType").fetchall()}
-    for ev in REQUIRED_EVENTS:
-        if ev not in have:
-            add("EVENT_TYPE_MISSING", f"ComplianceEventType lacks {ev} (run init-db)")
-
     rts = run_types(conn)
+    for rt in rts.values():
+        if not rt.run_ty.isalnum():
+            add("RUN_TYPE", f"run type {rt.run_ty!r} must be letters and digits only (it is the {{RUNTY}} token)")
+        if rt.run_category_cd not in ("ROUTINE", "ADHOC") or rt.sla_days < 1:
+            add("RUN_TYPE", f"run type {rt.run_ty}: category must be ROUTINE/ADHOC and SLA_Days >= 1")
+    projects = {r["project_cd"]: r["active_ind"] == 1
+                for r in conn.execute("SELECT Project_Cd, Active_Ind FROM ComplianceProject").fetchall()}
     xw = xwalk_rows(conn)
     cfgs = active_file_configs(conn)
     for x in xw:
-        label = f"xwalk {x.project_cd}/{x.table_nm}/{x.src_cd}/{x.run_ty}@{x.effective_start_dt}"
+        label = f"xwalk {x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty}@{x.effective_start_dt}"
         if not rts[x.run_ty].active:
             add("XWALK_RUN_TYPE", f"{label}: run type {x.run_ty} is inactive", "WARNING")
-        if not any((c.project_cd, c.table_nm, c.src_cd) == (x.project_cd, x.table_nm, x.src_cd) for c in cfgs):
+        if not projects[x.project_cd]:
+            add("XWALK_PROJECT", f"{label}: project {x.project_cd} is inactive", "WARNING")
+        if not any((c.project_cd, c.table_nm, c.src_id) == (x.project_cd, x.table_nm, x.src_id) for c in cfgs):
             add("XWALK_NO_FILE_CONFIG", f"{label}: no active ComplianceSourceFileConfig")
+    for a, b in combinations(xw, 2):
+        if ((a.project_cd, a.table_nm, a.src_id, a.run_ty) == (b.project_cd, b.table_nm, b.src_id, b.run_ty)
+                and (b.effective_end_dt is None or a.effective_start_dt <= b.effective_end_dt)
+                and (a.effective_end_dt is None or b.effective_start_dt <= a.effective_end_dt)):
+            add("XWALK_OVERLAP", f"xwalk {a.project_cd}/{a.table_nm}/{a.src_id}/{a.run_ty}: effective windows "
+                                 f"starting {a.effective_start_dt} and {b.effective_start_dt} overlap")
 
     for c in cfgs:
-        label = f"file config {c.cfg_id} ({c.project_cd}/{c.table_nm}/{c.src_cd})"
+        label = f"file config {c.cfg_id} ({c.project_cd}/{c.table_nm}/{c.src_id})"
         try:
-            compile_template(c.src_file_nm_tmplt, c.project_alias, c.table_alias, c.src_alias, case_sensitive)
+            compile_template(c.src_file_nm_tmplt, case_sensitive)
         except TemplateError as e:
             add("TEMPLATE", f"{label}: {e}")
-        if not c.src_file_nm_tmplt.lower().endswith(c.src_file_ty.lower()):
-            add("TEMPLATE_EXTENSION", f"{label}: template should end with {c.src_file_ty}")
-        if not any((x.project_cd, x.table_nm, x.src_cd) == (c.project_cd, c.table_nm, c.src_cd) for x in xw):
+        if not c.src_file_ty:
+            add("TEMPLATE_EXTENSION", f"{label}: template must end with a file extension such as .txt")
+        if not any((x.project_cd, x.table_nm, x.src_id) == (c.project_cd, c.table_nm, c.src_id) for x in xw):
             add("FILE_CONFIG_NO_XWALK", f"{label}: no active crosswalk row")
-        for p in ("s3_src_file_path", "src_file_archive_path", "s3_quarantine_path"):
+        for p in ("s3_src_file_path", "src_file_archive_path"):
             if not getattr(c, p).startswith(("s3://", "local://")):
                 add("PATH", f"{label}: {p} must be an s3:// URI")
-        for kind, schema, table, required in (("staging", c.stg_schema_nm, c.stg_tblnm, STAGING_FRAMEWORK_COLS),
-                                              ("core", c.core_schema_nm, c.core_tblnm, CORE_FRAMEWORK_COLS)):
+        for kind, schema, table, required in (("staging", c.stg_schema_nm, c.stg_table_nm, STAGING_FRAMEWORK_COLS),
+                                              ("core", c.core_schema_nm, c.table_nm, CORE_FRAMEWORK_COLS)):
             found = {col.name for col in columns(conn, schema, table)}
             if not found:
                 add("TARGET_TABLE", f"{label}: {kind} table {schema}.{table} not found")
@@ -351,15 +338,11 @@ def validate_all(conn: psycopg.Connection, case_sensitive: bool = True) -> list[
     # template overlap (§9.3): render a sample for each config/run type and test all other configs
     matcher = TemplateMatcher(cfgs, case_sensitive)
     for c in matcher.configs:
-        for rt in sorted({x.run_ty for x in xw if (x.project_cd, x.table_nm, x.src_cd) ==
-                          (c.project_cd, c.table_nm, c.src_cd)}) or ["X1"]:
-            name = render(c.src_file_nm_tmplt, project=c.project_alias, table=c.table_alias, src=c.src_alias,
-                          runty=rt, rpt_start=date(2026, 1, 1), rpt_end=date(2026, 1, 31),
+        for rt in sorted({x.run_ty for x in xw if (x.project_cd, x.table_nm, x.src_id) ==
+                          (c.project_cd, c.table_nm, c.src_id)}) or ["X1"]:
+            name = render(c.src_file_nm_tmplt, runty=rt, rpt_start=date(2026, 1, 1), rpt_end=date(2026, 1, 31),
                           ts=datetime(2026, 2, 1, 9, 30, 0))
             others = [o.cfg_id for o, _ in matcher.candidates(name) if o.cfg_id != c.cfg_id]
             if others:
                 add("TEMPLATE_OVERLAP", f"file config {c.cfg_id}: sample name {name} also matches {others}")
-    for a, b in combinations(matcher.configs, 2):
-        if (a.project_alias, a.table_alias, a.src_alias) == (b.project_alias, b.table_alias, b.src_alias):
-            add("ALIAS_COLLISION", f"file configs {a.cfg_id} and {b.cfg_id} share aliases")
     return issues

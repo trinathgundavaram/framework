@@ -1,4 +1,4 @@
-src_cd,src_nm,src_ty,active_ind
+src_id,src_nm,src_ty,active_ind
 210,Facets,VENDOR,1
 50,Qnxt,VENDOR,1
 51,MHK,VENDOR,1

@@ -45,7 +45,7 @@ class Settings:
     # --- object storage ---
     object_store: str = "s3"                      # s3 | local
     local_store_root: str = "./.local_store"
-    default_quarantine_uri: str = "s3://quarantine-bucket-not-configured/unmatched/"
+    quarantine_uri: str = "s3://quarantine-bucket-not-configured/"   # rejected files go to <uri><reason>/
 
     # --- filename matching / file reading ---
     filename_case_sensitive: bool = True
@@ -77,11 +77,10 @@ class Settings:
     period_rules_mode: str = "GATE"               # GATE | ANNOTATE
     auto_close_extracts: bool = True              # evaluate-extracts closes AUTO-eligible extracts
 
-    # --- notifications ---
-    notify_backend: str = "log"                   # log | aws
+    # --- email notifications ---
+    notify_backend: str = "log"                   # log | ses
     notify_from_email: Optional[str] = None
-    default_notify_emails: list[str] = field(default_factory=list)
-    sns_topic_arn: Optional[str] = None
+    default_notify_emails: list[str] = field(default_factory=list)   # events not tied to one file config
 
     # --- provenance (not a setting) ---
     sources: dict = field(default_factory=dict, repr=False, compare=False)
@@ -121,7 +120,8 @@ class Settings:
         for name, allowed in (("load_engine", ("PANDAS", "SPARK")), ("file_rules_mode", ("GATE", "ANNOTATE")),
                               ("period_rules_mode", ("GATE", "ANNOTATE")),
                               ("extract_gating_mode", ("STRICT_ALL_PASS", "BEST_EFFORT")),
-                              ("file_effective_date_basis", ("RPT_START", "RPT_END"))):
+                              ("file_effective_date_basis", ("RPT_START", "RPT_END")),
+                              ("notify_backend", ("log", "ses")), ("object_store", ("s3", "local"))):
             if getattr(self, name) not in allowed:
                 raise ConfigError(f"{name.upper()} must be one of {allowed}, got {getattr(self, name)!r}")
 

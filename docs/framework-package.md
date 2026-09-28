@@ -27,10 +27,9 @@ src/framework/
   load.py                 file reading, staging (pandas/COPY or Spark), core swap
   overrides.py            REUSE decisions: apply and expire
   extract.py              eligibility, refresh/combine, close, SLA sweep
-  audit.py                audit writer, notifications
-  adapters.py             S3/local store, GRE rules engine, SES/SNS
-  sql/schema.sql          schema (source of truth, CREATE-only)
-  sql/seed.sql            event vocabulary
+  audit.py                audit writer, event vocabulary, email notifications
+  adapters.py             S3/local store, GRE rules engine, email (log / SES)
+  sql/schema.sql          schema (source of truth, CREATE-only, no CHECK constraints)
   sql/approvals.sql       manual override templates (reuse / late arrival / correction)
 tests/                    unit + PostgreSQL integration tests
 ```
@@ -61,7 +60,7 @@ The environment variable is `FRAMEWORK_<NAME>`; the job argument is `--set <NAME
 | `AWS_REGION` | `us-east-1` | |
 | `BUSINESS_TZ` | `America/Chicago` | Run date, `Req_Dt_Key`, SLA hold. (Was `Business_Tz` on the crosswalk.) |
 | `OBJECT_STORE`, `LOCAL_STORE_ROOT` | `s3`, `./.local_store` | `local` for development. |
-| `DEFAULT_QUARANTINE_URI` | placeholder | Destination for files that match no config. |
+| `QUARANTINE_URI` | placeholder | Where rejected files go, under `<reason>/`. (Replaces the per-config `S3_Quarantine_Path`.) |
 | `FILENAME_CASE_SENSITIVE`, `FILE_EFFECTIVE_DATE_BASIS` | `true`, `RPT_START` | **Q-03**, **Q-04** |
 | `SUPPORTED_FILE_TYPES` | `.txt,.csv` | **Q-02**. `.xlsx` / `.parquet` readers exist but are disabled by default. |
 | `FILE_ENCODING`, `QUOTE_CHAR`, `EMPTY_AS_NULL` | `utf-8`, `"`, `true` | **Q-02** |
@@ -72,10 +71,10 @@ The environment variable is `FRAMEWORK_<NAME>`; the job argument is `--set <NAME
 | `FILE_RULES_MODE` | `GATE` | `ANNOTATE` promotes with warnings. (Was `Rules_Vld_Md`.) File rules run when the source has FILE_LEVEL bindings. |
 | `PERIOD_RULES_MODE` | `GATE` | (Was `Period_Rules_Vld_Md`.) |
 | `RULE_ENGINE`, `GRE_ENTRYPOINT` | `gre`, — | **Q-12**. `none` disables rules; `module:Class` plugs in another engine. |
-| `LOCK_TIMEOUT_SECONDS`, `HEARTBEAT_STALE_MINUTES` | `300`, `30` | |
+| `LOCK_TIMEOUT_SECONDS`, `HEARTBEAT_STALE_MINUTES` | `300`, `30` | A load not updated for `HEARTBEAT_STALE_MINUTES` is reported by `health`. |
 | `EXTRACT_GATING_MODE` | `STRICT_ALL_PASS` | or `BEST_EFFORT`. (Was `Extract_Gating_Md`.) |
 | `AUTO_CLOSE_EXTRACTS` | `true` | `false` makes `evaluate-extracts` refresh only, leaving every close to a person. |
-| `NOTIFY_BACKEND`, `NOTIFY_FROM_EMAIL`, `DEFAULT_NOTIFY_EMAILS`, `SNS_TOPIC_ARN` | `log`, —, —, — | D-54 (`aws` = SES/SNS). (`SNS_TOPIC_ARN` was a file-config column.) |
+| `NOTIFY_BACKEND`, `NOTIFY_FROM_EMAIL`, `DEFAULT_NOTIFY_EMAILS` | `log`, —, — | D-54. All notifications are email: `ses` sends through SES, `log` only logs them. `DEFAULT_NOTIFY_EMAILS` receives events not tied to one file config. |
 
 ### Report periods
 
@@ -101,7 +100,7 @@ PERIOD_SQL = {
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env              # set FRAMEWORK_DB_* for your PostgreSQL
-framework init-db                 # schema (skipped if present) + event vocabulary
+framework init-db                 # schema (skipped if present)
 framework test-connection
 framework show-config
 framework validate-config
@@ -110,13 +109,13 @@ export TEST_DATABASE_URL=postgresql://postgres@localhost:5432/fwtest   # a scrat
 pytest                            # tests drop and recreate the metadata schema
 ```
 
-Python 3.10+ and PostgreSQL 14+ with `btree_gist` (tested on 16). `TEST_METADATA_SCHEMA=fw_meta` runs the suite against a non-default schema. Without `TEST_DATABASE_URL` only the unit tests run.
+Python 3.10+ and PostgreSQL 14+ (tested on 16); no extensions are needed. `TEST_METADATA_SCHEMA=fw_meta` runs the suite against a non-default schema. Without `TEST_DATABASE_URL` only the unit tests run.
 
 ### Windows without Docker
 
 1. **Install Python 3.10+** from python.org and tick "Add python.exe to PATH".
 2. **Install PostgreSQL 14+.**
-   - With admin rights: the EDB installer (<https://www.postgresql.org/download/windows/>); it includes `btree_gist`.
+   - With admin rights: the EDB installer (<https://www.postgresql.org/download/windows/>).
    - Without admin rights: download the EDB **zip binaries**, unzip to e.g. `C:\pgsql`, then:
      ```powershell
      C:\pgsql\bin\initdb.exe -D C:\pgdata -U postgres -A trust -E UTF8
@@ -141,11 +140,13 @@ Python 3.10+ and PostgreSQL 14+ with `btree_gist` (tested on 16). `TEST_METADATA
    - Staging: business columns in file order, plus `btch_id`, `load_id`, `src_file_nm`, `stg_load_dtts`.
    - Core: business columns plus `btch_id`, `load_id`, `current_ind`, `load_dtts`, `end_dtts` (see the comment at the end of `schema.sql`).
 2. **Insert configuration rows** (SQL or the Glue metadata-load job), in this order:
-   1. `ComplianceSourceSystem`
-   2. `ComplianceRunType` — `SLA_Days` ≥ 1 (the hold is `Req_Dt_Key + SLA_Days − 1`); `Carry_Fwd_Ind = 1` if batches of this run type may reuse the previous batch's data after approval.
-   3. `ComplianceDataSetSourceXwalk` — one effective-dated row per project / table / source / run type. Nothing else.
-   4. `ComplianceSourceFileConfig` — one active row per project / table / source: template, aliases, file format, S3 paths, staging/core tables, notification recipients.
-   5. `ComplianceRuleBinding` — FILE_LEVEL per source (optional) and PERIOD_LEVEL (`Src_Cd = '*'`).
+   1. `ComplianceProject` — the project code and its description.
+   2. `ComplianceSourceSystem` — `Src_ID`, name, type.
+   3. `ComplianceRunType` — `SLA_Days` ≥ 1 (the hold is `Req_Dt_Key + SLA_Days − 1`); `Carry_Fwd_Ind = 1` if batches of this run type may reuse the previous batch's data after approval; code letters/digits only.
+   4. `ComplianceDataSetSourceXwalk` — one effective-dated row per project / table / source / run type. Nothing else.
+   5. `ComplianceSourceFileConfig` — one active row per project / table / source: filename template (project, table and source written literally, e.g. `PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt`; its extension is the file type), delimiter, header/trailer flags, inbound and archive paths, staging table, core schema (the core table is `Table_Nm`), email recipients.
+   6. `ComplianceRuleBinding` — FILE_LEVEL per source (optional) and PERIOD_LEVEL (`Src_ID = '*'`).
+   The schema has no CHECK constraints: `validate-config` checks the values instead.
 3. **Run `framework validate-config`.** It must report no `ERROR` issues.
 4. **Schedule the project's jobs** (EventBridge / Step Functions / Glue triggers), for example:
 
@@ -163,10 +164,11 @@ Python 3.10+ and PostgreSQL 14+ with `btree_gist` (tested on 16). `TEST_METADATA
 
    A missed `BATCH_CREATION` run is recreated with `--as-of <missed date>`: the period follows that date; `Btch_ID` carries the actual creation date.
 
-Filename template example (literal text plus exactly one of each placeholder, separated by literals):
+Filename template example (project, table and source as literal text, plus exactly one of each
+placeholder `{RUNTY}`, `{RPTSTART}`, `{RPTEND}`, `{TS}`, separated by literals; the extension is the file type):
 
 ```
-{PROJECT}_{TABLE}_{SRC}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt
+PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt
 ```
 
 ## Commands
@@ -175,7 +177,7 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 
 | Command | Purpose | Typical trigger |
 |---|---|---|
-| `init-db` | Schema (once) + event vocabulary | Deploy |
+| `init-db` | Schema (once) | Deploy |
 | `run --module NAME [module parameters]` | Run one module by name: `BATCH_CREATION`, `FILE_LOAD`, `RULES_TRIGGER` (see below). One Glue job / Step Functions state can start any of them | Any schedule or event |
 | `list-modules` | Module names and parameters (no database needed) | Ops |
 | `show-config` | Settings with value and source; database target (no password) | Ops |
@@ -185,7 +187,7 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 | `evaluate-extracts [--project] [--table] [--run-type]` | Refresh the runs past their SLA hold, close the AUTO-eligible ones, list the runs needing regeneration | Project schedule |
 | `refresh-extract --extract-id` | Recount / combine / evaluate one run | Manual |
 | `close-extract --extract-id --closed-by [--ack-warnings]` | Close one run and its batches (exit 2 if blocked) | Human |
-| `notify` | Send pending notifications | Poll |
+| `notify` | Email pending notifications | Poll |
 | `health` | Operational report (§15.3) | Ops |
 
 **Exit codes:** 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
@@ -237,8 +239,8 @@ def run_rules(conn, rule_group: str, rule_variant: str, run_params: dict) -> lis
 ```
 
 `conn` is the framework database (metadata, staging and core). `run_params`:
-- **FILE_LEVEL:** `btch_id`, `load_id`, `stg_schema_nm`, `stg_tblnm`, project / table / source / run type and report dates.
-- **PERIOD_LEVEL:** `extract_id`, `btch_id_list`, `load_id_list`, `core_schema_nm`, `core_tblnm` and the extract grain. For a carried source the lists contain the reused batch.
+- **FILE_LEVEL:** `btch_id`, `load_id`, `stg_schema_nm`, `stg_table_nm`, `project_cd` / `table_nm` / `src_id` / `run_ty` and report dates.
+- **PERIOD_LEVEL:** `extract_id`, `btch_id_list`, `load_id_list`, `core_schema_nm`, `core_table_nm` and the extract grain. For a carried source the lists contain the reused batch.
 
 The framework applies GATE/ANNOTATE itself (`FILE_RULES_MODE`, `PERIOD_RULES_MODE`).
 
@@ -248,7 +250,7 @@ The framework applies GATE/ANNOTATE itself (`FILE_RULES_MODE`, `PERIOD_RULES_MOD
 
 **Not yet verified:**
 - **Spark engine** (`LOAD_ENGINE=SPARK`): written against PySpark 3.x but not run here; test on Glue/Spark before enabling.
-- **AWS adapters** (S3 store, SES/SNS, Secrets Manager): written against boto3; the database secret is covered by a unit test with a fake loader.
+- **AWS adapters** (S3 store, SES, Secrets Manager): written against boto3; the database secret is covered by a unit test with a fake loader.
 
 **Waiting on decisions** (defaults are configurable; see design §16): Q-02 file types, encoding and trailer layout; Q-03 case sensitivity; Q-04 effective-date basis; Q-05 ad-hoc source additions; Q-11 PostgreSQL version; Q-12 GRE entry point; Q-13 – Q-15 orchestration, rollout, security; Q-16 regeneration downstream; Q-17 alerting on runs that stay open.
 

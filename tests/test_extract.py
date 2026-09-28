@@ -30,15 +30,15 @@ def test_auto_close_after_hold_closes_every_batch(conn, tmp_path):
     ingest(app, "S1")
     ingest(app, "S2")
     e = extract(conn)
-    assert e["extract_stat"] == "COMPLETE" and e["extract_rules_stat"] == "PASSED"      # early combine (D-21)
+    assert e["received_src_cnt"] == 2 and e["extract_rules_stat"] == "PASSED"         # early combine (D-21)
     assert e["eligibility_cd"] == "NOT_ELIGIBLE" and "SLA hold" in e["eligibility_rsn_txt"]
     assert app.evaluator.run().closed == []                            # still Feb 1 in Chicago
     clock.set(utc(2026, 2, 2, 6, 5))                                   # 00:05 Feb 2 Chicago
     s = app.evaluator.run()
     assert s.closed == [e["extract_id"]] and s.deferred == []
     e = extract(conn)
-    assert (e["extract_close_ind"], e["closed_by"], e["eligibility_cd"]) == (1, "SYSTEM", "AUTO")
-    assert e["closed_data_signature"] == e["data_signature"] and e["close_warning_txt"] is None
+    assert (e["extract_close_ind"], e["extract_closed_by"], e["eligibility_cd"]) == (1, "SYSTEM", "AUTO")
+    assert e["closed_data_signature"] == e["data_signature"]
     assert e["combine_btch_id_list"] == ",".join(sorted(
         r["btch_id"] for r in qa(conn, "SELECT Btch_ID FROM ComplianceRequestControl WHERE Run_Ty='MONTHLY'")))
     rows = qa(conn, "SELECT * FROM ComplianceRequestControl WHERE Run_Ty='MONTHLY'")
@@ -67,9 +67,9 @@ def test_strict_rule_failure_blocks_close(conn, tmp_path):
     ingest(app, "S1")
     ingest(app, "S2")
     e = extract(conn)
-    assert e["extract_rules_stat"] == "FAILED" and e["failed_rule_refs"] == "P_TOTALS"
-    assert "contributing batches" in q1(conn, "SELECT Description FROM CMS_ComplianceExceptionsAudit "
-                                              "WHERE Event_Ty='PERIOD_RULES_FAILED'")["description"]
+    assert e["extract_rules_stat"] == "FAILED" and e["failed_rule_list"] == "P_TOTALS"
+    assert "contributing batches" in q1(conn, "SELECT Event_Txt FROM CMS_ComplianceExceptionsAudit "
+                                              "WHERE Event_Ty='PERIOD_RULES_FAILED'")["event_txt"]
     clock.set(utc(2026, 2, 3, 12, 0))
     assert app.evaluator.run().not_eligible == 1
     assert extract(conn)["eligibility_cd"] == "NOT_ELIGIBLE"
@@ -91,9 +91,8 @@ def test_best_effort_manual_close_requires_ack(conn, tmp_path):
         app.control.close(e["extract_id"], "jdoe")
     out = app.control.close(e["extract_id"], "jdoe", ack_warnings=True)
     assert out.warnings and out.closed_batches == 2 and out.warnings_acknowledged
-    assert "1 of 2" in extract(conn)["close_warning_txt"]
-    assert q1(conn, "SELECT count(*) n FROM CMS_ComplianceExceptionsAudit "
-                    "WHERE Event_Ty='EXTRACT_CLOSED_WITH_WARNINGS'")["n"] == 1
+    assert "1 of 2" in q1(conn, "SELECT Event_Txt FROM CMS_ComplianceExceptionsAudit "
+                                "WHERE Event_Ty='EXTRACT_CLOSED_WITH_WARNINGS'")["event_txt"]
     assert q1(conn, "SELECT count(*) n FROM CMS_ComplianceExceptionsAudit "
                     "WHERE Event_Ty='SOURCE_MISSING_AT_CLOSE'")["n"] == 1
     with pytest.raises(CloseBlocked, match="already closed"):
@@ -117,7 +116,7 @@ def test_close_deferred_when_a_batch_is_locked(conn, tmp_path):
     clock.set(utc(2026, 2, 2, 12, 0))
     other = locks.connect(os.environ["TEST_DATABASE_URL"])
     try:
-        btch = q1(conn, "SELECT Btch_ID FROM ComplianceRequestControl WHERE Src_Cd='S1'")["btch_id"]
+        btch = q1(conn, "SELECT Btch_ID FROM ComplianceRequestControl WHERE Src_ID='S1'")["btch_id"]
         assert locks.try_lock(other, locks.batch_key(btch))
         s = app.evaluator.run()
         assert s.deferred == [extract(conn)["extract_id"]] and extract(conn)["extract_close_ind"] == 0

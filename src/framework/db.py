@@ -1,4 +1,4 @@
-"""Database helpers: schema install and advisory locks.
+"""Database helpers: schema install, query helpers and advisory locks.
 
 Connections are autocommit; every unit of work uses an explicit `with conn.transaction():` block.
 Lock order is always EXT -> BTCH (design §12.2). Session locks are released if the session dies.
@@ -38,38 +38,16 @@ def schema_exists(conn: psycopg.Connection, schema: str) -> bool:
     return bool(row["ok"])
 
 
-def _ensure_btree_gist(conn: psycopg.Connection, schema: str) -> str:
-    """Installed once per database, preferably in `public` (falls back to the metadata schema when
-    `public` is not writable), so dropping one metadata schema never breaks another."""
-    row = conn.execute("SELECT extnamespace::regnamespace::text AS ns FROM pg_extension "
-                       "WHERE extname = 'btree_gist'").fetchone()
-    if row:
-        return f"extension btree_gist (already installed in {row['ns']})"
-    try:
-        with conn.transaction():
-            conn.execute("CREATE EXTENSION btree_gist SCHEMA public")
-        return "extension btree_gist (installed in public)"
-    except psycopg.errors.InsufficientPrivilege:
-        conn.execute(sql.SQL("CREATE EXTENSION btree_gist SCHEMA {}").format(sql.Identifier(schema)))
-        return f"extension btree_gist (installed in {schema})"
-
-
 def init_db(conn: psycopg.Connection, schema: str = "cms_compliance") -> list[str]:
-    """Create the metadata schema (if missing), apply schema.sql once, and (re)apply seed.sql."""
+    """Create the metadata schema (if missing) and apply schema.sql once."""
     Settings(metadata_schema=schema).validate()
-    applied = []
     with conn.transaction():
         conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
-        conn.execute(sql.SQL("SET LOCAL search_path TO {}, public").format(sql.Identifier(schema)))
-        applied.append(_ensure_btree_gist(conn, schema))
         if schema_exists(conn, schema):
-            applied.append("schema.sql (skipped: schema already initialised)")
-        else:
-            conn.execute(sql_text("schema.sql"))
-            applied.append("schema.sql")
-        conn.execute(sql_text("seed.sql"))
-        applied.append("seed.sql")
-    return applied
+            return ["schema.sql (skipped: schema already initialised)"]
+        conn.execute(sql.SQL("SET LOCAL search_path TO {}, public").format(sql.Identifier(schema)))
+        conn.execute(sql_text("schema.sql"))
+    return ["schema.sql"]
 
 
 # ============================================================================ advisory locks

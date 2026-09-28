@@ -35,9 +35,9 @@ DESIGN
 
   Re-running the job against the same table with a refreshed CSV (add a
   row, correct a row, flip a flag) is the update mechanism - there's no
-  separate "load" vs "update" job. Loading the framework's 3 configuration
-  tables (or any other table) is just 3 (or however many) separate manual
-  runs of this same job with different --TABLE_NAME / --S3_FILE_NAME /
+  separate "load" vs "update" job. Loading the framework's configuration
+  tables (or any other table) is just one separate manual run per table
+  of this same job with different --TABLE_NAME / --S3_FILE_NAME /
   --PRIMARY_KEY values - see the README for the exact commands.
 
 This is a Glue **Python Shell** job (not Spark) - these are small
@@ -52,8 +52,8 @@ JOB PARAMETERS (set as Glue job arguments, all as --KEY VALUE)
   --S3_FILE_NAME    <file_name>.csv            File inside that folder to load
                      (the job reads s3://<bucket>/<prefix>/<file_name>).
   --PRIMARY_KEY     Comma-separated primary key column(s) for the ON CONFLICT
-                     target, e.g. src_cd
-                     or project_cd,table_nm,src_cd,run_ty,effective_start_dt
+                     target, e.g. src_id
+                     or project_cd,table_nm,src_id,run_ty,effective_start_dt_key
   --MODE            Optional: "upsert" (default) or "insert_only" (append-only
                      table - audit/exception logs).
   --AUDIT_COLUMNS   Optional comma-separated list of audit columns the table

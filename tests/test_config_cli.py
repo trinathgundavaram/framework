@@ -23,16 +23,20 @@ def test_validator_detects_problems(conn):
     seed_config(conn)
     with conn.transaction():
         conn.execute("DROP TABLE core_t.tbl_x")
-        conn.execute("UPDATE ComplianceSourceFileConfig SET Src_File_Nm_Tmplt='{PROJECT}_{TABLE}.txt' WHERE Src_Cd='S2'")
-        conn.execute("UPDATE ComplianceSourceFileConfig SET S3_Quarantine_Path='/tmp/q' WHERE Src_Cd='S1'")
-        conn.execute("DELETE FROM ComplianceEventType WHERE Event_Ty='BATCH_CLOSED'")
-        conn.execute("UPDATE ComplianceDataSetSourceXwalk SET Active_Ind=0 WHERE Src_Cd='S1'")
-        conn.execute("INSERT INTO ComplianceSourceSystem (Src_Cd, Src_Nm, Src_Ty) VALUES ('S3','s3','VENDOR')")
-        conn.execute("""INSERT INTO ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_Cd, Run_Ty, Effective_Start_Dt,
+        conn.execute("UPDATE ComplianceSourceFileConfig SET Src_File_Nm_Tmplt='{PROJECT}_{TABLE}.txt' WHERE Src_ID='S2'")
+        conn.execute("UPDATE ComplianceSourceFileConfig SET Src_File_Archive_Path='/tmp/q' WHERE Src_ID='S1'")
+        conn.execute("""INSERT INTO ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty,
+                        Effective_Start_Dt_Key, Cmplnc_Vrsn) VALUES ('PRJA','tbl_x','S2','MONTHLY','2025-06-01','V2')""")
+        conn.execute("""INSERT INTO ComplianceRunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days)
+                        VALUES ('BAD-1','bad','WEEKLY',0)""")
+        conn.execute("UPDATE ComplianceDataSetSourceXwalk SET Active_Ind=0 WHERE Src_ID='S1'")
+        conn.execute("INSERT INTO ComplianceSourceSystem (Src_ID, Src_Nm, Src_Ty) VALUES ('S3','s3','VENDOR')")
+        conn.execute("""INSERT INTO ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key,
                         Cmplnc_Vrsn) VALUES ('PRJA','tbl_x','S3','MONTHLY','2025-01-01','V1')""")
         conn.execute("UPDATE ComplianceRunType SET Active_Ind=0 WHERE Run_Ty='ADHOC'")
     issues = validate_all(conn)
-    for c in ("TEMPLATE", "TARGET_TABLE", "PATH", "EVENT_TYPE_MISSING", "FILE_CONFIG_NO_XWALK", "XWALK_NO_FILE_CONFIG"):
+    for c in ("TEMPLATE", "TARGET_TABLE", "PATH", "FILE_CONFIG_NO_XWALK", "XWALK_NO_FILE_CONFIG", "XWALK_OVERLAP",
+              "RUN_TYPE"):
         assert c in codes(issues), (c, codes(issues))
     assert "XWALK_RUN_TYPE" in codes(issues, "WARNING")
 
@@ -41,8 +45,8 @@ def test_template_overlap_detected(conn):
     seed_config(conn)
     with conn.transaction():
         # S2 names look like PRJA_TBLX_<RUNTY>_MONTHLY_... so an S1 monthly name also matches S2 (RUNTY='S1')
-        conn.execute("UPDATE ComplianceSourceFileConfig SET Src_Alias='MONTHLY', "
-                     "Src_File_Nm_Tmplt='{PROJECT}_{TABLE}_{RUNTY}_{SRC}_{RPTSTART}_{RPTEND}_{TS}.txt' WHERE Src_Cd='S2'")
+        conn.execute("UPDATE ComplianceSourceFileConfig "
+                     "SET Src_File_Nm_Tmplt='PRJA_TBLX_{RUNTY}_MONTHLY_{RPTSTART}_{RPTEND}_{TS}.txt' WHERE Src_ID='S2'")
     assert "TEMPLATE_OVERLAP" in codes(validate_all(conn))
 
 
@@ -56,8 +60,8 @@ def test_notifications_sent_once(conn, tmp_path):
     assert app.notifier(ch).run() == 2
     assert app.notifier(ch).run() == 0
     unmatched, matched = ch.sent
-    assert unmatched[1].recipients == [] and "FILE_REJECTED_UNPARSEABLE" in unmatched[1].subject
-    assert matched[1].recipients == ["ops@example.com"] and "1|2" not in matched[1].body
+    assert unmatched.recipients == [] and "FILE_REJECTED_UNPARSEABLE" in unmatched.subject
+    assert matched.recipients == ["ops@example.com"] and "1|2" not in matched.body
 
 
 def test_cli_end_to_end(conn, tmp_path, monkeypatch, capsys):

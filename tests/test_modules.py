@@ -7,7 +7,7 @@ either way, so one project's trigger never touches another project's rows of eit
 """
 import json
 import os
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
@@ -18,13 +18,17 @@ from framework.modules import MODULES, describe_modules, module_names, resolve_m
 from .helpers import file_name, make_app, put_file, q1, qa, seed_config, utc
 
 
-def intake(conn, iid, *, project="PRJA", run_ty="ADHOC", src=None, req_ty="UNIVERSE_PULL",
-          start="2026-03-01", end="2026-03-31", req_start="2026-02-01", req_end=None):
+def intake(conn, *, project="PRJA", run_ty="ADHOC", src=None, start="2026-03-01", end="2026-03-31",
+           req_start="2026-02-01", req_end=None) -> int:
     with conn.transaction():
-        conn.execute("""INSERT INTO ComplianceRequestInTake (Intake_ID, Project_Cd, Table_Nm, Run_Ty, Src_Cd, Req_Ty,
-                        Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key, Requested_By)
-                        VALUES (%s,%s,'tbl_x',%s,%s,%s,%s,%s,%s,%s,'analyst')""",
-                     (iid, project, run_ty, src, req_ty, start, end, req_start, req_end or req_start))
+        return conn.execute("""INSERT INTO ComplianceRequestInTake (Project_Cd, Table_Nm, Run_Ty, Src_ID,
+                                 Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key)
+                               VALUES (%s,'tbl_x',%s,%s,%s,%s,%s,%s) RETURNING Intake_ID""",
+                            (project, run_ty, src, start, end, req_start, req_end or req_start)).fetchone()["intake_id"]
+
+
+def last_run(conn, iid):
+    return q1(conn, "SELECT Last_Run_Dt_Key d FROM ComplianceRequestInTake WHERE Intake_ID=%s", iid)["d"]
 
 
 # ------------------------------------------------------------------ no database
@@ -106,17 +110,17 @@ def setup(conn, tmp_path):
 def test_batch_creation_module_routine_and_ad_hoc_together(conn, tmp_path):
     """One call, both kinds: routine batches created AND that project's pending ad-hoc request processed."""
     app, *_ = setup(conn, tmp_path)
-    intake(conn, "A1")                                                   # PRJA, req window opens 2026-02-01
+    a1 = intake(conn)                                                    # PRJA, req window opens 2026-02-01
     out = run_module(app, "batch-creation", BATCH_PARAMS)
     assert out.module == "BATCH_CREATION" and out.exit_code == 0
     assert out.result.scheduled.created == 2                             # the routine part (unchanged behaviour)
     assert out.result.adhoc.created == 2                                 # the ad-hoc part, in the SAME call
     assert q1(conn, "SELECT count(*) n FROM ComplianceRequestControl")["n"] == 4
-    assert q1(conn, "SELECT Intake_Stat s FROM ComplianceRequestInTake WHERE Intake_ID='A1'")["s"] == "COMPLETED"
+    assert last_run(conn, a1) == date(2026, 2, 1)
 
     again = app.run_module("BATCH_CREATION", BATCH_PARAMS)               # idempotent, and via App
     assert (again.result.scheduled.created, again.result.scheduled.existing) == (0, 2)
-    assert again.result.adhoc.created == 0                               # A1 already completed
+    assert again.result.adhoc.handled == 0                               # A1 already handled today
 
     out = run_module(app, "BATCH_CREATION", {**BATCH_PARAMS, "table": "no_such_table"})
     assert out.exit_code == 1 and out.result.scheduled.errors            # nothing effective: completed with problems
@@ -125,7 +129,7 @@ def test_batch_creation_module_routine_and_ad_hoc_together(conn, tmp_path):
 def test_batch_creation_project_only_runs_ad_hoc_only(conn, tmp_path):
     """No --run-type/--period: only the ad-hoc sweep runs; `scheduled` is None, nothing routine happens."""
     app, *_ = setup(conn, tmp_path)
-    intake(conn, "A1")
+    intake(conn)
     out = run_module(app, "BATCH_CREATION", {"project": "PRJA"})
     assert out.result.scheduled is None and out.result.adhoc.created == 2 and out.exit_code == 0
     assert q1(conn, "SELECT count(*) n FROM ComplianceRequestControl")["n"] == 2            # ad-hoc batches only
@@ -134,7 +138,7 @@ def test_batch_creation_project_only_runs_ad_hoc_only(conn, tmp_path):
 
 def test_batch_creation_with_adhoc_run_type_scopes_the_sweep_and_rejects_period(conn, tmp_path):
     app, *_ = setup(conn, tmp_path)
-    intake(conn, "A1", run_ty="ADHOC")
+    intake(conn, run_ty="ADHOC")
     with pytest.raises(ConfigError, match="is ADHOC; --period"):
         run_module(app, "BATCH_CREATION", {"project": "PRJA", "run_type": "ADHOC", "period": "SAME_DAY"})
     out = run_module(app, "BATCH_CREATION", {"project": "PRJA", "run_type": "ADHOC"})
@@ -146,21 +150,21 @@ def test_batch_creation_is_scoped_to_the_input_project_for_both_kinds(conn, tmp_
     row, but a PRJA run never touches PRJB's rows, and vice versa - proven for both halves of the merge."""
     app, *_ = setup(conn, tmp_path)
     with conn.transaction():
-        conn.execute("""INSERT INTO ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_Cd, Run_Ty,
-                          Effective_Start_Dt, Cmplnc_Vrsn)
+        conn.execute("""INSERT INTO ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty,
+                          Effective_Start_Dt_Key, Cmplnc_Vrsn)
                         VALUES ('PRJB','tbl_y','S1','MONTHLY','2025-01-01','V2'),
                                ('PRJB','tbl_y','S2','MONTHLY','2025-01-01','V2'),
                                ('PRJB','tbl_x','S1','ADHOC','2025-01-01','V1'),
                                ('PRJB','tbl_x','S2','ADHOC','2025-01-01','V1')""")
-    intake(conn, "A1", project="PRJA")
-    intake(conn, "B1", project="PRJB")
+    a1 = intake(conn, project="PRJA")
+    b1 = intake(conn, project="PRJB")
     by_project = lambda: {r["project_cd"]: r["n"] for r in qa(   # noqa: E731
         conn, "SELECT Project_Cd, count(*) n FROM ComplianceRequestControl GROUP BY 1")}
 
     a = run_module(app, "BATCH_CREATION", BATCH_PARAMS)                       # PRJA trigger
     assert a.result.scheduled.created == 2 and a.result.adhoc.created == 2    # routine tbl_x + A1's own ad-hoc
     assert by_project() == {"PRJA": 4}                                        # PRJB doesn't exist yet
-    assert q1(conn, "SELECT Intake_Stat s FROM ComplianceRequestInTake WHERE Intake_ID='B1'")["s"] == "NEW"
+    assert last_run(conn, b1) is None
 
     b = run_module(app, "BATCH_CREATION", {**BATCH_PARAMS, "project": "PRJB"})  # PRJB trigger
     assert b.result.scheduled.created == 2 and b.result.scheduled.errors == []
@@ -169,8 +173,7 @@ def test_batch_creation_is_scoped_to_the_input_project_for_both_kinds(conn, tmp_
                                                  "WHERE Project_Cd='PRJB' AND Run_Ty='MONTHLY'")) \
         == ["20260201_PRJB_tbl_y_S1_MONTHLY_V2_1", "20260201_PRJB_tbl_y_S2_MONTHLY_V2_1"]
     assert by_project() == {"PRJA": 4, "PRJB": 4}                             # PRJA's 4 rows: untouched
-    assert q1(conn, "SELECT Intake_Stat s FROM ComplianceRequestInTake WHERE Intake_ID='A1'")["s"] == "COMPLETED"
-    assert q1(conn, "SELECT Intake_Stat s FROM ComplianceRequestInTake WHERE Intake_ID='B1'")["s"] == "COMPLETED"
+    assert last_run(conn, a1) == last_run(conn, b1) == date(2026, 2, 1)
 
     none = run_module(app, "BATCH_CREATION", {**BATCH_PARAMS, "project": "PRJC"})   # unknown project
     assert none.exit_code == 1 and none.result.scheduled.created == 0 and "PRJC" in none.result.scheduled.errors[0]
@@ -218,7 +221,6 @@ def test_rules_trigger_module_reruns_period_rules(conn, tmp_path):
     out = run_module(app, "RULES_TRIGGER", {"project": "PRJA", "run_type": "MONTHLY"})
     assert (out.module, out.exit_code, out.result.evaluated, out.result.passed) == ("RULES_TRIGGER", 0, 1, 1)
     assert len([c for c in rules.calls if c["scope"] == "PERIOD_LEVEL"]) == before + 1     # forced, data unchanged
-    assert q1(conn, "SELECT Combine_Last_Trigger_Cd c FROM ComplianceExtractControl")["c"] == "MANUAL_REFRESH"
 
     rules.period_fail = ["P_TOTALS"]                                        # a rule now fails: exit 1, one extract by id
     out = run_module(app, "rules-trigger", {"extract_id": str(ext["extract_id"])})
@@ -258,7 +260,7 @@ def test_cli_run_module(conn, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("FRAMEWORK_RULE_ENGINE", "none")
     assert main(["init-db"]) == 0
     seed_config(conn)
-    intake(conn, "A1")
+    intake(conn)
     asof = ["--as-of", "2026-02-01T13:00:00+00:00"]
 
     capsys.readouterr()

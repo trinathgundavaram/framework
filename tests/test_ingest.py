@@ -23,14 +23,14 @@ def ingest(app, name, rows, header=True, **kw):
 def core_rows(conn, src="S1"):
     return qa(conn, """SELECT c.id, c.amount, c.current_ind, c.load_id FROM core_t.tbl_x c
                         JOIN ComplianceRequestControl b ON b.Btch_ID = c.btch_id
-                       WHERE b.Src_Cd = %s ORDER BY c.load_id, c.id""", src)
+                       WHERE b.Src_ID = %s ORDER BY c.load_id, c.id""", src)
 
 
 def test_o1_promote(env, conn):
     app, *_ = env
     out = ingest(app, file_name("S1"), ["1|10.50|a", "2||b"])
     assert (out.result, out.rule) == ("PROMOTED", "O-1")
-    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1'")
+    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID='S1'")
     assert (b["resolution_ty"], b["req_stat"]) == ("NEW_FILE", "PROMOTED")
     assert [(r["id"], r["current_ind"]) for r in core_rows(conn)] == [(1, 1), (2, 1)]
     assert core_rows(conn)[1]["amount"] is None                     # empty -> NULL
@@ -42,7 +42,7 @@ def test_o1_promote(env, conn):
                                               "ORDER BY Detail_ID", b["req_id"])]
     assert events == ["BATCH_CREATED", "FILE_RECEIVED", "FILE_PROMOTED"]
     e = q1(conn, "SELECT * FROM ComplianceExtractControl")
-    assert e["extract_stat"] == "PARTIAL" and e["received_src_cnt"] == 1 and e["combine_run_cnt"] == 0
+    assert e["received_src_cnt"] == 1 and e["combine_last_run_dtts"] is None        # partial: no combine yet
 
 
 def test_o2_replacement_latest_arrival_wins(env, conn):
@@ -65,7 +65,7 @@ def test_o3_o4_rules_failures(env, conn):
     rules.file_fail["S1"] = ["R_NOT_NULL"]
     out = ingest(app, file_name("S1"), ["1|1|a"])
     assert (out.result, out.rule) == ("RULES_FAILED", "O-3")
-    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1'")
+    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID='S1'")
     assert b["req_stat"] == "EXCEPTION_PENDING" and b["resolution_ty"] is None
     assert core_rows(conn) == []
     rules.file_fail.clear()
@@ -74,7 +74,7 @@ def test_o3_o4_rules_failures(env, conn):
     rules.file_fail["S1"] = ["R_NOT_NULL"]
     bad = ingest(app, file_name("S1", ts=datetime(2026, 2, 1, 12, 0, 0)), ["9|9|x"])
     assert bad.rule == "O-4"
-    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1'")
+    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID='S1'")
     assert (b["req_stat"], b["resolution_ty"]) == ("EXCEPTION_PENDING", "NEW_FILE")
     assert q1(conn, "SELECT Load_ID FROM ComplianceFileLoad WHERE Load_Stat='PROMOTED'")["load_id"] == good.load_id
     assert [r["id"] for r in core_rows(conn) if r["current_ind"] == 1] == [1]       # D-46
@@ -121,9 +121,9 @@ def test_structural_failures(env, conn, rows, header, event):
     app, *_ = env
     out = ingest(app, file_name("S1"), rows, header)
     assert (out.result, out.event_ty) == ("QUARANTINED", event)
-    desc = q1(conn, "SELECT Description FROM CMS_ComplianceExceptionsAudit WHERE Event_Ty=%s", event)["description"]
+    desc = q1(conn, "SELECT Event_Txt FROM CMS_ComplianceExceptionsAudit WHERE Event_Ty=%s", event)["event_txt"]
     assert '"x"' not in desc                                     # no file content in audit text
-    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1'")
+    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID='S1'")
     assert b["req_stat"] == "PENDING"
 
 
@@ -145,7 +145,7 @@ def test_zero_records(conn, tmp_path):
         conn.execute("UPDATE ComplianceSourceFileConfig SET Allow_Zero_Rcd_Ind=1")
     out = ingest(app, file_name("S1", ts=datetime(2026, 2, 1, 11, 0)), ["", ""])   # header + blank lines
     assert out.result == "PROMOTED"
-    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1'")
+    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID='S1'")
     assert b["resolution_ty"] == "NEW_FILE"
 
 
@@ -169,7 +169,7 @@ def test_replay_and_technical_failure_restart(env, conn):
         app.pipeline.process_file("inbound", key)
     load = q1(conn, "SELECT * FROM ComplianceFileLoad")
     assert load["load_stat"] == "FAILED_TECHNICAL"
-    assert q1(conn, "SELECT Req_Stat FROM ComplianceRequestControl WHERE Src_Cd='S1'")["req_stat"] == "PENDING"
+    assert q1(conn, "SELECT Req_Stat FROM ComplianceRequestControl WHERE Src_ID='S1'")["req_stat"] == "PENDING"
     assert app.store.exists("inbound", key)                  # not archived; will be retried
     rules.error.clear()
     out = app.pipeline.process_file("inbound", key)           # same object -> same Load_ID restarted (C0)
@@ -184,8 +184,7 @@ def test_replay_and_technical_failure_restart(env, conn):
 def test_unsupported_file_type(conn, tmp_path):
     seed_config(conn, sources=("S1",))
     with conn.transaction():
-        conn.execute("UPDATE ComplianceSourceFileConfig SET Src_File_Ty='.xlsx', "
-                     "Src_File_Nm_Tmplt=replace(Src_File_Nm_Tmplt, '.txt', '.xlsx')")
+        conn.execute("UPDATE ComplianceSourceFileConfig SET Src_File_Nm_Tmplt=replace(Src_File_Nm_Tmplt, '.txt', '.xlsx')")
     app, clock, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
     create_batches(app)
     out = ingest(app, file_name("S1").replace(".txt", ".xlsx"), ["1|1|a"])
@@ -229,7 +228,7 @@ def test_failure_during_promotion_rolls_back_core_and_control(env, conn, monkeyp
     monkeypatch.setattr(app.pipeline.logger, "batch_event", flaky)
     with pytest.raises(RuntimeError):
         ingest(app, name, ["2|2|b", "3|3|c"])
-    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1' AND Run_Ty='MONTHLY'")
+    b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID='S1' AND Run_Ty='MONTHLY'")
     assert q1(conn, "SELECT Load_ID FROM ComplianceFileLoad WHERE Load_Stat='PROMOTED'")["load_id"] == first.load_id
     cur = qa(conn, "SELECT load_id FROM core_t.tbl_x WHERE btch_id=%s AND current_ind=1", b["btch_id"])
     assert {r["load_id"] for r in cur} == {first.load_id}
@@ -249,7 +248,7 @@ def test_file_for_a_closed_batch_needs_an_approved_override(conn, tmp_path):
     clock.set(utc(2026, 2, 2, 12, 0))
     ext = q1(conn, "SELECT Extract_ID FROM ComplianceExtractControl")["extract_id"]
     app.control.close(ext, "ops", ack_warnings=True)
-    s2 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S2'")
+    s2 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID='S2'")
     assert (s2["batch_close_ind"], s2["req_stat"], s2["resolution_ty"]) == (1, "DATA_NOT_PROVIDED", "MISSING")
 
     clock.set(utc(2026, 2, 5, 12, 0))
@@ -282,15 +281,15 @@ def test_correction_needs_its_own_override_type_and_expires(env, conn):
     clock.set(utc(2026, 2, 2, 12, 0))
     ext = q1(conn, "SELECT Extract_ID FROM ComplianceExtractControl")["extract_id"]
     app.control.close(ext, "SYSTEM", automatic=True)
-    s1 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1'")
+    s1 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID='S1'")
 
     clock.set(utc(2026, 2, 4, 12, 0))
     add_override(conn, s1["req_id"], "LATE_ARRIVAL", date(2026, 2, 10))       # wrong type: the batch has data
     wrong = ingest(app, file_name("S1", ts=datetime(2026, 2, 4, 8, 0)), ["9|9|z"])
     assert (wrong.result, wrong.event_ty) == ("QUARANTINED", "FILE_REJECTED_BATCH_CLOSED")
     with conn.transaction():                                                  # make room for the right type
-        conn.execute("UPDATE ComplianceBatchOverride SET Apprvl_Stat='REJECTED', Rejected_By='ops', "
-                     "Rejected_Dtts=now() WHERE Req_ID=%s", (s1["req_id"],))
+        conn.execute("UPDATE ComplianceBatchOverride SET Apprvl_Stat='REJECTED', Reviewed_By='ops', "
+                     "Reviewed_Dtts=now() WHERE Req_ID=%s", (s1["req_id"],))
     add_override(conn, s1["req_id"], "CORRECTION", date(2026, 2, 5))
     ok = ingest(app, file_name("S1", ts=datetime(2026, 2, 4, 9, 0)), ["1|100|a"])
     assert (ok.result, ok.rule) == ("CORRECTION_PROMOTED", "C-2")
@@ -314,8 +313,8 @@ def test_process_path_scans_one_location_multiple_configs_and_batches(env, conn)
     summary = app.pipeline.process_path("inbound", "prja/in/")
     assert (summary.scanned, summary.promoted, summary.errors) == (2, 2, [])
     assert {o.result for o in summary.outcomes} == {"PROMOTED"}
-    s1 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S1'")
-    s2 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd='S2'")
+    s1 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID='S1'")
+    s2 = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID='S2'")
     assert s1["req_stat"] == "PROMOTED" and s2["req_stat"] == "PROMOTED"
     assert s1["btch_id"] != s2["btch_id"]                     # separate batches, one file each (D-26, D-33)
 
@@ -392,3 +391,4 @@ def test_file_matches_the_open_batch_of_the_latest_run_date(conn, tmp_path):
     b = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Req_ID=%s", out.req_id)
     assert b["req_dt_key"] == date(2026, 2, 3)
     assert q1(conn, "SELECT Req_Stat FROM ComplianceRequestControl WHERE Req_Dt_Key='2026-02-02'")["req_stat"] == "PENDING"
+

@@ -70,11 +70,11 @@ class DecisionProcessor:
                     continue
                 b = get_batch(self.conn, o["req_id"], for_update=True)
                 ctx = dict(ovrd_id=o["ovrd_id"], req_id=b["req_id"], extract_id=b["extract_id"], btch_id=b["btch_id"],
-                           project_cd=b["project_cd"], table_nm=b["table_nm"], src_cd=b["src_cd"], run_ty=b["run_ty"])
+                           project_cd=b["project_cd"], table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"])
                 src = self._reuse_source(o, b)
                 problem = self._reuse_problem(o, b, src)
                 if problem:
-                    self.logger.audit("OVERRIDE_INVALID_DETECTED", actor=o["apprvd_by"] or o["requested_by"],
+                    self.logger.audit("OVERRIDE_INVALID_DETECTED", actor=o["reviewed_by"] or o["created_by"],
                                       description=f"REUSE: {problem}", **ctx)
                     s.invalid.append(o["ovrd_id"])
                     continue
@@ -86,10 +86,10 @@ class DecisionProcessor:
                 if o["reuse_btch_id"] != src["btch_id"]:
                     self.conn.execute("UPDATE ComplianceBatchOverride SET Reuse_Btch_ID=%s, Updated_Dtts=%s "
                                       "WHERE Ovrd_ID=%s", (src["btch_id"], self.clock.now(), o["ovrd_id"]))
-                self.logger.audit("OVERRIDE_APPROVED", actor=o["apprvd_by"],
+                self.logger.audit("OVERRIDE_APPROVED", actor=o["reviewed_by"],
                                   description=f"REUSE of {src['btch_id']} valid through {o['valid_thru_dt_key']}", **ctx)
                 self.logger.batch_event("CARRY_FORWARD_APPLIED", req_id=b["req_id"], btch_id=b["btch_id"],
-                                        ovrd_id=o["ovrd_id"], actor=o["apprvd_by"] or "SYSTEM", entry_ty="MANUAL",
+                                        ovrd_id=o["ovrd_id"], actor=o["reviewed_by"] or "SYSTEM",
                                         detail=f"reuses {src['btch_id']} through {o['valid_thru_dt_key']}")
                 s.applied.append(o["ovrd_id"])
                 s.extracts_to_refresh.add(b["extract_id"])
@@ -117,7 +117,7 @@ class DecisionProcessor:
                               Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, self.clock.now(), b["req_id"]))
                 self.logger.audit("OVERRIDE_EXPIRED", ovrd_id=r["ovrd_id"], req_id=b["req_id"], btch_id=b["btch_id"],
                                   extract_id=b["extract_id"], project_cd=b["project_cd"], table_nm=b["table_nm"],
-                                  src_cd=b["src_cd"], run_ty=b["run_ty"],
+                                  src_id=b["src_id"], run_ty=b["run_ty"],
                                   description=f"REUSE of {b['reuse_btch_id']} is no longer valid")
                 self.logger.batch_event("CARRY_FORWARD_REMOVED", req_id=b["req_id"], btch_id=b["btch_id"],
                                         ovrd_id=r["ovrd_id"], detail=f"reuse of {b['reuse_btch_id']} expired")
@@ -160,12 +160,12 @@ class DecisionProcessor:
         same (project, table, source, run type) that has data. A carried batch resolves to its source."""
         row = self.conn.execute(
             """SELECT * FROM ComplianceRequestControl
-                WHERE Project_Cd=%s AND Table_Nm=%s AND Src_Cd=%s AND Run_Ty=%s AND Req_ID <> %s
+                WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s AND Run_Ty=%s AND Req_ID <> %s
                   AND Batch_Close_Ind = 1 AND Resolution_Ty IN ('NEW_FILE','CARRY_FORWARD')
                   AND (Rpt_Start_Dt_Key, Req_Dt_Key) <= (%s, %s)
                   AND (%s::text IS NULL OR Btch_ID = %s)
                 ORDER BY Rpt_Start_Dt_Key DESC, Req_Dt_Key DESC, Req_ID DESC LIMIT 1""",
-            (b["project_cd"], b["table_nm"], b["src_cd"], b["run_ty"], b["req_id"], b["rpt_start_dt_key"],
+            (b["project_cd"], b["table_nm"], b["src_id"], b["run_ty"], b["req_id"], b["rpt_start_dt_key"],
              b["req_dt_key"], o["reuse_btch_id"], o["reuse_btch_id"])).fetchone()
         if row and row["resolution_ty"] == "CARRY_FORWARD":
             row = self.conn.execute("SELECT * FROM ComplianceRequestControl WHERE Btch_ID=%s",

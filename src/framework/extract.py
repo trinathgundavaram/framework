@@ -158,26 +158,18 @@ class ExtractControlService:
             batches = batches_of_extract(self.conn, extract_id)
             received = [b for b in batches if b["resolution_ty"] in ("NEW_FILE", "CARRY_FORWARD")]
             required = e["required_src_cnt"]
-            extract_stat = ("COMPLETE" if required > 0 and len(received) >= required
-                            else "PARTIAL" if received else "PENDING")
-            received_ids = {b["req_id"] for b in received}
-            included = sorted(b["src_cd"] for b in received)
-            carried = sorted(b["src_cd"] for b in received if b["resolution_ty"] == "CARRY_FORWARD")
-            missing = sorted(b["src_cd"] for b in batches if b["req_id"] not in received_ids)
             pairs = self._data_pairs(received)
             signature = data_signature(pairs)
             btch_ids = [p[0] for p in pairs]
             load_ids = [p[1] for p in pairs if p[1] is not None]
 
             rules_stat = e["extract_rules_stat"]
-            failed = tuple(x for x in (e["failed_rule_refs"] or "").split(",") if x)
-            combine_cnt = e["combine_run_cnt"]
+            failed = tuple(x for x in (e["failed_rule_list"] or "").split(",") if x)
             combined = False
             wants_combine = trigger_cd != "EARLY_COMPLETE" or (required > 0 and len(received) >= required)
             fresh = signature == e["data_signature"] and rules_stat not in ("PENDING", "ERROR")
             if wants_combine and not (fresh and trigger_cd != "MANUAL_REFRESH"):
                 rules_stat, failed = self._period_rules(e, btch_ids, load_ids)
-                combine_cnt += 1
                 combined = True
             elif signature != e["data_signature"]:
                 rules_stat, failed = "PENDING", ()       # data changed; the previous rule result is stale
@@ -201,19 +193,16 @@ class ExtractControlService:
             reason = el.reason + (" | warnings: " + "; ".join(el.warnings) if el.warnings else "")
             row = self.conn.execute(
                 """UPDATE ComplianceExtractControl SET
-                      Received_Src_Cnt=%s, Included_Src_Cds=%s, Missing_Src_Cds=%s, Carried_Src_Cds=%s,
-                      Extract_Stat=%s, Extract_Rules_Stat=%s, Failed_Rule_Refs=%s,
-                      Eligibility_Cd=%s, Eligibility_Rsn_Txt=%s, Regenerate_Required_Ind=%s, Combine_Run_Cnt=%s,
-                      Combine_Last_Run_Dtts = CASE WHEN %s THEN %s ELSE Combine_Last_Run_Dtts END,
-                      Combine_Last_Trigger_Cd = CASE WHEN %s THEN %s ELSE Combine_Last_Trigger_Cd END,
-                      Combine_Btch_ID_List = CASE WHEN %s THEN %s ELSE Combine_Btch_ID_List END,
-                      Data_Signature = CASE WHEN %s THEN %s ELSE Data_Signature END,
-                      Updated_Dtts=%s
-                    WHERE Extract_ID=%s RETURNING *""",
-                (len(received), ",".join(included), ",".join(missing), ",".join(carried) or None,
-                 extract_stat, rules_stat, ",".join(failed) or None, el.code, reason[:1000], regenerate,
-                 combine_cnt, combined, now, combined, trigger_cd, combined, ",".join(btch_ids),
-                 combined, signature, now, extract_id)).fetchone()
+                      Received_Src_Cnt=%(received)s, Extract_Rules_Stat=%(rules_stat)s, Failed_Rule_List=%(failed)s,
+                      Eligibility_Cd=%(el)s, Eligibility_Rsn_Txt=%(reason)s, Regenerate_Required_Ind=%(regen)s,
+                      Combine_Last_Run_Dtts = CASE WHEN %(combined)s THEN %(now)s ELSE Combine_Last_Run_Dtts END,
+                      Combine_Btch_ID_List = CASE WHEN %(combined)s THEN %(btch_ids)s ELSE Combine_Btch_ID_List END,
+                      Data_Signature = CASE WHEN %(combined)s THEN %(signature)s ELSE Data_Signature END,
+                      Updated_Dtts=%(now)s
+                    WHERE Extract_ID=%(ext)s RETURNING *""",
+                {"received": len(received), "rules_stat": rules_stat, "failed": ",".join(failed) or None,
+                 "el": el.code, "reason": reason[:1000], "regen": regenerate, "combined": combined, "now": now,
+                 "btch_ids": ",".join(btch_ids), "signature": signature, "ext": extract_id}).fetchone()
         return ExtractState(row, el, btch_ids, load_ids)
 
     def trigger_rules(self, extract_id: Optional[int] = None, project_cd: Optional[str] = None,
@@ -252,7 +241,7 @@ class ExtractControlService:
                 log.warning("rules trigger failed for extract %s: %s", ext, e)
                 s.tally(RuleTriggerResult(ext, ERROR, detail=f"{type(e).__name__}: {e}"[:500]))
                 continue
-            failed = [x for x in (st.extract["failed_rule_refs"] or "").split(",") if x]
+            failed = [x for x in (st.extract["failed_rule_list"] or "").split(",") if x]
             s.tally(RuleTriggerResult(ext, st.extract["extract_rules_stat"], failed, st.eligibility.code))
         return s
 
@@ -299,7 +288,7 @@ class ExtractControlService:
             "table_nm": e["table_nm"], "run_ty": e["run_ty"], "rpt_start_dt_key": e["rpt_start_dt_key"],
             "rpt_end_dt_key": e["rpt_end_dt_key"], "req_dt_key": e["req_dt_key"],
             "btch_id_list": list(btch_ids), "load_id_list": list(load_ids),
-            "core_schema_nm": cfg.core_schema_nm if cfg else None, "core_tblnm": e["table_nm"]},
+            "core_schema_nm": cfg.core_schema_nm if cfg else None, "core_table_nm": e["table_nm"]},
             self.settings.period_rules_mode)
         ctx = dict(extract_id=e["extract_id"], project_cd=e["project_cd"], table_nm=e["table_nm"], run_ty=e["run_ty"])
         if outcome.status == ERROR:
@@ -373,18 +362,17 @@ class ExtractControlService:
                     """UPDATE ComplianceRequestControl SET Batch_Close_Ind=1, Req_Stat=%s, Resolution_Ty=%s,
                               Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, resolution, now, b["req_id"]))
                 self.logger.batch_event("BATCH_CLOSED", req_id=b["req_id"], btch_id=b["btch_id"], actor=closed_by,
-                                        entry_ty="AUTO" if closed_by == "SYSTEM" else "MANUAL",
                                         detail=f"{to_stat} / {resolution}")
                 if resolution == "MISSING":
                     self.logger.audit("SOURCE_MISSING_AT_CLOSE", req_id=b["req_id"], btch_id=b["btch_id"],
                                       extract_id=e["extract_id"], project_cd=b["project_cd"], table_nm=b["table_nm"],
-                                      src_cd=b["src_cd"], run_ty=b["run_ty"])
+                                      src_id=b["src_id"], run_ty=b["run_ty"])
                 closed += 1
             row = self.conn.execute(
-                """UPDATE ComplianceExtractControl SET Extract_Close_Ind=1, Extract_Closed_Dtts=%s, Closed_By=%s,
-                          Close_Warning_Txt=%s, Closed_Data_Signature=Data_Signature, Regenerate_Required_Ind=0,
-                          Updated_Dtts=%s WHERE Extract_ID=%s RETURNING *""",
-                (now, closed_by, "; ".join(warnings) or None, now, e["extract_id"])).fetchone()
+                """UPDATE ComplianceExtractControl SET Extract_Close_Ind=1, Extract_Closed_Dtts=%s, Extract_Closed_By=%s,
+                          Closed_Data_Signature=Data_Signature, Regenerate_Required_Ind=0, Updated_Dtts=%s
+                    WHERE Extract_ID=%s RETURNING *""",
+                (now, closed_by, now, e["extract_id"])).fetchone()
             event = "EXTRACT_CLOSED_WITH_WARNINGS" if warnings else "EXTRACT_CLOSED"
             self.logger.audit(event, actor=closed_by, extract_id=e["extract_id"], project_cd=e["project_cd"],
                               table_nm=e["table_nm"], run_ty=e["run_ty"],

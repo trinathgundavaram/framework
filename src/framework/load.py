@@ -62,9 +62,9 @@ def staging_business_columns(conn, schema: str, table: str) -> list[str]:
 
 def core_insert_columns(conn, cfg: "FileConfig") -> list[str]:
     """Staging business columns that exist in core, minus identity/generated/serial columns (D-61)."""
-    core = _table_columns(conn, cfg.core_schema_nm, cfg.core_tblnm, CORE_FRAMEWORK_COLS, "core")
+    core = _table_columns(conn, cfg.core_schema_nm, cfg.table_nm, CORE_FRAMEWORK_COLS, "core")
     usable = {c.name for c in core if not c.auto and c.name not in CORE_FRAMEWORK_COLS}
-    return [c for c in staging_business_columns(conn, cfg.stg_schema_nm, cfg.stg_tblnm) if c in usable]
+    return [c for c in staging_business_columns(conn, cfg.stg_schema_nm, cfg.stg_table_nm) if c in usable]
 
 
 def _ident(schema: str, table: str) -> sql.Identifier:
@@ -73,29 +73,12 @@ def _ident(schema: str, table: str) -> sql.Identifier:
 
 # ============================================================================ file reading
 _DELIMS = {"TAB": "\t", "\\T": "\t", "PIPE": "|", "COMMA": ",", "SEMICOLON": ";"}
-_STD_TERMINATORS = {None, "", "\\N", "\\R\\N", "LF", "CRLF", "\n", "\r\n"}
-
-
-@dataclass
-class ReadResult:
-    rows: list[list[Optional[str]]]
-    header_col_count: Optional[int]
-    trailer_count: Optional[int]
-
-    @property
-    def data_row_count(self) -> int:
-        return len(self.rows)
+Rows = list[list[Optional[str]]]
 
 
 def delimiter_for(cfg: "FileConfig") -> str:
     d = cfg.delmtr_cd
     return _DELIMS.get(d.upper(), d) if d else ","
-
-
-def _check_terminator(cfg: "FileConfig") -> None:
-    lt = cfg.line_term_cd
-    if lt is not None and lt.upper() not in _STD_TERMINATORS and lt not in _STD_TERMINATORS:
-        raise ConfigError(f"Line_Term_Cd {lt!r} is not supported (open question Q-02)")
 
 
 def sanitize_db_error(msg: str) -> str:
@@ -107,8 +90,8 @@ def _normalise(values: list[str], empty_as_null: bool) -> list[Optional[str]]:
     return [None if (empty_as_null and v == "") else v for v in values]
 
 
-def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> ReadResult:
-    _check_terminator(cfg)
+def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> Rows:
+    """LF and CRLF line endings are both accepted."""
     delim = delimiter_for(cfg)
     try:
         with open(path, "r", encoding=settings.file_encoding, newline="") as f:
@@ -118,7 +101,6 @@ def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "
     lines = text.splitlines(keepends=True)
     while lines and lines[-1].strip() == "":
         lines.pop()
-    header_cols = None
     trailer_count = None
     if cfg.has_trailer:
         if not lines:
@@ -131,11 +113,12 @@ def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "
             trailer_count = int(m.group(1))
     reader = csv.reader(io.StringIO("".join(lines)), delimiter=delim, quotechar=settings.quote_char or None,
                         strict=True)
-    rows: list[list[Optional[str]]] = []
+    rows: Rows = []
+    seen_header = False
     try:
         for i, rec in enumerate(reader):
             if i == 0 and cfg.has_header:
-                header_cols = len(rec)
+                seen_header = True
                 continue
             if len(rec) != expected_cols:
                 raise FileRejected("FILE_COLUMN_COUNT_MISMATCH",
@@ -143,17 +126,16 @@ def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "
             rows.append(_normalise(rec, settings.empty_as_null))
     except csv.Error as e:
         raise FileRejected("FILE_PARSE_ERROR", f"malformed delimited file at line {reader.line_num}: {e}")
-    if cfg.has_header and header_cols is None:
+    if cfg.has_header and not seen_header:
         raise FileRejected("FILE_PARSE_ERROR", "header expected but file has no lines")
     if trailer_count is not None and trailer_count != len(rows):
         raise FileRejected("FILE_TRAILER_COUNT_MISMATCH",
                            f"trailer count {trailer_count} != data rows {len(rows)}")
-    return ReadResult(rows, header_cols, trailer_count)
+    return rows
 
 
 def scan_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> int:
     """Streaming structural check (no rows kept in memory). Returns the data row count."""
-    _check_terminator(cfg)
     if cfg.has_trailer:
         raise FileRejected("FILE_TYPE_NOT_SUPPORTED", "streaming scan does not support trailer records yet (Q-02)")
     count = 0
@@ -174,7 +156,7 @@ def scan_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "
     return count
 
 
-def read_with_pandas(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> ReadResult:
+def read_with_pandas(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> Rows:
     import pandas as pd  # optional dependency
 
     try:
@@ -191,12 +173,11 @@ def read_with_pandas(path: str, cfg: "FileConfig", expected_cols: int, settings:
         df = df.iloc[:-1]
     if df.shape[1] != expected_cols and len(df):
         raise FileRejected("FILE_COLUMN_COUNT_MISMATCH", f"{df.shape[1]} columns, expected {expected_cols}")
-    rows = [_normalise([str(v) for v in rec], settings.empty_as_null) for rec in df.itertuples(index=False)]
-    return ReadResult(rows, None, None)
+    return [_normalise([str(v) for v in rec], settings.empty_as_null) for rec in df.itertuples(index=False)]
 
 
-def read_file(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> ReadResult:
-    ft = cfg.src_file_ty.lower()
+def read_file(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> Rows:
+    ft = cfg.src_file_ty
     if ft not in settings.supported_file_types:
         raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} is not enabled (Q-02)")
     if ft in (".txt", ".csv", ".dat", ".psv", ".tsv"):
@@ -207,33 +188,27 @@ def read_file(path: str, cfg: "FileConfig", expected_cols: int, settings: "Setti
 
 
 # ============================================================================ staging (D-05, D-62)
-@dataclass
-class StageResult:
-    data_rows: int
-    trailer_count: Optional[int]
-
-
 def stage(conn: psycopg.Connection, settings: "Settings", *, file_path: str, cfg: "FileConfig", btch_id: str,
-          load_id: int, src_file_nm: str, loaded_at: datetime, spark=None) -> StageResult:
-    """Delete staging rows for btch_id and load the file tagged with load_id."""
-    stg_columns = staging_business_columns(conn, cfg.stg_schema_nm, cfg.stg_tblnm)
-    table = _ident(cfg.stg_schema_nm, cfg.stg_tblnm)
+          load_id: int, src_file_nm: str, loaded_at: datetime, spark=None) -> int:
+    """Delete staging rows for btch_id and load the file tagged with load_id. Returns the staged row count."""
+    stg_columns = staging_business_columns(conn, cfg.stg_schema_nm, cfg.stg_table_nm)
+    table = _ident(cfg.stg_schema_nm, cfg.stg_table_nm)
     if settings.load_engine == "SPARK":
         return _stage_spark(conn, settings, spark, file_path, cfg, stg_columns, btch_id, load_id, src_file_nm,
                             loaded_at)
-    result = read_file(file_path, cfg, len(stg_columns), settings)
+    rows = read_file(file_path, cfg, len(stg_columns), settings)
     cols = [*stg_columns, *STAGING_FRAMEWORK_COLS]
     copy_sql = sql.SQL("COPY {} ({}) FROM STDIN").format(table, sql.SQL(", ").join(map(sql.Identifier, cols)))
     try:
         with conn.transaction():
             conn.execute(sql.SQL("DELETE FROM {} WHERE btch_id = %s").format(table), (btch_id,))
             with conn.cursor() as cur, cur.copy(copy_sql) as cp:
-                for rec in result.rows:
+                for rec in rows:
                     cp.write_row([*rec, btch_id, load_id, src_file_nm, loaded_at])
     except (psycopg.errors.DataError, psycopg.errors.IntegrityError) as e:
         raise FileRejected("FILE_PARSE_ERROR",
                            f"value does not fit staging column types: {sanitize_db_error(str(e.diag.message_primary))}")
-    return StageResult(result.data_row_count, result.trailer_count)
+    return len(rows)
 
 
 def _stage_spark(conn, settings, spark, file_path, cfg, stg_columns, btch_id, load_id, src_file_nm, loaded_at):
@@ -256,19 +231,19 @@ def _stage_spark(conn, settings, spark, file_path, cfg, stg_columns, btch_id, lo
     df = (df.withColumn("btch_id", F.lit(btch_id)).withColumn("load_id", F.lit(load_id))
           .withColumn("src_file_nm", F.lit(src_file_nm)).withColumn("stg_load_dtts", F.lit(loaded_at)))
     with conn.transaction():
-        conn.execute(sql.SQL("DELETE FROM {} WHERE btch_id = %s").format(_ident(cfg.stg_schema_nm, cfg.stg_tblnm)),
+        conn.execute(sql.SQL("DELETE FROM {} WHERE btch_id = %s").format(_ident(cfg.stg_schema_nm, cfg.stg_table_nm)),
                      (btch_id,))
     info = conn.info
     props = {"driver": "org.postgresql.Driver", "stringtype": "unspecified", "user": info.user or "",
              "password": info.password or ""}
     try:
         (df.repartition(settings.spark_write_partitions).write.option("batchsize", settings.spark_batch_size)
-         .jdbc(settings.spark_jdbc_url, f"{cfg.stg_schema_nm}.{cfg.stg_tblnm}", mode="append", properties=props))
+         .jdbc(settings.spark_jdbc_url, f"{cfg.stg_schema_nm}.{cfg.stg_table_nm}", mode="append", properties=props))
     except Exception as e:  # noqa: BLE001
         if "invalid input syntax" in str(e) or "out of range" in str(e):
             raise FileRejected("FILE_PARSE_ERROR", "value does not fit staging column types")
         raise
-    return StageResult(rows, None)
+    return rows
 
 
 # ============================================================================ promotion (D-01, §10.2)
@@ -281,7 +256,7 @@ class PromotionResult:
 def swap(conn, cfg: "FileConfig", btch_id: str, load_id: int, expected_rows: int, now: datetime) -> PromotionResult:
     """Must run inside the caller's open transaction; the caller holds the batch advisory lock."""
     cols = core_insert_columns(conn, cfg)
-    core, stg = _ident(cfg.core_schema_nm, cfg.core_tblnm), _ident(cfg.stg_schema_nm, cfg.stg_tblnm)
+    core, stg = _ident(cfg.core_schema_nm, cfg.table_nm), _ident(cfg.stg_schema_nm, cfg.stg_table_nm)
     col_sql = sql.SQL("").join(sql.SQL("{}, ").format(sql.Identifier(c)) for c in cols)
     disabled = conn.execute(sql.SQL("UPDATE {} SET current_ind = 0, end_dtts = %s WHERE btch_id = %s "
                                     "AND current_ind = 1").format(core), (now, btch_id)).rowcount

@@ -38,12 +38,12 @@ class CreateResult:
     extract_id: Optional[int] = None
 
 
-def find_batch(conn, project_cd, table_nm, src_cd, run_ty, rpt_start: date, rpt_end: date, req_dt: date,
+def find_batch(conn, project_cd, table_nm, src_id, run_ty, rpt_start: date, rpt_end: date, req_dt: date,
                for_update: bool = False) -> Optional[dict]:
     return conn.execute(
-        """SELECT * FROM ComplianceRequestControl WHERE Project_Cd=%s AND Table_Nm=%s AND Src_Cd=%s AND Run_Ty=%s
+        """SELECT * FROM ComplianceRequestControl WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s AND Run_Ty=%s
               AND Rpt_Start_Dt_Key=%s AND Rpt_End_Dt_Key=%s AND Req_Dt_Key=%s""" + (" FOR UPDATE" if for_update else ""),
-        (project_cd, table_nm, src_cd, run_ty, rpt_start, rpt_end, req_dt)).fetchone()
+        (project_cd, table_nm, src_id, run_ty, rpt_start, rpt_end, req_dt)).fetchone()
 
 
 def get_batch(conn: psycopg.Connection, req_id: int, for_update: bool = False) -> dict:
@@ -53,7 +53,7 @@ def get_batch(conn: psycopg.Connection, req_id: int, for_update: bool = False) -
 
 def batches_of_extract(conn: psycopg.Connection, extract_id: int, open_only: bool = False) -> list[dict]:
     return conn.execute("SELECT * FROM ComplianceRequestControl WHERE Extract_ID=%s"
-                        + (" AND Batch_Close_Ind=0 ORDER BY Src_Cd FOR UPDATE" if open_only else " ORDER BY Src_Cd"),
+                        + (" AND Batch_Close_Ind=0 ORDER BY Src_ID FOR UPDATE" if open_only else " ORDER BY Src_ID"),
                         (extract_id,)).fetchall()
 
 
@@ -71,13 +71,13 @@ def promoted_load(conn: psycopg.Connection, btch_id: str) -> Optional[dict]:
 
 
 def create_batch(conn: psycopg.Connection, clock: Clock, logger: EventLogger, *, xwalk: XwalkRow,
-                 rpt_start: date, rpt_end: date, req_dt: date, created_by: str,
-                 required_cnt: int, intake_id: Optional[str] = None) -> CreateResult:
+                 rpt_start: date, rpt_end: date, req_dt: date, required_cnt: int,
+                 intake_id: Optional[int] = None) -> CreateResult:
     """Idempotent: created=False when the batch for (period, run date) already exists (D-30)."""
     x = xwalk
     with conn.transaction():
-        db.xact_lock(conn, db.seq_key(x.project_cd, x.table_nm, x.src_cd, x.run_ty))
-        existing = find_batch(conn, x.project_cd, x.table_nm, x.src_cd, x.run_ty, rpt_start, rpt_end, req_dt)
+        db.xact_lock(conn, db.seq_key(x.project_cd, x.table_nm, x.src_id, x.run_ty))
+        existing = find_batch(conn, x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt)
         if existing:
             return CreateResult(existing["req_id"], False, "EXISTS", existing["extract_id"])
         conn.execute(
@@ -88,27 +88,26 @@ def create_batch(conn: psycopg.Connection, clock: Clock, logger: EventLogger, *,
         ext = find_extract(conn, x.project_cd, x.table_nm, x.run_ty, rpt_start, rpt_end, req_dt)
         if ext["extract_close_ind"] == 1:
             logger.audit("BATCH_CREATE_SKIPPED_EXTRACT_CLOSED", project_cd=x.project_cd, table_nm=x.table_nm,
-                         src_cd=x.src_cd, run_ty=x.run_ty, extract_id=ext["extract_id"], intake_id=intake_id,
+                         src_id=x.src_id, run_ty=x.run_ty, extract_id=ext["extract_id"], intake_id=intake_id,
                          description=f"run date {req_dt}, period {rpt_start}..{rpt_end} is closed; batch not created")
             return CreateResult(None, False, "EXTRACT_CLOSED", ext["extract_id"])
         seq = 1 + conn.execute(
-            """SELECT count(*) AS n FROM ComplianceRequestControl WHERE Project_Cd=%s AND Table_Nm=%s AND Src_Cd=%s
+            """SELECT count(*) AS n FROM ComplianceRequestControl WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s
                   AND Run_Ty=%s AND Req_Dt_Key=%s""",
-            (x.project_cd, x.table_nm, x.src_cd, x.run_ty, req_dt)).fetchone()["n"]
-        btch = build_btch_id(req_dt, x.project_cd, x.table_nm, x.src_cd, x.run_ty, x.cmplnc_vrsn, seq)
+            (x.project_cd, x.table_nm, x.src_id, x.run_ty, req_dt)).fetchone()["n"]
+        btch = build_btch_id(req_dt, x.project_cd, x.table_nm, x.src_id, x.run_ty, x.cmplnc_vrsn, seq)
         now = clock.now()
         row = conn.execute(
-            """INSERT INTO ComplianceRequestControl (Project_Cd, Table_Nm, Src_Cd, Run_Ty, Rpt_Start_Dt_Key,
-                 Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Cmplnc_Vrsn, Extract_ID, Req_Stat, Created_By,
-                 Created_Dtts, Updated_Dtts)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING Req_ID""",
-            (x.project_cd, x.table_nm, x.src_cd, x.run_ty, rpt_start, rpt_end, req_dt, btch, x.cmplnc_vrsn,
-             ext["extract_id"], PENDING, created_by, now, now)).fetchone()
+            """INSERT INTO ComplianceRequestControl (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key,
+                 Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Extract_ID, Req_Stat, Created_Dtts, Updated_Dtts)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING Req_ID""",
+            (x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt, btch, ext["extract_id"],
+             PENDING, now, now)).fetchone()
         if required_cnt > ext["required_src_cnt"]:          # a later source joined the same run (ad-hoc intake)
             conn.execute("UPDATE ComplianceExtractControl SET Required_Src_Cnt=%s, Updated_Dtts=%s WHERE Extract_ID=%s",
                          (required_cnt, now, ext["extract_id"]))
         logger.batch_event("BATCH_CREATED", req_id=row["req_id"], btch_id=btch, intake_id=intake_id,
-                           detail=f"created_by={created_by} run_date={req_dt} period={rpt_start}..{rpt_end}")
+                           detail=f"run_date={req_dt} period={rpt_start}..{rpt_end}")
         return CreateResult(row["req_id"], True, None, ext["extract_id"])
 
 
@@ -181,7 +180,7 @@ def create_batches(conn: psycopg.Connection, clock: Clock, settings: Settings, *
     required = Counter(x.table_nm for x in rows)
     for x in rows:
         res = create_batch(conn, clock, logger, xwalk=x, rpt_start=s.rpt_start, rpt_end=s.rpt_end,
-                           req_dt=s.run_date, created_by="SCHEDULER", required_cnt=required[x.table_nm])
+                           req_dt=s.run_date, required_cnt=required[x.table_nm])
         if res.created:
             s.created += 1
         elif res.skipped_reason == "EXISTS":
@@ -195,9 +194,9 @@ def create_batches(conn: psycopg.Connection, clock: Clock, settings: Settings, *
 @dataclass
 class IntakeSummary:
     run_date: Optional[date] = None
+    handled: int = 0
     created: int = 0
     existing: int = 0
-    completed: int = 0
     failed: int = 0
     details: list[str] = field(default_factory=list)
 
@@ -206,8 +205,10 @@ class IntakeProcessor:
     """ComplianceRequestInTake holds ad-hoc requests only (the run type must be in the ADHOC category).
 
     One row asks for batches for the SAME report period on every run date from Req_Start_Dt_Key to
-    Req_End_Dt_Key. This job runs daily: it creates the batches for the run date and marks the row
-    COMPLETED once the window has passed. A one-off request has Req_Start_Dt_Key = Req_End_Dt_Key.
+    Req_End_Dt_Key. This job runs daily: each request whose window contains the run date is handled once
+    for that date (Last_Run_Dt_Key), its batches are created, and every outcome is written to the audit
+    tables under its Intake_ID. A request that cannot be served is audited as INTAKE_FAILED on each run
+    date of its window until its configuration is fixed.
     """
 
     def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings):
@@ -217,90 +218,71 @@ class IntakeProcessor:
         self.logger = EventLogger(conn, clock)
 
     def run(self, project_cd: Optional[str] = None, run_ty: Optional[str] = None) -> IntakeSummary:
-        """Sweep pending ad-hoc requests. `BATCH_CREATION` (modules.py) always calls this with
+        """Sweep the requests due today. `BATCH_CREATION` (modules.py) always calls this with
         `project_cd` set, so one project's trigger only ever touches that project's requests; pass
         neither argument to sweep every project (a one-off, unscoped run)."""
         summary = IntakeSummary(run_date=self.clock.today(self.settings.business_tz))
-        handled: set[str] = set()
         while True:
             current = None
             try:
                 with self.conn.transaction():
                     row = self.conn.execute(
                         """SELECT * FROM ComplianceRequestInTake
-                            WHERE Intake_Stat IN ('NEW','IN_PROGRESS') AND Req_Start_Dt_Key <= %s
-                              AND NOT (Intake_ID = ANY(%s))
-                              AND (%s::text IS NULL OR Project_Cd = %s) AND (%s::text IS NULL OR Run_Ty = %s)
-                            ORDER BY Requested_Dtts, Intake_ID LIMIT 1 FOR UPDATE SKIP LOCKED""",
-                        (summary.run_date, list(handled), project_cd, project_cd, run_ty, run_ty)).fetchone()
+                            WHERE %(d)s BETWEEN Req_Start_Dt_Key AND Req_End_Dt_Key
+                              AND Last_Run_Dt_Key IS DISTINCT FROM %(d)s
+                              AND (%(p)s::text IS NULL OR Project_Cd = %(p)s) AND (%(r)s::text IS NULL OR Run_Ty = %(r)s)
+                            ORDER BY Created_Dtts, Intake_ID LIMIT 1 FOR UPDATE SKIP LOCKED""",
+                        {"d": summary.run_date, "p": project_cd, "r": run_ty}).fetchone()
                     if row is None:
                         return summary
                     current = row["intake_id"]
-                    handled.add(current)
+                    summary.handled += 1
                     self._process(row, summary)
             except Exception as e:  # unexpected error: record it and continue with the next intake
                 if current is None:
                     raise
                 log.exception("intake %s failed", current)
                 with self.conn.transaction():
-                    self._finish(current, "FAILED", f"technical error: {e}")
+                    self._mark_run(current)
                     self.logger.audit("INTAKE_FAILED", intake_id=current, description=f"technical error: {e}")
                 summary.failed += 1
 
     # ------------------------------------------------------------------
     def _process(self, it: dict, summary: IntakeSummary) -> None:
-        run_date = summary.run_date
+        self._mark_run(it["intake_id"])
         rt = cfg.run_type(self.conn, it["run_ty"])
         if rt is None or not rt.active or rt.run_category_cd != "ADHOC":
             self._fail(it, summary, f"run type {it['run_ty']} is unknown, inactive or not ADHOC")
             return
         sources = cfg.effective_sources(self.conn, it["project_cd"], it["table_nm"], it["run_ty"],
                                         it["rpt_start_dt_key"])
-        targets = [x for x in sources if it["src_cd"] is None or x.src_cd == it["src_cd"]]
+        targets = [x for x in sources if it["src_id"] is None or x.src_id == it["src_id"]]
         if not targets:
             self._fail(it, summary, "no active, effective crosswalk source for this request")
             return
-
         created = existing = 0
         msgs = []
-        if run_date <= it["req_end_dt_key"]:                       # inside the request window
-            for x in targets:
-                res = create_batch(self.conn, self.clock, self.logger, xwalk=x,
-                                   rpt_start=it["rpt_start_dt_key"], rpt_end=it["rpt_end_dt_key"], req_dt=run_date,
-                                   created_by="ADHOC_INTAKE", required_cnt=len(targets), intake_id=it["intake_id"])
-                if res.created:
-                    created += 1
-                elif res.skipped_reason == "EXISTS":
-                    existing += 1
-                else:
-                    msgs.append(f"{x.src_cd}: {res.skipped_reason}")
+        for x in targets:
+            res = create_batch(self.conn, self.clock, self.logger, xwalk=x, rpt_start=it["rpt_start_dt_key"],
+                               rpt_end=it["rpt_end_dt_key"], req_dt=summary.run_date, required_cnt=len(targets),
+                               intake_id=it["intake_id"])
+            if res.created:
+                created += 1
+            elif res.skipped_reason == "EXISTS":
+                existing += 1
+            else:
+                msgs.append(f"{x.src_id}: {res.skipped_reason}")
         summary.created += created
         summary.existing += existing
-        done = run_date >= it["req_end_dt_key"]
-        stat = "COMPLETED" if done else "IN_PROGRESS"
-        self.conn.execute(
-            """UPDATE ComplianceRequestInTake SET Intake_Stat=%s, Error_Txt=%s, Updated_Dtts=%s,
-                      Last_Created_Dt_Key = CASE WHEN %s > 0 THEN %s ELSE Last_Created_Dt_Key END,
-                      Processed_Dtts = CASE WHEN %s THEN %s ELSE Processed_Dtts END
-                WHERE Intake_ID=%s""",
-            (stat, "; ".join(msgs) or None, self.clock.now(), created, run_date, done, self.clock.now(),
-             it["intake_id"]))
-        if done:
-            summary.completed += 1
-            self.logger.audit("INTAKE_COMPLETED", intake_id=it["intake_id"], project_cd=it["project_cd"],
-                              table_nm=it["table_nm"], src_cd=it["src_cd"], run_ty=it["run_ty"],
-                              description=f"window {it['req_start_dt_key']}..{it['req_end_dt_key']} finished")
-        summary.details.append(f"{it['intake_id']}: {stat} created={created} existing={existing}"
+        summary.details.append(f"{it['intake_id']}: created={created} existing={existing}"
                                + (f" {'; '.join(msgs)}" if msgs else ""))
 
     def _fail(self, it: dict, summary: IntakeSummary, reason: str) -> None:
-        self._finish(it["intake_id"], "FAILED", reason)
         self.logger.audit("INTAKE_FAILED", intake_id=it["intake_id"], project_cd=it["project_cd"],
-                          table_nm=it["table_nm"], src_cd=it["src_cd"], run_ty=it["run_ty"], description=reason)
+                          table_nm=it["table_nm"], src_id=it["src_id"], run_ty=it["run_ty"], description=reason)
         summary.failed += 1
         summary.details.append(f"{it['intake_id']}: FAILED {reason}")
 
-    def _finish(self, intake_id: str, stat: str, error: Optional[str]) -> None:
-        self.conn.execute(
-            """UPDATE ComplianceRequestInTake SET Intake_Stat=%s, Processed_Dtts=%s, Error_Txt=%s, Updated_Dtts=%s
-                WHERE Intake_ID=%s""", (stat, self.clock.now(), error, self.clock.now(), intake_id))
+    def _mark_run(self, intake_id: int) -> None:
+        self.conn.execute("UPDATE ComplianceRequestInTake SET Last_Run_Dt_Key=%s, Updated_Dtts=%s WHERE Intake_ID=%s",
+                          (self.clock.today(self.settings.business_tz), self.clock.now(), intake_id))

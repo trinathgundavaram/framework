@@ -181,7 +181,7 @@ tell the job which table, which file, and the primary key every time.
 | `--TABLE_NAME` | `cms_compliance.compliancesourcesystem` |
 | `--S3_INPUT_PATH` | `s3://<artifacts-bucket>/cms-compliance-metadata/seed_data/` |
 | `--S3_FILE_NAME` | `compliance_source_system.csv` |
-| `--PRIMARY_KEY` | `src_cd` |
+| `--PRIMARY_KEY` | `src_id` |
 | `--MODE` | `upsert` (or `insert_only` for an append-only table — optional, default `upsert`) |
 
 **CLI**, same thing:
@@ -193,7 +193,7 @@ aws glue start-job-run \
     "--TABLE_NAME": "cms_compliance.compliancesourcesystem",
     "--S3_INPUT_PATH": "s3://<artifacts-bucket>/cms-compliance-metadata/seed_data/",
     "--S3_FILE_NAME": "compliance_source_system.csv",
-    "--PRIMARY_KEY": "src_cd"
+    "--PRIMARY_KEY": "src_id"
   }'
 ```
 
@@ -206,7 +206,7 @@ A few notes on the parameters:
   `--S3_FILE_NAME` (and `--TABLE_NAME` / `--PRIMARY_KEY`) — override
   `--S3_INPUT_PATH` too if the file lives somewhere else in the bucket.
 - `--PRIMARY_KEY` takes one or more columns, comma-separated, e.g.
-  `project_cd,table_nm,src_cd,run_ty,effective_start_dt` for a composite key.
+  `project_cd,table_nm,src_id,run_ty,effective_start_dt_key` for a composite key.
 - The file's own CSV header defines which columns get loaded — it must
   match the table's columns minus whichever audit columns the table owns
   (`created_dtts`, `updated_dtts`, `loaded_dtts`, `created_by`,
@@ -223,16 +223,22 @@ A few notes on the parameters:
 Reference commands for the tables this repo ships seed data for
 (`aws/glue/code/seed_data/*.csv`) — swap `dev` for `test`/`prod` and adjust
 the bucket. Framework table names are unquoted in `schema.sql`, so Postgres
-stores them lower-case (`compliancesourcesystem`, ...).
+stores them lower-case (`compliancesourcesystem`, ...). Load `complianceproject`,
+`compliancesourcesystem` and `complianceruntype` before the crosswalk, which references them.
 
 ```bash
 BUCKET=<artifacts-bucket>
 INPUT=s3://$BUCKET/cms-compliance-metadata/seed_data/
 
 aws glue start-job-run --job-name cms_compliance_metadata_load_dev --arguments "{
+  \"--TABLE_NAME\": \"cms_compliance.complianceproject\",
+  \"--S3_INPUT_PATH\": \"$INPUT\", \"--S3_FILE_NAME\": \"compliance_project.csv\",
+  \"--PRIMARY_KEY\": \"project_cd\" }"
+
+aws glue start-job-run --job-name cms_compliance_metadata_load_dev --arguments "{
   \"--TABLE_NAME\": \"cms_compliance.compliancesourcesystem\",
   \"--S3_INPUT_PATH\": \"$INPUT\", \"--S3_FILE_NAME\": \"compliance_source_system.csv\",
-  \"--PRIMARY_KEY\": \"src_cd\" }"
+  \"--PRIMARY_KEY\": \"src_id\" }"
 
 aws glue start-job-run --job-name cms_compliance_metadata_load_dev --arguments "{
   \"--TABLE_NAME\": \"cms_compliance.complianceruntype\",
@@ -242,13 +248,13 @@ aws glue start-job-run --job-name cms_compliance_metadata_load_dev --arguments "
 aws glue start-job-run --job-name cms_compliance_metadata_load_dev --arguments "{
   \"--TABLE_NAME\": \"cms_compliance.compliancedatasetsourcexwalk\",
   \"--S3_INPUT_PATH\": \"$INPUT\", \"--S3_FILE_NAME\": \"compliance_dataset_source_xwalk.csv\",
-  \"--PRIMARY_KEY\": \"project_cd,table_nm,src_cd,run_ty,effective_start_dt\" }"
+  \"--PRIMARY_KEY\": \"project_cd,table_nm,src_id,run_ty,effective_start_dt_key\" }"
 ```
 
 `ComplianceSourceFileConfig` and `ComplianceRuleBinding` load the same way once
 you add a CSV for them (primary keys `cfg_id` — omit it from the file and use
 `--MODE insert_only` for new rows — and
-`project_cd,table_nm,src_cd,rule_scope_cd,gre_rule_group,gre_rule_variant`).
+`project_cd,table_nm,src_id,rule_scope_cd,gre_rule_group,gre_rule_variant`).
 
 ## Loading any other table
 

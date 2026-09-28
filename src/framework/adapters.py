@@ -1,5 +1,5 @@
-"""Adapters to external systems: object storage (S3 / local), the GRE rules engine and notification
-channels (log / SES + SNS). Heavy SDKs are imported lazily.
+"""Adapters to external systems: object storage (S3 / local), the GRE rules engine and email
+notification channels (log / SES). Heavy SDKs are imported lazily.
 
 The framework does not call the extract job itself (D-76): the project's job chain generates the
 extract after the framework closes the run."""
@@ -277,47 +277,44 @@ def build_rule_engine(settings: Settings) -> RuleEngine:
     return CallableRuleEngine(_import(settings.gre_entrypoint, "GRE_ENTRYPOINT"))
 
 
-# ============================================================================ notification channels (D-54)
+# ============================================================================ email notifications (D-54)
 @dataclass
 class Message:
     subject: str
     body: str
     recipients: list[str]
-    sns_topic_arn: Optional[str]
 
 
 class Channel(ABC):
     @abstractmethod
-    def send(self, channel_cd: str, msg: Message) -> None: ...
+    def send(self, msg: Message) -> None: ...
 
 
 class LogChannel(Channel):
+    """Writes emails to the log instead of sending them (local development, tests)."""
+
     def __init__(self):
-        self.sent: list[tuple[str, Message]] = []
+        self.sent: list[Message] = []
 
-    def send(self, channel_cd, msg):
-        self.sent.append((channel_cd, msg))
-        log.warning("NOTIFY[%s] to=%s topic=%s | %s | %s", channel_cd, msg.recipients, msg.sns_topic_arn,
-                    msg.subject, msg.body.replace("\n", " / "))
+    def send(self, msg):
+        self.sent.append(msg)
+        log.warning("EMAIL to=%s | %s | %s", msg.recipients, msg.subject, msg.body.replace("\n", " / "))
 
 
-class AwsChannel(Channel):
+class SesChannel(Channel):
     def __init__(self, settings: Settings):
         import boto3
 
-        self.settings = settings
+        if not settings.notify_from_email:
+            raise ConfigError("NOTIFY_FROM_EMAIL is required when NOTIFY_BACKEND=ses")
+        self.sender = settings.notify_from_email
         self.ses = boto3.client("ses", region_name=settings.aws_region)
-        self.sns = boto3.client("sns", region_name=settings.aws_region)
 
-    def send(self, channel_cd, msg):
-        if channel_cd in ("SES", "BOTH") and msg.recipients:
-            if not self.settings.notify_from_email:
-                raise RuntimeError("NOTIFY_FROM_EMAIL is required for SES")
-            self.ses.send_email(Source=self.settings.notify_from_email, Destination={"ToAddresses": msg.recipients},
+    def send(self, msg):
+        if msg.recipients:
+            self.ses.send_email(Source=self.sender, Destination={"ToAddresses": msg.recipients},
                                 Message={"Subject": {"Data": msg.subject[:200]}, "Body": {"Text": {"Data": msg.body}}})
-        if channel_cd in ("SNS", "BOTH") and msg.sns_topic_arn:
-            self.sns.publish(TopicArn=msg.sns_topic_arn, Subject=msg.subject[:100], Message=msg.body)
 
 
 def build_channel(settings: Settings) -> Channel:
-    return AwsChannel(settings) if settings.notify_backend == "aws" else LogChannel()
+    return SesChannel(settings) if settings.notify_backend == "ses" else LogChannel()

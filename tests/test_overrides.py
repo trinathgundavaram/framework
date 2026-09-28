@@ -16,7 +16,7 @@ def send(app, src, rows, ts, start=date(2026, 1, 1), end=date(2026, 1, 31)):
 
 
 def batch(conn, src, start="2026-01-01"):
-    return q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_Cd=%s AND Rpt_Start_Dt_Key=%s", src, start)
+    return q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Src_ID=%s AND Rpt_Start_Dt_Key=%s", src, start)
 
 
 def feb(conn, src):
@@ -53,7 +53,7 @@ def test_reuse_carries_the_prior_batch_and_closes_complete(next_month, conn):
     assert (b["resolution_ty"], b["req_stat"], b["reuse_btch_id"]) == ("CARRY_FORWARD", "CARRIED_FORWARD",
                                                                       jan_s2["btch_id"])
     e = q1(conn, "SELECT * FROM ComplianceExtractControl WHERE Rpt_Start_Dt_Key='2026-02-01'")
-    assert (e["extract_stat"], e["received_src_cnt"], e["carried_src_cds"]) == ("COMPLETE", 2, "S2")
+    assert e["received_src_cnt"] == 2                                      # S2 counts as received
     assert jan_s2["btch_id"] in e["combine_btch_id_list"]                  # the extract reads January's S2 rows
     jan_load = q1(conn, "SELECT Load_ID FROM ComplianceFileLoad WHERE Btch_ID=%s AND Load_Stat='PROMOTED'",
                   jan_s2["btch_id"])["load_id"]
@@ -77,8 +77,8 @@ def test_reuse_is_rejected_when_the_run_type_disallows_it(next_month, conn):
     oid = reuse(conn, feb(conn, "S2")["req_id"])
     assert app.decisions.run().invalid == [oid]
     assert feb(conn, "S2")["resolution_ty"] is None
-    assert "Carry_Fwd_Ind" in q1(conn, "SELECT Description FROM CMS_ComplianceExceptionsAudit "
-                                       "WHERE Event_Ty='OVERRIDE_INVALID_DETECTED'")["description"]
+    assert "Carry_Fwd_Ind" in q1(conn, "SELECT Event_Txt FROM CMS_ComplianceExceptionsAudit "
+                                       "WHERE Event_Ty='OVERRIDE_INVALID_DETECTED'")["event_txt"]
 
 
 def test_reuse_invalid_when_batch_has_data_or_source_is_unknown(next_month, conn):
@@ -96,8 +96,8 @@ def test_pending_reuse_is_not_applied_until_approved(next_month, conn):
     assert app.decisions.run().applied == []
     assert feb(conn, "S2")["req_stat"] == "PENDING"
     with conn.transaction():
-        conn.execute("UPDATE ComplianceBatchOverride SET Apprvl_Stat='APPROVED', Apprvd_By='boss', "
-                     "Apprvd_Dtts=now(), Valid_Thru_Dt_Key='2026-03-31' WHERE Ovrd_ID=%s", (oid,))
+        conn.execute("UPDATE ComplianceBatchOverride SET Apprvl_Stat='APPROVED', Reviewed_By='boss', "
+                     "Reviewed_Dtts=now(), Valid_Thru_Dt_Key='2026-03-31' WHERE Ovrd_ID=%s", (oid,))
     assert app.decisions.run().applied == [oid]
     assert feb(conn, "S2")["req_stat"] == "CARRIED_FORWARD"
 
@@ -112,7 +112,7 @@ def test_reuse_expires_when_its_validity_date_passes(next_month, conn):
     b = feb(conn, "S2")
     assert (b["resolution_ty"], b["req_stat"], b["reuse_btch_id"]) == (None, "PENDING", None)
     e = q1(conn, "SELECT * FROM ComplianceExtractControl WHERE Rpt_Start_Dt_Key='2026-02-01'")
-    assert (e["extract_stat"], e["carried_src_cds"], e["received_src_cnt"]) == ("PARTIAL", None, 1)
+    assert e["received_src_cnt"] == 1
     assert q1(conn, "SELECT count(*) n FROM CMS_ComplianceExceptionsAudit "
                     "WHERE Event_Ty='OVERRIDE_EXPIRED'")["n"] == 1
     clock.set(utc(2026, 3, 4, 13, 0))                                       # nothing left to expire or apply
@@ -128,7 +128,7 @@ def test_a_file_replaces_a_carried_forward_batch(next_month, conn):
     b = feb(conn, "S2")
     assert (b["resolution_ty"], b["req_stat"], b["reuse_btch_id"]) == ("NEW_FILE", "PROMOTED", None)
     e = q1(conn, "SELECT * FROM ComplianceExtractControl WHERE Rpt_Start_Dt_Key='2026-02-01'")
-    assert e["carried_src_cds"] is None and e["received_src_cnt"] == 2
+    assert e["received_src_cnt"] == 2
     assert app.decisions.run().applied == []                                # the batch has data now
     assert q1(conn, "SELECT Apprvl_Stat FROM ComplianceBatchOverride WHERE Ovrd_ID=%s", oid)["apprvl_stat"] == "APPROVED"
 
@@ -156,7 +156,7 @@ def test_reuse_follows_a_chain_back_to_real_data(conn, tmp_path):
     assert q1(conn, "SELECT Reuse_Btch_ID r FROM ComplianceRequestControl WHERE Req_ID=%s",
               mar["req_id"])["r"] == jan["btch_id"]
     e = q1(conn, "SELECT * FROM ComplianceExtractControl WHERE Rpt_Start_Dt_Key='2026-03-01'")
-    assert e["combine_btch_id_list"] == jan["btch_id"] and e["extract_stat"] == "COMPLETE"
+    assert e["combine_btch_id_list"] == jan["btch_id"] and e["received_src_cnt"] == 1
 
 
 def test_late_arrival_and_correction_rows_are_left_to_the_pipeline(next_month, conn):

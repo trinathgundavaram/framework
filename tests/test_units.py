@@ -17,21 +17,22 @@ from framework.settings import Settings, read_env_file
 
 
 # ---------------------------------------------------------------- templates
-T = "{PROJECT}_{TABLE}_{SRC}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt"
+TOKENS = "{RUNTY}_{RPTSTART}_{RPTEND}_{TS}"
 
 
-def cfg(cfg_id=1, tmpl=T, p="PRJA", t="TBLX", s="S1"):
-    return FileConfig(cfg_id, "PRJA", "tbl_x", s, tmpl, p, t, s, ".txt", "|", None, True, False, False,
-                      "s3://b/in/", "s3://b/ar/", "s3://b/q/", "stg", "tbl_x", "core", "tbl_x")
+def cfg(cfg_id=1, tmpl=None, p="PRJA", t="TBLX", s="S1"):
+    return FileConfig(cfg_id, "PRJA", "tbl_x", s, tmpl or f"{p}_{t}_{s}_{TOKENS}.txt", "|", True, False, False,
+                      "s3://b/in/", "s3://b/ar/", "stg", "tbl_x", "core")
 
 
 @pytest.mark.parametrize("bad, why", [
-    ("{PROJECT}_{TABLE}_{SRC}_{RUNTY}_{RPTSTART}_{RPTEND}.txt", "exactly once"),
-    ("{PROJECT}_{TABLE}_{SRC}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}_{TS}.txt", "exactly once"),
-    ("{PROJECT}_{TABLE}_{SRC}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}_{FOO}.txt", "unknown"),
-    ("{PROJECT}{TABLE}_{SRC}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt", "separated"),
-    ("dir/{PROJECT}_{TABLE}_{SRC}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt", "no '/'"),
-    ("{PROJECT}_{TABLE}_{SRC}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt}", "braces"),
+    ("P_{RUNTY}_{RPTSTART}_{RPTEND}.txt", "exactly once"),
+    ("P_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}_{TS}.txt", "exactly once"),
+    ("P_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}_{FOO}.txt", "unknown"),
+    ("{PROJECT}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt", "unknown"),          # project/table/source are literal text
+    ("P_{RUNTY}{RPTSTART}_{RPTEND}_{TS}.txt", "separated"),
+    ("dir/P_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt", "no '/'"),
+    ("P_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt}", "braces"),
 ])
 def test_template_grammar_errors(bad, why):
     with pytest.raises(TemplateError, match=why):
@@ -44,7 +45,13 @@ def test_match_extracts_tokens():
     assert m.file_ts == datetime(2026, 2, 1, 9, 30)
 
 
-def test_no_match_and_alias_mismatch():
+def test_file_type_is_the_template_extension():
+    assert cfg().src_file_ty == ".txt"
+    assert cfg(tmpl=f"X_{TOKENS}.XLSX").src_file_ty == ".xlsx"
+    assert cfg(tmpl=f"X_{TOKENS}").src_file_ty == ""
+
+
+def test_no_match():
     mt = TemplateMatcher([cfg()])
     for name in ("PRJA_TBLX_S9_MONTHLY_20260101_20260131_20260201093000.txt",
                  "PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.csv",
@@ -67,8 +74,7 @@ def test_invalid_tokens(name):
 
 
 def test_ambiguous():
-    a = cfg(1, "{PROJECT}_{TABLE}_{SRC}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt", s="S1")
-    b = cfg(2, "{PROJECT}_{TABLE}_{SRC}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt", s="S1")
+    a, b = cfg(1), cfg(2)
     with pytest.raises(MatchError) as e:
         TemplateMatcher([a, b]).match("PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.txt")
     assert e.value.event_ty == "FILE_REJECTED_AMBIGUOUS_TEMPLATE"
@@ -90,8 +96,8 @@ def test_invalid_template_is_reported_not_raised():
 
 
 def test_render_roundtrip():
-    name = render(T, project="PRJA", table="TBLX", src="S1", runty="ADHOC", rpt_start=date(2026, 3, 1),
-                  rpt_end=date(2026, 3, 31), ts=datetime(2026, 4, 2, 1, 2, 3))
+    name = render(cfg().src_file_nm_tmplt, runty="ADHOC", rpt_start=date(2026, 3, 1), rpt_end=date(2026, 3, 31),
+                  ts=datetime(2026, 4, 2, 1, 2, 3))
     assert name == "PRJA_TBLX_S1_ADHOC_20260301_20260331_20260402010203.txt"
     assert TemplateMatcher([cfg()]).match(name).run_ty == "ADHOC"
 
@@ -109,11 +115,11 @@ def test_xlsx_reader(tmp_path):
     pytest.importorskip("openpyxl")
     path = tmp_path / "f.xlsx"
     pd.DataFrame([["id", "amount", "name"], [1, 2.5, "a"], [2, None, "b"]]).to_excel(path, header=False, index=False)
-    c = replace(cfg(), src_file_ty=".xlsx")
+    c = cfg(tmpl=f"X_{TOKENS}.xlsx")
     with pytest.raises(FileRejected, match="not enabled"):
         read_file(str(path), c, 3, settings())
-    r = read_file(str(path), c, 3, settings(supported_file_types=[".xlsx"]))
-    assert r.rows == [["1", "2.5", "a"], ["2", None, "b"]]
+    rows = read_file(str(path), c, 3, settings(supported_file_types=[".xlsx"]))
+    assert rows == [["1", "2.5", "a"], ["2", None, "b"]]
     with pytest.raises(FileRejected) as e:
         read_file(str(path), c, 4, settings(supported_file_types=[".xlsx"]))
     assert e.value.event_ty == "FILE_COLUMN_COUNT_MISMATCH"
@@ -123,7 +129,7 @@ def test_delimiters_encoding_and_streaming_scan(tmp_path):
     p = tmp_path / "f.txt"
     p.write_bytes("a\tb\n1\t2\n".encode())
     c = replace(cfg(), delmtr_cd="TAB")
-    assert read_file(str(p), c, 2, settings()).rows == [["1", "2"]]
+    assert read_file(str(p), c, 2, settings()) == [["1", "2"]]
     assert scan_delimited(str(p), c, 2, settings()) == 1
     with pytest.raises(FileRejected):
         scan_delimited(str(p), c, 3, settings())
@@ -131,7 +137,7 @@ def test_delimiters_encoding_and_streaming_scan(tmp_path):
     with pytest.raises(FileRejected) as e:
         read_file(str(p), c, 2, settings())
     assert e.value.event_ty == "FILE_PARSE_ERROR"
-    assert read_file(str(p), c, 2, settings(file_encoding="latin-1")).data_row_count == 1
+    assert len(read_file(str(p), c, 2, settings(file_encoding="latin-1"))) == 1
 
 
 def test_local_store(tmp_path):
