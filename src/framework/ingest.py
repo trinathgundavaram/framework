@@ -401,7 +401,8 @@ class IngestPipeline:
         rules_stat = "NOT_RUN"
         if staged_rows == 0 and not cfg.allow_zero_records:                      # D-60
             passed, failure_event, detail = False, "FILE_ZERO_RECORDS_REJECTED", "file has no data rows"
-        elif bindings := cfgmod.rule_bindings(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_id, "FILE_LEVEL"):
+        elif bindings := cfgmod.rule_bindings(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_id,
+                                              batch["run_ty"], "FILE_LEVEL"):
             with self.conn.transaction():
                 self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='RULES_RUNNING', Updated_Dtts=%s "
                                   "WHERE Load_ID=%s", (self.clock.now(), load_id))

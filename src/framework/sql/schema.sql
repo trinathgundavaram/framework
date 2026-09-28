@@ -113,12 +113,15 @@ CREATE TABLE ComplianceSourceFileConfig (
 CREATE UNIQUE INDEX uq_compliancesourcefileconfig_active
   ON ComplianceSourceFileConfig (Project_Cd, Table_Nm, Src_ID) WHERE Active_Ind = 1;
 
--- GRE rule groups. FILE_LEVEL rules run when at least one binding exists for the source;
--- PERIOD_LEVEL bindings use Src_ID = '*'.
+-- GRE rule groups, bound at any level: '*' in Table_Nm, Src_ID or Run_Ty means "all". Additive: every
+-- binding that matches a file (FILE_LEVEL) or a run (PERIOD_LEVEL, Src_ID = '*') runs; a rule group/
+-- variant bound at several levels runs once. A file with no matching FILE_LEVEL binding skips file rules.
+--   project  ('*', '*', '*')   table ('T', '*', '*')   table + run type ('T', '*', 'R')   source ('T', 'S', '*')
 CREATE TABLE ComplianceRuleBinding (
   Project_Cd       VARCHAR(30)  NOT NULL,
-  Table_Nm         VARCHAR(63)  NOT NULL,
-  Src_ID           VARCHAR(30)  NOT NULL,
+  Table_Nm         VARCHAR(63)  NOT NULL,                  -- '*' = every table of the project
+  Src_ID           VARCHAR(30)  NOT NULL,                  -- '*' = every source (always '*' for PERIOD_LEVEL)
+  Run_Ty           VARCHAR(20)  NOT NULL DEFAULT '*',      -- '*' = every run type
   Rule_Scope_Cd    VARCHAR(20)  NOT NULL,                  -- FILE_LEVEL | PERIOD_LEVEL
   Gre_Rule_Group   VARCHAR(100) NOT NULL,
   Gre_Rule_Variant VARCHAR(100) NOT NULL,
@@ -127,7 +130,8 @@ CREATE TABLE ComplianceRuleBinding (
   Created_By       VARCHAR(100) NOT NULL DEFAULT current_user,
   Updated_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Updated_By       VARCHAR(100) NOT NULL DEFAULT current_user,
-  CONSTRAINT pk_compliancerulebinding PRIMARY KEY (Project_Cd, Table_Nm, Src_ID, Rule_Scope_Cd, Gre_Rule_Group, Gre_Rule_Variant),
+  CONSTRAINT pk_compliancerulebinding PRIMARY KEY (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rule_Scope_Cd, Gre_Rule_Group,
+                                                   Gre_Rule_Variant),
   CONSTRAINT fk_compliancerulebinding_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject
 );
 

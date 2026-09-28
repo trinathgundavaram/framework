@@ -288,7 +288,7 @@ class ExtractControlService:
     def _period_rules(self, e: dict, btch_ids: list[str], load_ids: list[int]) -> tuple[str, tuple[str, ...]]:
         if not btch_ids:
             return PASSED, ()             # nothing to validate (zero data - see D-49)
-        bindings = cfgmod.rule_bindings(self.conn, e["project_cd"], e["table_nm"], "*", "PERIOD_LEVEL")
+        bindings = cfgmod.rule_bindings(self.conn, e["project_cd"], e["table_nm"], "*", e["run_ty"], "PERIOD_LEVEL")
         cfg = cfgmod.file_config(self.conn, e["project_cd"], e["table_nm"])
         outcome = self.rules.run(self.conn, bindings, {
             "scope": "PERIOD_LEVEL", "extract_id": e["extract_id"], "project_cd": e["project_cd"],

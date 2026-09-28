@@ -30,7 +30,8 @@ class FakeRules:
         self.calls: list[dict] = []
 
     def run(self, conn, bindings, run_params, mode):
-        self.calls.append(dict(run_params, mode=mode))
+        self.calls.append(dict(run_params, mode=mode,
+                               rules=[f"{b.gre_rule_group}:{b.gre_rule_variant}" for b in bindings]))
         scope = run_params["scope"]
         if scope in self.error:
             return RuleOutcome("ERROR", error="boom")
@@ -77,9 +78,17 @@ def seed_config(conn, *, sources=("S1", "S2"), sla=2, allow_zero=0, has_header=1
                            'stg_t','tbl_x','core_t','ops@example.com')""",
                 (s, template(s), has_header, allow_zero))
             if rules:
-                conn.execute("INSERT INTO ComplianceRuleBinding VALUES ('PRJA','tbl_x',%s,'FILE_LEVEL','g_file',%s,1)",
+                conn.execute("INSERT INTO ComplianceRuleBinding (Project_Cd, Table_Nm, Src_ID, Rule_Scope_Cd, "
+                             "Gre_Rule_Group, Gre_Rule_Variant) VALUES ('PRJA','tbl_x',%s,'FILE_LEVEL','g_file',%s)",
                              (s, s))
-        conn.execute("INSERT INTO ComplianceRuleBinding VALUES ('PRJA','tbl_x','*','PERIOD_LEVEL','g_period','all',1)")
+        bind(conn, "PERIOD_LEVEL", "g_period", "all")
+
+
+def bind(conn, scope, group, variant, *, project="PRJA", table="tbl_x", src="*", run_ty="*"):
+    """One ComplianceRuleBinding row; '*' = all tables / sources / run types."""
+    conn.execute("""INSERT INTO ComplianceRuleBinding (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rule_Scope_Cd,
+                      Gre_Rule_Group, Gre_Rule_Variant) VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                 (project, table, src, run_ty, scope, group, variant))
 
 
 def create_batches(app, period="PREV_CALENDAR_MONTH", **kw):

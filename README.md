@@ -254,7 +254,7 @@ aws glue start-job-run --job-name cms_compliance_metadata_load_dev --arguments "
 `ComplianceSourceFileConfig` and `ComplianceRuleBinding` load the same way once
 you add a CSV for them (primary keys `cfg_id` — omit it from the file and use
 `--MODE insert_only` for new rows — and
-`project_cd,table_nm,src_id,rule_scope_cd,gre_rule_group,gre_rule_variant`).
+`project_cd,table_nm,src_id,run_ty,rule_scope_cd,gre_rule_group,gre_rule_variant`).
 
 ## Loading any other table
 

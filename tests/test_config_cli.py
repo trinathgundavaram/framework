@@ -6,7 +6,7 @@ from framework.cli import main
 from framework.config import RuleBinding, validate_all
 from framework.settings import Settings
 
-from .helpers import create_batches, file_name, make_app, put_file, q1, qa, seed_config, utc
+from .helpers import bind, create_batches, file_name, make_app, put_file, q1, qa, seed_config, utc
 
 
 def codes(issues, severity="ERROR"):
@@ -145,7 +145,7 @@ def test_cli_file_load_path(conn, tmp_path, monkeypatch, capsys):
 
 
 def test_rule_engine_adapter_contract(conn):
-    b = [RuleBinding("P", "T", "S", "FILE_LEVEL", "g", "v")]
+    b = [RuleBinding("P", "T", "S", "*", "FILE_LEVEL", "g", "v")]
     seen = []
     ok = CallableRuleEngine(lambda c, g, v, p: seen.append((c, g, v)) or [{"rule_ref": "R1", "passed": True}])
     assert ok.run(conn, b, {}, "GATE").status == "PASSED" and seen == [(conn, "g", "v")]
@@ -157,3 +157,60 @@ def test_rule_engine_adapter_contract(conn):
     assert missing.run(conn, b, {}, "GATE").status == "ERROR"
     assert missing.run(conn, [], {}, "GATE").status == "PASSED"
     assert build_rule_engine(Settings(rule_engine="none")).run(conn, b, {}, "GATE").status == "PASSED"
+
+
+# ---------------------------------------------------------------- rule binding levels (additive)
+def rules_for(conn, src, run_ty, scope="FILE_LEVEL"):
+    from framework.config import rule_bindings
+    return [f"{b.gre_rule_group}:{b.gre_rule_variant}" for b in rule_bindings(conn, "PRJA", "tbl_x", src, run_ty, scope)]
+
+
+def test_rule_bindings_apply_at_every_level_and_add_up(conn):
+    seed_config(conn, rules=False)
+    with conn.transaction():
+        bind(conn, "FILE_LEVEL", "g", "project", table="*")                    # every table of the project
+        bind(conn, "FILE_LEVEL", "g", "table")                                 # every source of tbl_x
+        bind(conn, "FILE_LEVEL", "g", "adhoc_only", run_ty="ADHOC")            # tbl_x, ADHOC runs only
+        bind(conn, "FILE_LEVEL", "g", "s1_only", src="S1")                     # one source
+        bind(conn, "FILE_LEVEL", "g", "table", src="S1")                       # same rule at two levels: runs once
+        bind(conn, "FILE_LEVEL", "g", "other_table", table="tbl_other")        # a different table
+        bind(conn, "PERIOD_LEVEL", "p", "monthly", run_ty="MONTHLY")
+        bind(conn, "PERIOD_LEVEL", "p", "project", table="*")
+        conn.execute("UPDATE ComplianceRuleBinding SET Active_Ind=0 WHERE Gre_Rule_Variant='other_table'")
+    assert rules_for(conn, "S1", "MONTHLY") == ["g:project", "g:s1_only", "g:table"]
+    assert rules_for(conn, "S2", "MONTHLY") == ["g:project", "g:table"]
+    assert rules_for(conn, "S2", "ADHOC") == ["g:adhoc_only", "g:project", "g:table"]
+    # seed_config also binds g_period:all at table level
+    assert rules_for(conn, "*", "MONTHLY", "PERIOD_LEVEL") == ["g_period:all", "p:monthly", "p:project"]
+    assert rules_for(conn, "*", "ADHOC", "PERIOD_LEVEL") == ["g_period:all", "p:project"]
+
+
+def test_table_level_rules_reach_the_rules_engine(conn, tmp_path):
+    """Universe-style: rules bound once at project/table level run for every source's file and for the run."""
+    seed_config(conn, rules=False)
+    with conn.transaction():
+        conn.execute("DELETE FROM ComplianceRuleBinding")
+        bind(conn, "FILE_LEVEL", "u_file", "all_sources")
+        bind(conn, "PERIOD_LEVEL", "u_period", "all_runs")
+    app, clock, rules = make_app(conn, tmp_path, utc(2026, 2, 1, 13, 0))
+    create_batches(app)
+    for src in ("S1", "S2"):
+        assert app.pipeline.process_file("inbound", put_file(app, file_name(src), ["1|1|a"])).result == "PROMOTED"
+    file_calls = [c for c in rules.calls if c["scope"] == "FILE_LEVEL"]
+    assert [(c["src_id"], c["rules"]) for c in file_calls] == [("S1", ["u_file:all_sources"]),
+                                                               ("S2", ["u_file:all_sources"])]
+    assert [c["rules"] for c in rules.calls if c["scope"] == "PERIOD_LEVEL"] == [["u_period:all_runs"]]
+
+
+def test_validator_checks_rule_bindings(conn):
+    seed_config(conn)
+    assert codes(validate_all(conn)) == []
+    with conn.transaction():
+        bind(conn, "PERIOD_LEVEL", "p", "one_source", src="S1")               # period rules cover all sources
+        bind(conn, "FILE_LEVEL", "g", "typo", run_ty="WEEKLY")                 # no such run type in the crosswalk
+        bind(conn, "FILE_LEVEL", "g", "typo", table="tbl_nope")                # no such table
+        bind(conn, "EXTRACT", "g", "bad_scope")
+    issues = validate_all(conn)
+    assert codes(issues) == ["RULE_BINDING", "RULE_BINDING_NO_XWALK"]
+    assert sum(i.code == "RULE_BINDING_NO_XWALK" for i in issues) == 2
+    assert sum(i.code == "RULE_BINDING" for i in issues) == 2

@@ -145,7 +145,14 @@ Python 3.10+ and PostgreSQL 14+ (tested on 16); no extensions are needed. `TEST_
    3. `ComplianceRunType` — `SLA_Days` ≥ 1 (the hold is `Req_Dt_Key + SLA_Days − 1`); `Carry_Fwd_Ind = 1` if batches of this run type may reuse the previous batch's data after approval; code letters/digits only.
    4. `ComplianceDataSetSourceXwalk` — one effective-dated row per project / table / source / run type. Nothing else.
    5. `ComplianceSourceFileConfig` — one active row per project / table / source: filename template (project, table and source written literally, e.g. `PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt`; its extension is the file type), delimiter, header/trailer flags, inbound and archive paths, staging table, core schema (the core table is `Table_Nm`), email recipients.
-   6. `ComplianceRuleBinding` — FILE_LEVEL per source (optional) and PERIOD_LEVEL (`Src_ID = '*'`).
+   6. `ComplianceRuleBinding` — GRE rules at any level: `'*'` in `Table_Nm`, `Src_ID` or `Run_Ty` means all. Every matching binding runs (additive); a rule bound at two levels runs once. FILE_LEVEL is optional (no match = no file rules); PERIOD_LEVEL always uses `Src_ID = '*'`.
+
+      | Level | `Table_Nm` | `Src_ID` | `Run_Ty` |
+      |---|---|---|---|
+      | Project | `*` | `*` | `*` |
+      | Project + table | `ODAG1` | `*` | `*` |
+      | Table, one run type | `ODAG1` | `*` | `CMS` |
+      | One source | `ODAG1` | `210` | `*` |
    The schema has no CHECK constraints: `validate-config` checks the values instead.
 3. **Run `framework validate-config`.** It must report no `ERROR` issues.
 4. **Schedule the project's jobs** (EventBridge / Step Functions / Glue triggers), for example:
