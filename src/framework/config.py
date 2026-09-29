@@ -1,13 +1,9 @@
-"""Configuration: typed rows, read access, filename templates (§9) and the configuration validator (P1).
-
-Configuration tables: ComplianceProject, ComplianceRunType, ComplianceSourceSystem,
-ComplianceDataSetSourceXwalk, ComplianceSourceFileConfig, ComplianceRuleBinding. Everything else is
-job-level (settings.py).
-"""
+"""Configuration rows, filename templates and the validator."""
 from __future__ import annotations
 
 import os
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import combinations
@@ -18,7 +14,6 @@ import psycopg
 from .load import CORE_FRAMEWORK_COLS, STAGING_FRAMEWORK_COLS, columns
 
 
-# ============================================================================ typed rows
 @dataclass(frozen=True)
 class RunType:
     run_ty: str
@@ -56,7 +51,7 @@ class XwalkRow:
 class FileConfig:
     cfg_id: int
     project_cd: str
-    table_nm: str                    # also the core table's name (D-25)
+    table_nm: str
     src_id: str
     src_file_nm_tmplt: str
     delmtr_cd: Optional[str]
@@ -75,7 +70,7 @@ class FileConfig:
 
     @property
     def src_file_ty(self) -> str:
-        """The template's extension, e.g. '.txt'."""
+        """The template's file extension."""
         return os.path.splitext(self.src_file_nm_tmplt)[1].lower()
 
     @classmethod
@@ -90,14 +85,13 @@ class FileConfig:
 @dataclass(frozen=True)
 class RuleBinding:
     project_cd: str
-    table_nm: str                    # '*' = every table of the project
-    src_id: str                      # '*' = every source
-    run_ty: str                      # '*' = every run type
+    table_nm: str
+    src_id: str
+    run_ty: str
     gre_rule_group: str
     gre_rule_variant: str
 
 
-# ============================================================================ read access
 def run_type(conn: psycopg.Connection, run_ty: str) -> Optional[RunType]:
     r = conn.execute("SELECT * FROM ComplianceRunType WHERE Run_Ty = %s", (run_ty,)).fetchone()
     return RunType.from_row(r) if r else None
@@ -150,9 +144,7 @@ def file_config_by_id(conn: psycopg.Connection, cfg_id: int) -> Optional[FileCon
 
 
 def rule_bindings(conn, project_cd: str, table_nm: str, src_id: str, run_ty: str) -> list[RuleBinding]:
-    """Every active binding that applies to a file (additive): each of Table_Nm, Src_ID and Run_Ty equals
-    the given value or is '*'. A rule group/variant bound at several levels is returned once (its most
-    specific binding), in group/variant order."""
+    """Every active binding that applies to a file (additive)."""
     rows = conn.execute(
         """SELECT * FROM ComplianceRuleBinding
             WHERE Project_Cd = %(p)s AND Table_Nm IN (%(t)s, '*') AND Src_ID IN (%(s)s, '*')
@@ -166,14 +158,6 @@ def rule_bindings(conn, project_cd: str, table_nm: str, src_id: str, run_ty: str
             r["project_cd"], r["table_nm"], r["src_id"], r["run_ty"], r["gre_rule_group"], r["gre_rule_variant"]))
     return list(out.values())
 
-
-# ============================================================================ filename templates (§9)
-# A template is the file name with literal text (project, table and source spelled out) plus exactly one
-# of each placeholder:
-#   {RUNTY}                  -> [A-Za-z0-9]+, must equal a Run_Ty code exactly (D-31)
-#   {RPTSTART} {RPTEND}      -> YYYYMMDD (D-32)
-#   {TS}                     -> YYYYMMDDHHMMSS, uniqueness only (D-36, D-37)
-# Adjacent placeholders must be separated by literal text; the extension is the file type.
 
 PLACEHOLDERS = ("RUNTY", "RPTSTART", "RPTEND", "TS")
 _TOKEN = re.compile(r"\{([^{}]*)\}")
@@ -282,17 +266,15 @@ class TemplateMatcher:
         return MatchResult(cfg, m.group("runty"), start, end, ts)
 
 
-# ============================================================================ validator (P1)
 @dataclass(frozen=True)
 class Issue:
     code: str
     message: str
-    severity: str = "ERROR"      # ERROR blocks activation; WARNING is informational
+    severity: str = "ERROR"
 
 
 def validate_all(conn: psycopg.Connection, case_sensitive: bool = True) -> list[Issue]:
-    """Validate the configuration tables and the target tables they point to. Empty list = valid.
-    The schema has no CHECK constraints, so value rules the database used to enforce are checked here."""
+    """Validate the configuration tables and the target tables they point to."""
     issues: list[Issue] = []
 
     def add(code: str, msg: str, severity: str = "ERROR") -> None:
@@ -308,20 +290,24 @@ def validate_all(conn: psycopg.Connection, case_sensitive: bool = True) -> list[
                 for r in conn.execute("SELECT Project_Cd, Active_Ind FROM ComplianceProject").fetchall()}
     xw = xwalk_rows(conn)
     cfgs = active_file_configs(conn)
+    cfg_sources = {(c.project_cd, c.table_nm, c.src_id) for c in cfgs}
+    xw_by_source: dict[tuple, list[XwalkRow]] = defaultdict(list)
     for x in xw:
+        xw_by_source[(x.project_cd, x.table_nm, x.src_id)].append(x)
         label = f"xwalk {x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty}@{x.effective_start_dt}"
         if not rts[x.run_ty].active:
             add("XWALK_RUN_TYPE", f"{label}: run type {x.run_ty} is inactive", "WARNING")
         if not projects[x.project_cd]:
             add("XWALK_PROJECT", f"{label}: project {x.project_cd} is inactive", "WARNING")
-        if not any((c.project_cd, c.table_nm, c.src_id) == (x.project_cd, x.table_nm, x.src_id) for c in cfgs):
+        if (x.project_cd, x.table_nm, x.src_id) not in cfg_sources:
             add("XWALK_NO_FILE_CONFIG", f"{label}: no active ComplianceSourceFileConfig")
-    for a, b in combinations(xw, 2):
-        if ((a.project_cd, a.table_nm, a.src_id, a.run_ty) == (b.project_cd, b.table_nm, b.src_id, b.run_ty)
-                and (b.effective_end_dt is None or a.effective_start_dt <= b.effective_end_dt)
-                and (a.effective_end_dt is None or b.effective_start_dt <= a.effective_end_dt)):
-            add("XWALK_OVERLAP", f"xwalk {a.project_cd}/{a.table_nm}/{a.src_id}/{a.run_ty}: effective windows "
-                                 f"starting {a.effective_start_dt} and {b.effective_start_dt} overlap")
+    for rows in xw_by_source.values():
+        for a, b in combinations(rows, 2):
+            if (a.run_ty == b.run_ty
+                    and (b.effective_end_dt is None or a.effective_start_dt <= b.effective_end_dt)
+                    and (a.effective_end_dt is None or b.effective_start_dt <= a.effective_end_dt)):
+                add("XWALK_OVERLAP", f"xwalk {a.project_cd}/{a.table_nm}/{a.src_id}/{a.run_ty}: effective windows "
+                                     f"starting {a.effective_start_dt} and {b.effective_start_dt} overlap")
 
     for c in cfgs:
         label = f"file config {c.cfg_id} ({c.project_cd}/{c.table_nm}/{c.src_id})"
@@ -331,7 +317,7 @@ def validate_all(conn: psycopg.Connection, case_sensitive: bool = True) -> list[
             add("TEMPLATE", f"{label}: {e}")
         if not c.src_file_ty:
             add("TEMPLATE_EXTENSION", f"{label}: template must end with a file extension such as .txt")
-        if not any((x.project_cd, x.table_nm, x.src_id) == (c.project_cd, c.table_nm, c.src_id) for x in xw):
+        if (c.project_cd, c.table_nm, c.src_id) not in xw_by_source:
             add("FILE_CONFIG_NO_XWALK", f"{label}: no active crosswalk row")
         for p in ("s3_src_file_path", "src_file_archive_path"):
             if not getattr(c, p).startswith(("s3://", "local://")):
@@ -344,8 +330,6 @@ def validate_all(conn: psycopg.Connection, case_sensitive: bool = True) -> list[
             elif missing := [x for x in required if x not in found]:
                 add("TARGET_TABLE", f"{label}: {kind} table {schema}.{table} lacks {missing}")
 
-    # rule bindings: every named table / source / run type must exist in the project's crosswalk -
-    # a typo would otherwise silently match nothing
     for r in conn.execute("SELECT * FROM ComplianceRuleBinding WHERE Active_Ind = 1 "
                           "ORDER BY Project_Cd, Table_Nm, Src_ID, Run_Ty").fetchall():
         label = (f"rule binding {r['project_cd']}/{r['table_nm']}/{r['src_id']}/{r['run_ty']} "
@@ -354,11 +338,9 @@ def validate_all(conn: psycopg.Connection, case_sensitive: bool = True) -> list[
                    and r["src_id"] in ("*", x.src_id) and r["run_ty"] in ("*", x.run_ty) for x in xw):
             add("RULE_BINDING_NO_XWALK", f"{label}: matches no active crosswalk row")
 
-    # template overlap (§9.3): render a sample for each config/run type and test all other configs
     matcher = TemplateMatcher(cfgs, case_sensitive)
     for c in matcher.configs:
-        for rt in sorted({x.run_ty for x in xw if (x.project_cd, x.table_nm, x.src_id) ==
-                          (c.project_cd, c.table_nm, c.src_id)}) or ["X1"]:
+        for rt in sorted({x.run_ty for x in xw_by_source.get((c.project_cd, c.table_nm, c.src_id), ())}) or ["X1"]:
             name = render(c.src_file_nm_tmplt, runty=rt, rpt_start=date(2026, 1, 1), rpt_end=date(2026, 1, 31),
                           ts=datetime(2026, 2, 1, 9, 30, 0))
             others = [o.cfg_id for o, _ in matcher.candidates(name) if o.cfg_id != c.cfg_id]

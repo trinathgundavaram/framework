@@ -1,16 +1,4 @@
-"""Runtime settings and the database connection - no metadata tables involved.
-
-Every setting is read, highest precedence first, from:
-  1. job arguments       `framework --set NAME=VALUE ...` (Glue/Step Functions pass these per project)
-  2. the environment     FRAMEWORK_<NAME>
-  3. a .env file         FRAMEWORK_ENV_FILE, default ./.env (local development)
-  4. the built-in default below
-
-Database (one PostgreSQL database holds the metadata schema and the staging/core tables):
-  * local:  FRAMEWORK_DB_DSN, or FRAMEWORK_DB_HOST / _PORT / _NAME / _USER / _PASSWORD / _SSLMODE in .env
-  * AWS:    FRAMEWORK_DB_SECRET_NAME -> Secrets Manager JSON {host, port, dbname, username, password[, sslmode]}
-  Explicit FRAMEWORK_DB_* values override values read from the secret.
-"""
+"""Runtime settings and the database connection - no metadata tables involved."""
 from __future__ import annotations
 
 import functools
@@ -37,19 +25,16 @@ _SECRET_KEYS = {"host": ("host",), "port": ("port",), "dbname": ("dbname", "data
 
 @dataclass
 class Settings:
-    # --- environment / database ---
     metadata_schema: str = "cms_compliance"
     aws_region: str = "us-east-1"
-    business_tz: str = "America/Chicago"          # batch dates, SLA hold (was ComplianceDataSetSourceXwalk.Business_Tz)
+    business_tz: str = "America/Chicago"
 
-    # --- object storage ---
-    object_store: str = "s3"                      # s3 | local
+    object_store: str = "s3"
     local_store_root: str = "./.local_store"
-    quarantine_uri: str = "s3://quarantine-bucket-not-configured/"   # rejected files go to <uri><reason>/
+    quarantine_uri: str = "s3://quarantine-bucket-not-configured/"
 
-    # --- filename matching / file reading ---
     filename_case_sensitive: bool = True
-    file_effective_date_basis: str = "RPT_START"  # RPT_START | RPT_END
+    file_effective_date_basis: str = "RPT_START"
     supported_file_types: list[str] = field(default_factory=lambda: [".txt", ".csv"])
     file_encoding: str = "utf-8"
     quote_char: str = '"'
@@ -59,25 +44,21 @@ class Settings:
     xlsx_sheet: str = "0"
     xlsx_header_row: int = 0
 
-    # --- load / rules (job level; were per file config) ---
-    load_engine: str = "PANDAS"                   # PANDAS | SPARK
-    file_rules_mode: str = "GATE"                 # GATE | ANNOTATE
-    rule_engine: str = "gre"                      # gre | none | module:Class
+    load_engine: str = "PANDAS"
+    file_rules_mode: str = "GATE"
+    rule_engine: str = "gre"
     gre_entrypoint: Optional[str] = None
     spark_jdbc_url: Optional[str] = None
     spark_write_partitions: int = 4
     spark_batch_size: int = 10000
 
-    # --- locking / health ---
     lock_timeout_seconds: int = 300
     heartbeat_stale_minutes: int = 30
 
-    # --- email notifications ---
-    notify_backend: str = "log"                   # log | ses
+    notify_backend: str = "log"
     notify_from_email: Optional[str] = None
-    default_notify_emails: list[str] = field(default_factory=list)   # events not tied to one file config
+    default_notify_emails: list[str] = field(default_factory=list)
 
-    # --- provenance (not a setting) ---
     sources: dict = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
@@ -118,7 +99,6 @@ class Settings:
             if getattr(self, name) not in allowed:
                 raise ConfigError(f"{name.upper()} must be one of {allowed}, got {getattr(self, name)!r}")
 
-    # ------------------------------------------------------------------ database
     def db_conninfo(self, secret_loader: Optional[Callable[[str], dict]] = None) -> tuple[str, dict]:
         """Returns (conninfo, description-without-password)."""
         env = getattr(self, "env", None) or merged_env()
@@ -191,7 +171,7 @@ def merged_env(env: Optional[Mapping[str, str]] = None, env_file: Optional[str] 
 
 
 def read_env_file(path: str) -> dict[str, str]:
-    """Minimal .env reader: KEY=VALUE lines, optional quotes, '#' comments, optional 'export '."""
+    """Minimal .env reader."""
     out = {}
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -227,7 +207,7 @@ def _coerce(name: str, raw: Any) -> Any:
         return raw
     typ = _type_hints()[name]
     text = raw.strip()
-    if typing.get_origin(typ) is typing.Union:                     # Optional[X]
+    if typing.get_origin(typ) is typing.Union:
         if text == "" or text.lower() in ("none", "null"):
             return None
         typ = next(a for a in typing.get_args(typ) if a is not type(None))

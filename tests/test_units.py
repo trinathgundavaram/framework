@@ -1,5 +1,4 @@
-"""Pure unit tests (no database): templates, file reading, object store, close rules, resolution, Btch_ID,
-Req_Stat transitions, settings and period SQL loading."""
+"""Pure unit tests (no database)."""
 from dataclasses import replace
 from datetime import date, datetime, timezone
 
@@ -16,7 +15,6 @@ from framework.load import read_file, scan_delimited, stage
 from framework.settings import Settings, read_env_file
 
 
-# ---------------------------------------------------------------- templates
 TOKENS = "{RUNTY}_{RPTSTART}_{RPTEND}_{TS}"
 
 
@@ -29,7 +27,7 @@ def cfg(cfg_id=1, tmpl=None, p="PRJA", t="TBLX", s="S1"):
     ("P_{RUNTY}_{RPTSTART}_{RPTEND}.txt", "exactly once"),
     ("P_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}_{TS}.txt", "exactly once"),
     ("P_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}_{FOO}.txt", "unknown"),
-    ("{PROJECT}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt", "unknown"),          # project/table/source are literal text
+    ("{PROJECT}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt", "unknown"),
     ("P_{RUNTY}{RPTSTART}_{RPTEND}_{TS}.txt", "separated"),
     ("dir/P_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt", "no '/'"),
     ("P_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt}", "braces"),
@@ -63,9 +61,9 @@ def test_no_match():
 
 
 @pytest.mark.parametrize("name", [
-    "PRJA_TBLX_S1_MONTHLY_20260231_20260301_20260201093000.txt",   # impossible date
-    "PRJA_TBLX_S1_MONTHLY_20260201_20260131_20260201093000.txt",   # end < start
-    "PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201996000.txt",   # bad TS
+    "PRJA_TBLX_S1_MONTHLY_20260231_20260301_20260201093000.txt",
+    "PRJA_TBLX_S1_MONTHLY_20260201_20260131_20260201093000.txt",
+    "PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201996000.txt",
 ])
 def test_invalid_tokens(name):
     with pytest.raises(MatchError) as e:
@@ -86,7 +84,7 @@ def test_case_insensitive_option_and_regex_escaping():
     assert TemplateMatcher([c], case_sensitive=False).match(name).run_ty == "MONTHLY"
     with pytest.raises(MatchError):
         TemplateMatcher([c]).match(name)
-    with pytest.raises(MatchError):   # '.' must be literal
+    with pytest.raises(MatchError):
         TemplateMatcher([c]).match("PXA_T+X_S1_MONTHLY_20260101_20260131_20260201093000.txt")
 
 
@@ -102,7 +100,6 @@ def test_render_roundtrip():
     assert TemplateMatcher([cfg()]).match(name).run_ty == "ADHOC"
 
 
-# ---------------------------------------------------------------- file reading / object store
 def settings(**kw):
     s = Settings()
     for k, v in kw.items():
@@ -129,15 +126,15 @@ def test_delimiters_encoding_and_streaming_scan(tmp_path):
     p = tmp_path / "f.txt"
     p.write_bytes("a\tb\n1\t2\n".encode())
     c = replace(cfg(), delmtr_cd="TAB")
-    assert read_file(str(p), c, 2, settings()) == [["1", "2"]]
+    assert list(read_file(str(p), c, 2, settings())) == [["1", "2"]]
     assert scan_delimited(str(p), c, 2, settings()) == 1
     with pytest.raises(FileRejected):
         scan_delimited(str(p), c, 3, settings())
     p.write_bytes(b"a\tb\n\xff\xfe\t2\n")
     with pytest.raises(FileRejected) as e:
-        read_file(str(p), c, 2, settings())
+        list(read_file(str(p), c, 2, settings()))
     assert e.value.event_ty == "FILE_PARSE_ERROR"
-    assert len(read_file(str(p), c, 2, settings(file_encoding="latin-1"))) == 1
+    assert len(list(read_file(str(p), c, 2, settings(file_encoding="latin-1")))) == 1
 
 
 def test_local_store(tmp_path):
@@ -149,6 +146,8 @@ def test_local_store(tmp_path):
     assert s.exists("b", "archive/R/x.txt") and not s.exists("b", "in/x.txt")
     with pytest.raises(ValueError):
         s.put("b", "../../escape.txt", b"x")
+    with pytest.raises(ValueError):
+        s.put("..", f"{tmp_path.name}-sibling/x.txt", b"x")
     assert parse_uri("s3://bucket/a/b") == ("bucket", "a/b/")
     with pytest.raises(ValueError):
         parse_uri("ftp://x/y")
@@ -167,7 +166,7 @@ def test_local_store_list_objects(tmp_path):
     s = LocalObjectStore(str(tmp_path))
     s.put("b", "in/x.txt", b"hello")
     s.put("b", "in/y.txt", b"world!")
-    s.put("b", "in/sub/z.txt", b"nested")             # not returned: listing is non-recursive (Q-03: root only)
+    s.put("b", "in/sub/z.txt", b"nested")
     objs = s.list_objects("b", "in/")
     assert sorted(o.key for o in objs) == ["in/x.txt", "in/y.txt"]
     assert {o.bucket for o in objs} == {"b"}
@@ -182,13 +181,12 @@ def test_spark_engine_requires_jdbc_url():
         stage(None, s, file_path="x", cfg=cfg(), btch_id="b", load_id=1, src_file_nm="x", loaded_at=None)
 
 
-# ---------------------------------------------------------------- batch close rules
 @pytest.mark.parametrize("req_stat, resolution, expected, auto", [
     ("PROMOTED", "NEW_FILE", ("COMPLETED", "NEW_FILE"), True),
     ("CARRIED_FORWARD", "CARRY_FORWARD", ("COMPLETED", "CARRY_FORWARD"), True),
     ("EXCEPTION_PENDING", None, ("COMPLETED_WITH_EXCEPTION", "MISSING"), True),
     ("EXCEPTION_PENDING", "NEW_FILE", ("COMPLETED_WITH_EXCEPTION", "NEW_FILE"), True),
-    ("PENDING", None, ("DATA_NOT_PROVIDED", "MISSING"), False),                 # no data: a person closes it
+    ("PENDING", None, ("DATA_NOT_PROVIDED", "MISSING"), False),
 ])
 def test_close_resolution(req_stat, resolution, expected, auto):
     b = {"req_stat": req_stat, "resolution_ty": resolution}
@@ -196,7 +194,6 @@ def test_close_resolution(req_stat, resolution, expected, auto):
     check_transition(req_stat, expected[0])
 
 
-# ---------------------------------------------------------------- resolution tables
 @pytest.mark.parametrize("has_data, passed, action, rule", [
     (False, True, Action.PROMOTE, "O-1"),
     (True, True, Action.PROMOTE_REPLACE, "O-2"),
@@ -213,8 +210,8 @@ def test_open_batch(has_data, passed, action, rule):
     (True, "CORRECTION", Action.PROMOTE_CORRECTION, "C-2"),
     (False, None, Action.REJECT_CLOSED, "C-3"),
     (True, None, Action.REJECT_CLOSED, "C-3"),
-    (False, "CORRECTION", Action.REJECT_CLOSED, "C-3"),        # wrong type for a batch without data
-    (True, "LATE_ARRIVAL", Action.REJECT_CLOSED, "C-3"),       # wrong type for a batch with data
+    (False, "CORRECTION", Action.REJECT_CLOSED, "C-3"),
+    (True, "LATE_ARRIVAL", Action.REJECT_CLOSED, "C-3"),
 ])
 def test_closed_batch(has_data, override_ty, action, rule):
     d = decide(ResolutionInput(batch_closed=True, has_data=has_data, file_passed=True, override_ty=override_ty))
@@ -231,7 +228,6 @@ def test_required_override_ty():
     assert required_override_ty(False) == "LATE_ARRIVAL" and required_override_ty(True) == "CORRECTION"
 
 
-# ---------------------------------------------------------------- Btch_ID
 def test_build_btch_id():
     assert build_btch_id(date(2026, 2, 1), "PRJA", "tbl_x", "S1", "MONTHLY", "V1", 1) == "20260201_PRJA_tbl_x_S1_MONTHLY_V1_1"
     with pytest.raises(ValueError):
@@ -250,38 +246,35 @@ def test_hold_requires_positive_sla():
         earliest_close_date(date(2026, 2, 1), 0)
 
 
-# ---------------------------------------------------------------- --as-of / business_tz
 def test_as_of_with_explicit_offset_is_honoured_exactly():
-    c = parse_as_of("2026-02-01T18:00:00+00:00", "America/Chicago")     # offset given: business_tz is ignored
+    c = parse_as_of("2026-02-01T18:00:00+00:00", "America/Chicago")
     assert c.now() == datetime(2026, 2, 1, 18, 0, tzinfo=timezone.utc)
-    assert c.today("America/Chicago") == date(2026, 2, 1)               # 12:00 CST
+    assert c.today("America/Chicago") == date(2026, 2, 1)
 
 
 def test_as_of_bare_date_is_midnight_in_business_tz_not_utc():
-    """A bare date used to be read as UTC midnight - the previous evening in Chicago (CST, UTC-6) -
-    which silently ran the wrong (December) report period. It must resolve to that calendar date."""
+    """A bare date is midnight in the business time zone, not UTC."""
     c = parse_as_of("2026-02-01", "America/Chicago")
-    assert c.now() == datetime(2026, 2, 1, 6, 0, tzinfo=timezone.utc)   # CST midnight = 06:00 UTC
-    assert c.today("America/Chicago") == date(2026, 2, 1)               # the intended run date
-    assert c.today("UTC") == date(2026, 2, 1)                           # not Jan 31 anywhere now
+    assert c.now() == datetime(2026, 2, 1, 6, 0, tzinfo=timezone.utc)
+    assert c.today("America/Chicago") == date(2026, 2, 1)
+    assert c.today("UTC") == date(2026, 2, 1)
 
 
 def test_as_of_bare_timestamp_uses_business_tz_too():
-    c = parse_as_of("2026-02-01T09:30:00", "America/Chicago")           # no offset, has a time
+    c = parse_as_of("2026-02-01T09:30:00", "America/Chicago")
     assert c.now() == datetime(2026, 2, 1, 15, 30, tzinfo=timezone.utc)
     assert c.today("America/Chicago") == date(2026, 2, 1)
 
 
 def test_as_of_default_business_tz_is_utc_unchanged():
-    c = parse_as_of("2026-02-01")                                       # business_tz omitted: old default
+    c = parse_as_of("2026-02-01")
     assert c.now() == datetime(2026, 2, 1, 0, 0, tzinfo=timezone.utc)
 
 
 def test_as_of_respects_dst_boundary():
-    # 2026-03-08 is the US spring-forward date; CDT (UTC-5) starts at 02:00 local that day
-    before = parse_as_of("2026-03-08", "America/Chicago")               # midnight is still CST (UTC-6)
+    before = parse_as_of("2026-03-08", "America/Chicago")
     assert before.now() == datetime(2026, 3, 8, 6, 0, tzinfo=timezone.utc)
-    after = parse_as_of("2026-03-09", "America/Chicago")                # next midnight is CDT (UTC-5)
+    after = parse_as_of("2026-03-09", "America/Chicago")
     assert after.now() == datetime(2026, 3, 9, 5, 0, tzinfo=timezone.utc)
 
 
@@ -289,7 +282,6 @@ def test_as_of_none_returns_live_clock():
     assert type(parse_as_of(None, "America/Chicago")).__name__ == "Clock"
 
 
-# ---------------------------------------------------------------- Req_Stat, settings, period SQL, job params
 def test_status_transitions():
     check_transition("PENDING", "CARRIED_FORWARD")
     check_transition("CARRIED_FORWARD", "COMPLETED")

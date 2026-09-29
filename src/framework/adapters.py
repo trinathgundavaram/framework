@@ -1,7 +1,4 @@
-"""Adapters to external systems: object storage (S3 / local), the GRE rules engine and email
-notification channels (log / SES). Heavy SDKs are imported lazily.
-
-The framework does not produce or call the extract (D-76): a separate process does."""
+"""Adapters to external systems."""
 from __future__ import annotations
 
 import hashlib
@@ -23,7 +20,6 @@ from .settings import Settings
 log = logging.getLogger(__name__)
 
 
-# ============================================================================ object storage
 @dataclass(frozen=True)
 class ObjectInfo:
     bucket: str
@@ -34,7 +30,7 @@ class ObjectInfo:
 
 
 def parse_uri(uri: str) -> tuple[str, str]:
-    """s3://bucket/prefix/ -> (bucket, 'prefix/'). Prefix always ends with '/' unless empty."""
+    """s3://bucket/prefix/ -> (bucket, 'prefix/')."""
     p = urlparse(uri)
     if p.scheme not in ("s3", "local"):
         raise ValueError(f"unsupported storage URI {uri!r}")
@@ -86,7 +82,7 @@ class ObjectStore(ABC):
 
     def move(self, src_bucket: str, src_key: str, dst_uri: str, version_id: Optional[str] = None,
              sub_prefix: str = "") -> str:
-        """Copy to dst_uri/<sub_prefix>/<basename> then delete the source. Returns the destination key."""
+        """Copy to dst_uri/<sub_prefix>/<basename> then delete the source."""
         b, prefix = parse_uri(dst_uri)
         dst_key = f"{prefix}{sub_prefix}{basename(src_key)}"
         self.copy(src_bucket, src_key, b, dst_key, version_id)
@@ -95,14 +91,14 @@ class ObjectStore(ABC):
 
 
 class LocalObjectStore(ObjectStore):
-    """<root>/<bucket>/<key>. ETag = md5 of content; no versioning."""
+    """<root>/<bucket>/<key>."""
 
     def __init__(self, root: str):
         self.root = Path(root)
 
     def _path(self, bucket: str, key: str) -> Path:
         p = (self.root / bucket / key).resolve()
-        if not str(p).startswith(str(self.root.resolve())):
+        if not p.is_relative_to(self.root.resolve()):
             raise ValueError("path escapes the local store root")
         return p
 
@@ -121,8 +117,7 @@ class LocalObjectStore(ObjectStore):
         return self._path(bucket, key).is_file()
 
     def list_objects(self, bucket, prefix):
-        """Files directly under <bucket>/<prefix> - not recursive (Q-03: inbound files are at the
-        template's root, no sub-folders)."""
+        """Files directly under <bucket>/<prefix>, not recursive."""
         d = self._path(bucket, prefix)
         if not d.is_dir():
             return []
@@ -169,13 +164,12 @@ class S3ObjectStore(ObjectStore):
             raise
 
     def list_objects(self, bucket, prefix):
-        """Objects directly under prefix - Delimiter='/' keeps this non-recursive, matching
-        LocalObjectStore (Q-03: inbound files are at the template's root, no sub-folders)."""
+        """Objects directly under prefix, not recursive."""
         out: list[ObjectInfo] = []
         paginator = self.s3.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
             for obj in page.get("Contents", []):
-                if obj["Key"] == prefix:                # the "folder" placeholder object itself, if any
+                if obj["Key"] == prefix:
                     continue
                 out.append(ObjectInfo(bucket, obj["Key"], None, obj["ETag"].strip('"'), obj["Size"]))
         return out
@@ -202,21 +196,14 @@ def build_object_store(settings: Settings) -> ObjectStore:
     raise ValueError(f"unknown object store {settings.object_store!r}")
 
 
-# ============================================================================ rules engine (D-08, D-43, D-44, D-63)
-# GRE call mechanics are open question Q-12: the adapter delegates rule execution to a configurable
-# entry point (GRE_ENTRYPOINT="package.module:function") with this contract:
-#     def run_rules(conn, rule_group: str, rule_variant: str, run_params: dict) -> list[dict]
-#         # one dict per executed rule: {"rule_ref": str, "passed": bool, "detail": str | None}
-#         # raise any exception for a technical failure
-# The framework applies GATE/ANNOTATE itself (FILE_RULES_MODE job setting).
 PASSED, PASSED_WITH_WARNINGS, FAILED, ERROR = "PASSED", "PASSED_WITH_WARNINGS", "FAILED", "ERROR"
 
 
 @dataclass
 class RuleOutcome:
     status: str
-    failed_rules: list[str] = field(default_factory=list)      # GATE failures
-    warned_rules: list[str] = field(default_factory=list)      # ANNOTATE failures
+    failed_rules: list[str] = field(default_factory=list)
+    warned_rules: list[str] = field(default_factory=list)
     error: Optional[str] = None
 
     @property
@@ -243,7 +230,7 @@ class CallableRuleEngine(RuleEngine):
                     if "rule_ref" not in r or "passed" not in r:
                         raise ValueError(f"rule engine returned an invalid result {r!r}")
                     results.append(r)
-        except Exception as e:  # technical failure -> ERROR, never a business failure (E-23)
+        except Exception as e:
             log.exception("rule engine technical failure")
             return RuleOutcome(ERROR, error=str(e))
         failed = [r["rule_ref"] for r in results if not r.get("passed")]
@@ -255,7 +242,7 @@ class CallableRuleEngine(RuleEngine):
 
 
 class NoRulesEngine(RuleEngine):
-    """Passes everything. For environments where rules are intentionally disabled."""
+    """Passes everything."""
 
     def run(self, conn, bindings, run_params, mode):
         return RuleOutcome(PASSED)
@@ -280,7 +267,6 @@ def build_rule_engine(settings: Settings) -> RuleEngine:
     return CallableRuleEngine(_import(settings.gre_entrypoint, "GRE_ENTRYPOINT"))
 
 
-# ============================================================================ email notifications (D-54)
 @dataclass
 class Message:
     subject: str
@@ -314,9 +300,11 @@ class SesChannel(Channel):
         self.ses = boto3.client("ses", region_name=settings.aws_region)
 
     def send(self, msg):
-        if msg.recipients:
-            self.ses.send_email(Source=self.sender, Destination={"ToAddresses": msg.recipients},
-                                Message={"Subject": {"Data": msg.subject[:200]}, "Body": {"Text": {"Data": msg.body}}})
+        if not msg.recipients:
+            log.warning("no recipients for %r; not sent", msg.subject)
+            return
+        self.ses.send_email(Source=self.sender, Destination={"ToAddresses": msg.recipients},
+                            Message={"Subject": {"Data": msg.subject[:200]}, "Body": {"Text": {"Data": msg.body}}})
 
 
 def build_channel(settings: Settings) -> Channel:

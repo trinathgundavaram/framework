@@ -1,28 +1,4 @@
-"""Command-line entry points (design §3). Each command calls one service and sets the exit code.
-
-Any setting can be passed as a job argument with --set NAME=VALUE (see settings.py), so one Glue job
-definition per project carries its own period and gating configuration. The framework closes a run
-after its SLA hold; the extract is produced by a separate process (D-76).
-
-Batch creation and file loading are both reached through `run --module NAME` (modules.py) - one
-project's routine + ad-hoc batches, or one/many inbound files - rather than through separate
-per-purpose commands, so a project needs only one trigger per concern.
-
-Examples:
-  framework init-db
-  framework show-config
-  framework test-connection
-  framework validate-config
-  framework list-modules
-  framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
-  framework run --module BATCH_CREATION --project PRJA               # ad-hoc intake sweep for PRJA only
-  framework run --module FILE_LOAD --bucket inbound --key prja/in/PRJA_TBLX_S1_MONTHLY_20260101_20260131_20260201093000.txt
-  framework run --module FILE_LOAD --bucket inbound --prefix prja/in/     # every object waiting at one location
-  framework run --module FILE_LOAD                                        # every object at every configured location
-  framework process-decisions
-  framework close-batches --project PRJA                                    # SLA sweep: closes batches with data
-  framework close-batch --btch-id 20260201_PRJA_TBLX_S1_MONTHLY_V1_1 --closed-by jdoe   # e.g. a batch with no data
-"""
+"""Command-line entry points (design §3)."""
 from __future__ import annotations
 
 import argparse
@@ -80,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("init-db", "apply schema and seed data")
     add("list-modules", "list the modules that 'run --module' can call, with their parameters")
-    sp = add("run", "run one module by name (BATCH_CREATION, FILE_LOAD)")
+    sp = add("run", "run one module by name (see list-modules)")
     sp.add_argument("--module", required=True, help="module name (see list-modules); case-insensitive")
     scope(sp)
     sp.add_argument("--period", help="BATCH_CREATION: ROUTINE run types only - name in period_sql.py (or --period-file)")
@@ -165,8 +141,9 @@ def _dispatch(app: App, args) -> int:
         _print(app.closer.close(args.btch_id, args.closed_by))
         return 0
     if c == "notify":
-        _print({"sent": app.notifier().run()})
-        return 0
+        notifier = app.notifier()
+        _print({"sent": notifier.run(), "failed": len(notifier.failed)})
+        return 1 if notifier.failed else 0
     if c == "health":
         _print(app.health())
         return 0

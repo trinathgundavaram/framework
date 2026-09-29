@@ -1,12 +1,4 @@
-"""Batches: CRC rows (§5.2), scheduled batch creation (P2) and ad-hoc intake (P4).
-
-Scheduling lives outside the framework (EventBridge / Step Functions / cron). Each scheduled run calls
-`run --module BATCH_CREATION` for one project and run type, naming the report-period SQL to use (period_sql.py).
-A missed run is re-created by running the same command with `--as-of <missed date>`.
-
-A batch is one (project, table, source, run type, report period, **run date**): a run type whose
-period spans several days (a CMS universe, say) gets one batch per run date.
-"""
+"""Batch creation (scheduled and ad-hoc) and batch rows."""
 from __future__ import annotations
 
 import importlib.util
@@ -28,11 +20,10 @@ from .settings import Settings
 log = logging.getLogger(__name__)
 
 
-# ============================================================================ CRC rows
 @dataclass
 class CreateResult:
     req_id: int
-    created: bool                    # False: the batch for that period and run date already existed
+    created: bool
 
 
 def find_batch(conn, project_cd, table_nm, src_id, run_ty, rpt_start: date, rpt_end: date, req_dt: date,
@@ -49,14 +40,14 @@ def get_batch(conn: psycopg.Connection, req_id: int, for_update: bool = False) -
 
 
 def promoted_load(conn: psycopg.Connection, btch_id: str) -> Optional[dict]:
-    """The batch's current data: its single PROMOTED load (D-75, replaces CRC.Current_Load_ID)."""
+    """The batch's PROMOTED load, if any."""
     return conn.execute("SELECT * FROM ComplianceFileLoad WHERE Btch_ID=%s AND Load_Stat='PROMOTED'",
                         (btch_id,)).fetchone()
 
 
 def create_batch(conn: psycopg.Connection, clock: Clock, logger: EventLogger, *, xwalk: XwalkRow,
                  rpt_start: date, rpt_end: date, req_dt: date, intake_id: Optional[int] = None) -> CreateResult:
-    """Idempotent: created=False when the batch for (period, run date) already exists (D-30)."""
+    """Create the batch for (period, run date) unless it exists."""
     x = xwalk
     with conn.transaction():
         db.xact_lock(conn, db.seq_key(x.project_cd, x.table_nm, x.src_id, x.run_ty))
@@ -80,7 +71,6 @@ def create_batch(conn: psycopg.Connection, clock: Clock, logger: EventLogger, *,
         return CreateResult(row["req_id"], True)
 
 
-# ============================================================================ report period (§5.1)
 def period_sql(name: str, period_file: Optional[str] = None) -> str:
     """SQL text for `name` from period_sql.py, or from a project file defining PERIOD_SQL."""
     source = PERIOD_SQL
@@ -119,7 +109,6 @@ def compute_period(conn: psycopg.Connection, name: str, sched_dt: date, lookback
     return start, end
 
 
-# ============================================================================ scheduled creation (P2)
 @dataclass
 class ScheduleSummary:
     run_date: Optional[date] = None
@@ -138,7 +127,7 @@ def create_batches(conn: psycopg.Connection, clock: Clock, settings: Settings, *
     rt = cfg.run_type(conn, run_ty)
     if rt is None or not rt.active or rt.run_category_cd != "ROUTINE":
         raise ConfigError(f"run type {run_ty} is unknown, inactive or not ROUTINE")
-    s.run_date = clock.today(settings.business_tz)            # D-29: run date = creation date
+    s.run_date = clock.today(settings.business_tz)
     s.rpt_start, s.rpt_end = compute_period(conn, period, s.run_date, lookback_days, lookback_weeks, period_file)
     logger = EventLogger(conn, clock)
     rows = [x for x in cfg.xwalk_rows(conn, project_cd=project_cd, table_nm=table_nm, run_ty=run_ty)
@@ -154,7 +143,6 @@ def create_batches(conn: psycopg.Connection, clock: Clock, settings: Settings, *
     return s
 
 
-# ============================================================================ ad-hoc intake (P4)
 @dataclass
 class IntakeSummary:
     run_date: Optional[date] = None
@@ -166,14 +154,7 @@ class IntakeSummary:
 
 
 class IntakeProcessor:
-    """ComplianceRequestInTake holds ad-hoc requests only (the run type must be in the ADHOC category).
-
-    One row asks for batches for the SAME report period on every run date from Req_Start_Dt_Key to
-    Req_End_Dt_Key. This job runs daily: each request whose window contains the run date is handled once
-    for that date (Last_Run_Dt_Key), its batches are created, and every outcome is written to the audit
-    tables under its Intake_ID. A request that cannot be served is audited as INTAKE_FAILED on each run
-    date of its window until its configuration is fixed.
-    """
+    """ComplianceRequestInTake holds ad-hoc requests only (the run type must be in the ADHOC category)."""
 
     def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings):
         self.conn = conn
@@ -182,11 +163,9 @@ class IntakeProcessor:
         self.logger = EventLogger(conn, clock)
 
     def run(self, project_cd: Optional[str] = None, run_ty: Optional[str] = None) -> IntakeSummary:
-        """Sweep the requests due today. `BATCH_CREATION` (modules.py) always calls this with
-        `project_cd` set, so one project's trigger only ever touches that project's requests; pass
-        neither argument to sweep every project (a one-off, unscoped run)."""
+        """Sweep the requests due today."""
         summary = IntakeSummary(run_date=self.clock.today(self.settings.business_tz))
-        run_types: Optional[dict[str, RunType]] = None                 # read once, when the first request is due
+        run_types: Optional[dict[str, RunType]] = None
         while True:
             current = None
             try:
@@ -205,7 +184,7 @@ class IntakeProcessor:
                     if run_types is None:
                         run_types = cfg.run_types(self.conn)
                     self._process(row, summary, run_types)
-            except Exception as e:  # unexpected error: record it and continue with the next intake
+            except Exception as e:
                 if current is None:
                     raise
                 log.exception("intake %s failed", current)
@@ -214,7 +193,6 @@ class IntakeProcessor:
                     self.logger.audit("INTAKE_FAILED", intake_id=current, description=f"technical error: {e}")
                 summary.failed += 1
 
-    # ------------------------------------------------------------------
     def _process(self, it: dict, summary: IntakeSummary, run_types: dict[str, RunType]) -> None:
         self._mark_run(it["intake_id"])
         rt = run_types.get(it["run_ty"])

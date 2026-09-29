@@ -1,8 +1,4 @@
-"""Database helpers: schema install, query helpers and advisory locks.
-
-Connections are autocommit; every unit of work uses an explicit `with conn.transaction():` block.
-Batch locks (BTCH) serialise work on one batch (design §12.2). Session locks are released if the session dies.
-"""
+"""Database helpers."""
 from __future__ import annotations
 
 import time
@@ -50,9 +46,13 @@ def init_db(conn: psycopg.Connection, schema: str = "cms_compliance") -> list[st
     return ["schema.sql"]
 
 
-# ============================================================================ advisory locks
 def batch_key(btch_id: str) -> str:
     return f"BTCH:{btch_id}"
+
+
+def object_key(bucket: str, key: str, version_id: Optional[str]) -> str:
+    """Lock key of one S3 object version."""
+    return f"OBJ:{bucket}/{key}@{version_id or ''}"
 
 
 def seq_key(project: str, table: str, src: str, run_ty: str) -> str:

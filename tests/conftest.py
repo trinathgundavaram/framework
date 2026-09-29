@@ -1,9 +1,4 @@
-"""Test database fixtures.
-
-Environment:
-  TEST_DATABASE_URL     PostgreSQL database for DB tests (DB tests are skipped when unset)
-  TEST_METADATA_SCHEMA  metadata schema name (default cms_compliance)
-"""
+"""Test database fixtures."""
 import os
 
 import pytest

@@ -1,13 +1,4 @@
-"""Batch close (design §11). Each batch closes on its own; the extract is produced by a separate process.
-
-* **Automatic** (`close-batches`, the SLA sweep): an open batch whose hold has passed -
-  `Req_Dt_Key + (SLA_Days - 1)` of its run type (D-38, D-77) - closes when it has data (`NEW_FILE` /
-  `CARRY_FORWARD`) or is `EXCEPTION_PENDING`. A batch without data waits for a person.
-* **Manual** (`close-batch --btch-id --closed-by`): any open batch past its hold; one without data closes
-  as `DATA_NOT_PROVIDED` / `MISSING` (`SOURCE_MISSING_AT_CLOSE`).
-
-A closed batch accepts a file only through an approved LATE_ARRIVAL / CORRECTION override (ingest.py).
-"""
+"""Batch close (design §11)."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -48,9 +39,9 @@ class CloseOutcome:
 @dataclass
 class CloseSummary:
     evaluated: int = 0
-    closed: list[str] = field(default_factory=list)       # Btch_IDs closed by this sweep
-    waiting: list[str] = field(default_factory=list)      # past the hold without data: a person closes them
-    deferred: list[str] = field(default_factory=list)     # locked by another process: next sweep
+    closed: list[str] = field(default_factory=list)
+    waiting: list[str] = field(default_factory=list)
+    deferred: list[str] = field(default_factory=list)
 
 
 class BatchCloser:
@@ -58,7 +49,6 @@ class BatchCloser:
         self.conn, self.clock, self.settings = conn, clock, settings
         self.logger = EventLogger(conn, clock)
 
-    # ------------------------------------------------------------------ manual
     def close(self, btch_id: str, closed_by: str) -> CloseOutcome:
         """Close one open batch whose SLA hold has passed, whatever its data (CloseBlocked otherwise)."""
         b = self._batch(btch_id)
@@ -69,11 +59,10 @@ class BatchCloser:
         if reason:
             self._blocked(b, closed_by, reason)
         out = self._close_locked(b, closed_by, automatic=False)
-        if out is None:                                    # closed by someone else while we waited
+        if out is None:
             self._blocked(b, closed_by, "batch is already closed")
         return out
 
-    # ------------------------------------------------------------------ automatic (SLA sweep)
     def run(self, project_cd: Optional[str] = None, table_nm: Optional[str] = None,
             run_ty: Optional[str] = None) -> CloseSummary:
         """Sweep the open batches in the job's scope whose hold has passed."""
@@ -92,13 +81,12 @@ class BatchCloser:
         return s
 
     def health(self) -> dict[str, list[dict]]:
-        """Open batches past their SLA hold (design §15.3): closing.py closes batches, so this lives here."""
+        """Open batches past their SLA hold (design §15.3)."""
         return {"batches_past_hold_not_closed": [
             {k: b[k] for k in ("req_id", "btch_id", "project_cd", "table_nm", "src_id", "run_ty", "req_dt_key",
                                "req_stat", "resolution_ty")}
             for b in self._open_past_hold(None, None, None, last_hold=self._today() - timedelta(days=1))]}
 
-    # ------------------------------------------------------------------ internals
     def _today(self) -> date:
         return self.clock.today(self.settings.business_tz)
 
@@ -124,8 +112,7 @@ class BatchCloser:
         raise CloseBlocked(reason)
 
     def _close_locked(self, b: dict, closed_by: str, automatic: bool) -> Optional[CloseOutcome]:
-        """Close under the batch lock; None when the batch is no longer open (or, automatically, no longer
-        closes by itself). CloseDeferred when another process holds the batch."""
+        """Close under the batch lock; None if there is nothing to close any more."""
         key = db.batch_key(b["btch_id"])
         if not db.try_lock(self.conn, key):
             with self.conn.transaction():

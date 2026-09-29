@@ -1,34 +1,4 @@
-"""Module dispatcher: run one framework module by name.
-
-One entry point serves every kind of job. The caller passes a **module name** and that module's
-parameters; the dispatcher identifies the module, checks the parameters and calls the owning service.
-A single Glue job / Step Functions state / cron line can therefore run any module:
-
-    framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
-    framework run --module BATCH_CREATION --project PRJA                        # ad-hoc intake sweep only
-    framework run --module FILE_LOAD --bucket inbound --key prja/in/<file>      # one object
-    framework run --module FILE_LOAD --bucket inbound --prefix prja/in/         # one location
-    framework run --module FILE_LOAD                                            # every configured location
-
-From code (a Lambda, a notebook, another job):
-
-    from framework.modules import run_module
-    outcome = run_module(app, "batch-creation", {"project": "PRJA", "run_type": "MONTHLY", "period": "..."})
-    outcome.result, outcome.exit_code
-
-Modules
-  BATCH_CREATION  one project's batches, both kinds, in one call:
-                    - routine (ROUTINE run type + --period): the batches of the period of the run date
-                    - ad-hoc (always, whether or not --run-type/--period are given): processes that
-                      project's pending ComplianceRequestInTake rows
-  FILE_LOAD       load inbound files: one object, one location, or every configured location
-
-Names are case-insensitive and `-` / `_` are interchangeable (`file-load` = `FILE_LOAD`) - that is the
-only name normalisation; there are no alternate names for a module. An unknown module, a missing
-required parameter or a parameter the module does not take is a ConfigError (exit 2), so a typo never
-silently runs the wrong thing. The dispatcher holds no business logic and no SQL: it only maps a name
-to the service that already owns the work (`batches`, `ingest`), the same split as `app.py`.
-"""
+"""Module dispatcher."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -40,15 +10,15 @@ from .common import ConfigError
 
 @dataclass
 class ModuleOutcome:
-    module: str          # canonical module name
-    result: Any          # the service's summary object (dataclass) or dict
-    exit_code: int       # 0 ok, 1 completed with problems
+    module: str
+    result: Any
+    exit_code: int
 
 
 @dataclass(frozen=True)
 class Param:
     name: str
-    kind: type = str                 # str | int
+    kind: type = str
 
 
 @dataclass(frozen=True)
@@ -72,15 +42,11 @@ def _key(name: str) -> str:
     return name.strip().lstrip("-").lower().replace("-", "_")
 
 
-# ============================================================================ handlers
 @dataclass
 class BatchCreationSummary:
-    """One BATCH_CREATION call's work for one project: the routine batches it created (only when
-    --run-type/--period were given, and that run type is ROUTINE) and the ad-hoc intake requests it
-    processed (always attempted, scoped to the project and, for an ADHOC --run-type, to that run type
-    too). `scheduled` is None when no routine creation was requested this call."""
-    scheduled: Optional[Any] = None      # batches.ScheduleSummary
-    adhoc: Optional[Any] = None          # batches.IntakeSummary
+    """One BATCH_CREATION call's work for one project."""
+    scheduled: Optional[Any] = None
+    adhoc: Optional[Any] = None
 
 
 def _batch_creation(app, p: dict) -> ModuleOutcome:
@@ -99,21 +65,24 @@ def _batch_creation(app, p: dict) -> ModuleOutcome:
                                            period=p["period"], period_file=p.get("period_file"),
                                            lookback_days=p.get("lookback_days"),
                                            lookback_weeks=p.get("lookback_weeks"))
-        else:                                                  # ADHOC: the run type only scopes the intake sweep
+        else:
             if wants_period:
                 raise ConfigError(f"run type {run_type} is ADHOC; --period/--period-file/--lookback-* "
                                   "only apply to a ROUTINE run type")
             adhoc_run_ty = run_type
     elif wants_period:
         raise ConfigError("BATCH_CREATION: --period/--period-file/--lookback-* need --run-type")
-    adhoc = app.intake.run(project_cd=project, run_ty=adhoc_run_ty)   # always attempted, project-scoped
+    adhoc = app.intake.run(project_cd=project, run_ty=adhoc_run_ty)
     errors = bool(scheduled and scheduled.errors) or bool(adhoc.failed)
     return ModuleOutcome("BATCH_CREATION", BatchCreationSummary(scheduled, adhoc), 1 if errors else 0)
 
 
 def _file_load(app, p: dict) -> ModuleOutcome:
-    bucket, key, prefix = p.get("bucket"), p.get("key"), p.get("prefix")
-    if key:                                                   # one object
+    bucket, key, prefix, project = p.get("bucket"), p.get("key"), p.get("prefix"), p.get("project")
+    if project and (bucket or key or prefix):
+        raise ConfigError("FILE_LOAD takes --project (that project's configured locations) or "
+                          "--bucket/--key/--prefix, not both")
+    if key:
         if not bucket:
             raise ConfigError("FILE_LOAD with --key also needs --bucket")
         if prefix:
@@ -121,11 +90,28 @@ def _file_load(app, p: dict) -> ModuleOutcome:
         return ModuleOutcome("FILE_LOAD", app.pipeline.process_file(bucket, key, p.get("version_id")), 0)
     if p.get("version_id"):
         raise ConfigError("--version-id only applies to a single object (--key)")
-    s = app.pipeline.process_path(bucket, prefix)             # one location, or every configured one
+    s = app.pipeline.process_path(bucket, prefix, project)
     return ModuleOutcome("FILE_LOAD", s, 1 if s.errors else 0)
 
 
-# ============================================================================ registry
+def _override_decisions(app, p: dict) -> ModuleOutcome:
+    s = app.decisions.run(p.get("project"))
+    return ModuleOutcome("OVERRIDE_DECISIONS", s, 1 if s.invalid else 0)
+
+
+def _batch_close(app, p: dict) -> ModuleOutcome:
+    """Batches without data (waiting) and locked ones (deferred, closed by the next sweep) are normal."""
+    s = app.closer.run(p.get("project"), p.get("table"), p.get("run_type"))
+    return ModuleOutcome("BATCH_CLOSE", s, 0)
+
+
+def _notify(app, p: dict) -> ModuleOutcome:
+    """Events whose email failed stay unsent for the next run; exit 1 reports them."""
+    notifier = app.notifier()
+    sent = notifier.run(project_cd=p.get("project"))
+    return ModuleOutcome("NOTIFY", {"sent": sent, "failed": len(notifier.failed)}, 1 if notifier.failed else 0)
+
+
 MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
     ModuleSpec(
         "BATCH_CREATION",
@@ -137,9 +123,20 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
         handler=_batch_creation),
     ModuleSpec(
         "FILE_LOAD", "load inbound files: one object (--bucket --key), one location (--bucket --prefix), "
-                     "or every configured location (no arguments)",
-        required=(), optional=(Param("bucket"), Param("key"), Param("prefix"), Param("version_id")),
+                     "one project's configured locations (--project) or every configured location (no arguments)",
+        required=(), optional=(Param("bucket"), Param("key"), Param("prefix"), Param("version_id"), Param("project")),
         handler=_file_load),
+    ModuleSpec(
+        "OVERRIDE_DECISIONS", "apply approved REUSE overrides and expire the ones that ran out; "
+                              "one project (--project) or every project",
+        required=(), optional=(Param("project"),), handler=_override_decisions),
+    ModuleSpec(
+        "BATCH_CLOSE", "close the batches past their SLA hold that have data or are in exception; "
+                       "scope --project / --table / --run-type, or every batch",
+        required=(), optional=(Param("project"), Param("table"), Param("run_type")), handler=_batch_close),
+    ModuleSpec(
+        "NOTIFY", "email pending events: one project's (--project), or every event including those of no project",
+        required=(), optional=(Param("project"),), handler=_notify),
 )}
 
 
@@ -155,7 +152,7 @@ def resolve_module(name: str) -> ModuleSpec:
 
 
 def describe_modules() -> list[dict]:
-    """What `framework list-modules` prints: name, what it does and its parameters."""
+    """What `framework list-modules` prints."""
     return [{"module": m.name, "description": m.description,
              "required": [p.name for p in m.required], "optional": [p.name for p in m.optional]}
             for m in MODULES.values()]
@@ -168,7 +165,7 @@ def _coerce(spec: ModuleSpec, params: Mapping[str, Any]) -> dict[str, Any]:
     for raw_name, value in params.items():
         name = _key(raw_name)
         if value is None or value == "":
-            continue                                           # an unset job argument is not a value
+            continue
         if name not in known:
             unknown.append(raw_name)
             continue

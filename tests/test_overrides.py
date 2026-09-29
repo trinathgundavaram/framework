@@ -1,8 +1,4 @@
-"""Manual overrides: REUSE (carry-forward), LATE_ARRIVAL and CORRECTION (D-70, D-74).
-
-People insert and approve rows with the templates in sql/approvals.sql; `process-decisions` applies
-and expires REUSE, while the ingest pipeline reads LATE_ARRIVAL / CORRECTION (see test_ingest.py).
-"""
+"""Manual overrides."""
 from datetime import date, datetime
 
 import pytest
@@ -52,14 +48,14 @@ def test_reuse_carries_the_prior_batch_and_closes_complete(next_month, conn):
     b = feb(conn, "S2")
     assert (b["resolution_ty"], b["req_stat"], b["reuse_btch_id"]) == ("CARRY_FORWARD", "CARRIED_FORWARD",
                                                                       jan_s2["btch_id"])
-    clock.set(utc(2026, 3, 2, 12, 0))                                       # both Feb batches have data now
+    clock.set(utc(2026, 3, 2, 12, 0))
     assert app.closer.run().closed == [feb(conn, "S1")["btch_id"], feb(conn, "S2")["btch_id"]]
     b = feb(conn, "S2")
     assert (b["batch_close_ind"], b["req_stat"], b["resolution_ty"]) == (1, "COMPLETED", "CARRY_FORWARD")
     events = [r["event_ty"] for r in qa(conn, "SELECT Event_Ty FROM ComplianceRequestFileDetail WHERE Req_ID=%s "
                                               "ORDER BY Detail_ID", b["req_id"])]
     assert events == ["BATCH_CREATED", "CARRY_FORWARD_APPLIED", "BATCH_CLOSED"]
-    assert app.decisions.run().expired == []                                # a closed batch is left alone
+    assert app.decisions.run().expired == []
 
 
 def test_reuse_is_rejected_when_the_run_type_disallows_it(next_month, conn):
@@ -75,10 +71,10 @@ def test_reuse_is_rejected_when_the_run_type_disallows_it(next_month, conn):
 
 def test_reuse_invalid_when_batch_has_data_or_source_is_unknown(next_month, conn):
     app, *_ = next_month
-    a = reuse(conn, feb(conn, "S1")["req_id"])                              # S1 already has February data
+    a = reuse(conn, feb(conn, "S1")["req_id"])
     b = reuse(conn, feb(conn, "S2")["req_id"], reuse_btch_id="no-such-batch")
     assert sorted(app.decisions.run().invalid) == sorted([a, b])
-    with pytest.raises(Exception):                                          # one active override per batch and type
+    with pytest.raises(Exception):
         reuse(conn, feb(conn, "S2")["req_id"], approved=False)
 
 
@@ -98,14 +94,14 @@ def test_reuse_expires_when_its_validity_date_passes(next_month, conn):
     app, clock, _ = next_month
     oid = reuse(conn, feb(conn, "S2")["req_id"], valid_thru=date(2026, 3, 3))
     app.decisions.run()
-    stop_override(conn, oid, date(2026, 2, 28))                             # "stop using that batch" (template 6)
+    stop_override(conn, oid, date(2026, 2, 28))
     d = app.decisions.run()
     assert d.expired == [oid] and d.applied == []
     b = feb(conn, "S2")
     assert (b["resolution_ty"], b["req_stat"], b["reuse_btch_id"]) == (None, "PENDING", None)
     assert q1(conn, "SELECT count(*) n FROM CMS_ComplianceExceptionsAudit "
                     "WHERE Event_Ty='OVERRIDE_EXPIRED'")["n"] == 1
-    clock.set(utc(2026, 3, 4, 13, 0))                                       # nothing left to expire or apply
+    clock.set(utc(2026, 3, 4, 13, 0))
     assert app.decisions.run() == app.decisions.run()
 
 
@@ -114,10 +110,10 @@ def test_a_file_replaces_a_carried_forward_batch(next_month, conn):
     oid = reuse(conn, feb(conn, "S2")["req_id"])
     app.decisions.run()
     out = send(app, "S2", ["3|3|y"], datetime(2026, 3, 1, 10, 0), start=date(2026, 2, 1), end=date(2026, 2, 28))
-    assert (out.result, out.rule) == ("PROMOTED", "O-2")   # replaces the carried data
+    assert (out.result, out.rule) == ("PROMOTED", "O-2")
     b = feb(conn, "S2")
     assert (b["resolution_ty"], b["req_stat"], b["reuse_btch_id"]) == ("NEW_FILE", "PROMOTED", None)
-    assert app.decisions.run().applied == []                                # the batch has data now
+    assert app.decisions.run().applied == []
     assert q1(conn, "SELECT Apprvl_Stat FROM ComplianceBatchOverride WHERE Ovrd_ID=%s", oid)["apprvl_stat"] == "APPROVED"
 
 
@@ -135,7 +131,7 @@ def test_reuse_follows_a_chain_back_to_real_data(conn, tmp_path):
     reuse(conn, feb(conn, "S1")["req_id"], valid_thru=date(2026, 4, 30))
     app.decisions.run()
     clock.set(utc(2026, 3, 2, 12, 0))
-    assert app.closer.run().closed                                          # a carried batch closes like one with data
+    assert app.closer.run().closed
     clock.set(utc(2026, 4, 1, 13, 0))
     create_batches(app)
     mar = q1(conn, "SELECT * FROM ComplianceRequestControl WHERE Rpt_Start_Dt_Key='2026-03-01'")

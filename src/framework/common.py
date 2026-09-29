@@ -1,13 +1,12 @@
-"""Shared primitives: exceptions, the injectable clock, Btch_ID rules and the Req_Stat model."""
+"""Shared primitives."""
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
-# ============================================================================ exceptions
 class FrameworkError(Exception):
-    """Base class. Business outcomes are NOT exceptions; these signal control flow or technical failures."""
+    """Base class."""
 
 
 class ConfigError(FrameworkError):
@@ -50,9 +49,8 @@ class CloseDeferred(FrameworkError):
     """The batch is locked by another process; try again later."""
 
 
-# ============================================================================ clock
 class Clock:
-    """Injected time source. Services never call datetime.now() / date.today() directly."""
+    """Injected time source."""
 
     def now(self) -> datetime:
         return datetime.now(timezone.utc)
@@ -77,29 +75,21 @@ class FixedClock(Clock):
 
 
 def parse_as_of(value: str | None, business_tz: str = "UTC") -> Clock:
-    """`--as-of` accepts ISO-8601 (date or timestamp).
-
-    A value with an explicit UTC offset (`...+00:00`, `...Z`) is honoured exactly as given. A value
-    with **no** offset - including a bare date like `2026-02-01` - is interpreted in `business_tz`
-    (the job's `BUSINESS_TZ`, America/Chicago by default), not UTC: `--as-of 2026-02-01` means
-    midnight Feb 1 in that timezone, the same "today" a job actually running then would compute via
-    `Clock.today()` (a UTC midnight would be the previous evening in Chicago - the wrong report period).
-    """
+    """`--as-of` accepts ISO-8601 (date or timestamp)."""
     if not value:
         return Clock()
-    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))  # py3.10 does not accept "Z"
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=ZoneInfo(business_tz))
     return FixedClock(dt)
 
 
-# ============================================================================ Btch_ID (design §4)
 BTCH_ID_MAX_LEN = 250
 
 
 def build_btch_id(req_dt: date, project_cd: str, table_nm: str, src_id: str, run_ty: str,
                   cmplnc_vrsn: str, seq: int) -> str:
-    """{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Src}_{Run_Ty}_{Vrsn}_{Seq}"""
+    """{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Src}_{Run_Ty}_{Vrsn}_{Seq}."""
     if seq < 1:
         raise ValueError("seq must be >= 1")
     value = f"{req_dt:%Y%m%d}_{project_cd}_{table_nm}_{src_id}_{run_ty}_{cmplnc_vrsn}_{seq}"
@@ -109,14 +99,12 @@ def build_btch_id(req_dt: date, project_cd: str, table_nm: str, src_id: str, run
 
 
 def earliest_close_date(req_dt: date, sla_days: int) -> date:
-    """D-38: the SLA hold, computed when it is needed - never stored.
-    SLA 1 = the run date itself, SLA 2 = the next day, ... (calendar days)."""
+    """Earliest close date: Req_Dt_Key + SLA_Days - 1."""
     if sla_days < 1:
         raise ValueError("SLA_Days must be >= 1")
     return req_dt + timedelta(days=sla_days - 1)
 
 
-# ============================================================================ Req_Stat (design §6.1)
 PENDING = "PENDING"
 PROMOTED = "PROMOTED"
 CARRIED_FORWARD = "CARRIED_FORWARD"
@@ -132,7 +120,7 @@ TRANSITIONS: dict[str, set[str]] = {
     PROMOTED: {EXCEPTION_PENDING, COMPLETED},
     CARRIED_FORWARD: {PROMOTED, EXCEPTION_PENDING, PENDING, COMPLETED},
     EXCEPTION_PENDING: {PROMOTED, CARRIED_FORWARD, PENDING, COMPLETED_WITH_EXCEPTION},
-    COMPLETED: {COMPLETED},                      # reopen promotion
+    COMPLETED: {COMPLETED},
     COMPLETED_WITH_EXCEPTION: {COMPLETED},
     DATA_NOT_PROVIDED: {COMPLETED},
 }

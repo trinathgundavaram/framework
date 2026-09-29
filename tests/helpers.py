@@ -1,4 +1,4 @@
-"""Shared test fixtures/builders. All names are synthetic."""
+"""Shared test fixtures/builders."""
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
@@ -21,11 +21,11 @@ def utc(*a) -> datetime:
 
 
 class FakeRules:
-    """Rule engine double: set `file_fail` (per source) or `error` (the FILE_LEVEL scope raises)."""
+    """Rule engine double."""
 
     def __init__(self):
-        self.file_fail: dict[str, list[str]] = {}     # src_id -> failing rules
-        self.error: set[str] = set()                  # scopes that raise technical errors
+        self.file_fail: dict[str, list[str]] = {}
+        self.error: set[str] = set()
         self.calls: list[dict] = []
 
     def run(self, conn, bindings, run_params, mode):
@@ -113,7 +113,7 @@ def qa(conn, sql, *params):
 
 def add_override(conn, req_id: int, override_ty: str, valid_thru, *, reuse_btch_id=None, approved=True,
                  who="approver") -> int:
-    """What sql/approvals.sql does: one manual row, approved with a validity date."""
+    """What sql/approvals.sql does."""
     with conn.transaction():
         return conn.execute(
             """INSERT INTO ComplianceBatchOverride
@@ -130,7 +130,7 @@ def add_override(conn, req_id: int, override_ty: str, valid_thru, *, reuse_btch_
 
 
 def stop_override(conn, ovrd_id: int, valid_thru) -> None:
-    """Template 6: stop an approved override by moving its validity date into the past."""
+    """Template 6."""
     with conn.transaction():
         conn.execute("UPDATE ComplianceBatchOverride SET Valid_Thru_Dt_Key=%s, Updated_Dtts=now() WHERE Ovrd_ID=%s",
                      (valid_thru, ovrd_id))

@@ -45,7 +45,7 @@ tests/                    unit + PostgreSQL integration tests
 | `.env` location | `--env-file`, else `FRAMEWORK_ENV_FILE`, else `./.env` (optional) |
 
 - **Locally:** put the database values in `.env` (see `.env.example`). `.env` is git-ignored.
-- **In AWS:** set only `FRAMEWORK_DB_SECRET_NAME` (the secret created by `aws/glue/secrets.tf` has the right shape); pass project settings as Glue job arguments (`--set ...`).
+- **In AWS:** set only `FRAMEWORK_DB_SECRET_NAME` (the secret created by the AWS deployment in `module/aws/compliance_frameworks/compliance_batch_framework/` has the right shape); pass project settings as Glue job arguments (`--set ...`).
 - **One database:** the framework schema (`METADATA_SCHEMA`) and the staging/core schemas named in `ComplianceSourceFileConfig` are in the same PostgreSQL database, so a promotion is one transaction.
 - `framework show-config` prints every setting with its value and source (`argument`, `env`, `.env`, `default`) and the database target without the password.
 - Direct connections only (D-55): no RDS Proxy / PgBouncer transaction pooling.
@@ -106,11 +106,11 @@ export TEST_DATABASE_URL=postgresql://postgres@localhost:5432/fwtest   # a scrat
 pytest                            # tests drop and recreate the metadata schema
 ```
 
-Python 3.10+ and PostgreSQL 14+ (tested on 16); no extensions are needed. `TEST_METADATA_SCHEMA=fw_meta` runs the suite against a non-default schema. Without `TEST_DATABASE_URL` only the unit tests run.
+Python 3.9+ (Glue Python Shell runs 3.9) and PostgreSQL 14+ (tested on 16); no extensions are needed. `TEST_METADATA_SCHEMA=fw_meta` runs the suite against a non-default schema. Without `TEST_DATABASE_URL` only the unit tests run.
 
 ### Windows without Docker
 
-1. **Install Python 3.10+** from python.org and tick "Add python.exe to PATH".
+1. **Install Python 3.9+** from python.org and tick "Add python.exe to PATH".
 2. **Install PostgreSQL 14+.**
    - With admin rights: the EDB installer (<https://www.postgresql.org/download/windows/>).
    - Without admin rights: download the EDB **zip binaries**, unzip to e.g. `C:\pgsql`, then:
@@ -135,7 +135,7 @@ Python 3.10+ and PostgreSQL 14+ (tested on 16); no extensions are needed. `TEST_
 
 1. **Create the target tables** in the framework database (own schemas):
    - Staging: business columns in file order, plus `btch_id`, `load_id`, `src_file_nm`, `stg_load_dtts`.
-   - Core: business columns plus `btch_id`, `load_id`, `current_ind`, `load_dtts`, `end_dtts` (see the comment at the end of `schema.sql`).
+   - Core: business columns plus `btch_id`, `load_id`, `current_ind`, `load_dtts`, `end_dtts`. Index `btch_id` on staging and `btch_id WHERE current_ind = 1` on core.
 2. **Insert configuration rows** (SQL or the Glue metadata-load job), in this order:
    1. `ComplianceProject` — the project code and its description.
    2. `ComplianceSourceSystem` — `Src_ID`, name, type.
@@ -152,20 +152,26 @@ Python 3.10+ and PostgreSQL 14+ (tested on 16); no extensions are needed. `TEST_
       | One source | `ODAG1` | `210` | `*` |
    The schema has no CHECK constraints: `validate-config` checks the values instead.
 3. **Run `framework validate-config`.** It must report no `ERROR` issues.
-4. **Schedule the project's jobs** (EventBridge / Step Functions / Glue triggers), for example:
+4. **Schedule the project's steps.** In AWS this is an entry in the deployment's `projects` map
+   (EventBridge Scheduler -> the project's Step Functions workflow -> the Glue runner; see
+   `module/aws/compliance_frameworks/compliance_batch_framework/README.md`). Each step is one module run
+   for the project:
 
    ```bash
-   # monthly, 06:00 on the 1st: routine batches AND this project's pending ad-hoc requests, one trigger
+   # 06:00 on the 1st: routine batches AND this project's pending ad-hoc requests
    framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
-   # daily (or more often): close the batches past their SLA hold that have data or are in exception
-   framework close-batches --project PRJA
+   # every 15 minutes: load waiting files, apply / expire overrides, email events
+   framework run --module FILE_LOAD --project PRJA
+   framework run --module OVERRIDE_DECISIONS --project PRJA
+   framework run --module NOTIFY --project PRJA
+   # hourly: close the batches past their SLA hold that have data or are in exception
+   framework run --module BATCH_CLOSE --project PRJA
    # batches past the hold without data are listed as "waiting" (and in `health`); a person closes them:
    #   framework close-batch --btch-id <Btch_ID> --closed-by <user>
-   # the extract is produced by a separate process from the batches and their current core rows
-   # S3 event -> run --module FILE_LOAD --bucket ... --key ... (one object); or poll with
-   # run --module FILE_LOAD (every object waiting, one or all configured locations);
-   # also polling -> process-decisions, notify
+   # hourly, without --project: NOTIFY for events that belong to no project
    ```
+
+   The extract is produced by a separate process from the batches and their current core rows.
 
    A missed `BATCH_CREATION` run is recreated with `--as-of <missed date>`: the period follows that date; `Btch_ID` carries the actual creation date.
 
@@ -203,13 +209,18 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 | Module | Does | Parameters |
 |---|---|---|
 | `BATCH_CREATION` | One project, both kinds, in one call: routine batches (when `--run-type`/`--period` name a ROUTINE run type) *and* that project's pending ad-hoc intake requests (always attempted, project-scoped; scoped further to the run type when it names an ADHOC one) | `--project` · `[--run-type] [--period] [--table] [--period-file] [--lookback-days] [--lookback-weeks]` |
-| `FILE_LOAD` | Load inbound files: one object, one location, or every configured location | `--bucket --key [--version-id]` (one object) · `--bucket --prefix` (one location) · none (every configured location) |
+| `FILE_LOAD` | Load inbound files: one object, one location, one project's locations, or every configured location. In a folder shared with other projects, `--project` takes only its own templates' files | `--bucket --key [--version-id]` · `--bucket --prefix` · `--project` · none |
+| `OVERRIDE_DECISIONS` | Apply approved `REUSE` overrides, expire the ones that ran out (= `process-decisions`); an invalid override is reported once | `[--project]` |
+| `BATCH_CLOSE` | Close batches past their SLA hold that have data or are in exception (= `close-batches`); exit 0 even when some wait or are locked | `[--project] [--table] [--run-type]` |
+| `NOTIFY` | Email pending events (= `notify`); without `--project` also events of no project. Each email is claimed with `SKIP LOCKED`, so overlapping runs never send one twice | `[--project]` |
 
 ```bash
 framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
 framework run --module BATCH_CREATION --project PRJA                       # ad-hoc sweep only, no routine run
 framework run --module BATCH_CREATION --project PRJA --run-type ADHOC      # ad-hoc sweep scoped to that run type
 framework run --module FILE_LOAD --bucket inbound --key prja/in/<file>
+framework run --module FILE_LOAD --project PRJA                             # PRJA's inbound folders
+framework run --module BATCH_CLOSE --project PRJA --run-type MONTHLY
 ```
 
 `BATCH_CREATION` is the single, per-project trigger for both kinds of batch creation (Glue job

@@ -1,17 +1,4 @@
-"""Report-period SQL, one statement per name (design §5.1). Replaces CompliancePeriodStrategy.
-
-The scheduled job for a project names the period to use:
-
-    framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
-
-A project can ship its own list instead: a .py file that defines PERIOD_SQL in the same shape,
-passed with `--period-file path/to/project_periods.py`.
-
-Each statement returns one row (rpt_start, rpt_end) and may use these parameters:
-  %(sched_dt)s        the run date in BUSINESS_TZ (from --as-of, default today)
-  %(lookback_days)s   --lookback-days
-  %(lookback_weeks)s  --lookback-weeks
-"""
+"""Report-period SQL, one statement per name (design §5.1)."""
 
 PERIOD_SQL = {
     "SAME_DAY": """

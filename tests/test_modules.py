@@ -1,10 +1,4 @@
-"""Module dispatcher: a module name selects batch creation or file load (modules.py).
-
-BATCH_CREATION is the merged module (D: combine routine + ad-hoc into one project-scoped call): it
-creates the routine batches of a project/ROUTINE run type/period when those are given, and *always*
-also sweeps that project's pending ad-hoc intake requests (ComplianceRequestInTake) - project-scoped
-either way, so one project's trigger never touches another project's rows of either kind.
-"""
+"""Module dispatcher."""
 import json
 import os
 from datetime import date
@@ -31,7 +25,6 @@ def last_run(conn, iid):
     return q1(conn, "SELECT Last_Run_Dt_Key d FROM ComplianceRequestInTake WHERE Intake_ID=%s", iid)["d"]
 
 
-# ------------------------------------------------------------------ no database
 @pytest.mark.parametrize("name", ["BATCH_CREATION", "batch_creation", "batch-creation", " Batch Creation "])
 def test_batch_creation_name_is_case_and_dash_insensitive(name):
     """Case and `-`/`_` are interchangeable; there are no other names for this module (no aliases)."""
@@ -49,8 +42,7 @@ def test_other_modules_are_identified(name, expected):
                                   "ADHOC_BATCHES", "INGEST", "FILE_INGEST", "LOAD", "INGEST_FILE", "INGEST_PATH",
                                   "RULES", "TRIGGER_RULES", "RUN_RULES", "RULES_TRIGGER"])
 def test_old_aliases_no_longer_resolve(name):
-    """This is a brand-new system: there is no legacy caller to keep these names working for, so a module
-    is reached only by its canonical name (case/dash normalised) - nothing else resolves."""
+    """This is a brand-new system."""
     with pytest.raises(ConfigError, match="unknown module"):
         resolve_module(name)
 
@@ -63,21 +55,20 @@ def test_unknown_module_lists_the_available_ones():
 
 
 def test_registry_is_consistent():
-    assert module_names() == ["BATCH_CREATION", "FILE_LOAD"]
+    assert module_names() == ["BATCH_CLOSE", "BATCH_CREATION", "FILE_LOAD", "NOTIFY", "OVERRIDE_DECISIONS"]
     assert [d["module"] for d in describe_modules()] == list(MODULES)
-    for spec in MODULES.values():                       # every required parameter is a declared parameter
+    for spec in MODULES.values():
         assert {p.name for p in spec.required} <= set(spec.params)
 
 
 def test_parameters_are_checked_before_anything_runs():
-    # app=None: validation must fail before the handler touches the app
     with pytest.raises(ConfigError, match="BATCH_CREATION needs: project"):
         run_module(None, "BATCH_CREATION", {})
     with pytest.raises(ConfigError, match="does not take: bucket"):
         run_module(None, "BATCH_CREATION", {"project": "P", "bucket": "b"})
     with pytest.raises(ConfigError, match="lookback_days must be int"):
         run_module(None, "BATCH_CREATION", {"project": "P", "run_type": "R", "period": "X", "lookback_days": "soon"})
-    with pytest.raises(ConfigError, match="need --run-type"):                          # period with no run_type
+    with pytest.raises(ConfigError, match="need --run-type"):
         run_module(None, "BATCH_CREATION", {"project": "P", "period": "X"})
     with pytest.raises(ConfigError, match="FILE_LOAD with --key also needs --bucket"):
         run_module(None, "FILE_LOAD", {"key": "a/b.txt"})
@@ -90,10 +81,9 @@ def test_parameters_are_checked_before_anything_runs():
 def test_list_modules_needs_no_database(capsys):
     assert main(["list-modules"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert {m["module"] for m in out} == {"BATCH_CREATION", "FILE_LOAD"}
+    assert {m["module"] for m in out} == set(module_names())
 
 
-# ------------------------------------------------------------------ database
 BATCH_PARAMS = {"project": "PRJA", "run_type": "MONTHLY", "period": "PREV_CALENDAR_MONTH"}
 
 
@@ -104,31 +94,31 @@ def setup(conn, tmp_path):
 
 
 def test_batch_creation_module_routine_and_ad_hoc_together(conn, tmp_path):
-    """One call, both kinds: routine batches created AND that project's pending ad-hoc request processed."""
+    """One call, both kinds."""
     app, *_ = setup(conn, tmp_path)
-    a1 = intake(conn)                                                    # PRJA, req window opens 2026-02-01
+    a1 = intake(conn)
     out = run_module(app, "batch-creation", BATCH_PARAMS)
     assert out.module == "BATCH_CREATION" and out.exit_code == 0
-    assert out.result.scheduled.created == 2                             # the routine part (unchanged behaviour)
-    assert out.result.adhoc.created == 2                                 # the ad-hoc part, in the SAME call
+    assert out.result.scheduled.created == 2
+    assert out.result.adhoc.created == 2
     assert q1(conn, "SELECT count(*) n FROM ComplianceRequestControl")["n"] == 4
     assert last_run(conn, a1) == date(2026, 2, 1)
 
-    again = app.run_module("BATCH_CREATION", BATCH_PARAMS)               # idempotent, and via App
+    again = app.run_module("BATCH_CREATION", BATCH_PARAMS)
     assert (again.result.scheduled.created, again.result.scheduled.existing) == (0, 2)
-    assert again.result.adhoc.handled == 0                               # A1 already handled today
+    assert again.result.adhoc.handled == 0
 
     out = run_module(app, "BATCH_CREATION", {**BATCH_PARAMS, "table": "no_such_table"})
-    assert out.exit_code == 1 and out.result.scheduled.errors            # nothing effective: completed with problems
+    assert out.exit_code == 1 and out.result.scheduled.errors
 
 
 def test_batch_creation_project_only_runs_ad_hoc_only(conn, tmp_path):
-    """No --run-type/--period: only the ad-hoc sweep runs; `scheduled` is None, nothing routine happens."""
+    """No --run-type/--period."""
     app, *_ = setup(conn, tmp_path)
     intake(conn)
     out = run_module(app, "BATCH_CREATION", {"project": "PRJA"})
     assert out.result.scheduled is None and out.result.adhoc.created == 2 and out.exit_code == 0
-    assert q1(conn, "SELECT count(*) n FROM ComplianceRequestControl")["n"] == 2            # ad-hoc batches only
+    assert q1(conn, "SELECT count(*) n FROM ComplianceRequestControl")["n"] == 2
     assert q1(conn, "SELECT count(*) n FROM ComplianceRequestControl WHERE Run_Ty='MONTHLY'")["n"] == 0
 
 
@@ -142,8 +132,7 @@ def test_batch_creation_with_adhoc_run_type_scopes_the_sweep_and_rejects_period(
 
 
 def test_batch_creation_is_scoped_to_the_input_project_for_both_kinds(conn, tmp_path):
-    """One trigger per project: PRJB has its own crosswalk rows (routine AND ad-hoc) and its own intake
-    row, but a PRJA run never touches PRJB's rows, and vice versa - proven for both halves of the merge."""
+    """One trigger per project."""
     app, *_ = setup(conn, tmp_path)
     with conn.transaction():
         conn.execute("""INSERT INTO ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty,
@@ -157,24 +146,24 @@ def test_batch_creation_is_scoped_to_the_input_project_for_both_kinds(conn, tmp_
     by_project = lambda: {r["project_cd"]: r["n"] for r in qa(   # noqa: E731
         conn, "SELECT Project_Cd, count(*) n FROM ComplianceRequestControl GROUP BY 1")}
 
-    a = run_module(app, "BATCH_CREATION", BATCH_PARAMS)                       # PRJA trigger
-    assert a.result.scheduled.created == 2 and a.result.adhoc.created == 2    # routine tbl_x + A1's own ad-hoc
-    assert by_project() == {"PRJA": 4}                                        # PRJB doesn't exist yet
+    a = run_module(app, "BATCH_CREATION", BATCH_PARAMS)
+    assert a.result.scheduled.created == 2 and a.result.adhoc.created == 2
+    assert by_project() == {"PRJA": 4}
     assert last_run(conn, b1) is None
 
-    b = run_module(app, "BATCH_CREATION", {**BATCH_PARAMS, "project": "PRJB"})  # PRJB trigger
+    b = run_module(app, "BATCH_CREATION", {**BATCH_PARAMS, "project": "PRJB"})
     assert b.result.scheduled.created == 2 and b.result.scheduled.errors == []
     assert b.result.adhoc.created == 2
     assert sorted(r["btch_id"] for r in qa(conn, "SELECT Btch_ID FROM ComplianceRequestControl "
                                                  "WHERE Project_Cd='PRJB' AND Run_Ty='MONTHLY'")) \
         == ["20260201_PRJB_tbl_y_S1_MONTHLY_V2_1", "20260201_PRJB_tbl_y_S2_MONTHLY_V2_1"]
-    assert by_project() == {"PRJA": 4, "PRJB": 4}                             # PRJA's 4 rows: untouched
+    assert by_project() == {"PRJA": 4, "PRJB": 4}
     assert last_run(conn, a1) == last_run(conn, b1) == date(2026, 2, 1)
 
-    none = run_module(app, "BATCH_CREATION", {**BATCH_PARAMS, "project": "PRJC"})   # unknown project
+    none = run_module(app, "BATCH_CREATION", {**BATCH_PARAMS, "project": "PRJC"})
     assert none.exit_code == 1 and none.result.scheduled.created == 0 and "PRJC" in none.result.scheduled.errors[0]
-    assert none.result.adhoc.created == 0                                            # nothing pending for PRJC either
-    assert by_project() == {"PRJA": 4, "PRJB": 4}                                     # PRJC created nothing at all
+    assert none.result.adhoc.created == 0
+    assert by_project() == {"PRJA": 4, "PRJB": 4}
 
 
 def test_file_load_module_one_object_then_every_location(conn, tmp_path):
@@ -185,7 +174,7 @@ def test_file_load_module_one_object_then_every_location(conn, tmp_path):
     assert (out.module, out.exit_code, out.result.result) == ("FILE_LOAD", 0, "PROMOTED")
 
     put_file(app, file_name("S2"), ["2|2|b"])
-    out = run_module(app, "file-load", {})                                   # no arguments: every configured location
+    out = run_module(app, "file-load", {})
     assert (out.exit_code, out.result.scanned, out.result.promoted, out.result.errors) == (0, 1, 1, [])
     assert {r["req_stat"] for r in qa(conn, "SELECT Req_Stat FROM ComplianceRequestControl")} == {"PROMOTED"}
 
@@ -196,11 +185,10 @@ def test_file_load_module_one_location_and_errors(conn, tmp_path):
     put_file(app, file_name("S1"), ["1|1|a"])
     out = run_module(app, "FILE_LOAD", {"bucket": "inbound", "prefix": "prja/in/"})
     assert (out.result.scanned, out.result.promoted) == (1, 1)
-    with pytest.raises(ValueError, match="together"):                        # bucket without prefix
+    with pytest.raises(ValueError, match="together"):
         run_module(app, "FILE_LOAD", {"bucket": "inbound"})
 
 
-# ------------------------------------------------------------------ CLI
 def test_cli_run_module(conn, tmp_path, monkeypatch, capsys):
     from .conftest import SCHEMA
     monkeypatch.chdir(tmp_path)
@@ -228,10 +216,9 @@ def test_cli_run_module(conn, tmp_path, monkeypatch, capsys):
     assert out["module"] == "FILE_LOAD" and (out["result"]["scanned"], out["result"]["promoted"]) == (2, 2)
 
 
-    # identification errors are exit code 2 and change nothing
     assert main(["run", "--module", "NOPE"]) == 2
-    assert main(["run", "--module", "BATCH_CREATION"]) == 2                                 # missing --project
-    assert main(["run", "--module", "FILE_LOAD", "--period", "PREV_CALENDAR_MONTH"]) == 2  # not a FILE_LOAD parameter
-    with pytest.raises(SystemExit) as e:                                                    # --module is required
+    assert main(["run", "--module", "BATCH_CREATION"]) == 2
+    assert main(["run", "--module", "FILE_LOAD", "--period", "PREV_CALENDAR_MONTH"]) == 2
+    with pytest.raises(SystemExit) as e:
         main(["run"])
     assert e.value.code == 2

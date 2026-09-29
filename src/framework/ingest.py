@@ -1,23 +1,4 @@
-"""File ingest pipeline (design §7 P5, §8, §9.4).
-
-`IngestPipeline.process_file` processes one S3 object end to end. Business outcomes (quarantine,
-rules failure, late arrival) are returned; technical failures are raised after the load is marked
-FAILED_TECHNICAL so the orchestrator can retry (the replay restarts the same Load_ID - C0).
-
-`IngestPipeline.process_path` processes every object waiting at one or more inbound locations in a
-single call. It is a thin loop over `process_file`: each object is still matched to exactly one file
-config and exactly one batch (D-26, D-33) through the same per-file, per-batch-locked resolution, so
-several files that match different configs - and land in different open batches - are all picked up
-and processed together without changing that one-file/one-config/one-batch invariant. Use it when an
-orchestrator wants to sweep a location (or every configured inbound location) instead of naming one
-object per call.
-
-Batch selection (D-78): a filename carries the report period but not the run date, so the file is
-matched to the **open** batch of its (project, table, source, run type, report period) with the
-latest run date. When every batch of that grain is closed, the file is promoted only if an approved,
-still-valid override exists for it (LATE_ARRIVAL for a batch with no data, CORRECTION for one that
-has data); otherwise it is quarantined so a person can decide.
-"""
+"""File ingest pipeline (design §7 P5, §8, §9.4)."""
 from __future__ import annotations
 
 import logging
@@ -48,24 +29,23 @@ TERMINAL_LOAD_STATS = {"QUARANTINED", "RULES_FAILED", "PROMOTED", "SUPERSEDED"}
 ARCHIVE_LOAD_STATS = {"RULES_FAILED", "PROMOTED", "SUPERSEDED"}
 
 
-# ============================================================================ decision tables (§8), pure
 class Action(str, Enum):
-    PROMOTE = "PROMOTE"                              # O-1: open batch, no data yet
-    PROMOTE_REPLACE = "PROMOTE_REPLACE"              # O-2: open batch, replaces its current data
-    EXCEPTION_NO_DATA = "EXCEPTION_NO_DATA"          # O-3: open batch, rules failed, no prior data
-    EXCEPTION_KEEP_PRIOR = "EXCEPTION_KEEP_PRIOR"    # O-4: open batch, rules failed, prior data kept
-    PROMOTE_LATE = "PROMOTE_LATE"                    # C-1: closed batch with no data + LATE_ARRIVAL
-    PROMOTE_CORRECTION = "PROMOTE_CORRECTION"        # C-2: closed batch with data + CORRECTION
-    REJECT_CLOSED = "REJECT_CLOSED"                  # C-3: closed batch, no approved override
-    REJECT_RULES = "REJECT_RULES"                    # C-4: closed batch, file failed its rules
+    PROMOTE = "PROMOTE"
+    PROMOTE_REPLACE = "PROMOTE_REPLACE"
+    EXCEPTION_NO_DATA = "EXCEPTION_NO_DATA"
+    EXCEPTION_KEEP_PRIOR = "EXCEPTION_KEEP_PRIOR"
+    PROMOTE_LATE = "PROMOTE_LATE"
+    PROMOTE_CORRECTION = "PROMOTE_CORRECTION"
+    REJECT_CLOSED = "REJECT_CLOSED"
+    REJECT_RULES = "REJECT_RULES"
 
 
 @dataclass(frozen=True)
 class ResolutionInput:
     batch_closed: bool
-    has_data: bool                    # NEW_FILE promoted load, or an applied CARRY_FORWARD
-    file_passed: bool                 # FILE_LEVEL rules passed (incl. warnings) and the zero-record rule is met
-    override_ty: Optional[str] = None  # approved, still-valid override for this batch (LATE_ARRIVAL / CORRECTION)
+    has_data: bool
+    file_passed: bool
+    override_ty: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -94,10 +74,9 @@ def required_override_ty(has_data: bool) -> str:
     return "CORRECTION" if has_data else "LATE_ARRIVAL"
 
 
-# ============================================================================ pipeline
 @dataclass
 class IngestOutcome:
-    load_id: int
+    load_id: Optional[int]
     result: str
     rule: Optional[str] = None
     event_ty: Optional[str] = None
@@ -116,14 +95,14 @@ REJECTED_RESULTS = ("REJECTED_CLOSED", "RULES_FAILED")
 
 @dataclass
 class PathIngestSummary:
-    """Result of one process_path() sweep: how many objects were found and what happened to them.
-    `outcomes` carries one IngestOutcome per object, in the same order they were processed."""
+    """Result of one process_path() sweep."""
     scanned: int = 0
     promoted: int = 0
     quarantined: int = 0
     rejected: int = 0
     replayed: int = 0
     other: int = 0
+    skipped: int = 0
     locations: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     outcomes: list[IngestOutcome] = field(default_factory=list)
@@ -152,10 +131,20 @@ class IngestPipeline:
         self.rules = rule_engine
         self.spark = spark
         self.logger = EventLogger(conn, clock)
-        self._sweep_config: Optional[tuple[TemplateMatcher, tuple[str, ...]]] = None   # set for one process_path call
+        self._sweep_config: Optional[tuple[TemplateMatcher, tuple[str, ...]]] = None
+        self._scope_project: Optional[str] = None
 
-    # ------------------------------------------------------------------ entry point
     def process_file(self, bucket: str, key: str, version_id: Optional[str] = None) -> IngestOutcome:
+        """Process one object."""
+        obj = db.object_key(bucket, key, version_id)
+        if not db.try_lock(self.conn, obj):
+            return IngestOutcome(None, "IN_PROGRESS", message="another process is loading this object")
+        try:
+            return self._process_object(bucket, key, version_id)
+        finally:
+            db.unlock(self.conn, obj)
+
+    def _process_object(self, bucket: str, key: str, version_id: Optional[str]) -> IngestOutcome:
         info = self.store.head(bucket, key, version_id)
         load, is_new = self._register(info)
         if not is_new:
@@ -172,31 +161,41 @@ class IngestPipeline:
             self._mark_technical_failure(load["load_id"], e)
             raise
 
-    def process_path(self, bucket: Optional[str] = None, prefix: Optional[str] = None) -> PathIngestSummary:
-        """Process every object waiting at one inbound location, or - when bucket and prefix are both
-        omitted - at every active file config's configured inbound location (D-27: locations to scan
-        come from config, never from a name baked into the pipeline).
-
-        Multiple files, multiple file configs and multiple batches in one call are safe: each object
-        found is still handed to `process_file` on its own, so it is matched to exactly one config and
-        exactly one batch, under that batch's own lock, exactly as a single `run --module FILE_LOAD --key ...` call would.
-        This only spares the caller from enumerating objects and invoking the pipeline once per file.
-        A problem listing one location, or a technical failure on one object, is recorded and does not
-        stop the rest of the sweep.
-        """
+    def process_path(self, bucket: Optional[str] = None, prefix: Optional[str] = None,
+                     project_cd: Optional[str] = None) -> PathIngestSummary:
+        """Process every object at one location, a project's locations, or every configured location."""
         if bool(bucket) != bool(prefix):
             raise ValueError("bucket and prefix must be given together, or both omitted")
-        locations = [(bucket, prefix if not prefix or prefix.endswith("/") else prefix + "/")] if bucket \
-            else self._configured_locations()
+        if project_cd and bucket:
+            raise ValueError("a project sweep covers that project's configured locations; omit bucket and prefix")
+        own = None
+        if project_cd:
+            locations, shared, own = self._project_locations(project_cd)
+        else:
+            locations = [(bucket, prefix if not prefix or prefix.endswith("/") else prefix + "/")] if bucket \
+                else self._configured_locations()
+            shared = set()
         summary = PathIngestSummary(locations=[f"{b}/{p}" for b, p in locations])
-        self._sweep_config = self._load_config()      # the configuration is read once per sweep, not per object
+        if project_cd and not locations:
+            summary.errors.append(f"project {project_cd} has no active file config")
+        self._sweep_config = self._load_config()
+        self._scope_project = project_cd
         try:
-            self._sweep(locations, summary)
+            self._sweep(locations, summary, shared, own)
         finally:
-            self._sweep_config = None
+            self._sweep_config = self._scope_project = None
         return summary
 
-    def _sweep(self, locations: list[tuple[str, str]], summary: PathIngestSummary) -> None:
+    def _project_locations(self, project_cd: str) -> tuple[list[tuple[str, str]], set, TemplateMatcher]:
+        """(the project's inbound locations, the ones other projects also use, its own templates)."""
+        cfgs = cfgmod.active_file_configs(self.conn)
+        mine = [c for c in cfgs if c.project_cd == project_cd]
+        locations = sorted({parse_uri(c.s3_src_file_path) for c in mine})
+        shared = {parse_uri(c.s3_src_file_path) for c in cfgs if c.project_cd != project_cd} & set(locations)
+        return locations, shared, TemplateMatcher(mine, self.settings.filename_case_sensitive)
+
+    def _sweep(self, locations: list[tuple[str, str]], summary: PathIngestSummary, shared: set,
+               own: Optional[TemplateMatcher]) -> None:
         for loc_bucket, loc_prefix in locations:
             try:
                 objects = self.store.list_objects(loc_bucket, loc_prefix)
@@ -206,6 +205,9 @@ class IngestPipeline:
                 continue
             for info in objects:
                 summary.scanned += 1
+                if (loc_bucket, loc_prefix) in shared and not own.candidates(basename(info.key)):
+                    summary.skipped += 1
+                    continue
                 try:
                     out = self.process_file(loc_bucket, info.key, info.version_id)
                 except Exception as e:  # noqa: BLE001 - process_file already marked the load FAILED_TECHNICAL
@@ -219,14 +221,11 @@ class IngestPipeline:
                 tuple(cfgmod.run_types(self.conn)))
 
     def _configured_locations(self) -> list[tuple[str, str]]:
-        """The distinct (bucket, prefix) inbound locations of every active file config. Several configs
-        - one per source - commonly share a folder, matched purely by filename template, so this
-        de-duplicates before listing."""
+        """The distinct (bucket, prefix) inbound locations of every active file config."""
         return sorted({parse_uri(c.s3_src_file_path) for c in cfgmod.active_file_configs(self.conn)})
 
     def health(self) -> dict[str, list[dict]]:
-        """Loads stuck mid-pipeline, and current quarantine counts by reason (design §15.3): ingest.py
-        owns ComplianceFileLoad, so its health queries live here rather than in app.py."""
+        """Loads stuck mid-pipeline, and current quarantine counts by reason (design §15.3)."""
         q = partial(db.fetch_all, self.conn)
         stale_before = self.clock.now() - timedelta(minutes=self.settings.heartbeat_stale_minutes)
         return {
@@ -240,11 +239,9 @@ class IngestPipeline:
 
     @staticmethod
     def _retryable_quarantine(load: dict) -> bool:
-        """A file quarantined only because its batch was closed is reprocessed when it is delivered
-        again: by then an approved LATE_ARRIVAL / CORRECTION override may exist (D-74)."""
+        """A file quarantined only because its batch was closed is reprocessed when it is delivered again."""
         return load["load_stat"] == "QUARANTINED" and load["quarantine_rsn_cd"] == "FILE_REJECTED_BATCH_CLOSED"
 
-    # ------------------------------------------------------------------ steps
     def _register(self, info: ObjectInfo) -> tuple[dict, bool]:
         with self.conn.transaction():
             row = self.conn.execute(
@@ -268,7 +265,6 @@ class IngestPipeline:
             self.logger.audit("FILE_EVENT_REPLAY_IGNORED", load_id=load["load_id"], req_id=load["req_id"],
                               btch_id=load["btch_id"], file_ref=s3_ref(info.bucket, info.key),
                               description=f"load already {load['load_stat']}")
-        # finish an interrupted archive/quarantine move (E-27)
         if self.store.exists(info.bucket, info.key):
             if load["load_stat"] == "QUARANTINED":
                 self._move(info, self.settings.quarantine_uri, f"{load['quarantine_rsn_cd']}/", load["load_id"])
@@ -308,7 +304,7 @@ class IngestPipeline:
                 """UPDATE ComplianceFileLoad SET Cfg_ID=%s, Req_ID=%s, Btch_ID=%s, Load_Stat='STAGING', Error_Txt=NULL,
                           Updated_Dtts=%s WHERE Load_ID=%s""",
                 (cfg.cfg_id, batch["req_id"], batch["btch_id"], self.clock.now(), load_id))
-        if info.size == 0 and cfg.has_header:                                     # C1
+        if info.size == 0 and cfg.has_header:
             return self._quarantine(load_id, info, "FILE_PARSE_ERROR", "zero-byte file but a header is expected",
                                     cfg, batch)
         with db.held(self.conn, db.batch_key(batch["btch_id"]), self.settings.lock_timeout_seconds):
@@ -324,8 +320,7 @@ class IngestPipeline:
         return None
 
     def _select_batch(self, cfg: FileConfig, run_ty: str, rpt_start, rpt_end) -> tuple[Optional[dict], Optional[str]]:
-        """The batch a file belongs to (D-78). Returns (batch, override type) - the override type is
-        'CLOSED' when only closed batches exist and none of them may accept the file."""
+        """The batch a file belongs to (D-78)."""
         rows = self.conn.execute(
             """SELECT * FROM ComplianceRequestControl
                 WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s AND Run_Ty=%s
@@ -338,7 +333,7 @@ class IngestPipeline:
         open_rows = [r for r in rows if r["batch_close_ind"] == 0]
         if open_rows:
             return next((r for r in open_rows if r["req_dt_key"] <= today), open_rows[-1]), None
-        for r in rows:                                   # closed: an approved, valid override may accept it
+        for r in rows:
             ovrd = self.active_override(r, required_override_ty(self._has_data(r)), today)
             if ovrd:
                 return r, ovrd["override_ty"]
@@ -362,7 +357,7 @@ class IngestPipeline:
             with self.conn.transaction():
                 self.conn.execute("UPDATE ComplianceFileLoad SET File_Sha256=%s, Updated_Dtts=%s WHERE Load_ID=%s",
                                   (sha, self.clock.now(), load_id))
-            current = promoted_load(self.conn, batch["btch_id"])                     # C11
+            current = promoted_load(self.conn, batch["btch_id"])
             if current and current["file_sha256"] == sha and current["load_id"] != load_id:
                 return self._quarantine(load_id, info, "FILE_REJECTED_DUPLICATE",
                                         f"identical to load {current['load_id']} of batch {batch['btch_id']}",
@@ -390,7 +385,7 @@ class IngestPipeline:
         failure_event = None
         detail = None
         rules_stat = "NOT_RUN"
-        if staged_rows == 0 and not cfg.allow_zero_records:                      # D-60
+        if staged_rows == 0 and not cfg.allow_zero_records:
             passed, failure_event, detail = False, "FILE_ZERO_RECORDS_REJECTED", "file has no data rows"
         elif bindings := cfgmod.rule_bindings(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_id, batch["run_ty"]):
             with self.conn.transaction():
@@ -420,7 +415,6 @@ class IngestPipeline:
         self._move(info, cfg.src_file_archive_path, "", load_id)
         return result
 
-    # ------------------------------------------------------------------ resolution (§8)
     def _resolve(self, load_id, info, cfg, req_id, passed, rules_stat, failure_event, detail) -> IngestOutcome:
         now = self.clock.now()
         ref = s3_ref(info.bucket, info.key)
@@ -445,8 +439,8 @@ class IngestPipeline:
                                                (load_id,)).fetchone()["stg_rcd_cnt"]
                 prior = promoted_load(self.conn, b["btch_id"])
                 if prior and prior["load_id"] != load_id:
-                    self._supersede(prior["load_id"])                 # before the new row becomes PROMOTED
-                res = swap(self.conn, cfg, b["btch_id"], load_id, staged_cnt, now)   # same transaction
+                    self._supersede(prior["load_id"])
+                res = swap(self.conn, cfg, b["btch_id"], load_id, staged_cnt, now)
                 self.conn.execute(
                     """UPDATE ComplianceRequestControl SET Resolution_Ty='NEW_FILE', Req_Stat=%s, Reuse_Btch_ID=NULL,
                               Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, now, req_id))
@@ -477,21 +471,21 @@ class IngestPipeline:
                 self.logger.audit(failure_event, description=detail, **ctx)
                 out.result, out.event_ty = "RULES_FAILED", failure_event
 
-            elif d.action == Action.REJECT_RULES:                                      # closed batch, file failed
+            elif d.action == Action.REJECT_RULES:
                 self._rules_failed(load_id, rules_stat, detail, now)
                 self.logger.batch_event("FILE_RULES_FAILED", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
                                         detail=detail)
                 self.logger.audit(failure_event, description=f"closed batch: {detail}", **ctx)
                 out.result, out.event_ty = "RULES_FAILED", failure_event
 
-            else:                                                                      # REJECT_CLOSED
+            else:
                 self._rules_failed(load_id, rules_stat, "batch is closed and has no approved override", now)
                 self.logger.audit("FILE_REJECTED_BATCH_CLOSED", description="no approved, valid override", **ctx)
                 out.result, out.event_ty = "REJECTED_CLOSED", "FILE_REJECTED_BATCH_CLOSED"
         return out
 
     def _end_carry_forward(self, b: dict, load_id: int, now) -> None:
-        """A real file replaced an applied carry-forward: stop the reuse and record it."""
+        """A real file replaced an applied carry-forward."""
         row = self.conn.execute(
             """UPDATE ComplianceBatchOverride SET Valid_Thru_Dt_Key=%s, Updated_Dtts=%s, Updated_By='SYSTEM'
                 WHERE Req_ID=%s AND Override_Ty='REUSE' AND Apprvl_Stat='APPROVED' RETURNING Ovrd_ID""",
@@ -510,7 +504,6 @@ class IngestPipeline:
                 WHERE Load_ID=%s""",
             (rules_stat, detail, now, load_id))
 
-    # ------------------------------------------------------------------ quarantine / move / failure
     def _quarantine(self, load_id: int, info: ObjectInfo, event_ty: str, message: str,
                     cfg: Optional[FileConfig] = None, batch: Optional[dict] = None) -> IngestOutcome:
         with self.conn.transaction():
@@ -518,7 +511,7 @@ class IngestPipeline:
                 """UPDATE ComplianceFileLoad SET Load_Stat='QUARANTINED', Quarantine_Rsn_Cd=%s, Error_Txt=%s,
                           Cfg_ID=COALESCE(%s, Cfg_ID), Updated_Dtts=%s WHERE Load_ID=%s""",
                 (event_ty, message, cfg.cfg_id if cfg else None, self.clock.now(), load_id))
-            ctx = {}
+            ctx = {"project_cd": self._scope_project} if self._scope_project else {}
             if cfg:
                 ctx.update(project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_id=cfg.src_id)
             if batch:
@@ -548,5 +541,21 @@ class IngestPipeline:
                      list(TERMINAL_LOAD_STATS)))
                 if isinstance(err, RowCountMismatch):
                     self.logger.audit("CORE_LOAD_ROWCOUNT_MISMATCH", load_id=load_id, description=str(err))
+                self._report_technical_failure(load_id, err)
         except Exception:  # noqa: BLE001
             log.exception("could not record technical failure for load %s", load_id)
+
+    def _report_technical_failure(self, load_id: int, err: Exception) -> None:
+        """One FILE_TECHNICAL_FAILURE event (emailed) per load."""
+        if self.conn.execute("SELECT 1 FROM CMS_ComplianceExceptionsAudit WHERE Load_ID=%s "
+                             "AND Event_Ty='FILE_TECHNICAL_FAILURE'", (load_id,)).fetchone():
+            return
+        row = self.conn.execute(
+            """SELECT f.S3_Bucket, f.S3_Key, f.Req_ID, f.Btch_ID, c.Project_Cd, c.Table_Nm, c.Src_ID, c.Run_Ty
+                 FROM ComplianceFileLoad f LEFT JOIN ComplianceRequestControl c ON c.Req_ID = f.Req_ID
+                WHERE f.Load_ID=%s""", (load_id,)).fetchone()
+        self.logger.audit("FILE_TECHNICAL_FAILURE", load_id=load_id, req_id=row["req_id"], btch_id=row["btch_id"],
+                          file_ref=s3_ref(row["s3_bucket"], row["s3_key"]),
+                          project_cd=row["project_cd"] or self._scope_project, table_nm=row["table_nm"],
+                          src_id=row["src_id"], run_ty=row["run_ty"],
+                          description=sanitize_db_error(f"{type(err).__name__}: {err}")[:500])

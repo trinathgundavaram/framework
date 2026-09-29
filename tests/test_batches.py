@@ -39,13 +39,12 @@ def test_create_batches_one_batch_per_run_date(conn, tmp_path):
     s = create_batches(app)
     assert s.created == 2 and not s.errors
     assert (s.run_date, s.rpt_start, s.rpt_end) == (date(2026, 2, 1), date(2026, 1, 1), date(2026, 1, 31))
-    s = create_batches(app)                            # same run date again: nothing new (D-30)
+    s = create_batches(app)
     assert s.created == 0 and s.existing == 2
     rows = qa(conn, "SELECT * FROM ComplianceRequestControl ORDER BY Src_ID")
     assert [r["btch_id"] for r in rows] == ["20260201_PRJA_tbl_x_S1_MONTHLY_V1_1", "20260201_PRJA_tbl_x_S2_MONTHLY_V1_1"]
     assert (rows[0]["req_dt_key"], rows[0]["req_stat"]) == (date(2026, 2, 1), "PENDING")
     assert q1(conn, "SELECT count(*) n FROM ComplianceRequestFileDetail WHERE Event_Ty='BATCH_CREATED'")["n"] == 2
-    # nothing stores an SLA date: the hold is Req_Dt_Key + (SLA_Days - 1), computed when needed
     cols = {r["column_name"] for r in qa(conn, """SELECT column_name FROM information_schema.columns
                                                    WHERE table_name='compliancerequestcontrol'
                                                      AND table_schema = current_schema()""")}
@@ -53,7 +52,7 @@ def test_create_batches_one_batch_per_run_date(conn, tmp_path):
 
 
 def test_daily_runs_of_the_same_period_get_their_own_batch(conn, tmp_path):
-    """A CMS-style run type: the same report period, one batch per run date."""
+    """A CMS-style run type."""
     seed_config(conn, sources=("S1",))
     app, clock, *_ = make_app(conn, tmp_path, utc(2026, 2, 2, 13, 0))
     assert create_batches(app, period="CURRENT_CALENDAR_MONTH").created == 1
@@ -68,9 +67,9 @@ def test_daily_runs_of_the_same_period_get_their_own_batch(conn, tmp_path):
 def test_missed_run_recreated_with_as_of(conn, tmp_path):
     seed_config(conn, sources=("S1",))
     app, clock, *_ = make_app(conn, tmp_path, utc(2026, 3, 5, 12, 0))
-    assert create_batches(app).created == 1                        # Feb period
+    assert create_batches(app).created == 1
     clock.set(utc(2026, 2, 1, 12, 0))
-    assert create_batches(app).created == 1                        # Jan period, run date Feb 1
+    assert create_batches(app).created == 1
     rows = qa(conn, "SELECT * FROM ComplianceRequestControl ORDER BY Rpt_Start_Dt_Key")
     assert [(r["rpt_start_dt_key"], r["req_dt_key"]) for r in rows] == [
         (date(2026, 1, 1), date(2026, 2, 1)), (date(2026, 2, 1), date(2026, 3, 5))]
@@ -84,12 +83,11 @@ def test_effective_window_scope_and_errors(conn, tmp_path):
     app, clock, *_ = make_app(conn, tmp_path, utc(2026, 2, 1, 12, 0))
     s = create_batches(app)
     assert s.created == 1 and [r["src_id"] for r in qa(conn, "SELECT Src_ID FROM ComplianceRequestControl")] == ["S1"]
-    assert create_batches(app, table_nm="other").errors                 # nothing effective in that scope
+    assert create_batches(app, table_nm="other").errors
     with pytest.raises(ConfigError, match="not ROUTINE"):
         app.create_batches(project_cd="PRJA", run_ty="ADHOC", period="SAME_DAY")
 
 
-# ---------------------------------------------------------------- ad-hoc intake (P4)
 def intake(conn, run_ty="ADHOC", src=None, start="2026-03-01", end="2026-03-31", req_start="2026-04-02",
            req_end=None) -> int:
     with conn.transaction():
@@ -111,20 +109,20 @@ def app(conn, tmp_path):
 
 def test_one_off_request_creates_one_run(app, conn):
     a, clock, _ = app
-    iid = intake(conn)                                        # req start = req end = 2026-04-02
+    iid = intake(conn)
     s = a.intake.run()
     assert (s.handled, s.created, s.failed) == (1, 2, 0)
     assert last_run(conn, iid) == date(2026, 4, 2)
     rows = qa(conn, "SELECT * FROM ComplianceRequestControl WHERE Run_Ty='ADHOC' ORDER BY Src_ID")
     assert {r["req_dt_key"] for r in rows} == {date(2026, 4, 2)} and len(rows) == 2
     assert q1(conn, "SELECT count(*) n FROM ComplianceRequestFileDetail WHERE Intake_ID=%s", iid)["n"] == 2
-    assert a.intake.run().handled == 0                        # already handled for this run date
+    assert a.intake.run().handled == 0
     clock.set(utc(2026, 4, 3, 15, 0))
-    assert a.intake.run().handled == 0                        # window is over
+    assert a.intake.run().handled == 0
 
 
 def test_request_window_creates_batches_daily_for_the_same_period(app, conn):
-    """10-day window, same report dates: one batch per source per run date."""
+    """10-day window, same report dates."""
     a, clock, _ = app
     iid = intake(conn, src="S1", req_start="2026-04-02", req_end="2026-04-11")
     for day in (2, 3, 4):
@@ -135,12 +133,12 @@ def test_request_window_creates_batches_daily_for_the_same_period(app, conn):
     assert [r["req_dt_key"] for r in rows] == [date(2026, 4, 2), date(2026, 4, 3), date(2026, 4, 4)]
     assert {(r["rpt_start_dt_key"], r["rpt_end_dt_key"]) for r in rows} == {(date(2026, 3, 1), date(2026, 3, 31))}
     assert [r["btch_id"] for r in rows] == [f"2026040{d}_PRJA_tbl_x_S1_ADHOC_V1_1" for d in (2, 3, 4)]
-    assert a.intake.run().handled == 0                        # same day twice: idempotent
-    with conn.transaction():                                  # even if re-run after a reset, batches already exist
+    assert a.intake.run().handled == 0
+    with conn.transaction():
         conn.execute("UPDATE ComplianceRequestInTake SET Last_Run_Dt_Key=NULL")
     s = a.intake.run()
     assert (s.handled, s.created, s.existing) == (1, 0, 1)
-    clock.set(utc(2026, 4, 11, 15, 0))                        # last day of the window
+    clock.set(utc(2026, 4, 11, 15, 0))
     assert a.intake.run().created == 1
     clock.set(utc(2026, 4, 12, 15, 0))
     assert a.intake.run().handled == 0
@@ -156,20 +154,20 @@ def test_request_not_started_yet_is_left_alone(app, conn):
 def test_routine_run_type_and_unknown_source_fail(app, conn):
     a, clock, _ = app
     r1 = intake(conn, run_ty="MONTHLY")
-    r2 = intake(conn, start="2020-01-01", end="2020-01-31")      # before Effective_Start_Dt_Key
+    r2 = intake(conn, start="2020-01-01", end="2020-01-31")
     s = a.intake.run()
     assert (s.handled, s.failed) == (2, 2)
     reason = lambda iid: q1(conn, "SELECT Event_Txt FROM CMS_ComplianceExceptionsAudit "  # noqa: E731
                                   "WHERE Event_Ty='INTAKE_FAILED' AND Intake_ID=%s", iid)["event_txt"]
     assert "ADHOC" in reason(r1) and "crosswalk" in reason(r2)
     assert last_run(conn, r1) == date(2026, 4, 2)
-    assert a.intake.run().handled == 0                         # reported once per run date
+    assert a.intake.run().handled == 0
 
 
 def test_schema_follows_the_ddl_standard(conn):
     """No CHECK constraints (values are validated in code); every constraint is named by the standard."""
     rows = qa(conn, """SELECT c.conname, c.contype FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
-                        WHERE n.nspname = current_schema() AND c.contype <> 'n'""")   # PG 18 lists NOT NULL
+                        WHERE n.nspname = current_schema() AND c.contype <> 'n'""")
     assert rows and not [r for r in rows if r["contype"] == "c"]
     assert all(r["conname"].startswith(("pk_", "fk_", "uq_")) for r in rows)
     assert not qa(conn, "SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() "

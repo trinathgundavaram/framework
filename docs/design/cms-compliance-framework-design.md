@@ -47,7 +47,7 @@ A single, **project-agnostic** framework for compliance source files. It does th
 **Out of scope:**
 - The extract (D-76): combining sources, cross-source (period-level) validation, generating and tracking the submission. A separate process does this from the batches and their current core rows.
 - An approval UI (D-12).
-- AWS orchestration wiring, which is deferred (D-13).
+- Nothing - AWS orchestration is decided (D-13) and deployed from `module/aws/compliance_frameworks/compliance_batch_framework`.
 
 ---
 
@@ -66,7 +66,7 @@ A single, **project-agnostic** framework for compliance source files. It does th
 | ~~D-09~~ | *Withdrawn in v6 (D-76).* There is no extract grain in the framework. |
 | ~~D-11~~ | *Withdrawn in v5.* Waivers are removed. A batch without data is closed by a person with `close-batch` (v6). |
 | D-12 | **Approvals.** Overrides are created, approved and rejected with manual SQL for now (`sql/approvals.sql`); a UI comes later. |
-| D-13 | **AWS orchestration** (Glue triggers vs Step Functions) is decided later. The package is orchestration-agnostic. |
+| D-13 | **AWS orchestration (v6).** One Glue Python Shell runner job runs every module (one module, one project per run). One Step Functions workflow per project runs the steps named in its input, in order, stopping and alerting (with the project) on the first failure. EventBridge Scheduler schedules, in the business time zone, start the workflows with their own steps / run type / period, so each step runs at its own time and daily / weekly / monthly runs share a workflow; people start the same workflow by hand. The package itself stays orchestration-agnostic. |
 | D-14 | **Replacement while open.** A new file for an open batch replaces the previous one: same `Btch_ID`, new `Load_ID`, no approval. |
 | D-15 | **No batch for the period.** A file whose (project, table, source, run type, report period) has no batch is quarantined immediately. |
 | D-17 | **Independence.** The framework runs independently of existing stores and processes; existing processes migrate onto it. Column names are framework-owned. |
@@ -322,7 +322,7 @@ Each `BATCH_CREATION` run handles a request once per run date while `Req_Start_D
 |---|---|---|
 | Batches | `BATCH_CREATED` [I], `BATCH_CLOSED` [I] | `INTAKE_FAILED` [E ✉], `BATCH_CLOSE_BLOCKED` [W], `BATCH_CLOSE_DEFERRED_LOCKED` [I], `SOURCE_MISSING_AT_CLOSE` [W ✉] |
 | File intake | `FILE_RECEIVED` [I], `FILE_REPLACED_BEFORE_CLOSE` [I] | `FILE_REJECTED_UNPARSEABLE`, `FILE_REJECTED_AMBIGUOUS_TEMPLATE`, `FILE_REJECTED_INVALID_TOKEN`, `FILE_REJECTED_RUNTY_NOT_CONFIGURED`, `FILE_REJECTED_NO_BATCH`, `FILE_REJECTED_BATCH_CLOSED`, `FILE_PARSE_ERROR`, `FILE_COLUMN_COUNT_MISMATCH`, `FILE_TRAILER_COUNT_MISMATCH`, `FILE_ZERO_RECORDS_REJECTED`, `FILE_TYPE_NOT_SUPPORTED` [E ✉]; `FILE_REJECTED_DUPLICATE`, `FILE_SAME_CONTENT_OTHER_BATCH` [W ✉]; `FILE_EVENT_REPLAY_IGNORED` [I]; `FILE_MOVE_FAILED` [W] |
-| Validation / load | `FILE_PROMOTED` [I], `FILE_RULES_FAILED` [E] | `RULES_VALIDATION_FAILED`, `RULES_ENGINE_TECHNICAL_FAILURE`, `CORE_LOAD_ROWCOUNT_MISMATCH` [E ✉] |
+| Validation / load | `FILE_PROMOTED` [I], `FILE_RULES_FAILED` [E] | `RULES_VALIDATION_FAILED`, `RULES_ENGINE_TECHNICAL_FAILURE`, `CORE_LOAD_ROWCOUNT_MISMATCH`, `FILE_TECHNICAL_FAILURE` (once per load) [E ✉] |
 | Overrides | `LATE_ARRIVAL_PROMOTED` [I], `CORRECTION_PROMOTED` [I], `CARRY_FORWARD_APPLIED` [I], `CARRY_FORWARD_REMOVED` [I] | `OVERRIDE_APPROVED` [W ✉], `OVERRIDE_EXPIRED` [W ✉], `OVERRIDE_INVALID_DETECTED` [E ✉] |
 | Config | — | `CONFIG_VALIDATION_FAILED` [E ✉] |
 
@@ -619,8 +619,9 @@ Session advisory locks (`pg_try_advisory_lock` / `pg_advisory_lock` with a timeo
 |---|---|---|
 | `BTCH:<Btch_ID>` | ingest, promotion, decisions, close | One writer per batch |
 | `SEQ:<Project>|<Table>|<Src>|<Run_Ty>|<Req_Dt_Key>` | batch creation | Computing `Seq` |
+| `OBJ:<bucket>/<key>@<version>` | file load | One run per S3 object: overlapping runs (schedule + manual, two sweeps) report `IN_PROGRESS` |
 
-- Each operation takes at most one BTCH lock, so there is no lock ordering to respect.
+- A file load takes OBJ, then BTCH; every other operation takes at most one BTCH lock, so the order is always OBJ → BTCH and cannot deadlock.
 - Locks are released automatically if a process dies.
 - A non-terminal load whose `Updated_Dtts` is older than `HEARTBEAT_STALE_MINUTES` with no lock held means a crash → `health` reports it.
 - **Direct DB connections only** (D-55). RDS Proxy / PgBouncer transaction pooling would silently break session locks.
@@ -934,7 +935,7 @@ The following v2 questions are closed: O-01, O-02, O-03, O-05–O-08, O-10, O-11
 
 ## Appendix A: PostgreSQL DDL (tested on PostgreSQL 16)
 
-The DDL is maintained in one place: [`src/framework/sql/schema.sql`](../../src/framework/sql/schema.sql). `framework init-db` applies it (once) into the metadata schema, and the Glue metadata-load deployment uploads the same file for reference. §5 describes every table; the end of the file documents the framework columns that each staging and core table needs.
+The DDL is maintained in one place: [`src/framework/sql/schema.sql`](../../src/framework/sql/schema.sql). `framework init-db` applies it (once) into the metadata schema, and the Glue metadata-load deployment uploads the same file for reference. §5 describes every table; §5.4 lists the framework columns each staging and core table needs.
 
 ---
 

@@ -1,13 +1,4 @@
-"""Audit trail and email notifications (design §5.3, P13, D-54).
-
-EventLogger is the only writer of ComplianceRequestFileDetail and CMS_ComplianceExceptionsAudit.
-Callers pass ids, counts and codes only - never file content (no PHI in audit text). Writes
-participate in the caller's open transaction.
-
-The event vocabulary lives here (it used to be the ComplianceEventType table): BATCH_EVENTS go to the
-batch timeline; AUDIT_EVENTS go to the exceptions audit with their category, default severity and
-whether they are emailed. An unknown event code is a programming error (ConfigError).
-"""
+"""Audit trail and email notifications (design §5.3, P13, D-54)."""
 from __future__ import annotations
 
 import logging
@@ -30,16 +21,14 @@ BATCH_EVENTS = frozenset({
 
 
 class AuditEvent(NamedTuple):
-    category: str        # EXCEPTION -> failure recipients, AUDIT -> success recipients
-    severity: str        # INFO | WARNING | ERROR
+    category: str
+    severity: str
     notify: bool
 
 
 _EXC_ERROR, _EXC_WARN = AuditEvent("EXCEPTION", "ERROR", True), AuditEvent("EXCEPTION", "WARNING", True)
 AUDIT_EVENTS: dict[str, AuditEvent] = {
-    # intake
     "INTAKE_FAILED": _EXC_ERROR,
-    # file intake (quarantine codes)
     **dict.fromkeys(("FILE_REJECTED_UNPARSEABLE", "FILE_REJECTED_AMBIGUOUS_TEMPLATE", "FILE_REJECTED_INVALID_TOKEN",
                      "FILE_REJECTED_RUNTY_NOT_CONFIGURED", "FILE_REJECTED_NO_BATCH", "FILE_REJECTED_BATCH_CLOSED",
                      "FILE_PARSE_ERROR", "FILE_COLUMN_COUNT_MISMATCH", "FILE_TRAILER_COUNT_MISMATCH",
@@ -48,19 +37,16 @@ AUDIT_EVENTS: dict[str, AuditEvent] = {
     "FILE_SAME_CONTENT_OTHER_BATCH": _EXC_WARN,
     "FILE_EVENT_REPLAY_IGNORED": AuditEvent("AUDIT", "INFO", False),
     "FILE_MOVE_FAILED": AuditEvent("EXCEPTION", "WARNING", False),
-    # validation / load
     "RULES_VALIDATION_FAILED": _EXC_ERROR,
     "RULES_ENGINE_TECHNICAL_FAILURE": _EXC_ERROR,
     "CORE_LOAD_ROWCOUNT_MISMATCH": _EXC_ERROR,
-    # manual decisions
+    "FILE_TECHNICAL_FAILURE": _EXC_ERROR,
     "OVERRIDE_APPROVED": AuditEvent("AUDIT", "WARNING", True),
     "OVERRIDE_INVALID_DETECTED": _EXC_ERROR,
     "OVERRIDE_EXPIRED": AuditEvent("AUDIT", "WARNING", True),
-    # batch close
     "BATCH_CLOSE_BLOCKED": AuditEvent("AUDIT", "WARNING", False),
     "BATCH_CLOSE_DEFERRED_LOCKED": AuditEvent("AUDIT", "INFO", False),
     "SOURCE_MISSING_AT_CLOSE": _EXC_WARN,
-    # config
     "CONFIG_VALIDATION_FAILED": _EXC_ERROR,
 }
 
@@ -106,38 +92,51 @@ _BODY_KEYS = ("event_id", "event_ty", "event_dtts", "project_cd", "table_nm", "s
 
 
 class NotificationDispatcher:
-    """Emails unsent exceptions-audit events (ids, codes and counts only). Only notifiable events are
-    written with Notified_Ind = 0, so every such row is sent once."""
+    """Emails unsent exceptions-audit events (ids, codes and counts only)."""
 
     def __init__(self, conn: psycopg.Connection, settings: Settings, channel: Channel):
         self.conn, self.settings, self.channel = conn, settings, channel
+        self.failed: list[int] = []
 
-    def run(self, limit: int = 500) -> int:
-        rows = self.conn.execute("SELECT * FROM CMS_ComplianceExceptionsAudit WHERE Notified_Ind = 0 "
-                                 "ORDER BY Event_ID LIMIT %s", (limit,)).fetchall()
-        sent = 0
-        configs: dict[tuple, Optional[cfgmod.FileConfig]] = {}     # one lookup per source per run
-        for r in rows:
-            key = (r["project_cd"], r["table_nm"], r["src_id"])
-            if key not in configs:
-                configs[key] = cfgmod.file_config(self.conn, *key) if all(key) else None
-            cfg = configs[key]
-            if cfg:
-                failure = AUDIT_EVENTS.get(r["event_ty"], _EXC_ERROR).category == "EXCEPTION"
-                raw = cfg.failr_email_notfn_id if failure else cfg.sucs_email_notfn_id
-                recipients = [x.strip() for x in (raw or "").split(",") if x.strip()]
-            else:
-                recipients = list(self.settings.default_notify_emails)
-            prefix = f"{cfg.email_subjct_txt} - " if cfg and cfg.email_subjct_txt else ""
-            msg = Message(f"{prefix}[{r['sevrty']}] {r['event_ty']}",
-                          "\n".join(f"{k}: {r[k]}" for k in _BODY_KEYS if r.get(k) is not None), recipients)
-            try:
-                self.channel.send(msg)
-            except Exception:  # noqa: BLE001 - never roll back pipeline state for a notification
-                log.exception("notification for event %s failed", r["event_id"])
-                continue
+    def run(self, limit: int = 500, project_cd: Optional[str] = None) -> int:
+        """Send up to `limit` events - of one project, or of every project (and none) when project_cd is None."""
+        sent, self.failed = 0, []
+        configs: dict[tuple, Optional[cfgmod.FileConfig]] = {}
+        for _ in range(limit):
             with self.conn.transaction():
-                self.conn.execute("UPDATE CMS_ComplianceExceptionsAudit SET Notified_Ind=1 WHERE Event_ID=%s",
-                                  (r["event_id"],))
-            sent += 1
+                r = self.conn.execute(
+                    """SELECT * FROM CMS_ComplianceExceptionsAudit
+                        WHERE Notified_Ind = 0 AND (%(p)s::text IS NULL OR Project_Cd = %(p)s)
+                          AND NOT (Event_ID = ANY(%(failed)s))
+                        ORDER BY Event_ID LIMIT 1 FOR UPDATE SKIP LOCKED""",
+                    {"p": project_cd, "failed": self.failed}).fetchone()
+                if r is None:
+                    break
+                if self._send(r, configs):
+                    self.conn.execute("UPDATE CMS_ComplianceExceptionsAudit SET Notified_Ind=1 WHERE Event_ID=%s",
+                                      (r["event_id"],))
+                    sent += 1
+                else:
+                    self.failed.append(r["event_id"])
         return sent
+
+    def _send(self, r: dict, configs: dict) -> bool:
+        key = (r["project_cd"], r["table_nm"], r["src_id"])
+        if key not in configs:
+            configs[key] = cfgmod.file_config(self.conn, *key) if all(key) else None
+        cfg = configs[key]
+        if cfg:
+            failure = AUDIT_EVENTS.get(r["event_ty"], _EXC_ERROR).category == "EXCEPTION"
+            raw = cfg.failr_email_notfn_id if failure else cfg.sucs_email_notfn_id
+            recipients = [x.strip() for x in (raw or "").split(",") if x.strip()]
+        else:
+            recipients = list(self.settings.default_notify_emails)
+        prefix = f"{cfg.email_subjct_txt} - " if cfg and cfg.email_subjct_txt else ""
+        msg = Message(f"{prefix}[{r['sevrty']}] {r['event_ty']}",
+                      "\n".join(f"{k}: {r[k]}" for k in _BODY_KEYS if r.get(k) is not None), recipients)
+        try:
+            self.channel.send(msg)
+        except Exception:  # noqa: BLE001 - never roll back pipeline state for a notification
+            log.exception("notification for event %s failed", r["event_id"])
+            return False
+        return True

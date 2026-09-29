@@ -1,16 +1,4 @@
-"""Manual overrides on ComplianceBatchOverride (design §7 P7, D-12, D-70, D-74).
-
-People create and approve rows with the templates in sql/approvals.sql. One shape covers three cases:
-
-  REUSE         an open batch without data reuses an earlier batch's data (run type Carry_Fwd_Ind = 1).
-                `process-decisions` applies it to the batch and removes it again when it expires.
-  LATE_ARRIVAL  a file may still be promoted into a closed batch that has no data.
-  CORRECTION    a corrected file may replace the data of a closed batch.
-                Those two are read by the ingest pipeline; this job only validates and audits them.
-
-An approval is valid through Valid_Thru_Dt_Key. There is no revoke: setting that date in the past
-stops the override, and the next run of this job removes an applied REUSE.
-"""
+"""Manual overrides on ComplianceBatchOverride (design §7 P7, D-12, D-70, D-74)."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -30,8 +18,8 @@ from .settings import Settings
 
 @dataclass
 class DecisionSummary:
-    applied: list[int] = field(default_factory=list)       # REUSE overrides applied to their batch
-    expired: list[int] = field(default_factory=list)       # applied REUSE overrides that ran out
+    applied: list[int] = field(default_factory=list)
+    expired: list[int] = field(default_factory=list)
     invalid: list[int] = field(default_factory=list)
 
 
@@ -40,22 +28,23 @@ class DecisionProcessor:
         self.conn, self.clock, self.settings = conn, clock, settings
         self.logger = EventLogger(conn, clock)
 
-    def run(self) -> DecisionSummary:
+    def run(self, project_cd: Optional[str] = None) -> DecisionSummary:
+        """Expire, then apply, REUSE overrides - of one project, or of every project when project_cd is None."""
         s = DecisionSummary()
         today = self.clock.today(self.settings.business_tz)
-        self._expire(s, today)
-        self._apply(s, today)
+        self._expire(s, today, project_cd)
+        self._apply(s, today, project_cd)
         return s
 
-    # ------------------------------------------------------------------ REUSE: apply
-    def _apply(self, s: DecisionSummary, today: date) -> None:
+    def _apply(self, s: DecisionSummary, today: date, project_cd: Optional[str]) -> None:
         """Approved, still-valid REUSE overrides whose batch is open and has no data yet."""
         rows = self.conn.execute(
             """SELECT o.Ovrd_ID FROM ComplianceBatchOverride o
                  JOIN ComplianceRequestControl c ON c.Req_ID = o.Req_ID
                 WHERE o.Override_Ty = 'REUSE' AND o.Apprvl_Stat = 'APPROVED' AND o.Valid_Thru_Dt_Key >= %s
                   AND c.Batch_Close_Ind = 0 AND c.Resolution_Ty IS DISTINCT FROM 'CARRY_FORWARD'
-                ORDER BY o.Ovrd_ID""", (today,)).fetchall()
+                  AND (%s::text IS NULL OR c.Project_Cd = %s)
+                ORDER BY o.Ovrd_ID""", (today, project_cd, project_cd)).fetchall()
         run_types = cfgmod.run_types(self.conn) if rows else {}
         for r in rows:
             with self.conn.transaction():
@@ -69,8 +58,11 @@ class DecisionProcessor:
                 src = self._reuse_source(o, b)
                 problem = self._reuse_problem(o, b, src, run_types.get(b["run_ty"]))
                 if problem:
-                    self.logger.audit("OVERRIDE_INVALID_DETECTED", actor=o["reviewed_by"] or o["created_by"],
-                                      description=f"REUSE: {problem}", **ctx)
+                    if not self.conn.execute(
+                            "SELECT 1 FROM CMS_ComplianceExceptionsAudit WHERE Ovrd_ID=%s "
+                            "AND Event_Ty='OVERRIDE_INVALID_DETECTED'", (o["ovrd_id"],)).fetchone():
+                        self.logger.audit("OVERRIDE_INVALID_DETECTED", actor=o["reviewed_by"] or o["created_by"],
+                                          description=f"REUSE: {problem}", **ctx)
                     s.invalid.append(o["ovrd_id"])
                     continue
                 check_transition(b["req_stat"], CARRIED_FORWARD)
@@ -88,8 +80,7 @@ class DecisionProcessor:
                                         detail=f"reuses {src['btch_id']} through {o['valid_thru_dt_key']}")
                 s.applied.append(o["ovrd_id"])
 
-    # ------------------------------------------------------------------ REUSE: expire
-    def _expire(self, s: DecisionSummary, today: date) -> None:
+    def _expire(self, s: DecisionSummary, today: date, project_cd: Optional[str]) -> None:
         """A batch still carrying data whose override has run out (or was rejected) goes back to PENDING."""
         rows = self.conn.execute(
             """SELECT c.Req_ID, o.Ovrd_ID FROM ComplianceRequestControl c
@@ -97,7 +88,8 @@ class DecisionProcessor:
                         ON o.Req_ID = c.Req_ID AND o.Override_Ty = 'REUSE' AND o.Apprvl_Stat = 'APPROVED'
                 WHERE c.Resolution_Ty = 'CARRY_FORWARD' AND c.Batch_Close_Ind = 0
                   AND (o.Ovrd_ID IS NULL OR o.Valid_Thru_Dt_Key < %s)
-                ORDER BY c.Req_ID""", (today,)).fetchall()
+                  AND (%s::text IS NULL OR c.Project_Cd = %s)
+                ORDER BY c.Req_ID""", (today, project_cd, project_cd)).fetchall()
         for r in rows:
             with self.conn.transaction():
                 b = get_batch(self.conn, r["req_id"], for_update=True)
@@ -117,11 +109,8 @@ class DecisionProcessor:
                                         ovrd_id=r["ovrd_id"], detail=f"reuse of {b['reuse_btch_id']} expired")
                 s.expired.append(r["ovrd_id"] or b["req_id"])
 
-    # ------------------------------------------------------------------ health (design §15.3)
     def health(self) -> dict[str, list[dict]]:
-        """Approvals awaiting review, and approved overrides expiring within a week - all three override
-        types, not just the REUSE rows this job applies: overrides.py owns ComplianceBatchOverride, so
-        its health queries live here rather than in app.py."""
+        """Pending reviews and approved overrides expiring within a week."""
         q = partial(db.fetch_all, self.conn)
         today = self.clock.today(self.settings.business_tz)
         return {
@@ -134,7 +123,6 @@ class DecisionProcessor:
                     ORDER BY Valid_Thru_Dt_Key""", today, today + timedelta(days=7)),
         }
 
-    # ------------------------------------------------------------------ validation
     def _reuse_problem(self, o: dict, b: dict, src: Optional[dict], rt: Optional[cfgmod.RunType]) -> Optional[str]:
         if rt is None or not rt.carry_fwd:
             return f"run type {b['run_ty']} does not allow carry-forward (Carry_Fwd_Ind = 0)"
@@ -148,8 +136,7 @@ class DecisionProcessor:
         return None
 
     def _reuse_source(self, o: dict, b: dict) -> Optional[dict]:
-        """The batch whose data is reused: the requested one, else the latest earlier closed batch of the
-        same (project, table, source, run type) that has data. A carried batch resolves to its source."""
+        """The batch whose data is reused."""
         row = self.conn.execute(
             """SELECT * FROM ComplianceRequestControl
                 WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s AND Run_Ty=%s AND Req_ID <> %s

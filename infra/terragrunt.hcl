@@ -1,14 +1,3 @@
-##############################################################################
-# Root Terragrunt config.
-#
-# Every component's terragrunt.hcl does:
-#     include "root" { path = find_in_parent_folders("terragrunt.hcl") }
-# which pulls in the remote_state backend + provider generated here. The
-# actual bucket/region/lock-table values come from each environment's
-# env.hcl (infra/<env>/env.hcl) - fill those in with your existing state
-# bucket + DynamoDB lock table names for dev / test / prod.
-##############################################################################
-
 locals {
   env_vars    = read_terragrunt_config(find_in_parent_folders("env.hcl"))
   environment = local.env_vars.locals.environment
@@ -68,6 +57,3 @@ generate "versions" {
   EOF
 }
 
-# Note: no blanket `inputs` block here on purpose - each module declares a
-# different variable set, so environment/region are passed explicitly by
-# each component's own terragrunt.hcl instead of merged in globally.

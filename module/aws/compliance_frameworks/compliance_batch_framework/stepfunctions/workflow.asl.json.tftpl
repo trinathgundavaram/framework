@@ -1,0 +1,106 @@
+{
+  "Comment": "compliance batch framework - ${workflow_label}: runs the requested steps in order, one Glue runner run per step. Input: {\"steps\": [...], \"run_type\"?, \"period\"?, \"table\"?, \"as_of\"?, \"schedule\"?}",
+  "QueryLanguage": "JSONata",
+  "TimeoutSeconds": ${timeout_seconds},
+  "StartAt": "Validate",
+  "States": {
+    "Validate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $count($append([], $states.input.steps)) > 0 and $count($append([], $states.input.steps)[$not($ in ${known_steps})]) = 0 %}",
+          "Next": "RunSteps"
+        }
+      ],
+      "Default": "InvalidInput"
+    },
+    "InvalidInput": {
+      "Type": "Pass",
+      "Output": "{% {'Error': 'InvalidInput', 'Cause': 'steps must be a non-empty list of ' & $join(${known_steps}, ', ') & '; got ' & $string($states.input.steps)} %}",
+      "Next": "Alert"
+    },
+    "RunSteps": {
+      "Type": "Map",
+      "Items": "{% $append([], $states.input.steps) %}",
+      "ItemSelector": "{% {'step': $states.context.Map.Item.Value, 'number': $states.context.Map.Item.Index + 1, 'of': $count($append([], $states.input.steps)), 'ctx': $states.input} %}",
+      "MaxConcurrency": 1,
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "RunStep",
+        "States": {
+          "RunStep": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::glue:startJobRun.sync",
+            "Arguments": {
+              "JobName": "${runner_job_name}",
+              "MaxCapacity": "{% $lookup(${step_capacity}, $states.input.step) %}",
+              "Timeout": "{% $lookup(${step_timeout}, $states.input.step) %}",
+              "Arguments": "{% $merge([${project_settings}, ${project_arg}, {'--FW_MODULE': $states.input.step, '--FW_FAIL_ON_EXIT_CODES': $lookup(${step_fail_on}, $states.input.step)}, $states.input.ctx.run_type ? {'--FW_RUN_TYPE': $string($states.input.ctx.run_type)} : {}, $states.input.ctx.period ? {'--FW_PERIOD': $string($states.input.ctx.period)} : {}, $states.input.ctx.table ? {'--FW_TABLE': $string($states.input.ctx.table)} : {}, $states.input.ctx.as_of ? {'--FW_AS_OF': $string($states.input.ctx.as_of)} : {}]) %}"
+            },
+            "TimeoutSeconds": "{% ($lookup(${step_timeout}, $states.input.step) + 15) * 60 %}",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Glue.ConcurrentRunsExceededException",
+                  "Glue.ThrottlingException",
+                  "Glue.InternalServiceException",
+                  "Glue.OperationTimeoutException",
+                  "Glue.ResourceNumberLimitExceededException"
+                ],
+                "IntervalSeconds": 60,
+                "MaxAttempts": 5,
+                "BackoffRate": 2,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "Output": "{% $merge([$states.input, {'error': $states.errorOutput}]) %}",
+                "Next": "StepFailed"
+              }
+            ],
+            "Output": "{% {'step': $states.input.step, 'job_run_id': $states.result.Id, 'state': $states.result.JobRunState, 'seconds': $states.result.ExecutionTime} %}",
+            "End": true
+          },
+          "StepFailed": {
+            "Type": "Fail",
+            "Error": "StepFailed",
+            "Cause": "{% 'step ' & $states.input.step & ' (' & $string($states.input.number) & ' of ' & $string($states.input.of) & ') failed - ' & $string($states.input.error.Error) & ': ' & $substring($string($states.input.error.Cause), 0, 3000) %}"
+          }
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Output": "{% $states.errorOutput %}",
+          "Next": "Alert"
+        }
+      ],
+      "Output": "{% {'workflow': '${workflow_label}', 'schedule': $states.input.schedule, 'steps': $states.result} %}",
+      "End": true
+    },
+    "Alert": {
+      "Type": "Choice",
+      "Choices": [{ "Condition": "{% '${failure_topic_arn}' != '' %}", "Next": "NotifyFailure" }],
+      "Default": "Failed"
+    },
+    "NotifyFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "${failure_topic_arn}",
+        "Subject": "{% $substring('[FAILED] ${workflow_label} ${environment}: ' & $string($states.input.Error), 0, 100) %}",
+        "Message": "{% 'Compliance batch framework - ${workflow_label} (${environment})\n\nSchedule: ' & ($states.context.Execution.Input.schedule ? $string($states.context.Execution.Input.schedule) : 'manual run') & '\nSteps requested: ' & $string($states.context.Execution.Input.steps) & '\nError: ' & $string($states.input.Error) & '\n' & $string($states.input.Cause) & '\n\nExecution input: ' & $string($states.context.Execution.Input) & '\nExecution ' & $states.context.Execution.Name & ': https://${region}.console.aws.amazon.com/states/home?region=${region}#/v2/executions/details/' & $states.context.Execution.Id %}"
+      },
+      "Output": "{% $states.input %}",
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Output": "{% $states.input %}", "Next": "Failed" }],
+      "Next": "Failed"
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "{% $string($states.input.Error) %}",
+      "Cause": "{% $string($states.input.Cause) %}"
+    }
+  }
+}

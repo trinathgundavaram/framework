@@ -1,12 +1,4 @@
-"""Staging load and core promotion (design §9.4, §10).
-
-* file reading    structural checks C12-C14 (D-58, D-59); values are text, Postgres casts on COPY
-* stage()         delete the batch's staging rows (D-05) and load one file tagged with its Load_ID;
-                  engine PANDAS (python reader + COPY) or SPARK (JDBC) - job setting LOAD_ENGINE (D-62)
-* swap()          disable current core rows of the batch and append the load's staged rows (D-01)
-
-Staging and core tables live in the framework database (schema-qualified in the file config).
-"""
+"""Staging load and core promotion (design §9.4, §10)."""
 from __future__ import annotations
 
 import csv
@@ -29,11 +21,10 @@ STAGING_FRAMEWORK_COLS = ("btch_id", "load_id", "src_file_nm", "stg_load_dtts")
 CORE_FRAMEWORK_COLS = ("btch_id", "load_id", "current_ind", "load_dtts", "end_dtts")
 
 
-# ============================================================================ table introspection
 @dataclass(frozen=True)
 class Column:
     name: str
-    auto: bool          # identity / generated / serial - never inserted
+    auto: bool
 
 
 def columns(conn: psycopg.Connection, schema: str, table: str) -> list[Column]:
@@ -71,9 +62,8 @@ def _ident(schema: str, table: str) -> sql.Identifier:
     return sql.Identifier(schema.lower(), table.lower())
 
 
-# ============================================================================ file reading
 _DELIMS = {"TAB": "\t", "\\T": "\t", "PIPE": "|", "COMMA": ",", "SEMICOLON": ";"}
-Rows = list[list[Optional[str]]]
+Rows = Iterable[list[Optional[str]]]
 
 
 def delimiter_for(cfg: "FileConfig") -> str:
@@ -110,10 +100,8 @@ def _lf_lines(parts: Iterable[str]) -> Iterator[str]:
         yield buf
 
 
-def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> Rows:
-    """LF and CRLF line endings are both accepted; trailing blank lines are ignored. The file is read
-    in two streaming passes (never held in memory as text): the first checks the encoding and finds the
-    last non-blank line - the trailer when the file has one - and the second parses the records."""
+def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> Iterator[list]:
+    """Rows yielded one at a time; LF and CRLF line endings are both accepted, trailing blank lines ignored."""
     delim = delimiter_for(cfg)
     content_cnt, last = 0, ""
     try:
@@ -134,7 +122,7 @@ def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "
             trailer_count = int(m.group(1))
     reader = csv.reader(_lf_lines(islice(_file_lines(path, settings.file_encoding), content_cnt)),
                         delimiter=delim, quotechar=settings.quote_char or None, strict=True)
-    rows: Rows = []
+    data_rows = 0
     seen_header = False
     try:
         for i, rec in enumerate(reader):
@@ -144,19 +132,19 @@ def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "
             if len(rec) != expected_cols:
                 raise FileRejected("FILE_COLUMN_COUNT_MISMATCH",
                                    f"line {reader.line_num}: {len(rec)} columns, expected {expected_cols}")
-            rows.append(_normalise(rec, settings.empty_as_null))
+            data_rows += 1
+            yield _normalise(rec, settings.empty_as_null)
     except csv.Error as e:
         raise FileRejected("FILE_PARSE_ERROR", f"malformed delimited file at line {reader.line_num}: {e}")
     if cfg.has_header and not seen_header:
         raise FileRejected("FILE_PARSE_ERROR", "header expected but file has no lines")
-    if trailer_count is not None and trailer_count != len(rows):
+    if trailer_count is not None and trailer_count != data_rows:
         raise FileRejected("FILE_TRAILER_COUNT_MISMATCH",
-                           f"trailer count {trailer_count} != data rows {len(rows)}")
-    return rows
+                           f"trailer count {trailer_count} != data rows {data_rows}")
 
 
 def scan_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> int:
-    """Streaming structural check (no rows kept in memory). Returns the data row count."""
+    """Streaming structural check (no rows kept in memory)."""
     if cfg.has_trailer:
         raise FileRejected("FILE_TYPE_NOT_SUPPORTED", "streaming scan does not support trailer records yet (Q-02)")
     count = 0
@@ -177,8 +165,8 @@ def scan_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "
     return count
 
 
-def read_with_pandas(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> Rows:
-    import pandas as pd  # optional dependency
+def read_with_pandas(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> list[list]:
+    import pandas as pd
 
     try:
         if cfg.src_file_ty in (".xlsx", ".xls"):
@@ -208,10 +196,9 @@ def read_file(path: str, cfg: "FileConfig", expected_cols: int, settings: "Setti
     raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} has no reader")
 
 
-# ============================================================================ staging (D-05, D-62)
 def stage(conn: psycopg.Connection, settings: "Settings", *, file_path: str, cfg: "FileConfig", btch_id: str,
           load_id: int, src_file_nm: str, loaded_at: datetime, spark=None) -> int:
-    """Delete staging rows for btch_id and load the file tagged with load_id. Returns the staged row count."""
+    """Replace the staging rows of btch_id with the file, streamed into COPY; returns the row count."""
     stg_columns = staging_business_columns(conn, cfg.stg_schema_nm, cfg.stg_table_nm)
     table = _ident(cfg.stg_schema_nm, cfg.stg_table_nm)
     if settings.load_engine == "SPARK":
@@ -219,6 +206,7 @@ def stage(conn: psycopg.Connection, settings: "Settings", *, file_path: str, cfg
                             loaded_at)
     rows = read_file(file_path, cfg, len(stg_columns), settings)
     cols = [*stg_columns, *STAGING_FRAMEWORK_COLS]
+    count = 0
     copy_sql = sql.SQL("COPY {} ({}) FROM STDIN").format(table, sql.SQL(", ").join(map(sql.Identifier, cols)))
     try:
         with conn.transaction():
@@ -226,15 +214,15 @@ def stage(conn: psycopg.Connection, settings: "Settings", *, file_path: str, cfg
             with conn.cursor() as cur, cur.copy(copy_sql) as cp:
                 for rec in rows:
                     cp.write_row([*rec, btch_id, load_id, src_file_nm, loaded_at])
+                    count += 1
     except (psycopg.errors.DataError, psycopg.errors.IntegrityError) as e:
         raise FileRejected("FILE_PARSE_ERROR",
                            f"value does not fit staging column types: {sanitize_db_error(str(e.diag.message_primary))}")
-    return len(rows)
+    return count
 
 
 def _stage_spark(conn, settings, spark, file_path, cfg, stg_columns, btch_id, load_id, src_file_nm, loaded_at):
-    """Large files: streaming structural scan, then Spark JDBC append. A partial append is never promoted
-    because promotion filters on Load_ID and checks the staged row count (§10.1)."""
+    """Spark engine: streaming scan, then JDBC append."""
     from pyspark.sql import SparkSession, functions as F
     from pyspark.sql.types import StringType, StructField, StructType
 
@@ -267,7 +255,6 @@ def _stage_spark(conn, settings, spark, file_path, cfg, stg_columns, btch_id, lo
     return rows
 
 
-# ============================================================================ promotion (D-01, §10.2)
 @dataclass
 class PromotionResult:
     disabled_cnt: int

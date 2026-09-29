@@ -44,7 +44,6 @@ def test_validator_detects_problems(conn):
 def test_template_overlap_detected(conn):
     seed_config(conn)
     with conn.transaction():
-        # S2 names look like PRJA_TBLX_<RUNTY>_MONTHLY_... so an S1 monthly name also matches S2 (RUNTY='S1')
         conn.execute("UPDATE ComplianceSourceFileConfig "
                      "SET Src_File_Nm_Tmplt='PRJA_TBLX_{RUNTY}_MONTHLY_{RPTSTART}_{RPTEND}_{TS}.txt' WHERE Src_ID='S2'")
     assert "TEMPLATE_OVERLAP" in codes(validate_all(conn))
@@ -71,7 +70,7 @@ def test_cli_end_to_end(conn, tmp_path, monkeypatch, capsys):
                                    f"FRAMEWORK_METADATA_SCHEMA={SCHEMA}\nFRAMEWORK_OBJECT_STORE=local\n"
                                    f"FRAMEWORK_LOCAL_STORE_ROOT={tmp_path / 'store'}\n")
     monkeypatch.setenv("FRAMEWORK_RULE_ENGINE", "none")
-    assert main(["init-db"]) == 0                     # idempotent re-run on an initialised schema
+    assert main(["init-db"]) == 0
     seed_config(conn)
     assert main(["validate-config"]) == 0
     assert main(["test-connection"]) == 0
@@ -94,28 +93,27 @@ def test_cli_end_to_end(conn, tmp_path, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["result"]["result"] == "PROMOTED"
     s2 = q1(conn, "SELECT Btch_ID FROM ComplianceRequestControl WHERE Src_ID='S2'")["btch_id"]
     feb1, feb3 = ["--as-of", "2026-02-01T13:00:00+00:00"], ["--as-of", "2026-02-03T13:00:00+00:00"]
-    assert main(["close-batch", "--btch-id", s2, "--closed-by", "me", *feb1]) == 2   # SLA hold -> exit 2
+    assert main(["close-batch", "--btch-id", s2, "--closed-by", "me", *feb1]) == 2
     capsys.readouterr()
-    assert main(["close-batches", "--project", "PRJA", *feb1]) == 0                # still inside the SLA hold
+    assert main(["close-batches", "--project", "PRJA", *feb1]) == 0
     assert json.loads(capsys.readouterr().out)["evaluated"] == 0
-    assert main(["close-batches", "--project", "PRJA", *feb3]) == 0                # S1 has data: closed
+    assert main(["close-batches", "--project", "PRJA", *feb3]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert (len(out["closed"]), out["waiting"]) == (1, [s2])                       # S2 has none: a person decides
+    assert (len(out["closed"]), out["waiting"]) == (1, [s2])
     assert main(["close-batch", "--btch-id", s2, "--closed-by", "me", *feb3]) == 0
     assert json.loads(capsys.readouterr().out)["req_stat"] == "DATA_NOT_PROVIDED"
-    assert main(["health"]) == 0                        # composed from ingest/overrides/batch close (§15.3)
+    assert main(["health"]) == 0
     assert set(json.loads(capsys.readouterr().out)) == {
         "stale_loads", "quarantine_by_reason", "pending_reviews", "overrides_expiring_soon",
         "batches_past_hold_not_closed"}
     assert main(["process-decisions"]) == 0
-    assert main(["run", "--module", "BATCH_CREATION", "--project", "PRJA"]) == 0  # ad-hoc sweep only
+    assert main(["run", "--module", "BATCH_CREATION", "--project", "PRJA"]) == 0
     assert main(["notify"]) == 0
     assert main(["show-config", "--set", "NOT_A_SETTING=1"]) == 2
 
 
 def test_cli_file_load_path(conn, tmp_path, monkeypatch, capsys):
-    """`run --module FILE_LOAD` with no `--key`: one CLI call picks up files for two different sources -
-    two configs, two batches - sitting at the same configured inbound location."""
+    """`run --module FILE_LOAD` with no `--key`."""
     from .conftest import SCHEMA
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(f"FRAMEWORK_DB_DSN={os.environ['TEST_DATABASE_URL']}\n"
@@ -131,17 +129,17 @@ def test_cli_file_load_path(conn, tmp_path, monkeypatch, capsys):
     put_file(app, file_name("S2"), ["2|2|b"])
 
     capsys.readouterr()
-    assert main(["run", "--module", "FILE_LOAD"]) == 0        # no --bucket/--prefix: every configured location
+    assert main(["run", "--module", "FILE_LOAD"]) == 0
     out = json.loads(capsys.readouterr().out)["result"]
     assert (out["scanned"], out["promoted"], out["errors"]) == (2, 2, [])
     assert out["locations"] == ["inbound/prja/in/"]
     assert {r["req_stat"] for r in qa(conn, "SELECT Req_Stat FROM ComplianceRequestControl")} == {"PROMOTED"}
 
-    capsys.readouterr()                                       # nothing left to pick up
+    capsys.readouterr()
     assert main(["run", "--module", "FILE_LOAD", "--bucket", "inbound", "--prefix", "prja/in/"]) == 0
     assert json.loads(capsys.readouterr().out)["result"]["scanned"] == 0
 
-    assert main(["run", "--module", "FILE_LOAD", "--bucket", "inbound"]) == 2   # --bucket without --prefix
+    assert main(["run", "--module", "FILE_LOAD", "--bucket", "inbound"]) == 2
 
 
 def test_rule_engine_adapter_contract(conn):
@@ -153,13 +151,12 @@ def test_rule_engine_adapter_contract(conn):
     assert bad.run(conn, b, {}, "GATE").failed_rules == ["R1"]
     assert bad.run(conn, b, {}, "ANNOTATE").status == "PASSED_WITH_WARNINGS"
     assert CallableRuleEngine(lambda *a: [{"oops": 1}]).run(conn, b, {}, "GATE").status == "ERROR"
-    missing = build_rule_engine(Settings())                                       # Q-12 not configured
+    missing = build_rule_engine(Settings())
     assert missing.run(conn, b, {}, "GATE").status == "ERROR"
     assert missing.run(conn, [], {}, "GATE").status == "PASSED"
     assert build_rule_engine(Settings(rule_engine="none")).run(conn, b, {}, "GATE").status == "PASSED"
 
 
-# ---------------------------------------------------------------- rule binding levels (additive)
 def rules_for(conn, src, run_ty):
     from framework.config import rule_bindings
     return [f"{b.gre_rule_group}:{b.gre_rule_variant}" for b in rule_bindings(conn, "PRJA", "tbl_x", src, run_ty)]
@@ -168,12 +165,12 @@ def rules_for(conn, src, run_ty):
 def test_rule_bindings_apply_at_every_level_and_add_up(conn):
     seed_config(conn, rules=False)
     with conn.transaction():
-        bind(conn, "g", "project", table="*")                                  # every table of the project
-        bind(conn, "g", "table")                                               # every source of tbl_x
-        bind(conn, "g", "adhoc_only", run_ty="ADHOC")                          # tbl_x, ADHOC runs only
-        bind(conn, "g", "s1_only", src="S1")                                   # one source
-        bind(conn, "g", "table", src="S1")                                     # same rule at two levels: runs once
-        bind(conn, "g", "other_table", table="tbl_other")                      # a different table
+        bind(conn, "g", "project", table="*")
+        bind(conn, "g", "table")
+        bind(conn, "g", "adhoc_only", run_ty="ADHOC")
+        bind(conn, "g", "s1_only", src="S1")
+        bind(conn, "g", "table", src="S1")
+        bind(conn, "g", "other_table", table="tbl_other")
         conn.execute("UPDATE ComplianceRuleBinding SET Active_Ind=0 WHERE Gre_Rule_Variant='other_table'")
     assert rules_for(conn, "S1", "MONTHLY") == ["g:project", "g:s1_only", "g:table"]
     assert rules_for(conn, "S2", "MONTHLY") == ["g:project", "g:table"]
@@ -181,7 +178,7 @@ def test_rule_bindings_apply_at_every_level_and_add_up(conn):
 
 
 def test_table_level_rules_reach_the_rules_engine(conn, tmp_path):
-    """Universe-style: a rule bound once at project/table level runs for every source's file."""
+    """Universe-style."""
     seed_config(conn, rules=False)
     with conn.transaction():
         conn.execute("DELETE FROM ComplianceRuleBinding")
@@ -198,8 +195,8 @@ def test_validator_checks_rule_bindings(conn):
     seed_config(conn)
     assert codes(validate_all(conn)) == []
     with conn.transaction():
-        bind(conn, "g", "typo", run_ty="WEEKLY")                               # no such run type in the crosswalk
-        bind(conn, "g", "typo", table="tbl_nope")                              # no such table
-        bind(conn, "g", "typo", src="S9")                                      # no such source
+        bind(conn, "g", "typo", run_ty="WEEKLY")
+        bind(conn, "g", "typo", table="tbl_nope")
+        bind(conn, "g", "typo", src="S9")
     issues = validate_all(conn)
     assert codes(issues) == ["RULE_BINDING_NO_XWALK"] and len(issues) == 3

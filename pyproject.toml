@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cms-compliance-framework"
 version = "0.3.0"
-description = "Project-agnostic, filename-driven CMS compliance file ingestion, validation, promotion and extract-trigger framework"
-requires-python = ">=3.10"
+description = "Project-agnostic, filename-driven CMS compliance file ingestion, validation and promotion framework"
+requires-python = ">=3.9"
 dependencies = [
   "psycopg[binary]>=3.1",
-  "tzdata>=2023.3",   # Windows has no system time-zone database for zoneinfo
+  "tzdata>=2023.3",
 ]
 
 [project.optional-dependencies]
@@ -18,7 +18,7 @@ pandas = ["pandas>=1.5"]
 spark = ["pyspark>=3.3"]
 excel = ["pandas>=1.5", "openpyxl>=3.1"]
 parquet = ["pandas>=1.5", "pyarrow>=12"]
-dev   = ["pytest>=7", "pytest-cov>=4", "pandas>=1.5", "boto3>=1.28", "pyflakes>=3"]
+dev   = ["pytest>=7", "pytest-cov>=4", "pandas>=1.5", "boto3>=1.28", "pyflakes>=3", "jsonata-python>=0.5"]
 
 [project.scripts]
 framework = "framework.cli:main"
