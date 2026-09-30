@@ -14,8 +14,9 @@ variable "name_prefix" {
 }
 
 variable "required_common_tags" {
-  type    = map(string)
-  default = {}
+  description = "Tags on every resource."
+  type        = map(string)
+  default     = { AppName = "Compliance", ManagedBy = "Terraform" }
 }
 
 variable "artifacts_bucket" {
@@ -29,8 +30,9 @@ variable "artifacts_bucket_key" {
 }
 
 variable "glue_version" {
-  type    = string
-  default = "3.0"
+  description = "Ignored by AWS for Python shell jobs (the runtime is python_version); null avoids a perpetual diff."
+  type        = string
+  default     = null
 }
 
 variable "python_version" {
@@ -57,7 +59,7 @@ variable "glue_connection_names" {
 }
 
 variable "pypi_packages" {
-  description = "PyPI packages installed with the framework wheel."
+  description = "PyPI packages the jobs install (--additional-python-modules): the framework wheel's dependencies and pg8000."
   type        = list(string)
 }
 
@@ -134,6 +136,12 @@ variable "data_bucket_names" {
 
 variable "kms_key_arns" {
   description = "KMS keys of the data buckets or the database secret, if any."
+  type        = list(string)
+  default     = []
+}
+
+variable "alert_emails" {
+  description = "Emailed when a Glue job run fails, times out or errors (including runs started by hand)."
   type        = list(string)
   default     = []
 }

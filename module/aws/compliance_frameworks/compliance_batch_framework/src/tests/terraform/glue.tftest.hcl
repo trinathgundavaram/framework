@@ -2,6 +2,7 @@ mock_provider "aws" {
   mock_data "aws_caller_identity" { defaults = { account_id = "111122223333" } }
   mock_data "aws_region" { defaults = { name = "us-east-1" } }
   mock_resource "aws_iam_role" { defaults = { arn = "arn:aws:iam::111122223333:role/r" } }
+  mock_resource "aws_sns_topic" { defaults = { arn = "arn:aws:sns:us-east-1:111122223333:t" } }
 }
 
 variables {
@@ -16,8 +17,8 @@ run "jobs" {
     error_message = "runner job"
   }
   assert {
-    condition     = startswith(aws_glue_job.runner.default_arguments["--additional-python-modules"], "s3://silverton-maa-global-artifactory-dev/compliance_batch_framework/wheels/cms_compliance_framework-") && strcontains(aws_glue_job.runner.default_arguments["--additional-python-modules"], ",psycopg[binary]==")
-    error_message = "framework wheel from S3, dependencies from PyPI: ${aws_glue_job.runner.default_arguments["--additional-python-modules"]}"
+    condition     = startswith(aws_glue_job.runner.default_arguments["--extra-py-files"], "s3://silverton-maa-global-artifactory-dev/compliance_batch_framework/wheels/cms_compliance_framework-") && !strcontains(aws_glue_job.runner.default_arguments["--additional-python-modules"], "s3://") && startswith(aws_glue_job.runner.default_arguments["--additional-python-modules"], "psycopg[binary]==")
+    error_message = "Python shell: the framework wheel via --extra-py-files, PyPI packages via --additional-python-modules"
   }
   assert {
     condition     = aws_glue_job.metadata_load.default_arguments["--additional-python-modules"] == aws_glue_job.runner.default_arguments["--additional-python-modules"]
@@ -28,7 +29,7 @@ run "jobs" {
     error_message = "SSL required; the database name comes from the secret unless rds_database_name is set"
   }
   assert {
-    condition     = aws_iam_role.glue.name == "compliance_batch_framework_glue_dev" && aws_glue_job.runner.role_arn == aws_iam_role.glue.arn
+    condition     = aws_iam_role.glue.name == "compliance_batch_framework_glue_dev" && aws_glue_job.runner.role_arn == aws_iam_role.glue.arn && aws_glue_job.runner.command[0].python_version == "3.9"
     error_message = "the jobs run as the module's Glue role"
   }
   assert {
@@ -38,6 +39,23 @@ run "jobs" {
   assert {
     condition     = aws_glue_job.runner.connections == tolist(["REPLACE_WITH_DEV_GLUE_RDS_CONNECTION"]) && aws_glue_job.runner.command[0].script_location == "s3://silverton-maa-global-artifactory-dev/compliance_batch_framework/python_code/glue_framework_entry.py"
     error_message = "existing Glue connection and uploaded script"
+  }
+}
+
+run "failure_alerts_and_tags" {
+  command = apply
+
+  assert {
+    condition     = aws_cloudwatch_event_rule.glue_failed.name == "compliance_batch_framework_glue_failed_dev" && jsondecode(aws_cloudwatch_event_rule.glue_failed.event_pattern).detail.jobName == ["compliance_batch_framework_runner_dev", "compliance_batch_framework_metadata_load_dev"]
+    error_message = "a failed run of either job is caught"
+  }
+  assert {
+    condition     = aws_sns_topic.glue_alerts.name == "compliance_batch_framework_glue_alerts_dev" && length(aws_sns_topic_subscription.glue_alerts) == 1
+    error_message = "failures are emailed through the glue alerts topic"
+  }
+  assert {
+    condition     = aws_glue_job.runner.tags == tomap({ AppName = "Compliance", ManagedBy = "Terraform" }) && aws_iam_role.glue.tags == aws_glue_job.runner.tags
+    error_message = "team tags on every resource"
   }
 }
 

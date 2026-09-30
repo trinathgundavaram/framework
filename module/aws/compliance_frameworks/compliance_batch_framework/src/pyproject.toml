@@ -24,7 +24,7 @@ dev   = ["pytest>=7", "pytest-cov>=4", "pandas>=1.5", "boto3>=1.28", "pyflakes>=
 framework = "framework.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+include = ["framework*"]
 
 [tool.setuptools.package-data]
 framework = ["sql/*.sql"]

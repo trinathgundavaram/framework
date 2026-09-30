@@ -1,0 +1,75 @@
+name: Build Compliance Framework Wheel
+
+on:
+  workflow_dispatch:
+    inputs:
+      src_path:
+        description: "Framework source folder (contains pyproject.toml)"
+        required: true
+        type: string
+        default: module/aws/compliance_frameworks/compliance_batch_framework/src
+      output_path:
+        description: "Folder the wheel is written to and committed"
+        required: true
+        type: string
+        default: module/aws/compliance_frameworks/compliance_batch_framework/code/wheels
+      run_tests:
+        description: "Run the framework unit tests before building"
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: "build-wheel-${{ github.ref }}"
+
+permissions:
+  contents: write
+
+jobs:
+  BuildWheel:
+    runs-on: MA-Analytics-Runner
+    env:
+      SRC_PATH: ${{ inputs.src_path }}
+      OUTPUT_PATH: ${{ inputs.output_path }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check paths
+        run: |
+          for p in "$SRC_PATH" "$OUTPUT_PATH"; do
+            case "$p" in /*|*..*) echo "::error::$p must be a path inside the repository"; exit 1 ;; esac
+          done
+          test -f "$SRC_PATH/pyproject.toml" || { echo "::error::$SRC_PATH/pyproject.toml not found"; exit 1; }
+
+      - name: Set up Python 3.9 (the Glue runtime)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Run unit tests
+        if: ${{ inputs.run_tests }}
+        working-directory: ${{ inputs.src_path }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pytest -q
+
+      - name: Build wheel
+        run: bash "$SRC_PATH/build_wheel.sh" "$OUTPUT_PATH"
+
+      - name: Commit wheel
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A "$OUTPUT_PATH"
+          if git diff --cached --quiet; then
+            echo "Wheel unchanged; nothing to commit." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          wheel="$(ls "$OUTPUT_PATH"/*.whl | xargs -n1 basename)"
+          git commit -m "Rebuild $wheel from $SRC_PATH"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "Committed $OUTPUT_PATH/$wheel to ${GITHUB_REF_NAME}" | tee -a "$GITHUB_STEP_SUMMARY"

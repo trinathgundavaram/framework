@@ -29,7 +29,3 @@ resource "aws_cloudwatch_event_target" "schedule" {
     maximum_retry_attempts       = 5
   }
 }
-
-output "schedule_rules" {
-  value = { for k, r in aws_cloudwatch_event_rule.schedule : k => r.name }
-}

@@ -7,7 +7,7 @@ EventBridge scheduled rules (UTC)               one rule per schedule entry
    ODR  daily_batches  12:00 UTC   {steps: [BATCH_CREATION], run_type: DAILY, period: PREV_DAY}
    ODR  file_load      every 15'   {steps: [FILE_LOAD, OVERRIDE_DECISIONS, NOTIFY]}
    ODR  close          hourly      {steps: [BATCH_CLOSE, NOTIFY]}
-        │                                        manual: scripts/run_workflow.sh dev ODR FILE_LOAD,BATCH_CLOSE
+        │                                        manual: src/scripts/run_workflow.sh dev ODR FILE_LOAD,BATCH_CLOSE
         ▼
 Step Functions  compliance_batch_framework_ODR_dev      one workflow per project (+ all_projects)
    validate the steps -> run them one at a time -> on any failure stop and email the project
@@ -28,8 +28,10 @@ existing RDS PostgreSQL (VPC)  +  S3 inbound / archive / quarantine  +  SES emai
   (steps, run type, period), so each step can run at its own time, and monthly / weekly / daily runs share
   the workflow. Any steps can be run by hand at any time.
 
-Deployed as Terragrunt submodules by the team's GitHub Actions workflow, one `config/<env>.tfvars` for
-all of them. Every resource name starts with `compliance`.
+Deployed as two Terragrunt submodules by the team's GitHub Actions workflow, each with its own
+`config/<env>.tfvars`. Every resource name starts with `compliance`; every resource is tagged
+`AppName = Compliance`, `ManagedBy = Terraform` (`required_common_tags`; per-project resources add
+`Project`).
 
 ## Steps
 
@@ -78,7 +80,7 @@ projects = {
   | every 15 minutes / hourly | `cron(0/15 * * * ? *)` / `cron(0 * * * ? *)` | unaffected |
 
   Keep daily times out of 05:00–06:59 UTC (Chicago midnight) so the run's business date never changes
-  with daylight saving. One-time runs: use `scripts/run_workflow.sh`.
+  with daylight saving. One-time runs: use `src/scripts/run_workflow.sh`.
 - Optional per schedule: `run_type`, `period` (a name in the framework's `period_sql.py`), `table`,
   `as_of`, `enabled = false`. A project with `enabled = false` keeps its workflow for manual runs.
 - Adding a project = adding an entry and `terragrunt apply`: a new workflow, schedule group and alert
@@ -89,10 +91,10 @@ projects = {
 ## Running steps by hand
 
 ```bash
-scripts/run_workflow.sh dev ODR FILE_LOAD,BATCH_CLOSE                               # now, in this order
-scripts/run_workflow.sh dev UNIVERSE BATCH_CREATION --run-type MONTHLY --period PREV_CALENDAR_MONTH
-scripts/run_workflow.sh prod ODR BATCH_CREATION --run-type DAILY --period PREV_DAY --as-of 2026-09-01   # missed run
-scripts/run_workflow.sh dev all_projects NOTIFY
+src/scripts/run_workflow.sh dev ODR FILE_LOAD,BATCH_CLOSE                               # now, in this order
+src/scripts/run_workflow.sh dev UNIVERSE BATCH_CREATION --run-type MONTHLY --period PREV_CALENDAR_MONTH
+src/scripts/run_workflow.sh prod ODR BATCH_CREATION --run-type DAILY --period PREV_DAY --as-of 2026-09-01   # missed run
+src/scripts/run_workflow.sh dev all_projects NOTIFY
 ```
 
 Or, in the Step Functions console, **Start execution** on `compliance_batch_framework_<PROJECT>_<env>` with
@@ -120,6 +122,7 @@ run names the module and project.
 | A step fails, or the input names an unknown step | the project's `alert_emails` + `alert_email` | the workflow publishes: subject `[FAILED] project ODR dev: StepFailed`, body with the schedule (or "manual run"), the failed step (`step BATCH_CLOSE (2 of 3)`), the Glue error and a link to the execution |
 | An execution times out (`workflow_timeout_hours`) or is aborted | same | EventBridge rule on the workflow's `TIMED_OUT` / `ABORTED` events |
 | A schedule cannot start its workflow (after 1 hour of retries) | `alert_email` | a CloudWatch alarm on the rule's `FailedInvocations` emails |
+| A Glue run fails, times out or errors (also runs started by hand: `init-db`, `metadata_load`) | glue `alert_emails` | EventBridge rule `..._glue_failed_<env>` → SNS `..._glue_alerts_<env>` |
 | Business events: quarantined file, missing source, invalid override, technical failure of a file | the file config's recipients / `DEFAULT_NOTIFY_EMAILS` | the framework's `NOTIFY` step (SES) |
 
 SNS email subscriptions must be confirmed once from the email SNS sends.
@@ -143,27 +146,40 @@ SNS email subscriptions must be confirmed once from the email SNS sends.
 
 ```
 compliance_batch_framework/
-  config/dev.tfvars test.tfvars prod.tfvars   settings of both submodules, per environment
+  src/                                        framework source, tests, docs, wheel build (not deployed)
   code/                                       uploaded to s3://<artifacts_bucket>/compliance_batch_framework/
     glue_framework_entry.py                   runner entry point (Glue arguments -> `framework` CLI)
     glue_job_metadata_load.py  rds_conn.py    configuration-load job
-    wheels/cms_compliance_framework-*.whl     the framework (scripts/build_glue_wheel.sh, committed)
-  glue/            Glue role, code upload, runner and metadata_load jobs
-  stepfunctions/   workflow and EventBridge roles, one workflow per project, schedule rules, SNS alerts
-    workflow.asl.json.tftpl
+    wheels/cms_compliance_framework-*.whl     the framework, built from src/ (committed)
+  glue/
+    config/dev.tfvars test.tfvars prod.tfvars   Glue settings per environment
+    main.tf          code upload, runner and metadata_load jobs
+    iam.tf           Glue role
+    cloudwatch.tf    failed-run rule, SNS alert topic
+    _variable.tf  _local.tf  _data.tf  outputs.tf  backend.tf  terragrunt.hcl
+  stepfunctions/
+    config/dev.tfvars test.tfvars prod.tfvars   projects, schedules, alerts per environment
+    main.tf          one workflow per project (workflow.asl.json.tftpl)
+    iam.tf           workflow and EventBridge roles
+    schedules.tf     EventBridge schedule rules
+    cloudwatch.tf    SNS topics, stopped-execution rules, failed-schedule alarms
+    _variable.tf  _local.tf  _data.tf  outputs.tf  backend.tf  terragrunt.hcl
 ```
+
+`backend.tf` declares the S3 backend (`backend "s3" {}`); the repository root's `remote_state` fills in
+bucket, key and lock table. If the root instead *generates* `backend.tf`, delete these two files.
 
 | Submodule | Creates | Needs first |
 |---|---|---|
-| `glue` | role `compliance_batch_framework_glue_<env>`, jobs `..._runner_<env>` / `..._metadata_load_<env>`, S3 objects | — |
+| `glue` | role `compliance_batch_framework_glue_<env>`, jobs `..._runner_<env>` / `..._metadata_load_<env>`, S3 objects, rule `..._glue_failed_<env>`, SNS `..._glue_alerts_<env>` | — |
 | `stepfunctions` | roles `..._workflow_<env>` / `..._events_<env>`, workflows `..._<PROJECT>_<env>`, rules `..._<PROJECT>_<env>_<schedule>` + failure alarms, `..._stopped` rules, SNS `..._<PROJECT>_<env>_failures` / `..._ops_<env>` (log groups only with `enable_workflow_logs`) | `glue` |
 
 Existing resources it uses (not managed here): the artifacts bucket, the RDS database and its Secrets
 Manager secret (`host, port, username, password, dbname`), the Glue connection(s) to the RDS VPC, the
 data buckets, the SES sender.
 
-Helpers outside the module, in the framework repository: `scripts/build_glue_wheel.sh` (rebuild
-`code/wheels/`), `scripts/run_workflow.sh` (start a workflow by hand), `scripts/test_terraform.sh`
+Helpers in `src/`: `build_wheel.sh` and the GitHub Actions workflow `github-workflow/build-framework-wheel.yaml`
+(rebuild `code/wheels/`), `scripts/run_workflow.sh` (start a workflow by hand), `scripts/test_terraform.sh`
 (fmt / validate / mocked-provider tests in `tests/terraform/`, no AWS access).
 
 ## Deployer role (gov-compliance-it-deployer)
@@ -179,8 +195,8 @@ UTC EventBridge rules and alarms instead of time-zone schedules and a dead-lette
 `logs:*LogDelivery` actions on `*` that Step Functions needs for CloudWatch Logs (`enable_workflow_logs`
 stays `false`; execution history and the failure emails do not depend on it).
 
-In the framework repository, `docs/deployer/gov-compliance-it-deployer.original.yml` is the role
-template as provided; `docs/deployer/gov-compliance-it-deployer.yml` is the same role with duplicates removed and a
+`src/docs/deployer/gov-compliance-it-deployer.original.yml` is the role template as provided;
+`src/docs/deployer/gov-compliance-it-deployer.yml` is the same role with duplicates removed and a
 `MaaGOVCOMPLIANCEITScheduler` policy (Scheduler, SQS, Step Functions log delivery on `compliance*`) that
 enables time-zone schedules, a dead-letter queue and workflow logs once it is deployed.
 
@@ -191,18 +207,21 @@ submodule options `glue` and `stepfunctions` already exist. Leave the submodule 
 (`glue` first).
 
 Each submodule's `terragrunt.hcl` includes the repository root (`find_in_parent_folders()`) for remote
-state and provider, and adds `-var-file=config/${TF_VAR_env}.tfvars` (the workflow sets `TF_VAR_env`).
+state and provider, and adds its own `-var-file=config/${TF_VAR_env}.tfvars` (the workflow sets `TF_VAR_env`).
 No credentials are passed: the jobs read the database secret at run time.
 
-Before the first deploy, fill in every `REPLACE_WITH_...` in `config/<env>.tfvars`. Locally:
+Before the first deploy, fill in every `REPLACE_WITH_...` in `glue/config/<env>.tfvars` and
+`stepfunctions/config/<env>.tfvars`. Locally:
 
 ```bash
 export TF_VAR_env=dev
 cd glue && terragrunt plan
 ```
 
-Packages: the framework wheel is uploaded from `code/wheels/`; its dependencies (`pypi_packages`)
-install from PyPI at run time, like the team's other Glue jobs. Database connections require SSL.
+Packages: Python shell jobs run Python 3.9 (`python_version`; `glue_version` does not apply to them).
+The framework wheel is uploaded from `code/wheels/` and attached with `--extra-py-files` (Python shell
+cannot install S3 packages through `--additional-python-modules`); `pypi_packages` install from PyPI
+through `--additional-python-modules`, like the team's other Glue jobs. Database connections require SSL.
 
 ### First run in a new environment
 
@@ -237,7 +256,14 @@ same way. Run `validate-config` after every change.
 
 ## Updating
 
-- **Framework code**: `scripts/build_glue_wheel.sh` in the framework repository, copy `code/wheels/`,
-  deploy `glue`. A changed schema needs the database re-created (`init-db` only creates a missing schema).
-- **Schedules / projects / settings**: edit `config/<env>.tfvars`, deploy `stepfunctions` (or `glue` for
-  job settings).
+- **Framework code**: edit `src/framework/`, rebuild the wheel (the *Build Compliance Framework Wheel*
+  workflow, or `src/build_wheel.sh`), deploy `glue`. A changed schema needs the database re-created
+  (`init-db` only creates a missing schema).
+- **Schedules / projects**: edit `stepfunctions/config/<env>.tfvars`, deploy `stepfunctions`.
+- **Job settings**: edit `glue/config/<env>.tfvars`, deploy `glue`.
+
+## The framework wheel
+
+`code/wheels/cms_compliance_framework-<version>-py3-none-any.whl` is `src/framework/` packaged for pip; Glue
+installs it on every run, so a rebuilt wheel takes effect on the next run after `glue` is deployed. How
+to edit, test, rebuild (GitHub Actions or locally) and inspect it: [`src/README.md`](src/README.md).

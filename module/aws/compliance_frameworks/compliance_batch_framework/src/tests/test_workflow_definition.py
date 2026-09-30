@@ -1,4 +1,4 @@
-"""The Step Functions workflow template (module/aws/.../stepfunctions/workflow.asl.json.tftpl)."""
+"""The Step Functions workflow template (../stepfunctions/workflow.asl.json.tftpl)."""
 import json
 import pathlib
 import re
@@ -6,8 +6,7 @@ import re
 import pytest
 
 jsonata = pytest.importorskip("jsonata", reason="pip install jsonata-python")
-TEMPLATE = (pathlib.Path(__file__).parents[1] / "module/aws/compliance_frameworks/compliance_batch_framework"
-            / "stepfunctions/workflow.asl.json.tftpl")
+TEMPLATE = pathlib.Path(__file__).parents[2] / "stepfunctions/workflow.asl.json.tftpl"
 pytestmark = pytest.mark.skipif(not TEMPLATE.exists(), reason="deployment module not in this checkout")
 
 STEPS = {"BATCH_CREATION": (0.0625, 60, "1,2"), "FILE_LOAD": (1, 120, "2"), "OVERRIDE_DECISIONS": (0.0625, 30, "2"),

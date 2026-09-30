@@ -11,21 +11,6 @@ resource "aws_sns_topic" "workflow" {
   tags = merge(local.tags, { Project = each.value.project })
 }
 
-locals {
-  alert_topics = var.enable_failure_alerts ? merge(
-    { for k, t in aws_sns_topic.workflow : k => t.arn },
-    { for k, w in local.workflows : k => aws_sns_topic.ops[0].arn if w.project == null },
-  ) : {}
-  topics_by_name = var.enable_failure_alerts ? merge({ ops = aws_sns_topic.ops[0].arn }, { for k, t in aws_sns_topic.workflow : k => t.arn }) : {}
-  subscriptions = var.enable_failure_alerts ? merge(
-    var.alert_email == "" ? {} : { "ops|${var.alert_email}" = { topic = aws_sns_topic.ops[0].arn, email = var.alert_email } },
-    merge([for k, t in aws_sns_topic.workflow : {
-      for e in distinct(compact(concat(local.workflows[k].alert_emails, [var.alert_email]))) :
-      "${k}|${e}" => { topic = t.arn, email = e }
-    }]...),
-  ) : {}
-}
-
 resource "aws_sns_topic_subscription" "email" {
   for_each  = local.subscriptions
   topic_arn = each.value.topic

@@ -90,6 +90,14 @@ run "every_name_starts_with_compliance" {
   }
 }
 
+run "team_tags" {
+  command = apply
+  assert {
+    condition     = aws_sfn_state_machine.workflow["ODR"].tags == tomap({ AppName = "Compliance", ManagedBy = "Terraform", Project = "ODR" }) && aws_iam_role.workflow.tags == tomap({ AppName = "Compliance", ManagedBy = "Terraform" })
+    error_message = "team tags (plus Project on per-project resources)"
+  }
+}
+
 run "workflow_logs_when_enabled" {
   command = apply
   variables {

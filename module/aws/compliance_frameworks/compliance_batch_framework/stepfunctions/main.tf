@@ -1,47 +1,3 @@
-data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
-
-locals {
-  tags            = merge(var.required_common_tags, { Environment = var.env })
-  account_id      = data.aws_caller_identity.current.account_id
-  region          = data.aws_region.current.name
-  runner_job_name = "${var.name_prefix}_runner_${var.env}"
-  known_steps     = sort(keys(var.step_settings))
-
-  workflows = { for code, p in var.projects : code => {
-    label        = code == "all_projects" ? "all projects" : "project ${code}"
-    project      = code == "all_projects" ? null : code
-    enabled      = p.enabled
-    settings     = p.settings
-    alert_emails = p.alert_emails
-    schedules    = p.schedules
-  } }
-  workflow_name = { for k in keys(local.workflows) : k => "${var.name_prefix}_${k}_${var.env}" }
-
-  schedules = merge([for w, wf in local.workflows : {
-    for name, s in wf.schedules : "${w}.${name}" => merge(s, {
-      workflow = w
-      name     = name
-      enabled  = var.enable_schedules && wf.enabled && s.enabled
-      input = jsonencode({ for k, v in {
-        schedule = name
-        steps    = s.steps
-        run_type = s.run_type
-        period   = s.period
-        table    = s.table
-        as_of    = s.as_of
-      } : k => v if v != null })
-    })
-  }]...)
-
-  asl_value = { for k, v in {
-    known_steps  = local.known_steps
-    step_cap     = { for s, c in var.step_settings : s => c.capacity }
-    step_timeout = { for s, c in var.step_settings : s => c.timeout_minutes }
-    step_fail_on = { for s, c in var.step_settings : s => c.fail_on_problems ? "1,2" : "2" }
-  } : k => trimsuffix(trimprefix(jsonencode(jsonencode(v)), "\""), "\"") }
-}
-
 check "unscoped_notify" {
   assert {
     condition = anytrue([for s in try(values(var.projects["all_projects"].schedules), []) :
@@ -97,9 +53,4 @@ resource "aws_sfn_state_machine" "workflow" {
       error_message = "Workflow ${each.key}: every schedule needs steps, each one of ${join(", ", local.known_steps)}."
     }
   }
-}
-
-output "workflows" {
-  description = "Step Functions workflow per project (and all_projects): name and ARN."
-  value       = { for k, m in aws_sfn_state_machine.workflow : k => { name = m.name, arn = m.arn } }
 }

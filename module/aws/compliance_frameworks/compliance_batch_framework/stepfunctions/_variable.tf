@@ -14,8 +14,9 @@ variable "name_prefix" {
 }
 
 variable "required_common_tags" {
-  type    = map(string)
-  default = {}
+  description = "Tags on every resource."
+  type        = map(string)
+  default     = { AppName = "Compliance", ManagedBy = "Terraform" }
 }
 
 variable "projects" {

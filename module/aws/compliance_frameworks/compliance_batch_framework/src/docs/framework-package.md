@@ -13,7 +13,8 @@ Implementation of [`design/cms-compliance-framework-design.md`](design/cms-compl
 pyproject.toml            package metadata; `framework` console script
 .env.example              sample local settings (copy to .env)
 docker-compose.yml        optional local PostgreSQL 16 (not needed on Windows - see below)
-src/framework/
+build_wheel.sh            builds the Glue wheel into ../code/wheels
+framework/
   cli.py                  commands (one command = one service)
   app.py                  service wiring only; health() composes each service's own report (§15.3)
   settings.py             settings (job args > env > .env > default) and the database connection
@@ -31,7 +32,7 @@ src/framework/
   adapters.py             S3/local store, GRE rules engine, email (log / SES)
   sql/schema.sql          schema (source of truth, CREATE-only, no CHECK constraints)
   sql/approvals.sql       manual override templates (reuse / late arrival / correction)
-tests/                    unit + PostgreSQL integration tests
+tests/                    unit + PostgreSQL integration tests (tests/terraform: mocked Terraform tests)
 ```
 
 ## Configuration
@@ -75,7 +76,7 @@ The environment variable is `FRAMEWORK_<NAME>`; the job argument is `--set <NAME
 
 ### Report periods
 
-`run --module BATCH_CREATION --period <NAME>` picks a statement from `src/framework/period_sql.py`:
+`run --module BATCH_CREATION --period <NAME>` picks a statement from `framework/period_sql.py`:
 `SAME_DAY`, `PREV_DAY`, `PREV_N_DAYS` (`--lookback-days`), `PREV_WEEK_SAME_DAY` (`--lookback-weeks`), `PREV_CALENDAR_WEEK`, `CURRENT_CALENDAR_MONTH`, `PREV_CALENDAR_MONTH`, `ROLLING_1_MONTH`, `PREV_CALENDAR_QUARTER`, `PREV_CALENDAR_YEAR`.
 
 A project with its own calendar ships a file and passes it with `--period-file`:
@@ -234,7 +235,7 @@ In Glue, keep one job definition and pass the module and its parameters as job a
 
 ## Overrides (manual SQL, D-12, D-74)
 
-Use the templates in `src/framework/sql/approvals.sql`. Every statement must report **1 row**. One shape covers three decisions, each approved with a `Valid_Thru_Dt_Key` — the last date it may be used. **There is no revoke:** template 6 moves that date into the past.
+Use the templates in `framework/sql/approvals.sql`. Every statement must report **1 row**. One shape covers three decisions, each approved with a `Valid_Thru_Dt_Key` — the last date it may be used. **There is no revoke:** template 6 moves that date into the past.
 
 - **`REUSE` (D-70):** for an open batch with no data, when the run type has `Carry_Fwd_Ind = 1`. Optionally name `Reuse_Btch_ID`; otherwise the latest earlier closed batch with data is used. `process-decisions` applies it (the batch becomes `CARRIED_FORWARD` and counts as received, combining the reused batch's current core rows) and removes it again when it runs out. A file that arrives later for the open batch replaces the carried data.
 - **`LATE_ARRIVAL`:** lets a file be promoted into a **closed** batch that has no data.
