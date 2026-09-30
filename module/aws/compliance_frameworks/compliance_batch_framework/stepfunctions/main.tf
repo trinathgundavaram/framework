@@ -1,10 +1,6 @@
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
-data "aws_iam_role" "workflow" {
-  name = "${var.name_prefix}_workflow_${var.env}"
-}
-
 locals {
   tags            = merge(var.required_common_tags, { Environment = var.env })
   account_id      = data.aws_caller_identity.current.account_id
@@ -66,7 +62,7 @@ resource "aws_sfn_state_machine" "workflow" {
   for_each = local.workflows
 
   name     = local.workflow_name[each.key]
-  role_arn = data.aws_iam_role.workflow.arn
+  role_arn = aws_iam_role.workflow.arn
   type     = "STANDARD"
 
   definition = templatefile("${path.module}/workflow.asl.json.tftpl", {

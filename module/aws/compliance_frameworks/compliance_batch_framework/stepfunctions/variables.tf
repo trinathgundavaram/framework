@@ -96,3 +96,9 @@ variable "alert_email" {
   type        = string
   default     = ""
 }
+
+variable "permissions_boundary" {
+  description = "Permissions boundary ARN for the roles, if the account requires one."
+  type        = string
+  default     = null
+}

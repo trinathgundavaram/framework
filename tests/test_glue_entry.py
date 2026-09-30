@@ -1,4 +1,4 @@
-"""The Glue runner's entry script (module/aws/.../common/glue_framework_entry.py)."""
+"""The Glue runner's entry script (module/aws/.../code/glue_framework_entry.py)."""
 import importlib.util
 import pathlib
 
@@ -6,7 +6,7 @@ import pytest
 
 from framework.modules import resolve_module
 
-ENTRY = pathlib.Path(__file__).parents[1] / "module/aws/compliance_frameworks/compliance_batch_framework/common/glue_framework_entry.py"
+ENTRY = pathlib.Path(__file__).parents[1] / "module/aws/compliance_frameworks/compliance_batch_framework/code/glue_framework_entry.py"
 pytestmark = pytest.mark.skipif(not ENTRY.exists(), reason="deployment module not in this checkout")
 
 

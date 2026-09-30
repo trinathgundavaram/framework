@@ -1,8 +1,6 @@
 data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
 
 locals {
-  tags          = merge(var.required_common_tags, { Environment = var.env })
   artifacts_arn = "arn:aws:s3:::${var.artifacts_bucket}"
   secret_arn    = "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:${var.rds_secret_name}-*"
 }
@@ -80,12 +78,4 @@ resource "aws_iam_role_policy" "glue" {
         Resource = var.kms_key_arns
     }])
   })
-}
-
-output "glue_role_name" {
-  value = aws_iam_role.glue.name
-}
-
-output "glue_role_arn" {
-  value = aws_iam_role.glue.arn
 }

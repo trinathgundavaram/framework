@@ -1,12 +1,3 @@
-data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
-
-locals {
-  tags    = merge(var.required_common_tags, { Environment = var.env })
-  account = data.aws_caller_identity.current.account_id
-  region  = data.aws_region.current.name
-}
-
 resource "aws_iam_role" "workflow" {
   name                 = "${var.name_prefix}_workflow_${var.env}"
   permissions_boundary = var.permissions_boundary
@@ -17,7 +8,7 @@ resource "aws_iam_role" "workflow" {
       Effect    = "Allow"
       Principal = { Service = "states.amazonaws.com" }
       Action    = "sts:AssumeRole"
-      Condition = { StringEquals = { "aws:SourceAccount" = local.account } }
+      Condition = { StringEquals = { "aws:SourceAccount" = local.account_id } }
     }]
   })
 
@@ -35,13 +26,13 @@ resource "aws_iam_role_policy" "workflow" {
         Sid      = "RunTheRunner"
         Effect   = "Allow"
         Action   = ["glue:StartJobRun", "glue:GetJobRun", "glue:GetJobRuns", "glue:BatchStopJobRun"]
-        Resource = ["arn:aws:glue:${local.region}:${local.account}:job/${var.name_prefix}_runner_${var.env}"]
+        Resource = ["arn:aws:glue:${local.region}:${local.account_id}:job/${var.name_prefix}_runner_${var.env}"]
       },
       {
         Sid      = "FailureAlerts"
         Effect   = "Allow"
         Action   = ["sns:Publish"]
-        Resource = ["arn:aws:sns:${local.region}:${local.account}:${var.name_prefix}_*_${var.env}*"]
+        Resource = ["arn:aws:sns:${local.region}:${local.account_id}:${var.name_prefix}_*_${var.env}*"]
       },
       {
         Sid    = "ExecutionLogs"
@@ -64,7 +55,7 @@ resource "aws_iam_role" "events" {
       Effect    = "Allow"
       Principal = { Service = "events.amazonaws.com" }
       Action    = "sts:AssumeRole"
-      Condition = { StringEquals = { "aws:SourceAccount" = local.account } }
+      Condition = { StringEquals = { "aws:SourceAccount" = local.account_id } }
     }]
   })
 
@@ -81,15 +72,7 @@ resource "aws_iam_role_policy" "events" {
       Sid      = "StartWorkflows"
       Effect   = "Allow"
       Action   = ["states:StartExecution"]
-      Resource = ["arn:aws:states:${local.region}:${local.account}:stateMachine:${var.name_prefix}_*_${var.env}"]
+      Resource = ["arn:aws:states:${local.region}:${local.account_id}:stateMachine:${var.name_prefix}_*_${var.env}"]
     }]
   })
-}
-
-output "workflow_role_arn" {
-  value = aws_iam_role.workflow.arn
-}
-
-output "events_role_arn" {
-  value = aws_iam_role.events.arn
 }

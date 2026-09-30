@@ -1,7 +1,7 @@
 mock_provider "aws" {
   mock_data "aws_caller_identity" { defaults = { account_id = "111122223333" } }
   mock_data "aws_region" { defaults = { name = "us-east-1" } }
-  mock_data "aws_iam_role" { defaults = { arn = "arn:aws:iam::111122223333:role/r" } }
+  mock_resource "aws_iam_role" { defaults = { arn = "arn:aws:iam::111122223333:role/r" } }
   mock_resource "aws_sfn_state_machine" { defaults = { arn = "arn:aws:states:us-east-1:111122223333:stateMachine:m" } }
   mock_resource "aws_sns_topic" { defaults = { arn = "arn:aws:sns:us-east-1:111122223333:t" } }
   mock_resource "aws_sqs_queue" { defaults = { arn = "arn:aws:sqs:us-east-1:111122223333:q" } }
@@ -79,6 +79,7 @@ run "every_name_starts_with_compliance" {
   command = apply
   assert {
     condition = alltrue(concat(
+      [startswith(aws_iam_role.workflow.name, "compliance"), startswith(aws_iam_role.events.name, "compliance")],
       [for m in aws_sfn_state_machine.workflow : startswith(m.name, "compliance")],
       [for r in aws_cloudwatch_event_rule.schedule : startswith(r.name, "compliance")],
       [for r in aws_cloudwatch_event_rule.workflow_stopped : startswith(r.name, "compliance")],

@@ -1,7 +1,3 @@
-data "aws_iam_role" "events" {
-  name = "${var.name_prefix}_events_${var.env}"
-}
-
 resource "aws_cloudwatch_event_rule" "schedule" {
   for_each = local.schedules
 
@@ -25,7 +21,7 @@ resource "aws_cloudwatch_event_target" "schedule" {
   rule      = aws_cloudwatch_event_rule.schedule[each.key].name
   target_id = "workflow"
   arn       = aws_sfn_state_machine.workflow[each.value.workflow].arn
-  role_arn  = data.aws_iam_role.events.arn
+  role_arn  = aws_iam_role.events.arn
   input     = each.value.input
 
   retry_policy {

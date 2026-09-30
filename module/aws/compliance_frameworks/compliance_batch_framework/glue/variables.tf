@@ -120,3 +120,20 @@ variable "framework_settings" {
   type        = map(string)
   default     = {}
 }
+
+variable "permissions_boundary" {
+  description = "Permissions boundary ARN for the Glue role, if the account requires one."
+  type        = string
+  default     = null
+}
+
+variable "data_bucket_names" {
+  description = "Buckets of the file configs (inbound, archive) and the quarantine."
+  type        = list(string)
+}
+
+variable "kms_key_arns" {
+  description = "KMS keys of the data buckets or the database secret, if any."
+  type        = list(string)
+  default     = []
+}

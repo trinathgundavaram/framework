@@ -45,7 +45,7 @@ tests/                    unit + PostgreSQL integration tests
 | `.env` location | `--env-file`, else `FRAMEWORK_ENV_FILE`, else `./.env` (optional) |
 
 - **Locally:** put the database values in `.env` (see `.env.example`). `.env` is git-ignored.
-- **In AWS:** set only `FRAMEWORK_DB_SECRET_NAME` (the secret created by the AWS deployment in `module/aws/compliance_frameworks/compliance_batch_framework/` has the right shape); pass project settings as Glue job arguments (`--set ...`).
+- **In AWS:** set only `FRAMEWORK_DB_SECRET_NAME` (the existing RDS secret the AWS deployment in `module/aws/compliance_frameworks/compliance_batch_framework/` points at: `host, port, username, password, dbname`); pass project settings as Glue job arguments (`--set ...`).
 - **One database:** the framework schema (`METADATA_SCHEMA`) and the staging/core schemas named in `ComplianceSourceFileConfig` are in the same PostgreSQL database, so a promotion is one transaction.
 - `framework show-config` prints every setting with its value and source (`argument`, `env`, `.env`, `default`) and the database target without the password.
 - Direct connections only (D-55): no RDS Proxy / PgBouncer transaction pooling.

@@ -3,7 +3,7 @@ include "root" {
 }
 
 dependencies {
-  paths = ["../iam/stepfunctions", "../glue"]
+  paths = ["../glue"]
 }
 
 terraform {

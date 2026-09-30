@@ -44,5 +44,6 @@ Everything runs on AWS as one Glue runner job (one module per run), one Step Fun
 project (runs the requested steps in order, alerts with the project on failure) and EventBridge
 scheduled rules (each step at its own time; daily / weekly / monthly runs; manual runs any time),
 deployed with Terraform / Terragrunt from [`module/aws/compliance_frameworks/compliance_batch_framework`](module/aws/compliance_frameworks/compliance_batch_framework/README.md)
-as Terragrunt submodules (IAM, Glue, Step Functions) that the team's GitHub Actions deploy workflow
-applies; see its README for the runbook.
+as two Terragrunt submodules (`glue`, `stepfunctions`) that the team's GitHub Actions deploy workflow
+applies; see its README for the runbook. `scripts/` rebuilds its framework wheel, starts workflows by hand
+and tests its Terraform (`tests/terraform/`); `docs/deployer/` holds the deployer role template.
