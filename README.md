@@ -42,7 +42,7 @@ command; `BATCH_CREATION` and `FILE_LOAD` are it.
 
 Everything runs on AWS as one Glue runner job (one module per run), one Step Functions workflow per
 project (runs the requested steps in order, alerts with the project on failure) and EventBridge
-Scheduler schedules (each step at its own time; daily / weekly / monthly runs; manual runs any time),
+scheduled rules (each step at its own time; daily / weekly / monthly runs; manual runs any time),
 deployed with Terraform / Terragrunt from [`module/aws/compliance_frameworks/compliance_batch_framework`](module/aws/compliance_frameworks/compliance_batch_framework/README.md)
-(runbook, job list, first-run steps, loading the configuration tables). `infra/` holds this
-repository's Terragrunt live config for dev / test / prod.
+as Terragrunt submodules (IAM, Glue, Step Functions) that the team's GitHub Actions deploy workflow
+applies; see its README for the runbook.

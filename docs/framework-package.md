@@ -153,7 +153,7 @@ Python 3.9+ (Glue Python Shell runs 3.9) and PostgreSQL 14+ (tested on 16); no e
    The schema has no CHECK constraints: `validate-config` checks the values instead.
 3. **Run `framework validate-config`.** It must report no `ERROR` issues.
 4. **Schedule the project's steps.** In AWS this is an entry in the deployment's `projects` map
-   (EventBridge Scheduler -> the project's Step Functions workflow -> the Glue runner; see
+   (EventBridge rule -> the project's Step Functions workflow -> the Glue runner; see
    `module/aws/compliance_frameworks/compliance_batch_framework/README.md`). Each step is one module run
    for the project:
 

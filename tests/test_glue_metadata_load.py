@@ -1,4 +1,4 @@
-"""The configuration-load Glue job (module/aws/.../code/glue_job_metadata_load.py), with AWS stubbed."""
+"""The configuration-load Glue job (module/aws/.../common/glue_job_metadata_load.py), with AWS stubbed."""
 import importlib.util
 import io
 import pathlib
@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-CODE = pathlib.Path(__file__).parents[1] / "module/aws/compliance_frameworks/compliance_batch_framework/code"
+CODE = pathlib.Path(__file__).parents[1] / "module/aws/compliance_frameworks/compliance_batch_framework/common"
 pytestmark = pytest.mark.skipif(not CODE.exists(), reason="deployment module not in this checkout")
 
 
