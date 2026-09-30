@@ -11,9 +11,8 @@ Implementation of [`design/cms-compliance-framework-design.md`](design/cms-compl
 
 ```
 pyproject.toml            package metadata; `framework` console script
-.env.example              sample local settings (copy to .env)
-docker-compose.yml        optional local PostgreSQL 16 (not needed on Windows - see below)
 build_wheel.sh            builds the Glue wheel into ../code/wheels
+run_workflow.sh           starts a project's Step Functions workflow by hand
 framework/
   cli.py                  commands (one command = one service)
   app.py                  service wiring only; health() composes each service's own report (§15.3)
@@ -32,7 +31,6 @@ framework/
   adapters.py             S3/local store, GRE rules engine, email (log / SES)
   sql/schema.sql          schema (source of truth, CREATE-only, no CHECK constraints)
   sql/approvals.sql       manual override templates (reuse / late arrival / correction)
-tests/                    unit + PostgreSQL integration tests (tests/terraform: mocked Terraform tests)
 ```
 
 ## Configuration
@@ -45,7 +43,7 @@ tests/                    unit + PostgreSQL integration tests (tests/terraform: 
 | Database | `FRAMEWORK_DB_DSN` / `FRAMEWORK_DB_HOST`, `_PORT`, `_NAME`, `_USER`, `_PASSWORD`, `_SSLMODE`, `_CONNECT_TIMEOUT` (explicit values) > the Secrets Manager secret named by `FRAMEWORK_DB_SECRET_NAME` (JSON `host, port, dbname, username, password[, sslmode]`) |
 | `.env` location | `--env-file`, else `FRAMEWORK_ENV_FILE`, else `./.env` (optional) |
 
-- **Locally:** put the database values in `.env` (see `.env.example`). `.env` is git-ignored.
+- **Locally (optional):** set `FRAMEWORK_DB_*` environment variables, or put them in a git-ignored `.env` file.
 - **In AWS:** set only `FRAMEWORK_DB_SECRET_NAME` (the existing RDS secret the AWS deployment in `module/aws/compliance_frameworks/compliance_batch_framework/` points at: `host, port, username, password, dbname`); pass project settings as Glue job arguments (`--set ...`).
 - **One database:** the framework schema (`METADATA_SCHEMA`) and the staging/core schemas named in `ComplianceSourceFileConfig` are in the same PostgreSQL database, so a promotion is one transaction.
 - `framework show-config` prints every setting with its value and source (`argument`, `env`, `.env`, `default`) and the database target without the password.
@@ -92,45 +90,17 @@ PERIOD_SQL = {
 
 `%(sched_dt)s` is the run date in `BUSINESS_TZ` (or the `--as-of` date).
 
-## Quick start (local)
+## Running the CLI locally (optional)
+
+Only for inspecting a database by hand; AWS runs the same commands through the Glue runner job.
 
 ```bash
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env              # set FRAMEWORK_DB_* for your PostgreSQL
-framework init-db                 # schema (skipped if present)
+pip install .                                            # from src/, Python 3.9+
+export FRAMEWORK_DB_DSN=postgresql://user@host:5432/db   # PostgreSQL 14+
 framework test-connection
 framework show-config
 framework validate-config
-
-export TEST_DATABASE_URL=postgresql://postgres@localhost:5432/fwtest   # a scratch database
-pytest                            # tests drop and recreate the metadata schema
 ```
-
-Python 3.9+ (Glue Python Shell runs 3.9) and PostgreSQL 14+ (tested on 16); no extensions are needed. `TEST_METADATA_SCHEMA=fw_meta` runs the suite against a non-default schema. Without `TEST_DATABASE_URL` only the unit tests run.
-
-### Windows without Docker
-
-1. **Install Python 3.9+** from python.org and tick "Add python.exe to PATH".
-2. **Install PostgreSQL 14+.**
-   - With admin rights: the EDB installer (<https://www.postgresql.org/download/windows/>).
-   - Without admin rights: download the EDB **zip binaries**, unzip to e.g. `C:\pgsql`, then:
-     ```powershell
-     C:\pgsql\bin\initdb.exe -D C:\pgdata -U postgres -A trust -E UTF8
-     C:\pgsql\bin\pg_ctl.exe -D C:\pgdata -l C:\pgdata\log.txt start
-     C:\pgsql\bin\createdb.exe -U postgres fwtest
-     C:\pgsql\bin\createdb.exe -U postgres framework
-     ```
-3. **Set up and test** (PowerShell):
-   ```powershell
-   py -3 -m venv .venv
-   .\.venv\Scripts\Activate.ps1          # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-   pip install -e ".[dev]"
-   $env:TEST_DATABASE_URL = "postgresql://postgres@localhost:5432/fwtest"
-   pytest
-   ```
-4. **Run the CLI:** `copy .env.example .env`, set `FRAMEWORK_DB_NAME=framework`, `FRAMEWORK_DB_USER=postgres`, remove the password line, then `framework init-db`.
-5. **Stop the database** when done: `C:\pgsql\bin\pg_ctl.exe -D C:\pgdata stop`.
 
 ## Onboarding a project
 

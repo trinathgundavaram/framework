@@ -12,9 +12,10 @@ What each file in `framework/` does, what it owns, and what it leaves to other m
 3. [Command → module map](#3-command--module-map)
 4. [Modules](#4-modules)
 5. [SQL files](#5-sql-files)
-6. [Tests](#6-tests)
-7. [Who writes which table](#7-who-writes-which-table)
-8. [What changed in v5](#8-what-changed-in-v5)
+6. [Who writes which table](#6-who-writes-which-table)
+7. [What changed in v5](#7-what-changed-in-v5)
+8. [What changed in v6](#8-what-changed-in-v6)
+9. [Extract control removed](#9-extract-control-removed)
 
 ---
 
@@ -192,26 +193,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 
 ---
 
-## 6. Tests
-
-| File | Covers |
-|---|---|
-| `conftest.py` | `conn` fixture: recreates the metadata schema and the sample `stg_t` / `core_t` tables in `TEST_DATABASE_URL`. |
-| `helpers.py` | Synthetic configuration seed, job-level settings (`make_app`), fake rules engine, `create_batches`, file builders, `add_override` / `stop_override`. |
-| `test_units.py` | No database: templates, readers, local store (incl. `list_objects`), batch close rules, §8 tables and `required_override_ty`, `PathIngestSummary.tally`, Btch_ID, Req_Stat transitions, settings precedence and `.env`, DB conninfo from DSN / secret, period SQL lookup. |
-| `test_batches.py` | Every period, lookback checks, project period file, create-batches (one batch per run date, daily runs of one period, re-run by `--as-of`, effective windows, scope, closed runs skipped), the removed CRC columns, ad-hoc intake windows (once per run date), the DDL standard (no CHECK constraints, named constraints, no event-type table). |
-| `test_ingest.py` | Promotion, replacement, quarantine reasons, structural failures, duplicates, zero records, GATE / ANNOTATE, no bindings, technical failure and replay, closed-batch overrides (late arrival, correction, retry after approval), batch selection by run date, `process_path` (one location, every configured location, mixed outcomes, listing/technical errors that don't stop the sweep). |
-| `test_overrides.py` | `REUSE`: apply, invalid cases, pending until approved, expiry, replacement by a real file, reuse chains; `LATE_ARRIVAL` / `CORRECTION` rows are left to the pipeline. |
-| `test_closing.py` | SLA sweep (closes batches with data or in exception, leaves the rest waiting, idempotent), manual close of a batch without data, blocked inside the hold / when already closed, deferred on a locked batch, scope and per-run-date holds, health. |
-| `test_project_scope.py` | The Step Functions steps as modules: project-scoped `FILE_LOAD` (own folder, shared folder, errors), the object lock, once-only technical-failure and invalid-override events, scoped `OVERRIDE_DECISIONS` / `BATCH_CLOSE`, scoped and catch-all `NOTIFY` without duplicates, a failed send retried. |
-| `test_glue_entry.py` | The Glue runner entry script: argument parsing, the command built for each step (context passed only to modules that take it), command mode, exit codes that fail the Glue run. |
-| `test_workflow_definition.py` | The Step Functions template rendered as Terraform renders it, every JSONata expression evaluated: step order and Glue arguments, single-step input, bad input, a failed step and its alert. |
-| `test_modules.py` | Module identification (names, no aliases, unknown), parameter checks before anything runs, each module end to end (`BATCH_CREATION` routine + ad-hoc together, ad-hoc-only, ADHOC-run-type-scoped, per-project scoping for both halves; file load one object / one location / every location), `run --module` and `list-modules` on the CLI. |
-| `test_config_cli.py` | Validator, notifications, CLI end to end (with `.env`, `--set`, `run --module`, `close-batches` and `close-batch`), the `FILE_LOAD` path sweep end to end, the composed `health` report, rules adapter contract. |
-
----
-
-## 7. Who writes which table
+## 6. Who writes which table
 
 | Table | Written by |
 |---|---|
@@ -226,7 +208,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 
 ---
 
-## 8. What changed in v5
+## 7. What changed in v5
 
 | Removed | Now |
 |---|---|
@@ -246,7 +228,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 | Intake `Req_Start_Dt_Key`, `Req_End_Dt_Key`, `Last_Created_Dt_Key`, `IN_PROGRESS` | The ad-hoc request window (D-79) |
 | `AUTO_CLOSE_EXTRACTS` | Whether `evaluate-extracts` closes AUTO-eligible runs or only refreshes them |
 
-## 9. What changed in v6
+## 8. What changed in v6
 
 | Removed | Now |
 |---|---|
@@ -269,7 +251,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 | `Stg_Tblnm` → `Stg_Table_Nm`, `Effective_*_Dt` → `Effective_*_Dt_Key`, `Closed_By` → `Extract_Closed_By`, `Failed_Rule_Refs` → `Failed_Rule_List`, `Rsn` → `Rsn_Txt`, `Description` / `Detail_Txt` → `Event_Txt` | Class-word suffixes as in `ComplianceRequestControl` |
 | Named constraints (`pk_`, `fk_`, `uq_`, `ix_`) and audit columns on every table people maintain | PostgreSQL DDL standard |
 
-## 10. Extract control removed
+## 9. Extract control removed
 
 | Removed | Now |
 |---|---|

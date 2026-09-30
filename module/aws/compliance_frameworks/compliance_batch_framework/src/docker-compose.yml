@@ -1,9 +1,0 @@
-# Local Postgres for development and tests: docker compose up -d
-services:
-  postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: framework
-      POSTGRES_PASSWORD: framework
-      POSTGRES_DB: framework
-    ports: ["5432:5432"]

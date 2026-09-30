@@ -7,7 +7,7 @@ EventBridge scheduled rules (UTC)               one rule per schedule entry
    ODR  daily_batches  12:00 UTC   {steps: [BATCH_CREATION], run_type: DAILY, period: PREV_DAY}
    ODR  file_load      every 15'   {steps: [FILE_LOAD, OVERRIDE_DECISIONS, NOTIFY]}
    ODR  close          hourly      {steps: [BATCH_CLOSE, NOTIFY]}
-        │                                        manual: src/scripts/run_workflow.sh dev ODR FILE_LOAD,BATCH_CLOSE
+        │                                        manual: src/run_workflow.sh dev ODR FILE_LOAD,BATCH_CLOSE
         ▼
 Step Functions  compliance_batch_framework_ODR_dev      one workflow per project (+ all_projects)
    validate the steps -> run them one at a time -> on any failure stop and email the project
@@ -80,7 +80,7 @@ projects = {
   | every 15 minutes / hourly | `cron(0/15 * * * ? *)` / `cron(0 * * * ? *)` | unaffected |
 
   Keep daily times out of 05:00–06:59 UTC (Chicago midnight) so the run's business date never changes
-  with daylight saving. One-time runs: use `src/scripts/run_workflow.sh`.
+  with daylight saving. One-time runs: use `src/run_workflow.sh`.
 - Optional per schedule: `run_type`, `period` (a name in the framework's `period_sql.py`), `table`,
   `as_of`, `enabled = false`. A project with `enabled = false` keeps its workflow for manual runs.
 - Adding a project = adding an entry and `terragrunt apply`: a new workflow, schedule group and alert
@@ -91,10 +91,10 @@ projects = {
 ## Running steps by hand
 
 ```bash
-src/scripts/run_workflow.sh dev ODR FILE_LOAD,BATCH_CLOSE                               # now, in this order
-src/scripts/run_workflow.sh dev UNIVERSE BATCH_CREATION --run-type MONTHLY --period PREV_CALENDAR_MONTH
-src/scripts/run_workflow.sh prod ODR BATCH_CREATION --run-type DAILY --period PREV_DAY --as-of 2026-09-01   # missed run
-src/scripts/run_workflow.sh dev all_projects NOTIFY
+src/run_workflow.sh dev ODR FILE_LOAD,BATCH_CLOSE                               # now, in this order
+src/run_workflow.sh dev UNIVERSE BATCH_CREATION --run-type MONTHLY --period PREV_CALENDAR_MONTH
+src/run_workflow.sh prod ODR BATCH_CREATION --run-type DAILY --period PREV_DAY --as-of 2026-09-01   # missed run
+src/run_workflow.sh dev all_projects NOTIFY
 ```
 
 Or, in the Step Functions console, **Start execution** on `compliance_batch_framework_<PROJECT>_<env>` with
@@ -146,7 +146,7 @@ SNS email subscriptions must be confirmed once from the email SNS sends.
 
 ```
 compliance_batch_framework/
-  src/                                        framework source, tests, docs, wheel build (not deployed)
+  src/                                        framework source, docs, wheel build (not deployed)
   code/                                       uploaded to s3://<artifacts_bucket>/compliance_batch_framework/
     glue_framework_entry.py                   runner entry point (Glue arguments -> `framework` CLI)
     glue_job_metadata_load.py  rds_conn.py    configuration-load job
@@ -179,8 +179,7 @@ Manager secret (`host, port, username, password, dbname`), the Glue connection(s
 data buckets, the SES sender.
 
 Helpers in `src/`: `build_wheel.sh` and the GitHub Actions workflow `github-workflow/build-framework-wheel.yaml`
-(rebuild `code/wheels/`), `scripts/run_workflow.sh` (start a workflow by hand), `scripts/test_terraform.sh`
-(fmt / validate / mocked-provider tests in `tests/terraform/`, no AWS access).
+(rebuild `code/wheels/`), `run_workflow.sh` (start a workflow by hand).
 
 ## Deployer role (gov-compliance-it-deployer)
 
@@ -266,4 +265,4 @@ same way. Run `validate-config` after every change.
 
 `code/wheels/cms_compliance_framework-<version>-py3-none-any.whl` is `src/framework/` packaged for pip; Glue
 installs it on every run, so a rebuilt wheel takes effect on the next run after `glue` is deployed. How
-to edit, test, rebuild (GitHub Actions or locally) and inspect it: [`src/README.md`](src/README.md).
+to edit, rebuild (GitHub Actions or locally) and inspect it: [`src/README.md`](src/README.md).

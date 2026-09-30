@@ -19,8 +19,8 @@ the batches. PostgreSQL + Python; runs locally or as AWS Glue jobs.
 | `ComplianceProject`, `ComplianceSourceSystem`, `ComplianceRunType` (incl. `SLA_Days`, `Carry_Fwd_Ind`), `ComplianceDataSetSourceXwalk` (which project/table/source/run type apply, and when), `ComplianceSourceFileConfig` (file contract, paths, targets, recipients), `ComplianceRuleBinding` (file rules at project / table / run type / source level) | Database connection: `.env` locally, Secrets Manager in AWS · Settings: `--set` job arguments > environment > `.env` · Report period: `run --module BATCH_CREATION --period <NAME>` (`period_sql.py`) · Event vocabulary: `audit.py` |
 
 ```bash
-pip install -e ".[dev]"
-cp .env.example .env                      # database + local settings
+pip install .                             # Python 3.9+
+export FRAMEWORK_DB_DSN=postgresql://user@host:5432/db
 framework init-db
 framework list-modules                                                       # every module, its parameters
 framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
@@ -52,12 +52,10 @@ src/
     ingest.py batches.py closing.py overrides.py audit.py modules.py cli.py ...
     sql/schema.sql        metadata tables, created by `framework init-db`
     sql/approvals.sql     manual override templates
-  tests/                  pytest suite (+ tests/terraform: mocked Terraform tests)
   build_wheel.sh          builds the wheel into ../code/wheels
-  scripts/                run_workflow.sh (start a workflow by hand), test_terraform.sh
+  run_workflow.sh         starts a project's Step Functions workflow by hand
   github-workflow/        build-framework-wheel.yaml (GitHub Actions)
   docs/                   setup and settings, module reference, design, deployer role templates
-  .env.example  docker-compose.yml   local settings and PostgreSQL for development
 ```
 
 ### Changing the framework
@@ -79,9 +77,8 @@ then run **Build Compliance Framework Wheel** (Actions → Run workflow) on your
 |---|---|---|
 | `src_path` | `module/aws/compliance_frameworks/compliance_batch_framework/src` | folder with `pyproject.toml` |
 | `output_path` | `module/aws/compliance_frameworks/compliance_batch_framework/code/wheels` | where the wheel is written |
-| `run_tests` | `true` | run the unit tests first (database tests are skipped without `TEST_DATABASE_URL`) |
 
-It tests, builds with Python 3.9 (the Glue runtime), replaces the wheel in `output_path` and commits it
+It builds with Python 3.9 (the Glue runtime), replaces the wheel in `output_path` and commits it
 to the same branch; an unchanged source gives a byte-identical wheel and no commit. The branch must
 allow pushes from `github-actions[bot]` (branch protection).
 
@@ -106,12 +103,3 @@ unzip -p ../code/wheels/cms_compliance_framework-*.whl framework/ingest.py # pri
 
 Always change the code here and rebuild; do not edit a wheel in place (pip checks each file against the
 hashes in its `RECORD`).
-
-### Running the tests locally
-
-```bash
-python -m pip install -e ".[dev]"
-python -m pytest                                  # unit tests; database tests skip
-TEST_DATABASE_URL=postgresql://user@localhost:5432/db python -m pytest   # everything (PostgreSQL 14+)
-scripts/test_terraform.sh                         # Terraform fmt / validate / mocked tests (terraform >= 1.7)
-```
