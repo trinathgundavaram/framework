@@ -1,6 +1,6 @@
 resource "aws_sns_topic" "ops" {
   count = var.enable_failure_alerts ? 1 : 0
-  name  = "${var.name_prefix}_ops_${var.env}"
+  name  = "${local.name_prefix}_ops_${var.env}"
   tags  = local.tags
 }
 

@@ -2,45 +2,10 @@ variable "env" {
   type = string
 }
 
-variable "name_prefix" {
-  description = "Start of every resource name; must start with compliance (the deployer role only manages compliance* resources)."
-  type        = string
-  default     = "compliance_batch_framework"
-
-  validation {
-    condition     = can(regex("^compliance[a-z0-9_]*$", var.name_prefix))
-    error_message = "name_prefix must start with compliance and use lower-case letters, digits or _."
-  }
-}
-
 variable "required_common_tags" {
-  description = "Tags on every resource."
+  description = "Tags on every resource (env-config/<region>/common.tfvars)."
   type        = map(string)
-  default     = { AppName = "Compliance", ManagedBy = "Terraform" }
-}
-
-variable "projects" {
-  description = "One entry per project (key = Project_Cd, or all_projects for steps without --project): settings, alert_emails, schedules. See README."
-  type = map(object({
-    enabled      = optional(bool, true)
-    settings     = optional(map(string), {})
-    alert_emails = optional(list(string), [])
-    schedules = optional(map(object({
-      expression = string
-      steps      = list(string)
-      run_type   = optional(string)
-      period     = optional(string)
-      table      = optional(string)
-      as_of      = optional(string)
-      enabled    = optional(bool, true)
-    })), {})
-  }))
-  default = {}
-
-  validation {
-    condition     = alltrue([for k in keys(var.projects) : can(regex("^[A-Za-z0-9_-]{1,30}$", k))])
-    error_message = "Project keys are the Project_Cd (or all_projects): letters, digits, _ or -, at most 30 characters."
-  }
+  default     = {}
 }
 
 variable "step_settings" {
@@ -102,4 +67,10 @@ variable "permissions_boundary" {
   description = "Permissions boundary ARN for the roles, if the account requires one."
   type        = string
   default     = null
+}
+
+variable "project_alert_emails" {
+  description = "Per project (key of local.projects): who is emailed when its workflow fails."
+  type        = map(list(string))
+  default     = {}
 }

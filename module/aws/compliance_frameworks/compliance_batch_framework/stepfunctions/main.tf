@@ -1,6 +1,6 @@
 check "unscoped_notify" {
   assert {
-    condition = anytrue([for s in try(values(var.projects["all_projects"].schedules), []) :
+    condition = anytrue([for s in try(values(local.workflows["all_projects"].schedules), []) :
     s.enabled && contains(s.steps, "NOTIFY")])
     error_message = "No enabled all_projects schedule runs NOTIFY: events that belong to no project (e.g. CONFIG_VALIDATION_FAILED) will not be emailed."
   }

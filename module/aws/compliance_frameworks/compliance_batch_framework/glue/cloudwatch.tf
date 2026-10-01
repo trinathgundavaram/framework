@@ -1,5 +1,5 @@
 resource "aws_sns_topic" "glue_alerts" {
-  name = "${var.name_prefix}_glue_alerts_${var.env}"
+  name = "${local.name_prefix}_glue_alerts_${var.env}"
   tags = local.tags
 }
 
@@ -27,7 +27,7 @@ resource "aws_sns_topic_policy" "glue_alerts" {
 }
 
 resource "aws_cloudwatch_event_rule" "glue_failed" {
-  name        = "${var.name_prefix}_glue_failed_${var.env}"
+  name        = "${local.name_prefix}_glue_failed_${var.env}"
   description = "compliance batch framework: a Glue job run failed, timed out or errored"
 
   event_pattern = jsonencode({

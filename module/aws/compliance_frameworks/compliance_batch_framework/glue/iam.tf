@@ -1,5 +1,5 @@
 resource "aws_iam_role" "glue" {
-  name                 = "${var.name_prefix}_glue_${var.env}"
+  name                 = "${local.name_prefix}_glue_${var.env}"
   permissions_boundary = var.permissions_boundary
 
   assume_role_policy = jsonencode({
@@ -20,7 +20,7 @@ resource "aws_iam_role_policy_attachment" "glue_service" {
 }
 
 resource "aws_iam_role_policy" "glue" {
-  name = "${var.name_prefix}_${var.env}"
+  name = "${local.name_prefix}_${var.env}"
   role = aws_iam_role.glue.id
 
   policy = jsonencode({
@@ -30,20 +30,20 @@ resource "aws_iam_role_policy" "glue" {
         Sid      = "ArtifactsRead"
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
-        Resource = ["${local.artifacts_arn}/${var.artifacts_bucket_key}/*"]
+        Resource = ["${local.artifacts_arn}/${local.s3_prefix}/*"]
       },
       {
         Sid       = "ArtifactsList"
         Effect    = "Allow"
         Action    = ["s3:ListBucket"]
         Resource  = [local.artifacts_arn]
-        Condition = { StringLike = { "s3:prefix" = ["${var.artifacts_bucket_key}/*"] } }
+        Condition = { StringLike = { "s3:prefix" = ["${local.s3_prefix}/*"] } }
       },
       {
         Sid      = "ArtifactsTempWrite"
         Effect   = "Allow"
         Action   = ["s3:PutObject", "s3:DeleteObject"]
-        Resource = ["${local.artifacts_arn}/${var.artifacts_bucket_key}/tmp/*"]
+        Resource = ["${local.artifacts_arn}/${local.tmp_prefix}/*"]
       },
       {
         Sid      = "DataBuckets"

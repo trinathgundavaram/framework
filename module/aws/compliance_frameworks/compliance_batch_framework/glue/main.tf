@@ -1,8 +1,8 @@
 resource "aws_s3_object" "scripts" {
-  for_each = local.scripts
+  for_each = local.glue_scripts
 
-  bucket = var.artifacts_bucket
-  key    = "${local.code_prefix}/${each.value}"
+  bucket = local.artifacts_bucket
+  key    = "${local.glue_script_prefix}/${each.value}"
   source = "${local.code_dir}/${each.value}"
   etag   = filemd5("${local.code_dir}/${each.value}")
   tags   = local.tags
@@ -11,15 +11,15 @@ resource "aws_s3_object" "scripts" {
 resource "aws_s3_object" "wheels" {
   for_each = local.wheels
 
-  bucket = var.artifacts_bucket
-  key    = "${var.artifacts_bucket_key}/wheels/${each.value}"
+  bucket = local.artifacts_bucket
+  key    = "${local.wheel_prefix}/${each.value}"
   source = "${local.code_dir}/wheels/${each.value}"
   etag   = filemd5("${local.code_dir}/wheels/${each.value}")
   tags   = local.tags
 }
 
 resource "aws_glue_job" "runner" {
-  name                   = "${var.name_prefix}_runner_${var.env}"
+  name                   = local.runner_job_name
   description            = "compliance batch framework: runs one framework module or command per run"
   glue_version           = var.glue_version
   role_arn               = aws_iam_role.glue.arn
@@ -31,13 +31,13 @@ resource "aws_glue_job" "runner" {
   max_retries            = 0
 
   execution_property {
-    max_concurrent_runs = var.runner_max_concurrent_runs
+    max_concurrent_runs = local.runner_max_concurrent_runs
   }
 
   command {
     name            = "pythonshell"
     python_version  = var.python_version
-    script_location = "${local.code_uri}/glue_framework_entry.py"
+    script_location = "s3://${local.artifacts_bucket}/${local.runner_script_key}"
   }
 
   default_arguments = merge(
@@ -57,7 +57,7 @@ resource "aws_glue_job" "runner" {
 }
 
 resource "aws_glue_job" "metadata_load" {
-  name                   = "${var.name_prefix}_metadata_load_${var.env}"
+  name                   = local.metadata_load_job_name
   description            = "compliance batch framework: upsert one CSV into one configuration table"
   glue_version           = var.glue_version
   role_arn               = aws_iam_role.glue.arn
@@ -75,14 +75,14 @@ resource "aws_glue_job" "metadata_load" {
   command {
     name            = "pythonshell"
     python_version  = var.python_version
-    script_location = "${local.code_uri}/glue_job_metadata_load.py"
+    script_location = "s3://${local.artifacts_bucket}/${local.metadata_script_key}"
   }
 
   default_arguments = merge(
     local.common_arguments,
     {
-      "--extra-py-files" = "${local.code_uri}/rds_conn.py"
-      "--S3_INPUT_PATH"  = "s3://${var.artifacts_bucket}/${var.artifacts_bucket_key}/config_data/"
+      "--extra-py-files" = "s3://${local.artifacts_bucket}/${local.rds_conn_script_key}"
+      "--S3_INPUT_PATH"  = "s3://${local.artifacts_bucket}/${local.config_data_prefix}/"
       "--RDS_SECRET_NM"  = var.rds_secret_name
       "--REGION"         = local.region
     },

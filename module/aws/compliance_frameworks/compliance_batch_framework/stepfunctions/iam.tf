@@ -1,5 +1,5 @@
 resource "aws_iam_role" "workflow" {
-  name                 = "${var.name_prefix}_workflow_${var.env}"
+  name                 = "${local.name_prefix}_workflow_${var.env}"
   permissions_boundary = var.permissions_boundary
 
   assume_role_policy = jsonencode({
@@ -16,7 +16,7 @@ resource "aws_iam_role" "workflow" {
 }
 
 resource "aws_iam_role_policy" "workflow" {
-  name = "${var.name_prefix}_workflow_${var.env}"
+  name = "${local.name_prefix}_workflow_${var.env}"
   role = aws_iam_role.workflow.id
 
   policy = jsonencode({
@@ -26,13 +26,13 @@ resource "aws_iam_role_policy" "workflow" {
         Sid      = "RunTheRunner"
         Effect   = "Allow"
         Action   = ["glue:StartJobRun", "glue:GetJobRun", "glue:GetJobRuns", "glue:BatchStopJobRun"]
-        Resource = ["arn:aws:glue:${local.region}:${local.account_id}:job/${var.name_prefix}_runner_${var.env}"]
+        Resource = ["arn:aws:glue:${local.region}:${local.account_id}:job/${local.name_prefix}_runner_${var.env}"]
       },
       {
         Sid      = "FailureAlerts"
         Effect   = "Allow"
         Action   = ["sns:Publish"]
-        Resource = ["arn:aws:sns:${local.region}:${local.account_id}:${var.name_prefix}_*_${var.env}*"]
+        Resource = ["arn:aws:sns:${local.region}:${local.account_id}:${local.name_prefix}_*_${var.env}*"]
       },
       {
         Sid    = "ExecutionLogs"
@@ -46,7 +46,7 @@ resource "aws_iam_role_policy" "workflow" {
 }
 
 resource "aws_iam_role" "events" {
-  name                 = "${var.name_prefix}_events_${var.env}"
+  name                 = "${local.name_prefix}_events_${var.env}"
   permissions_boundary = var.permissions_boundary
 
   assume_role_policy = jsonencode({
@@ -63,7 +63,7 @@ resource "aws_iam_role" "events" {
 }
 
 resource "aws_iam_role_policy" "events" {
-  name = "${var.name_prefix}_events_${var.env}"
+  name = "${local.name_prefix}_events_${var.env}"
   role = aws_iam_role.events.id
 
   policy = jsonencode({
@@ -72,7 +72,7 @@ resource "aws_iam_role_policy" "events" {
       Sid      = "StartWorkflows"
       Effect   = "Allow"
       Action   = ["states:StartExecution"]
-      Resource = ["arn:aws:states:${local.region}:${local.account_id}:stateMachine:${var.name_prefix}_*_${var.env}"]
+      Resource = ["arn:aws:states:${local.region}:${local.account_id}:stateMachine:${local.name_prefix}_*_${var.env}"]
     }]
   })
 }

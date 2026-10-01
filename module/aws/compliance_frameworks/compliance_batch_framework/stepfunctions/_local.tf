@@ -1,19 +1,57 @@
 locals {
-  tags            = var.required_common_tags
-  account_id      = data.aws_caller_identity.current.account_id
-  region          = data.aws_region.current.name
-  runner_job_name = "${var.name_prefix}_runner_${var.env}"
+  account_id = data.aws_caller_identity.current.account_id
+  region     = data.aws_region.current.name
+
+  name_prefix     = "compliance_batch_framework"
+  runner_job_name = "${local.name_prefix}_runner_${var.env}"
   known_steps     = sort(keys(var.step_settings))
 
-  workflows = { for code, p in var.projects : code => {
+  tags = merge(var.required_common_tags, {
+    Environment = var.env
+    ManagedBy   = "Terraform"
+  })
+
+  # One entry per project (key = Project_Cd); all_projects runs its steps without --project.
+  # Schedule times are UTC: cron(0 12 ...) = 07:00 CDT / 06:00 CST, cron(30 4 ...) = 23:30 CDT / 22:30 CST.
+  projects = {
+    ODR = {
+      schedules = {
+        daily_batches = { expression = "cron(0 12 * * ? *)", steps = ["BATCH_CREATION"], run_type = "DAILY", period = "PREV_DAY" }
+        file_load     = { expression = "cron(0/15 * * * ? *)", steps = ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"] }
+        close         = { expression = "cron(0 * * * ? *)", steps = ["BATCH_CLOSE", "NOTIFY"] }
+      }
+    }
+    UNIVERSE = {
+      schedules = {
+        daily_batches = { expression = "cron(0 12 * * ? *)", steps = ["BATCH_CREATION"], run_type = "CMS", period = "CURRENT_CALENDAR_MONTH" }
+        file_load     = { expression = "cron(5/15 * * * ? *)", steps = ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"] }
+        close         = { expression = "cron(30 4 * * ? *)", steps = ["BATCH_CLOSE", "NOTIFY"] }
+      }
+    }
+    all_projects = {
+      schedules = {
+        notify_unscoped = { expression = "cron(0 * * * ? *)", steps = ["NOTIFY"] }
+      }
+    }
+  }
+
+  workflows = { for code, p in local.projects : code => {
     label        = code == "all_projects" ? "all projects" : "project ${code}"
     project      = code == "all_projects" ? null : code
-    enabled      = p.enabled
-    settings     = p.settings
-    alert_emails = p.alert_emails
-    schedules    = p.schedules
+    enabled      = try(p.enabled, true)
+    settings     = try(p.settings, {})
+    alert_emails = lookup(var.project_alert_emails, code, [])
+    schedules = { for name, s in try(p.schedules, {}) : name => {
+      expression = s.expression
+      steps      = s.steps
+      run_type   = try(s.run_type, null)
+      period     = try(s.period, null)
+      table      = try(s.table, null)
+      as_of      = try(s.as_of, null)
+      enabled    = try(s.enabled, true)
+    } }
   } }
-  workflow_name = { for k in keys(local.workflows) : k => "${var.name_prefix}_${k}_${var.env}" }
+  workflow_name = { for k in keys(local.workflows) : k => "${local.name_prefix}_${k}_${var.env}" }
 
   schedules = merge([for w, wf in local.workflows : {
     for name, s in wf.schedules : "${w}.${name}" => merge(s, {

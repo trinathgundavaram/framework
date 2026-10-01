@@ -29,9 +29,9 @@ existing RDS PostgreSQL (VPC)  +  S3 inbound / archive / quarantine  +  SES emai
   the workflow. Any steps can be run by hand at any time.
 
 Deployed as two Terragrunt submodules by the team's GitHub Actions workflow, each with its own
-`config/<env>.tfvars`. Every resource name starts with `compliance`; every resource is tagged
-`AppName = Compliance`, `ManagedBy = Terraform` (`required_common_tags`; per-project resources add
-`Project`).
+`env-config/us-east-1/` (`common.tfvars` + `<env>.tfvars`). Every resource name starts with `compliance`;
+every resource carries the `required_common_tags` of `common.tfvars` plus `Environment` and `ManagedBy`
+(per-project resources add `Project`).
 
 ## Steps
 
@@ -49,11 +49,13 @@ safe to run concurrently with itself — see *Fallbacks*.
 
 ## Configuring projects and schedules
 
+Projects and their schedules are `local.projects` in `stepfunctions/_local.tf` (the same in every
+environment); who is emailed is `project_alert_emails` in `stepfunctions/env-config/us-east-1/<env>.tfvars`.
+
 ```hcl
 projects = {
   UNIVERSE = {
-    alert_emails = ["universe-team@example.com"]
-    settings     = { FILE_RULES_MODE = "ANNOTATE" }            # framework settings for this project only
+    settings = { FILE_RULES_MODE = "ANNOTATE" }                # framework settings for this project only
     schedules = {
       monthly_batches = { expression = "cron(0 12 1 * ? *)",  steps = ["BATCH_CREATION"], run_type = "MONTHLY", period = "PREV_CALENDAR_MONTH" }
       weekly_batches  = { expression = "cron(0 12 ? * MON *)", steps = ["BATCH_CREATION"], run_type = "WEEKLY",  period = "PREV_CALENDAR_WEEK" }
@@ -83,8 +85,8 @@ projects = {
   with daylight saving. One-time runs: use `src/run_workflow.sh`.
 - Optional per schedule: `run_type`, `period` (a name in the framework's `period_sql.py`), `table`,
   `as_of`, `enabled = false`. A project with `enabled = false` keeps its workflow for manual runs.
-- Adding a project = adding an entry and `terragrunt apply`: a new workflow, schedule group and alert
-  topic; no new Glue job.
+- Adding a project = adding an entry to `local.projects` (and its emails to `project_alert_emails`) and
+  deploying `stepfunctions`: a new workflow, schedule rules and alert topic; no new Glue job.
 - Keep the `all_projects` hourly `NOTIFY`: it emails events that belong to no project (e.g.
   `CONFIG_VALIDATION_FAILED`). `plan` warns if it is missing.
 
@@ -119,7 +121,7 @@ run names the module and project.
 
 | What | Who is told | How |
 |---|---|---|
-| A step fails, or the input names an unknown step | the project's `alert_emails` + `alert_email` | the workflow publishes: subject `[FAILED] project ODR dev: StepFailed`, body with the schedule (or "manual run"), the failed step (`step BATCH_CLOSE (2 of 3)`), the Glue error and a link to the execution |
+| A step fails, or the input names an unknown step | the project's `project_alert_emails` + `alert_email` | the workflow publishes: subject `[FAILED] project ODR dev: StepFailed`, body with the schedule (or "manual run"), the failed step (`step BATCH_CLOSE (2 of 3)`), the Glue error and a link to the execution |
 | An execution times out (`workflow_timeout_hours`) or is aborted | same | EventBridge rule on the workflow's `TIMED_OUT` / `ABORTED` events |
 | A schedule cannot start its workflow (after 1 hour of retries) | `alert_email` | a CloudWatch alarm on the rule's `FailedInvocations` emails |
 | A Glue run fails, times out or errors (also runs started by hand: `init-db`, `metadata_load`) | glue `alert_emails` | EventBridge rule `..._glue_failed_<env>` → SNS `..._glue_alerts_<env>` |
@@ -147,18 +149,18 @@ SNS email subscriptions must be confirmed once from the email SNS sends.
 ```
 compliance_batch_framework/
   src/                                        framework source, docs, wheel build (not deployed)
-  code/                                       uploaded to s3://<artifacts_bucket>/compliance_batch_framework/
+  code/                                       uploaded to S3 by the glue submodule (see *S3 layout*)
     glue_framework_entry.py                   runner entry point (Glue arguments -> `framework` CLI)
     glue_job_metadata_load.py  rds_conn.py    configuration-load job
     wheels/cms_compliance_framework-*.whl     the framework, built from src/ (committed)
   glue/
-    config/dev.tfvars test.tfvars prod.tfvars   Glue settings per environment
+    env-config/us-east-1/                       common.tfvars (tags) + dev / test / prod.tfvars (secret, data buckets, emails)
     main.tf          code upload, runner and metadata_load jobs
     iam.tf           Glue role
     cloudwatch.tf    failed-run rule, SNS alert topic
     _variable.tf  _local.tf  _data.tf  outputs.tf  backend.tf  terragrunt.hcl
   stepfunctions/
-    config/dev.tfvars test.tfvars prod.tfvars   projects, schedules, alerts per environment
+    env-config/us-east-1/                       common.tfvars (tags) + dev / test / prod.tfvars (alert emails, schedules on/off)
     main.tf          one workflow per project (workflow.asl.json.tftpl)
     iam.tf           workflow and EventBridge roles
     schedules.tf     EventBridge schedule rules
@@ -181,13 +183,32 @@ data buckets, the SES sender.
 Helpers in `src/`: `build_wheel.sh` and the GitHub Actions workflow `github-workflow/build-framework-wheel.yaml`
 (rebuild `code/wheels/`), `run_workflow.sh` (start a workflow by hand).
 
+## S3 layout
+
+Everything the jobs read from the artifacts bucket sits under one prefix, classified by type
+(`glue/_local.tf`):
+
+```
+s3://silverton-maa-global-artifactory-<env>/compliance_batch_framework/
+  glue/glue_framework_entry.py        runner job script                 <- code/glue_framework_entry.py
+  glue/glue_job_metadata_load.py      metadata_load job script          <- code/glue_job_metadata_load.py
+  glue/rds_conn.py                    its connection helper             <- code/rds_conn.py
+  whl/cms_compliance_framework-*.whl  the framework (--extra-py-files)  <- code/wheels/*.whl
+  config_data/*.csv                   configuration CSVs for metadata_load (uploaded by hand)
+  tmp/                                Glue --TempDir
+```
+
+The `glue` submodule uploads `glue/` and `whl/` on every apply; the Glue role can read the whole prefix
+and write only `tmp/`. Inbound, archive and quarantine files are not here: they live in the data
+buckets named by `ComplianceSourceFileConfig` and `quarantine_uri` (`data_bucket_names`).
+
 ## Deployer role (gov-compliance-it-deployer)
 
 Everything this module creates is named `compliance*` and falls inside the role's policies:
 IAM roles `role/compliance*` (create, inline policy, attach, pass), Glue jobs `job/*compliance*`, state
 machines `stateMachine:compliance*`, SNS topics `compliance*`, EventBridge rules `rule/compliance*`,
-CloudWatch alarms, and S3 objects in `silverton-maa-global-artifactory-<env>`. `name_prefix` must start
-with `compliance` (`plan` refuses anything else).
+CloudWatch alarms, and S3 objects in `silverton-maa-global-artifactory-<env>`. `local.name_prefix`
+(`compliance_batch_framework`) must keep starting with `compliance`.
 
 Not granted by the role, so not used: EventBridge Scheduler (`scheduler:*`) and SQS (`sqs:*`) — hence
 UTC EventBridge rules and alarms instead of time-zone schedules and a dead-letter queue — and the
@@ -206,11 +227,15 @@ submodule options `glue` and `stepfunctions` already exist. Leave the submodule 
 (`glue` first).
 
 Each submodule's `terragrunt.hcl` includes the repository root (`find_in_parent_folders()`) for remote
-state and provider, and adds its own `-var-file=config/${TF_VAR_env}.tfvars` (the workflow sets `TF_VAR_env`).
+state and provider, and adds its own `env-config/${TF_VAR_region}/common.tfvars` and `${TF_VAR_env}.tfvars`
+(the workflow sets `TF_VAR_env` and `TF_VAR_region`).
 No credentials are passed: the jobs read the database secret at run time.
 
-Before the first deploy, fill in every `REPLACE_WITH_...` in `glue/config/<env>.tfvars` and
-`stepfunctions/config/<env>.tfvars`. Locally:
+Before the first deploy, fill in every `REPLACE_WITH_...`: the Glue connection name in `glue/_local.tf`
+and the values in `glue/env-config/us-east-1/<env>.tfvars` (database secret, data buckets, quarantine
+path, emails) and `stepfunctions/env-config/us-east-1/<env>.tfvars` (alert emails). Everything else
+(names, S3 keys, packages, schema, time zone, projects and schedules) is in each submodule's `_local.tf`.
+Locally:
 
 ```bash
 export TF_VAR_env=dev
@@ -219,7 +244,7 @@ cd glue && terragrunt plan
 
 Packages: Python shell jobs run Python 3.9 (`python_version`; `glue_version` does not apply to them).
 The framework wheel is uploaded from `code/wheels/` and attached with `--extra-py-files` (Python shell
-cannot install S3 packages through `--additional-python-modules`); `pypi_packages` install from PyPI
+cannot install S3 packages through `--additional-python-modules`); `local.pypi_packages` (`glue/_local.tf`) install from PyPI
 through `--additional-python-modules`, like the team's other Glue jobs. Database connections require SSL.
 
 ### First run in a new environment
@@ -234,7 +259,7 @@ through `--additional-python-modules`, like the team's other Glue jobs. Database
 
 ## Loading the configuration tables (metadata-load job)
 
-Upload the CSVs to `s3://<artifacts_bucket>/compliance_batch_framework/config_data/`; one run upserts one CSV
+Upload the CSVs to `s3://silverton-maa-global-artifactory-<env>/compliance_batch_framework/config_data/`; one run upserts one CSV
 into one table (the header is the column list; audit columns are skipped).
 
 ```bash
@@ -258,8 +283,10 @@ same way. Run `validate-config` after every change.
 - **Framework code**: edit `src/framework/`, rebuild the wheel (the *Build Compliance Framework Wheel*
   workflow, or `src/build_wheel.sh`), deploy `glue`. A changed schema needs the database re-created
   (`init-db` only creates a missing schema).
-- **Schedules / projects**: edit `stepfunctions/config/<env>.tfvars`, deploy `stepfunctions`.
-- **Job settings**: edit `glue/config/<env>.tfvars`, deploy `glue`.
+- **Schedules / projects**: edit `local.projects` in `stepfunctions/_local.tf`, deploy `stepfunctions`.
+- **Job settings**: edit `glue/env-config/us-east-1/<env>.tfvars` (or `glue/_local.tf` for S3 keys and
+  packages), deploy `glue`.
+- **Tags**: edit `env-config/us-east-1/common.tfvars` in both submodules.
 
 ## The framework wheel
 
