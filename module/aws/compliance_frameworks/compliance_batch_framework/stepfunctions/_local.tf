@@ -11,6 +11,10 @@ locals {
     ManagedBy   = "Terraform"
   })
 
+  # FILE_RULES runs the rules on files already loaded to core, in its own workflow execution after the load.
+  # Turn it on once the Glue runner has a rules engine (glue/_local.tf: rule_engine / gre_entrypoint).
+  file_rules_enabled = false
+
   # One entry per project (key = Project_Cd); all_projects runs its steps without --project.
   # Schedule times are UTC: cron(0 12 ...) = 07:00 CDT / 06:00 CST, cron(30 4 ...) = 23:30 CDT / 22:30 CST.
   projects = {
@@ -18,6 +22,7 @@ locals {
       schedules = {
         daily_batches = { expression = "cron(0 12 * * ? *)", steps = ["BATCH_CREATION"], run_type = "DAILY", period = "PREV_DAY" }
         file_load     = { expression = "cron(0/15 * * * ? *)", steps = ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"] }
+        file_rules    = { expression = "cron(10/15 * * * ? *)", steps = ["FILE_RULES", "NOTIFY"], enabled = local.file_rules_enabled }
         close         = { expression = "cron(0 * * * ? *)", steps = ["BATCH_CLOSE", "NOTIFY"] }
       }
     }
@@ -25,6 +30,7 @@ locals {
       schedules = {
         daily_batches = { expression = "cron(0 12 * * ? *)", steps = ["BATCH_CREATION"], run_type = "CMS", period = "CURRENT_CALENDAR_MONTH" }
         file_load     = { expression = "cron(5/15 * * * ? *)", steps = ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"] }
+        file_rules    = { expression = "cron(0/15 * * * ? *)", steps = ["FILE_RULES", "NOTIFY"], enabled = local.file_rules_enabled }
         close         = { expression = "cron(30 4 * * ? *)", steps = ["BATCH_CLOSE", "NOTIFY"] }
       }
     }

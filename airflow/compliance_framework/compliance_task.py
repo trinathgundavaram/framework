@@ -1,18 +1,16 @@
-"""Airflow bridge: one Variable (configuration) + the Teradata and NAS Connections -> the framework."""
+"""Airflow bridge: a step's Variable (configuration) + the Teradata and NAS Connections -> the framework."""
 import json
 import logging
 import os
-import re
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_VARIABLE_KEY = "compliance_framework_config"
 DEFAULT_CONNECTION_ID = "compliance_teradata"
 TD_CONN_KEY = "td_conn_var"
 NAS_CONN_KEY = "wdc_comp_oper_nas_var"
 DEFAULT_TIMEZONE = "America/Chicago"
-STEPS = ("BATCH_CREATION", "FILE_LOAD", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY")
-FAIL_ON_PROBLEMS = {"BATCH_CREATION": True, "FILE_LOAD": False, "OVERRIDE_DECISIONS": False,
+STEPS = ("BATCH_CREATION", "FILE_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY")
+FAIL_ON_PROBLEMS = {"BATCH_CREATION": True, "FILE_LOAD": False, "FILE_RULES": True, "OVERRIDE_DECISIONS": False,
                     "BATCH_CLOSE": True, "NOTIFY": True}
 SCOPE_KEYS = ("project", "run_type", "period", "table", "period_file", "lookback_days", "lookback_weeks",
               "bucket", "key", "prefix", "version_id")
@@ -20,8 +18,7 @@ _GRE_ENV = {"environment": "GRE_ENVIRONMENT", "meta_db": "GRE_META_DB", "log_lev
             "log_dir": "GRE_LOG_DIR", "max_parallel_rules": "GRE_MAX_PARALLEL_RULES",
             "package_dir": "GRE_PACKAGE_DIR", "project_name": "GRE_PROJECT_NAME"}
 _GRE_PARAMS = {"run_params": "GRE_RUN_PARAMS", "text_params": "GRE_TEXT_PARAMS", "extra_filters": "GRE_EXTRA_FILTERS"}
-_RUN_NAME = re.compile(r"^[A-Za-z0-9_]{1,200}$")
-_DAG_ID = re.compile(r"^[A-Za-z0-9_.-]{1,250}$")
+_MERGED = ("settings", "gre")
 
 
 def _set_env(key: str, value) -> None:
@@ -69,83 +66,52 @@ def _load_variable(variable_key: str) -> dict:
     return config
 
 
-def _steps(value) -> list:
-    steps = [value] if isinstance(value, str) else list(value or [])
-    steps = [str(s).strip().upper() for s in steps]
-    unknown = sorted(set(steps) - set(STEPS))
-    if unknown:
-        raise ValueError(f"unknown step(s) {unknown}; valid: {', '.join(STEPS)}")
-    return steps
-
-
-def load_dag_config(variable_key: str = DEFAULT_VARIABLE_KEY) -> dict:
+def load_dag_config(variable_key: str) -> dict:
     """The Variable for the DAG file ({} when missing or invalid, so a bad Variable cannot break parsing)."""
     try:
         return _load_variable(variable_key)
     except Exception as e:  # noqa: BLE001
-        logger.warning("no scheduled compliance DAGs: %s", e)
+        logger.warning("compliance DAG configuration: %s", e)
         return {}
 
 
-def scheduled_runs(config: dict) -> dict:
-    """{run name: run} of the runs that have a schedule_interval; an invalid run is skipped."""
-    out = {}
-    for name, run in (config.get("runs") or {}).items():
-        try:
-            if not _RUN_NAME.match(str(name)) or not isinstance(run, dict):
-                raise ValueError("the name must be letters, digits or _ and the value a JSON object")
-            if run.get("dag_id") and not _DAG_ID.match(str(run["dag_id"])):
-                raise ValueError("dag_id must be letters, digits, _ . or -")
-            if run.get("schedule_interval") and not _steps(run.get("steps")):
-                raise ValueError("a scheduled run needs steps")
-        except ValueError as e:
-            logger.warning("compliance run %r ignored: %s", name, e)
-            continue
-        if run.get("schedule_interval"):
-            out[str(name)] = run
-    return out
+def step_scopes(config: dict) -> list:
+    """The Variable's `runs` (one task each: project / run type / period ...), or one scope: the Variable itself."""
+    runs = config.get("runs")
+    if not runs:
+        return [{}]
+    if not isinstance(runs, list) or not all(isinstance(r, dict) for r in runs):
+        raise ValueError("'runs' must be a list of JSON objects")
+    return runs
 
 
-def resolve_run(variable_key: str = DEFAULT_VARIABLE_KEY, overrides: dict = None, run: str = None) -> tuple:
-    """(configuration, framework settings): the Variable, then its named run, then the overrides."""
-    config = _load_variable(variable_key)
-    overrides = dict(overrides or {})
-    run = overrides.pop("run", None) or run
-    run_config = {}
-    if run:
-        runs = config.get("runs") or {}
-        if run not in runs:
-            raise ValueError(f"run '{run}' is not in Airflow Variable '{variable_key}' (runs: {', '.join(sorted(runs))})")
-        run_config = dict(runs[run])
-    settings = {**(config.get("settings") or {}), **(run_config.pop("settings", None) or {}),
-                **(overrides.pop("settings", None) or {})}
-    fail_on = {**FAIL_ON_PROBLEMS, **(config.get("fail_on_problems") or {}),
-               **(run_config.pop("fail_on_problems", None) or {}), **(overrides.pop("fail_on_problems", None) or {})}
-    gre = {**(config.get("gre") or {}), **(run_config.pop("gre", None) or {}), **(overrides.pop("gre", None) or {})}
-    config = {**{k: v for k, v in config.items() if k != "runs"}, **run_config, **overrides, "gre": gre}
+def resolve_config(variable_key: str, overrides: dict = None, scope_index: int = None) -> tuple:
+    """(configuration, framework settings): the Variable, then one entry of its `runs`, then the trigger's values."""
+    variable = _load_variable(variable_key)
+    scope = dict(step_scopes(variable)[scope_index]) if scope_index is not None else {}
+    overrides = {k: v for k, v in (overrides or {}).items() if v not in (None, "", [])}
+    layers = (variable, scope, overrides)
+    merged = {key: {k: v for layer in layers for k, v in (layer.get(key) or {}).items()} for key in _MERGED}
+    config = {k: v for layer in layers for k, v in layer.items() if k not in (*_MERGED, "runs")}
+    config["gre"] = merged["gre"]
     if not config.get("meta_db"):
         raise ValueError(f"'meta_db' is required in Airflow Variable '{variable_key}'")
-    config["run"] = run
-    config["steps"] = _steps(config.get("steps"))
-    config["fail_on_problems"] = fail_on
     settings = {str(k).upper(): ",".join(map(str, v)) if isinstance(v, (list, tuple)) else v
-                for k, v in settings.items()}
+                for k, v in merged["settings"].items()}
     settings["METADATA_SCHEMA"] = config["meta_db"]
     if config.get("load_duplicate") not in (None, ""):
         settings["LOAD_DUPLICATE"] = config["load_duplicate"]
-    environment = config.get("load_env") or config.get("environment") or (config.get("gre") or {}).get("environment")
+    environment = config.get("load_env") or config.get("environment") or config["gre"].get("environment")
     if environment:
         settings.setdefault("ENVIRONMENT", environment)
     return config, settings
 
 
-def _connect_environment(config: dict, settings: dict, connection_id: str = None) -> None:
+def _connect_environment(config: dict, connection_id: str = None) -> None:
     gre = config.get("gre") or {}
     _load_teradata_connection(connection_id or config.get(TD_CONN_KEY) or config.get("connection_id")
                               or gre.get("connection_id") or DEFAULT_CONNECTION_ID)
-    if str(settings.get("OBJECT_STORE") or "nas").lower() == "nas":
-        if not config.get(NAS_CONN_KEY):
-            raise ValueError(f"'{NAS_CONN_KEY}' (the Airflow Connection of the NAS file server) is required")
+    if config.get(NAS_CONN_KEY):
         _load_nas_connection(config[NAS_CONN_KEY])
     if gre and str(gre.get("connection_type") or "teradata").lower() != "teradata":
         raise ValueError("gre.connection_type must be 'teradata': the rules run on the framework's Teradata connection")
@@ -159,34 +125,38 @@ def _connect_environment(config: dict, settings: dict, connection_id: str = None
         _set_env("GRE_META_CONNECTION", gre.get("meta_connection") or "teradata")
 
 
-def run_compliance_step(step: str, variable_key: str = DEFAULT_VARIABLE_KEY, overrides: dict = None,
-                        connection_id: str = None, run: str = None, **scope):
+def run_compliance_step(step: str, variable_key: str, overrides: dict = None, scope_index: int = None,
+                        connection_id: str = None):
     """Run one framework step; raises RuntimeError when it fails, returns its outcome otherwise."""
-    config, settings = resolve_run(variable_key, overrides, run)
-    _connect_environment(config, settings, connection_id)
+    step = step.strip().upper()
+    config, settings = resolve_config(variable_key, overrides, scope_index)
+    if step == "FILE_LOAD" and str(settings.get("OBJECT_STORE") or "nas").lower() == "nas" and not config.get(NAS_CONN_KEY):
+        raise ValueError(f"'{NAS_CONN_KEY}' (the Airflow Connection of the NAS file server) is required in "
+                         f"Airflow Variable '{variable_key}'")
+    _connect_environment(config, connection_id)
     from .run_framework import run_step
 
-    step = step.strip().upper()
     params = {k: config.get(k) for k in SCOPE_KEYS if config.get(k) not in (None, "")}
-    params.update({k: v for k, v in scope.items() if v not in (None, "")})
-    as_of = params.pop("as_of", None) or config.get("as_of")
-    outcome, exit_code = run_step(step, as_of=as_of, settings=settings,
+    outcome, exit_code = run_step(step, as_of=config.get("as_of") or None, settings=settings,
                                   log_level=config.get("log_level") or "INFO", **params)
-    if exit_code == 2 or (exit_code == 1 and config["fail_on_problems"].get(step, True)):
+    fail_on_problems = config.get("fail_on_problems")
+    if not isinstance(fail_on_problems, bool):
+        fail_on_problems = FAIL_ON_PROBLEMS.get(step, True)
+    if exit_code == 2 or (exit_code == 1 and fail_on_problems):
         raise RuntimeError(f"compliance framework step {step} failed (exit_code={exit_code}). outcome={outcome!r}")
     if exit_code:
         logger.warning("step %s completed with problems (exit_code=%s): %r", step, exit_code, outcome)
     return outcome
 
 
-def run_compliance_command(command: str, args: list = None, variable_key: str = DEFAULT_VARIABLE_KEY,
-                           overrides: dict = None, connection_id: str = None):
+def run_compliance_command(command: str, variable_key: str, args: list = None, overrides: dict = None,
+                           connection_id: str = None):
     """Run one framework command (validate-config, health, locks, release-lock, close-batch, ...)."""
-    config, settings = resolve_run(variable_key, overrides)
-    _connect_environment(config, settings, connection_id)
+    config, settings = resolve_config(variable_key, overrides)
+    _connect_environment(config, connection_id)
     from .run_framework import run_command
 
-    outcome, exit_code = run_command(command, args=args, as_of=config.get("as_of"), settings=settings,
+    outcome, exit_code = run_command(command, args=args, as_of=config.get("as_of") or None, settings=settings,
                                      log_level=config.get("log_level") or "INFO")
     logger.info("command %s exit_code=%s outcome=%r", command, exit_code, outcome)
     if exit_code != 0:

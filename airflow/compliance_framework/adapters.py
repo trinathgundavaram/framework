@@ -12,6 +12,7 @@ import stat
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from functools import cached_property
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 from urllib.parse import urlparse
@@ -213,10 +214,20 @@ class NasObjectStore(ObjectStore):
     """Files on an SMB share; bucket = '<server>/<share>', or '<share>' on the server of the NAS connection."""
 
     def __init__(self, settings: Settings):
-        self.smb = smb_client()
-        self.nas = nas_settings()
-        self.server = self.nas.pop("server")
         self.min_age_seconds = settings.nas_min_age_seconds
+
+    @cached_property
+    def smb(self):
+        return smb_client()
+
+    @cached_property
+    def server(self) -> str:
+        return nas_settings()["server"]
+
+    @cached_property
+    def nas(self) -> dict:
+        """Session arguments of every smbclient call; read when the first file is touched."""
+        return {k: v for k, v in nas_settings().items() if k != "server"}
 
     def _target(self, bucket: str) -> tuple[str, str]:
         server, _, share = bucket.rpartition("/")

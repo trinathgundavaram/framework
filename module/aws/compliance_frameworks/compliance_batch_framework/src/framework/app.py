@@ -16,6 +16,7 @@ from .db import schema_exists
 from .ingest import IngestPipeline
 from .modules import ModuleOutcome, run_module
 from .overrides import DecisionProcessor
+from .rules import RulesRunner
 from .settings import Settings
 
 
@@ -56,7 +57,11 @@ class App:
 
     @cached_property
     def pipeline(self) -> IngestPipeline:
-        return IngestPipeline(self.conn, self.clock, self.settings, self.store, self.rules, spark=self.spark)
+        return IngestPipeline(self.conn, self.clock, self.settings, self.store, spark=self.spark)
+
+    @cached_property
+    def rules_runner(self) -> RulesRunner:
+        return RulesRunner(self.conn, self.clock, self.settings, self.rules)
 
     @cached_property
     def decisions(self) -> DecisionProcessor:

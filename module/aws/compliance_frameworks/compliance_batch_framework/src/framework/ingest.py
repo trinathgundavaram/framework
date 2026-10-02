@@ -14,11 +14,10 @@ import psycopg
 
 from . import config as cfgmod
 from . import db
-from .adapters import ERROR, ObjectInfo, ObjectStore, RuleEngine, basename, dirname, parse_uri, sha256_file
+from .adapters import ObjectInfo, ObjectStore, basename, dirname, parse_uri, sha256_file
 from .audit import EventLogger
 from .batches import get_batch, promoted_load
-from .common import (COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch,
-                     TechnicalFailure, check_transition)
+from .common import COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch, check_transition
 from .config import FileConfig, MatchError, TemplateMatcher
 from .load import sanitize_db_error, stage, swap
 from .settings import Settings
@@ -118,13 +117,11 @@ class PathIngestSummary:
 
 
 class IngestPipeline:
-    def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings, store: ObjectStore,
-                 rule_engine: RuleEngine, spark=None):
+    def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings, store: ObjectStore, spark=None):
         self.conn = conn
         self.clock = clock
         self.settings = settings
         self.store = store
-        self.rules = rule_engine
         self.spark = spark
         self.logger = EventLogger(conn, clock)
         self._sweep_config: Optional[tuple[TemplateMatcher, tuple[str, ...]]] = None
@@ -384,32 +381,10 @@ class IngestPipeline:
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, Updated_Dtts=%s "
                               "WHERE Load_ID=%s", (staged_rows, self.clock.now(), load_id))
 
-        failure_event = None
-        detail = None
+        failure_event = detail = None
         rules_stat = "NOT_RUN"
         if staged_rows == 0 and not cfg.allow_zero_records:
             passed, failure_event, detail = False, "FILE_ZERO_RECORDS_REJECTED", "file has no data rows"
-        elif bindings := cfgmod.rule_bindings(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_id, batch["run_ty"]):
-            with self.conn.transaction():
-                self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='RULES_RUNNING', Updated_Dtts=%s "
-                                  "WHERE Load_ID=%s", (self.clock.now(), load_id))
-            outcome = self.rules.run(self.conn, bindings, {
-                "scope": "FILE_LEVEL", "btch_id": batch["btch_id"], "load_id": load_id,
-                "project_cd": cfg.project_cd, "table_nm": cfg.table_nm, "src_id": cfg.src_id,
-                "run_ty": batch["run_ty"], "rpt_start_dt_key": batch["rpt_start_dt_key"],
-                "rpt_end_dt_key": batch["rpt_end_dt_key"], "req_dt_key": batch["req_dt_key"],
-                "stg_schema_nm": cfg.stg_schema_nm, "stg_table_nm": cfg.stg_table_nm}, self.settings.file_rules_mode)
-            if outcome.status == ERROR:
-                with self.conn.transaction():
-                    self.conn.execute("UPDATE ComplianceFileLoad SET Rules_Stat='ERROR' WHERE Load_ID=%s", (load_id,))
-                    self.logger.audit("RULES_ENGINE_TECHNICAL_FAILURE", load_id=load_id, req_id=req_id,
-                                      btch_id=batch["btch_id"], description=sanitize_db_error(outcome.error or ""))
-                raise TechnicalFailure(f"rules engine failed for load {load_id}: {outcome.error}")
-            passed, rules_stat = outcome.passed, outcome.status
-            if not passed:
-                failure_event, detail = "RULES_VALIDATION_FAILED", "failed GATE rules: " + ", ".join(outcome.failed_rules)
-            elif outcome.warned_rules:
-                detail = "ANNOTATE warnings: " + ", ".join(outcome.warned_rules)
         else:
             passed = True
 

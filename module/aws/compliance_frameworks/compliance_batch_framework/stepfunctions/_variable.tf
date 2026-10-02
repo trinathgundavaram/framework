@@ -18,6 +18,7 @@ variable "step_settings" {
   default = {
     BATCH_CREATION     = { capacity = 0.0625, timeout_minutes = 60, fail_on_problems = true }
     FILE_LOAD          = { capacity = 1, timeout_minutes = 120, fail_on_problems = false }
+    FILE_RULES         = { capacity = 0.0625, timeout_minutes = 120, fail_on_problems = true }
     OVERRIDE_DECISIONS = { capacity = 0.0625, timeout_minutes = 30, fail_on_problems = false }
     BATCH_CLOSE        = { capacity = 0.0625, timeout_minutes = 30, fail_on_problems = true }
     NOTIFY             = { capacity = 0.0625, timeout_minutes = 30, fail_on_problems = true }
@@ -25,7 +26,7 @@ variable "step_settings" {
 
   validation {
     condition = alltrue([for k, v in var.step_settings :
-    contains(["BATCH_CREATION", "FILE_LOAD", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY"], k) && contains([0.0625, 1], v.capacity) && v.timeout_minutes > 0])
+    contains(["BATCH_CREATION", "FILE_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY"], k) && contains([0.0625, 1], v.capacity) && v.timeout_minutes > 0])
     error_message = "step_settings keys are framework modules; capacity is 0.0625 or 1 (Glue Python Shell); timeout_minutes > 0."
   }
 }

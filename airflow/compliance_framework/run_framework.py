@@ -16,7 +16,7 @@ from .settings import Settings
 
 log = logging.getLogger(__name__)
 
-STEPS = ("BATCH_CREATION", "FILE_LOAD", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY")
+STEPS = ("BATCH_CREATION", "FILE_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY")
 STEP_PARAMS = ("project", "run_type", "period", "table", "period_file", "lookback_days", "lookback_weeks",
                "bucket", "key", "prefix", "version_id")
 COMMANDS = ("test-connection", "show-config", "validate-config", "health", "locks", "release-lock",

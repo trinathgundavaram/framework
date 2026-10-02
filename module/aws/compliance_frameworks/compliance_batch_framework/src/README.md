@@ -49,7 +49,7 @@ to S3 and each Glue run installs.
 src/
   pyproject.toml          package name, version, dependencies, what goes into the wheel
   framework/              the package (the only thing inside the wheel)
-    ingest.py batches.py closing.py overrides.py audit.py modules.py cli.py ...
+    ingest.py rules.py batches.py closing.py overrides.py audit.py modules.py cli.py ...
     sql/schema.sql        DDL of the metadata tables (created separately; the framework never creates them)
     sql/approvals.sql     manual override templates
   build_wheel.sh          builds the wheel into ../code/wheels
@@ -61,7 +61,7 @@ src/
 ### Changing the framework
 
 1. Edit the files under `framework/`.
-2. Bump `version` in `pyproject.toml` and `__version__` in `framework/__init__.py` (e.g. 0.3.4 → 0.3.5),
+2. Bump `version` in `pyproject.toml` and `__version__` in `framework/__init__.py` (e.g. 0.3.5 → 0.3.6),
    so every deployed build is identifiable. The Terraform picks up any wheel name.
 3. Rebuild the wheel, with GitHub Actions or locally (below).
 4. Deploy the `glue` submodule. The next Glue run installs the new wheel.

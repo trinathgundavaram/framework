@@ -1,0 +1,20 @@
+{
+  "td_conn_var": "PROD",
+  "meta_db": "REPLACE_WITH_PROD_META_DB",
+  "load_env": "PROD",
+  "email_recipient": "compliance-ops@example.com",
+  "owner": "oss",
+  "snow_assignment_group": "D&AE - EDE Govt Compliance",
+  "tags": [
+    "Compliance",
+    "Compliance_Batch_Framework"
+  ],
+  "schedule_timezone": "America/Chicago",
+  "log_level": "INFO",
+  "wdc_comp_oper_nas_var": "wdc_comp_oper_nas",
+  "settings": {
+    "BUSINESS_TZ": "America/Chicago",
+    "LOCK_TTL_MINUTES": 240,
+    "OBJECT_STORE": "nas"
+  }
+}

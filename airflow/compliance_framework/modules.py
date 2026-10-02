@@ -94,6 +94,12 @@ def _file_load(app, p: dict) -> ModuleOutcome:
     return ModuleOutcome("FILE_LOAD", s, 1 if s.errors else 0)
 
 
+def _file_rules(app, p: dict) -> ModuleOutcome:
+    """A file that fails its rules is audited and emailed (exit 0); exit 1 = the rules engine could not run."""
+    s = app.rules_runner.run(p.get("project"))
+    return ModuleOutcome("FILE_RULES", s, 1 if s.errors else 0)
+
+
 def _override_decisions(app, p: dict) -> ModuleOutcome:
     s = app.decisions.run(p.get("project"))
     return ModuleOutcome("OVERRIDE_DECISIONS", s, 1 if s.invalid else 0)
@@ -126,6 +132,10 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
                      "one project's configured locations (--project) or every configured location (no arguments)",
         required=(), optional=(Param("bucket"), Param("key"), Param("prefix"), Param("version_id"), Param("project")),
         handler=_file_load),
+    ModuleSpec(
+        "FILE_RULES", "run the bound rules on the files already loaded to core that have not had them yet; "
+                      "one project (--project) or every project. It never blocks or undoes a load",
+        required=(), optional=(Param("project"),), handler=_file_rules),
     ModuleSpec(
         "OVERRIDE_DECISIONS", "apply approved REUSE overrides and expire the ones that ran out; "
                               "one project (--project) or every project",

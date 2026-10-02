@@ -1,9 +1,7 @@
 {
   "td_conn_var": "DEV",
-  "wdc_comp_oper_nas_var": "wdc_comp_oper_nas_dev",
   "meta_db": "HSABC_dev",
   "load_env": "DEV",
-  "load_duplicate": "no",
   "email_recipient": "compliance-dev@example.com",
   "owner": "oss",
   "snow_assignment_group": "D&AE - EDE Govt Compliance",
@@ -11,18 +9,21 @@
     "Compliance",
     "Compliance_Batch_Framework"
   ],
-  "log_level": "INFO",
   "schedule_timezone": "America/Chicago",
+  "log_level": "INFO",
+  "wdc_comp_oper_nas_var": "wdc_comp_oper_nas_dev",
   "settings": {
+    "BUSINESS_TZ": "America/Chicago",
+    "LOCK_TTL_MINUTES": 240,
     "OBJECT_STORE": "nas",
     "ARCHIVE_FOLDER": "Archive",
+    "ERROR_FOLDER": "Error",
     "NAS_MIN_AGE_SECONDS": 120,
-    "BUSINESS_TZ": "America/Chicago",
-    "NOTIFY_BACKEND": "log",
-    "DEFAULT_NOTIFY_EMAILS": "compliance-dev@example.com",
     "RULE_ENGINE": "gre",
-    "LOCK_TTL_MINUTES": 60,
-    "GRE_ENTRYPOINT": "compliance_framework.gre_bridge:run_gre"
+    "GRE_ENTRYPOINT": "compliance_framework.gre_bridge:run_gre",
+    "FILE_RULES_MODE": "GATE",
+    "NOTIFY_BACKEND": "log",
+    "DEFAULT_NOTIFY_EMAILS": "compliance-dev@example.com"
   },
   "gre": {
     "connection_type": "teradata",
@@ -40,28 +41,5 @@
     },
     "log_level": "INFO",
     "max_parallel_rules": 1
-  },
-  "runs": {
-    "cms_universe_file_load": {
-      "schedule_interval": "0 * * * *",
-      "project": "CMS_UNIVERSE",
-      "steps": [
-        "FILE_LOAD",
-        "OVERRIDE_DECISIONS",
-        "NOTIFY"
-      ]
-    },
-    "cms_universe_full_cycle": {
-      "project": "CMS_UNIVERSE",
-      "steps": [
-        "BATCH_CREATION",
-        "FILE_LOAD",
-        "OVERRIDE_DECISIONS",
-        "BATCH_CLOSE",
-        "NOTIFY"
-      ],
-      "run_type": "MNT",
-      "period": "PREV_CALENDAR_MONTH"
-    }
   }
 }

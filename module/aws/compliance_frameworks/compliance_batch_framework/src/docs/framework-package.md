@@ -25,6 +25,7 @@ framework/
   batches.py              batch creation (scheduled + ad-hoc), CRC rows
   ingest.py               file pipeline (single object or a path sweep) + resolution decision tables
   load.py                 file reading, staging (pandas/COPY or Spark), core swap
+  rules.py                FILE_RULES: rules on loaded files, after the core load
   overrides.py            REUSE decisions: apply and expire
   closing.py              batch close: SLA sweep and manual close
   audit.py                audit writer, event vocabulary, email notifications
@@ -68,7 +69,7 @@ The environment variable is `FRAMEWORK_<NAME>`; the job argument is `--set <NAME
 | `XLSX_SHEET`, `XLSX_HEADER_ROW` | `0`, `0` | **Q-02** |
 | `LOAD_ENGINE` | `PANDAS` | `SPARK` for large delimited files (needs `SPARK_JDBC_URL`). (Was `Engine_Cd`.) |
 | `SPARK_JDBC_URL`, `SPARK_WRITE_PARTITIONS`, `SPARK_BATCH_SIZE` | —, `4`, `10000` | User and password come from the open connection. |
-| `FILE_RULES_MODE` | `GATE` | `ANNOTATE` promotes with warnings. (Was `Rules_Vld_Md`.) File rules run when the source has FILE_LEVEL bindings. |
+| `FILE_RULES_MODE` | `GATE` | How the `FILE_RULES` step records a failed rule: `GATE` = `Rules_Stat` `FAILED`, `ANNOTATE` = `PASSED_WITH_WARNINGS`. Rules run after the core load and never block it. |
 | `RULE_ENGINE`, `GRE_ENTRYPOINT` | `gre`, — | **Q-12**. `none` disables rules; `module:Class` plugs in another engine. |
 | `LOCK_TIMEOUT_SECONDS`, `HEARTBEAT_STALE_MINUTES` | `300`, `30` | A load not updated for `HEARTBEAT_STALE_MINUTES` is reported by `health`. |
 | `NOTIFY_BACKEND`, `NOTIFY_FROM_EMAIL`, `DEFAULT_NOTIFY_EMAILS` | `log`, —, — | D-54. All notifications are email: `ses` sends through SES, `log` only logs them. `DEFAULT_NOTIFY_EMAILS` receives events not tied to one file config. |
@@ -114,7 +115,7 @@ framework validate-config
    3. `ComplianceRunType` — `SLA_Days` ≥ 1 (the hold is `Req_Dt_Key + SLA_Days − 1`); `Carry_Fwd_Ind = 1` if batches of this run type may reuse the previous batch's data after approval; code letters/digits only.
    4. `ComplianceDataSetSourceXwalk` — one effective-dated row per project / table / source / run type. Nothing else.
    5. `ComplianceSourceFileConfig` — one active row per project / table / source: filename template (project, table and source written literally, e.g. `PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt`; its extension is the file type), delimiter, header/trailer flags, inbound path (files then move to its `Archive/` or `Error/` subfolder), staging table, core schema (the core table is `Table_Nm`), email recipients.
-   6. `ComplianceRuleBinding` — GRE rules run on each staged file, bound at any level: `'*'` in `Table_Nm`, `Src_ID` or `Run_Ty` means all. Every matching binding runs (additive); a rule bound at two levels runs once. Optional: a file with no matching binding skips the rules.
+   6. `ComplianceRuleBinding` — rules run by the `FILE_RULES` step on each file after it is loaded to core, bound at any level: `'*'` in `Table_Nm`, `Src_ID` or `Run_Ty` means all. Every matching binding runs (additive); a rule bound at two levels runs once. Optional: a file with no matching binding skips the rules.
 
       | Level | `Table_Nm` | `Src_ID` | `Run_Ty` |
       |---|---|---|---|
@@ -222,9 +223,9 @@ def run_rules(conn, rule_group: str, rule_variant: str, run_params: dict) -> lis
     # raise on technical failure (treated as ERROR -> retry, never as a data failure)
 ```
 
-`conn` is the framework database (metadata, staging and core). Rules run on each staged file; `run_params`: `scope` (`FILE_LEVEL`), `btch_id`, `load_id`, `stg_schema_nm`, `stg_table_nm`, `project_cd` / `table_nm` / `src_id` / `run_ty` and the report and run dates.
+`conn` is the framework database (metadata, staging and core). Rules run on each file after it is loaded to core (`run --module FILE_RULES`); `run_params`: `scope` (`FILE_LEVEL`), `btch_id`, `load_id`, `stg_schema_nm`, `stg_table_nm`, `core_schema_nm`, `core_table_nm`, `project_cd` / `table_nm` / `src_id` / `run_ty` and the report and run dates.
 
-The framework applies GATE/ANNOTATE itself (`FILE_RULES_MODE`).
+The framework applies GATE/ANNOTATE itself (`FILE_RULES_MODE`); neither blocks or undoes the load.
 
 ## Implementation status and open items
 

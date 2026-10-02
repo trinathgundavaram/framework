@@ -39,6 +39,7 @@ every resource carries the `required_common_tags` of `common.tfvars` plus `Envir
 |---|---|---|---|
 | `BATCH_CREATION` | routine batches for `run_type` / `period`, and the project's ad-hoc intake requests | 0.0625 DPU / 60 min | stops the workflow (configuration problem) |
 | `FILE_LOAD` | every file waiting in the project's inbound folders | 1 DPU / 120 min | continues: a bad file is audited, retried next sweep and emailed once |
+| `FILE_RULES` | the rules of every loaded file that has not had them yet (separate execution, after the load) | 0.0625 DPU / 120 min | a failed rule is audited and emailed; stops only when the rules engine cannot run |
 | `OVERRIDE_DECISIONS` | apply / expire approved REUSE overrides | 0.0625 DPU / 30 min | continues: an invalid override is audited and emailed once |
 | `BATCH_CLOSE` | close batches past their SLA hold that have data or are in exception (`run_type` / `table` narrow it) | 0.0625 DPU / 30 min | stops the workflow |
 | `NOTIFY` | email the project's pending events | 0.0625 DPU / 30 min | stops the workflow |
@@ -111,7 +112,7 @@ Every file leaves the inbound folder once it has been processed, into a subfolde
 | Outcome | Moves to |
 |---|---|
 | Loaded to core | `<inbound folder>/Archive/` |
-| Not loaded: unknown name, no batch or a closed batch, wrong column count, bad characters, an empty file where one is not allowed, failed its file rules, a name already loaded (unless `LOAD_DUPLICATE` = `yes`) | `<inbound folder>/Error/` |
+| Not loaded: unknown name, no batch or a closed batch, wrong column count, bad characters, an empty file where one is not allowed, a name already loaded (unless `LOAD_DUPLICATE` = `yes`) | `<inbound folder>/Error/` |
 | Technical failure | stays in place and is retried by the next sweep |
 
 - **Duplicate file names (`LOAD_DUPLICATE`).** A file whose name was already loaded is rejected by
@@ -126,6 +127,34 @@ Every file leaves the inbound folder once it has been processed, into a subfolde
   the two subfolders are never picked up again.
 - The folder names are the `ARCHIVE_FOLDER` and `ERROR_FOLDER` settings (defaults `Archive`, `Error`).
 - The reason for a rejection is in `ComplianceFileLoad.Quarantine_Rsn_Cd` / `Error_Txt` and in the email.
+
+## File rules run after the load
+
+The rules engine is not part of the load. `FILE_LOAD` validates the file, stages it and loads it to
+core; it never calls the rules engine and never waits for it.
+
+`FILE_RULES` is a separate step. It takes every file that is loaded to core and has not had its rules
+yet (`ComplianceFileLoad.Load_Stat = PROMOTED`, `Rules_Stat = NOT_RUN`), runs the rules bound to it in
+`ComplianceRuleBinding`, and records the outcome:
+
+| Outcome | `Rules_Stat` | What else happens |
+|---|---|---|
+| All rules pass | `PASSED` (`PASSED_WITH_WARNINGS` under `FILE_RULES_MODE` = `ANNOTATE`) | `FILE_RULES_PASSED` on the batch timeline |
+| A rule fails | `FAILED` | `FILE_RULES_FAILED` on the timeline, `RULES_VALIDATION_FAILED` audit event, emailed by `NOTIFY` |
+| No binding for the file | `SKIPPED` | nothing |
+| The engine could not run | `ERROR` | audited once, the step exits 1, the file is tried again on the next run |
+
+- A rule failure changes nothing else: the data stays in core, the file stays in `Archive`, the batch
+  keeps its status and closes as usual. Acting on a failed rule is a decision for the project.
+- Only the batch's current load is checked; a load replaced by a newer file is not. A file loaded again
+  is checked again.
+- The engine is given the staging and the core table of the file (`stg_schema_nm`, `stg_table_nm`,
+  `core_schema_nm`, `core_table_nm`) with the batch and load ids.
+- **Glue:** `FILE_RULES` is its own workflow execution, on the `file_rules` schedule of each project
+  (`stepfunctions/_local.tf`). It is off until the runner has a rules engine: set `gre_entrypoint` (or
+  `rule_engine`) in `glue/_local.tf`, then `file_rules_enabled = true`. By hand:
+  `src/run_workflow.sh dev ODR FILE_RULES,NOTIFY`.
+
 
 ## Environment in database names (`$env`)
 

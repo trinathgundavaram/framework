@@ -1,44 +1,76 @@
 {
-  "COMPLIANCE_BATCH_FRAMEWORK: a named run of the Variable": {
-    "run": "odr_full_cycle"
-  },
-  "COMPLIANCE_BATCH_FRAMEWORK: a named run for a missed day": {
-    "run": "odr_full_cycle",
-    "as_of": "2026-09-01"
-  },
-  "COMPLIANCE_BATCH_FRAMEWORK: parameters given directly": {
-    "project": "UNIVERSE",
-    "steps": ["BATCH_CREATION", "FILE_LOAD"],
-    "run_type": "MONTHLY",
+  "OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE: create batches": {
+    "module": "BATCH_CREATION",
+    "project": "CMS_UNIVERSE",
+    "run_type": "MNT",
     "period": "PREV_CALENDAR_MONTH"
   },
-  "COMPLIANCE_BATCH_FRAMEWORK: one table, rules annotated instead of gating": {
-    "project": "ODR",
-    "steps": ["FILE_LOAD", "NOTIFY"],
-    "table": "ROPENS",
-    "settings": {"FILE_RULES_MODE": "ANNOTATE"}
+  "OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE: load files": {
+    "module": "FILE_LOAD",
+    "project": "CMS_UNIVERSE"
   },
-  "COMPLIANCE_BATCH_FRAMEWORK: another environment's Variable": {
-    "variable_key": "compliance_framework_config_qa",
-    "run": "odr_full_cycle"
+  "OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE: run the rules on loaded files": {
+    "module": "FILE_RULES",
+    "project": "CMS_UNIVERSE"
   },
-  "COMPLIANCE_BATCH_FRAMEWORK: load files whose names were already loaded": {
-    "project": "ODR",
-    "steps": ["FILE_LOAD", "NOTIFY"],
-    "load_duplicate": "yes"
+  "OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE: close batches": {
+    "module": "BATCH_CLOSE",
+    "project": "CMS_UNIVERSE"
   },
-  "any scheduled DAG: re-run for a past date": {
+  "OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE: send notifications": {
+    "module": "NOTIFY"
+  },
+  "OSSTD_CORE_CMS_COMPLIANCE_BATCH_CREATION: another run type and period, once": {
+    "project": "CMS_UNIVERSE",
+    "run_type": "MNT",
+    "period": "PREV_CALENDAR_MONTH"
+  },
+  "OSSTD_CORE_CMS_COMPLIANCE_BATCH_CREATION: for a missed day": {
     "as_of": "2026-09-01"
   },
-  "COMPLIANCE_ADMIN: check the configuration": {
+  "OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD: one project": {
+    "project": "CMS_UNIVERSE"
+  },
+  "OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD: load files whose names were already loaded": {
+    "load_duplicate": "yes"
+  },
+  "OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES: every project": {},
+  "OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES: one project, a setting for this run only": {
+    "project": "CMS_UNIVERSE",
+    "settings": {
+      "FILE_RULES_MODE": "ANNOTATE"
+    }
+  },
+  "OSSTD_CORE_CMS_COMPLIANCE_BATCH_CLOSE: one project and run type": {
+    "project": "CMS_UNIVERSE",
+    "run_type": "MNT"
+  },
+  "OSSTD_CORE_CMS_COMPLIANCE_NOTIFY: one project": {
+    "project": "CMS_UNIVERSE"
+  },
+  "OSSTD_CORE_CMS_COMPLIANCE_ADMIN: check the configuration": {
     "command": "validate-config"
   },
-  "COMPLIANCE_ADMIN: close a batch without data": {
-    "command": "close-batch",
-    "args": ["--btch-id", "20260901_ODR_ROPENS_50_DAILY_2026_1", "--closed-by", "jdoe"]
+  "OSSTD_CORE_CMS_COMPLIANCE_ADMIN: health report": {
+    "command": "health"
   },
-  "COMPLIANCE_ADMIN: list locks, release one left by a crashed run": {
+  "OSSTD_CORE_CMS_COMPLIANCE_ADMIN: list locks": {
+    "command": "locks"
+  },
+  "OSSTD_CORE_CMS_COMPLIANCE_ADMIN: release a lock left by a crashed run": {
     "command": "release-lock",
-    "args": ["--key", "BTCH:20260901_ODR_ROPENS_50_DAILY_2026_1"]
+    "args": [
+      "--key",
+      "BTCH:<Btch_ID>"
+    ]
+  },
+  "OSSTD_CORE_CMS_COMPLIANCE_ADMIN: close one batch by hand": {
+    "command": "close-batch",
+    "args": [
+      "--btch-id",
+      "<Btch_ID>",
+      "--closed-by",
+      "jdoe"
+    ]
   }
 }

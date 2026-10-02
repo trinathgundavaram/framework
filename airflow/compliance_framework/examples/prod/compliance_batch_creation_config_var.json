@@ -1,0 +1,34 @@
+{
+  "td_conn_var": "PROD",
+  "meta_db": "REPLACE_WITH_PROD_META_DB",
+  "load_env": "PROD",
+  "email_recipient": "compliance-ops@example.com",
+  "owner": "oss",
+  "snow_assignment_group": "D&AE - EDE Govt Compliance",
+  "tags": [
+    "Compliance",
+    "Compliance_Batch_Framework"
+  ],
+  "schedule_timezone": "America/Chicago",
+  "log_level": "INFO",
+  "schedule_interval": "0 6 * * *",
+  "runs": [
+    {
+      "project": "ODR",
+      "run_type": "DAILY",
+      "period": "PREV_DAY"
+    },
+    {
+      "project": "UNIVERSE",
+      "run_type": "CMS",
+      "period": "CURRENT_CALENDAR_MONTH"
+    }
+  ],
+  "settings": {
+    "BUSINESS_TZ": "America/Chicago",
+    "LOCK_TTL_MINUTES": 240
+  },
+  "trigger_dags": [
+    "OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"
+  ]
+}

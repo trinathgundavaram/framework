@@ -1,0 +1,40 @@
+{
+  "td_conn_var": "PROD",
+  "meta_db": "REPLACE_WITH_PROD_META_DB",
+  "load_env": "PROD",
+  "email_recipient": "compliance-ops@example.com",
+  "owner": "oss",
+  "snow_assignment_group": "D&AE - EDE Govt Compliance",
+  "tags": [
+    "Compliance",
+    "Compliance_Batch_Framework"
+  ],
+  "schedule_timezone": "America/Chicago",
+  "log_level": "INFO",
+  "wdc_comp_oper_nas_var": "wdc_comp_oper_nas",
+  "settings": {
+    "BUSINESS_TZ": "America/Chicago",
+    "LOCK_TTL_MINUTES": 240,
+    "OBJECT_STORE": "nas",
+    "ARCHIVE_FOLDER": "Archive",
+    "ERROR_FOLDER": "Error",
+    "NAS_MIN_AGE_SECONDS": 120,
+    "RULE_ENGINE": "gre",
+    "GRE_ENTRYPOINT": "compliance_framework.gre_bridge:run_gre",
+    "FILE_RULES_MODE": "GATE",
+    "NOTIFY_BACKEND": "airflow",
+    "DEFAULT_NOTIFY_EMAILS": "compliance-ops@example.com"
+  },
+  "gre": {
+    "connection_type": "teradata",
+    "connection_id": "PROD",
+    "environment": "PROD",
+    "meta_db": "REPLACE_WITH_PROD_GRE_META_DB",
+    "meta_connection": "teradata",
+    "run_params": {},
+    "text_params": {},
+    "extra_filters": {},
+    "log_level": "INFO",
+    "max_parallel_rules": 1
+  }
+}
