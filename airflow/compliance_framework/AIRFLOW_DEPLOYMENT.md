@@ -137,7 +137,7 @@ a `$env` token, so one set of configuration rows works in every environment (the
 
 | Authored | DEV | TEST | QA | PROD / UAT |
 |---|---|---|---|---|
-| `CMS_STG_$ENV` | `CMS_STG_DEV` | `CMS_STG_TEST` | `CMS_STG_QA` | `CMS_STG` |
+| `CMS_$ENV_STG` | `CMS_DEV_STG` | `CMS_TEST_STG` | `CMS_QA_STG` | `CMS_STG` |
 | `cms_core_$env_t` | `cms_core_dev_t` | `cms_core_test_t` | `cms_core_qa_t` | `cms_core_t` |
 | `s3://inbound-$env/odr/in/` | `s3://inbound-dev/odr/in/` | `s3://inbound-test/odr/in/` | `s3://inbound-qa/odr/in/` | `s3://inbound-/odr/in/` |
 
@@ -145,6 +145,8 @@ a `$env` token, so one set of configuration rows works in every environment (the
 - The token matches in any casing and is replaced in its own casing (`$env` → `dev`, `$ENV` → `DEV`,
   `$Env` → `Dev`). PROD and UAT replace it with nothing; a doubled underscore left in a database name
   collapses (paths are left as they are, so prefer a database-style name where PROD has no suffix).
+- Keep the token in the middle of a database name: at the very end or start it leaves the underscore
+  behind in PROD and UAT (`CMS_STG_$ENV` → `CMS_STG_`), exactly as GRE does.
 - The environment is the `ENVIRONMENT` setting (the Variable's `environment`); `ENV_VALUE` overrides the replacement text for
   that environment (e.g. `ENV_VALUE=uat` where UAT databases do carry a suffix).
 
