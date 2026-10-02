@@ -1,0 +1,79 @@
+"""Service wiring (design §15.3 for the operational health report)."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from functools import cached_property
+from typing import Optional
+
+from .adapters import ObjectStore, RuleEngine, build_channel, build_object_store, build_rule_engine
+from .audit import NotificationDispatcher
+from .batches import IntakeProcessor, ScheduleSummary, create_batches
+from .closing import BatchCloser
+from .common import Clock, ConfigError
+from .db import Connection, held_locks, schema_exists
+from .ingest import IngestPipeline
+from .modules import ModuleOutcome, run_module
+from .overrides import DecisionProcessor
+from .settings import Settings
+
+
+@dataclass
+class App:
+    conn: Connection
+    clock: Clock
+    settings: Settings
+    store: ObjectStore
+    rules: RuleEngine
+
+    @classmethod
+    def from_settings(cls, settings: Settings, clock: Optional[Clock] = None) -> "App":
+        conn = settings.connect()
+        try:
+            if not schema_exists(conn, settings.metadata_schema):
+                raise ConfigError(f"metadata schema {settings.metadata_schema!r} is not initialised - "
+                                  "run 'framework init-db'")
+            return cls(conn, clock or Clock(), settings, build_object_store(settings), build_rule_engine(settings))
+        except BaseException:
+            conn.close()
+            raise
+
+    def close(self) -> None:
+        if not self.conn.closed:
+            self.conn.close()
+
+    def __enter__(self) -> "App":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    @cached_property
+    def closer(self) -> BatchCloser:
+        return BatchCloser(self.conn, self.clock, self.settings)
+
+    @cached_property
+    def pipeline(self) -> IngestPipeline:
+        return IngestPipeline(self.conn, self.clock, self.settings, self.store, self.rules)
+
+    @cached_property
+    def decisions(self) -> DecisionProcessor:
+        return DecisionProcessor(self.conn, self.clock, self.settings)
+
+    @cached_property
+    def intake(self) -> IntakeProcessor:
+        return IntakeProcessor(self.conn, self.clock, self.settings)
+
+    def run_module(self, name: str, params: Optional[dict] = None) -> ModuleOutcome:
+        """Run a module by name (see modules.py)."""
+        return run_module(self, name, params)
+
+    def create_batches(self, **kw) -> ScheduleSummary:
+        return create_batches(self.conn, self.clock, self.settings, **kw)
+
+    def notifier(self, channel=None) -> NotificationDispatcher:
+        return NotificationDispatcher(self.conn, self.settings, channel or build_channel(self.settings))
+
+    def health(self) -> dict[str, list[dict]]:
+        """Operational report (design §15.3), composed from the service that owns each set of tables."""
+        return {**self.pipeline.health(), **self.decisions.health(), **self.closer.health(),
+                "locks_held": held_locks(self.conn)}

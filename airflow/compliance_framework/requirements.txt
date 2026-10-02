@@ -1,0 +1,8 @@
+# Installed into the Airflow workers' environment (not Airflow's own dependencies). Python >= 3.9.
+teradatasql>=17.20.0.0
+tzdata>=2023.3
+boto3>=1.28          # S3 object store and (optionally) SES email; already present on MWAA
+# Optional file types:
+# pandas>=1.5
+# openpyxl>=3.1      # .xlsx
+# pyarrow>=12        # .parquet

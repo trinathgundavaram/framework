@@ -1,4 +1,4 @@
-"""File ingest pipeline (design §7 P5, §8, §9.4)."""
+"""File ingest pipeline on Teradata (design §7 P5, §8, §9.4)."""
 from __future__ import annotations
 
 import logging
@@ -10,8 +10,6 @@ from enum import Enum
 from functools import partial
 from typing import Optional
 
-import psycopg
-
 from . import config as cfgmod
 from . import db
 from .adapters import ERROR, ObjectInfo, ObjectStore, RuleEngine, basename, dirname, parse_uri, sha256_file
@@ -20,6 +18,7 @@ from .batches import get_batch, promoted_load
 from .common import (COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch,
                      TechnicalFailure, check_transition)
 from .config import FileConfig, MatchError, TemplateMatcher
+from .db import Connection
 from .load import sanitize_db_error, stage, swap
 from .settings import Settings
 
@@ -122,14 +121,13 @@ class PathIngestSummary:
 
 
 class IngestPipeline:
-    def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings, store: ObjectStore,
-                 rule_engine: RuleEngine, spark=None):
+    def __init__(self, conn: Connection, clock: Clock, settings: Settings, store: ObjectStore,
+                 rule_engine: RuleEngine):
         self.conn = conn
         self.clock = clock
         self.settings = settings
         self.store = store
         self.rules = rule_engine
-        self.spark = spark
         self.logger = EventLogger(conn, clock)
         self._sweep_config: Optional[tuple[TemplateMatcher, tuple[str, ...]]] = None
         self._scope_project: Optional[str] = None
@@ -249,22 +247,24 @@ class IngestPipeline:
         return load["load_stat"] == "QUARANTINED" and load["quarantine_rsn_cd"] == "FILE_REJECTED_BATCH_CLOSED"
 
     def _register(self, info: ObjectInfo) -> tuple[dict, bool]:
-        with self.conn.transaction():
-            row = self.conn.execute(
-                """INSERT INTO ComplianceFileLoad (S3_Bucket, S3_Key, S3_Version_Id, S3_ETag, File_Size_Byte,
-                                                  Load_Stat, Created_Dtts, Updated_Dtts)
-                   VALUES (%s,%s,%s,%s,%s,'RECEIVED',%s,%s)
-                   ON CONFLICT (S3_Bucket, S3_Key, COALESCE(S3_Version_Id, S3_ETag)) DO NOTHING
-                   RETURNING *""",
-                (info.bucket, info.key, info.version_id, info.etag, info.size, self.clock.now(),
-                 self.clock.now())).fetchone()
-            if row:
-                return row, True
-            row = self.conn.execute(
-                """SELECT * FROM ComplianceFileLoad WHERE S3_Bucket=%s AND S3_Key=%s
-                      AND COALESCE(S3_Version_Id, S3_ETag) = COALESCE(%s, %s)""",
-                (info.bucket, info.key, info.version_id, info.etag)).fetchone()
+        """The load row of this object version (the caller holds the object lock); True when it is new."""
+        obj_hash = db.object_hash(info.bucket, info.key, info.version_id or info.etag)
+        find = "SELECT * FROM ComplianceFileLoad WHERE Obj_Hash=%s"
+        row = self.conn.execute(find, (obj_hash,)).fetchone()
+        if row:
             return row, False
+        now = self.clock.now()
+        try:
+            self.conn.execute(
+                """INSERT INTO ComplianceFileLoad (Obj_Hash, S3_Bucket, S3_Key, S3_Version_Id, S3_ETag,
+                                                  File_Size_Byte, Load_Stat, Rules_Stat, Created_Dtts, Updated_Dtts)
+                   VALUES (%s,%s,%s,%s,%s,%s,'RECEIVED','NOT_RUN',%s,%s)""",
+                (obj_hash, info.bucket, info.key, info.version_id, info.etag, info.size, now, now))
+        except Exception as e:  # noqa: BLE001 - the same version registered under another lock key
+            if not db.is_duplicate_key(e):
+                raise
+            return self.conn.execute(find, (obj_hash,)).fetchone(), False
+        return self.conn.execute(find, (obj_hash,)).fetchone(), True
 
     def _replay(self, load: dict, info: ObjectInfo) -> IngestOutcome:
         with self.conn.transaction():
@@ -338,7 +338,7 @@ class IngestPipeline:
         today = self.clock.today(self.settings.business_tz)
         open_rows = [r for r in rows if r["batch_close_ind"] == 0]
         if open_rows:
-            return next((r for r in open_rows if r["req_dt_key"] <= today), open_rows[-1]), None
+            return next((r for r in open_rows if db.as_date(r["req_dt_key"]) <= today), open_rows[-1]), None
         for r in rows:
             ovrd = self.active_override(r, required_override_ty(self._has_data(r)), today)
             if ovrd:
@@ -369,8 +369,8 @@ class IngestPipeline:
                                         f"identical to load {current['load_id']} of batch {batch['btch_id']}",
                                         cfg, batch)
             other = self.conn.execute(
-                """SELECT Load_ID, Btch_ID FROM ComplianceFileLoad WHERE File_Sha256=%s AND Btch_ID<>%s
-                      AND Load_Stat <> 'QUARANTINED' LIMIT 1""", (sha, batch["btch_id"])).fetchone()
+                """SELECT TOP 1 Load_ID, Btch_ID FROM ComplianceFileLoad WHERE File_Sha256=%s AND Btch_ID<>%s
+                      AND Load_Stat <> 'QUARANTINED'""", (sha, batch["btch_id"])).fetchone()
             if other:
                 with self.conn.transaction():
                     self.logger.audit("FILE_SAME_CONTENT_OTHER_BATCH", load_id=load_id, req_id=req_id,
@@ -380,8 +380,7 @@ class IngestPipeline:
                                       description=f"same content as load {other['load_id']} ({other['btch_id']})")
             try:
                 staged_rows = stage(self.conn, self.settings, file_path=path, cfg=cfg, btch_id=batch["btch_id"],
-                               load_id=load_id, src_file_nm=basename(info.key), loaded_at=self.clock.now(),
-                               spark=self.spark)
+                                    load_id=load_id, src_file_nm=basename(info.key), loaded_at=self.clock.now())
             except FileRejected as e:
                 return self._quarantine(load_id, info, e.event_ty, str(e), cfg, batch)
         with self.conn.transaction():
@@ -426,7 +425,7 @@ class IngestPipeline:
         ref = s3_ref(info.bucket, info.key)
         today = self.clock.today(self.settings.business_tz)
         with self.conn.transaction():
-            b = get_batch(self.conn, req_id, for_update=True)
+            b = get_batch(self.conn, req_id)
             closed = b["batch_close_ind"] == 1
             has_data = self._has_data(b)
             ovrd = self.active_override(b, required_override_ty(has_data), today) if closed else None
@@ -492,10 +491,12 @@ class IngestPipeline:
 
     def _end_carry_forward(self, b: dict, load_id: int, now) -> None:
         """A real file replaced an applied carry-forward."""
-        row = self.conn.execute(
+        row = self.conn.execute("SELECT Ovrd_ID FROM ComplianceBatchOverride WHERE Req_ID=%s "
+                                "AND Override_Ty='REUSE' AND Apprvl_Stat='APPROVED'", (b["req_id"],)).fetchone()
+        self.conn.execute(
             """UPDATE ComplianceBatchOverride SET Valid_Thru_Dt_Key=%s, Updated_Dtts=%s, Updated_By='SYSTEM'
-                WHERE Req_ID=%s AND Override_Ty='REUSE' AND Apprvl_Stat='APPROVED' RETURNING Ovrd_ID""",
-            (b["req_dt_key"], now, b["req_id"])).fetchone()
+                WHERE Req_ID=%s AND Override_Ty='REUSE' AND Apprvl_Stat='APPROVED'""",
+            (db.as_date(b["req_dt_key"]), now, b["req_id"]))
         self.logger.batch_event("CARRY_FORWARD_REMOVED", req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id,
                                 ovrd_id=row["ovrd_id"] if row else None,
                                 detail=f"reuse of {b['reuse_btch_id']} replaced by load {load_id}")
@@ -508,15 +509,16 @@ class IngestPipeline:
         self.conn.execute(
             """UPDATE ComplianceFileLoad SET Load_Stat='RULES_FAILED', Rules_Stat=%s, Error_Txt=%s, Updated_Dtts=%s
                 WHERE Load_ID=%s""",
-            (rules_stat, detail, now, load_id))
+            (rules_stat, detail[:4000] if detail else detail, now, load_id))
 
     def _quarantine(self, load_id: int, info: ObjectInfo, event_ty: str, message: str,
                     cfg: Optional[FileConfig] = None, batch: Optional[dict] = None) -> IngestOutcome:
         with self.conn.transaction():
             self.conn.execute(
                 """UPDATE ComplianceFileLoad SET Load_Stat='QUARANTINED', Quarantine_Rsn_Cd=%s, Error_Txt=%s,
-                          Cfg_ID=COALESCE(%s, Cfg_ID), Updated_Dtts=%s WHERE Load_ID=%s""",
-                (event_ty, message, cfg.cfg_id if cfg else None, self.clock.now(), load_id))
+                          Updated_Dtts=%s WHERE Load_ID=%s""", (event_ty, message[:4000], self.clock.now(), load_id))
+            if cfg:
+                self.conn.execute("UPDATE ComplianceFileLoad SET Cfg_ID=%s WHERE Load_ID=%s", (cfg.cfg_id, load_id))
             ctx = {"project_cd": self._scope_project} if self._scope_project else {}
             if cfg:
                 ctx.update(project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_id=cfg.src_id)
@@ -540,11 +542,11 @@ class IngestPipeline:
     def _mark_technical_failure(self, load_id: int, err: Exception) -> None:
         try:
             with self.conn.transaction():
+                marks, terminal = db.in_list(sorted(TERMINAL_LOAD_STATS))
                 self.conn.execute(
-                    """UPDATE ComplianceFileLoad SET Load_Stat='FAILED_TECHNICAL', Error_Txt=%s, Updated_Dtts=%s
-                        WHERE Load_ID=%s AND Load_Stat <> ALL(%s)""",
-                    (sanitize_db_error(f"{type(err).__name__}: {err}"), self.clock.now(), load_id,
-                     list(TERMINAL_LOAD_STATS)))
+                    f"""UPDATE ComplianceFileLoad SET Load_Stat='FAILED_TECHNICAL', Error_Txt=%s, Updated_Dtts=%s
+                        WHERE Load_ID=%s AND Load_Stat NOT IN ({marks})""",
+                    [sanitize_db_error(f"{type(err).__name__}: {err}"), self.clock.now(), load_id, *terminal])
                 if isinstance(err, RowCountMismatch):
                     self.logger.audit("CORE_LOAD_ROWCOUNT_MISMATCH", load_id=load_id, description=str(err))
                 self._report_technical_failure(load_id, err)
@@ -553,7 +555,7 @@ class IngestPipeline:
 
     def _report_technical_failure(self, load_id: int, err: Exception) -> None:
         """One FILE_TECHNICAL_FAILURE event (emailed) per load."""
-        if self.conn.execute("SELECT 1 FROM CMS_ComplianceExceptionsAudit WHERE Load_ID=%s "
+        if self.conn.execute("SELECT 1 AS ok FROM CMS_ComplianceExceptionsAudit WHERE Load_ID=%s "
                              "AND Event_Ty='FILE_TECHNICAL_FAILURE'", (load_id,)).fetchone():
             return
         row = self.conn.execute(
