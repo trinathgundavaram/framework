@@ -17,32 +17,35 @@ airflow/
     adapters.py app.py cli.py common.py settings.py
     sql/schema.sql                Teradata DDL ({{META_DB}} template)
     sql/approvals.sql             manual override templates
+    examples/                     example Variables (prod, dev) and trigger configurations
     requirements.txt
 ```
 
 ## How it fits together
 
-1. A DAG task calls `compliance_task.run_compliance_step(step, ...)`.
-2. The bridge reads one **Airflow Variable** (JSON: metadata database, framework settings) and merges the
-   trigger's configuration over it, reads the Teradata credentials from one **Airflow Connection**, and
-   exports `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD` / `TERADATA_LOGMECH`.
-3. `run_framework.run_step()` opens the Teradata connection (`connection_factory.py`) with the metadata
-   database as default database and runs one module: `BATCH_CREATION`, `FILE_LOAD`,
-   `OVERRIDE_DECISIONS`, `BATCH_CLOSE` or `NOTIFY`.
+1. **One Airflow Variable** (`compliance_framework_config`, JSON) holds everything about the runs: the
+   metadata database, the framework settings, and the named **runs** (project, steps, run type, period,
+   schedule). Nothing about a run is hardcoded in the DAG file.
+2. **One Airflow Connection** (`compliance_teradata`) holds the Teradata host, login and password. The
+   bridge exports them as `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD` / `TERADATA_LOGMECH`.
+3. A DAG task calls `compliance_task.run_compliance_step(step, ...)`, which merges, in this order: the
+   Variable, the named run inside it, the trigger's configuration. It then runs one module in-process:
+   `BATCH_CREATION`, `FILE_LOAD`, `OVERRIDE_DECISIONS`, `BATCH_CLOSE` or `NOTIFY`.
 4. The task fails on a framework error (exit code 2), and on "completed with problems" (exit code 1)
-   for the steps configured that way; otherwise the outcome is returned as the task's XCom.
+   for the steps configured that way; otherwise the outcome is the task's XCom.
 
 No `.env` file and no AWS Secrets Manager: credentials come from the Airflow Connection only.
 
-## Setup
+## Deploying
 
-### 1. Install
+1. Copy `airflow/compliance_framework_dag.py` and the `airflow/compliance_framework/` folder into the
+   DAGs folder, side by side.
+2. Install `compliance_framework/requirements.txt` in the workers' environment. Airflow 2.4+, Python 3.9+.
+3. Create the Connection and the Variable (below; ready-made examples in `examples/`).
+4. Trigger `compliance_admin` with `{"command": "init-db"}`, load the configuration tables, then
+   `{"command": "validate-config"}`.
 
-Copy `airflow/` into the DAGs folder (keep `compliance_framework/` next to
-`compliance_framework_dag.py`) and install `compliance_framework/requirements.txt` in the workers'
-environment. Airflow 2.4+ (uses `schedule=`), Python 3.9+.
-
-### 2. Airflow Connection
+### Airflow Connection
 
 | Field | Value |
 |---|---|
@@ -55,22 +58,27 @@ The account needs, on the metadata database: CREATE TABLE (for `init-db`) and SE
 DELETE; on each project's staging and core databases: SELECT / INSERT / UPDATE / DELETE; and SELECT on
 `DBC.TablesV` and `DBC.ColumnsV`.
 
-### 3. Airflow Variable `compliance_framework_config`
+### Airflow Variable `compliance_framework_config`
+
+Examples: [`examples/compliance_framework_config.prod.json`](examples/compliance_framework_config.prod.json),
+[`examples/compliance_framework_config.dev.json`](examples/compliance_framework_config.dev.json). Paste one
+as the Variable's value (Admin → Variables) and replace the `REPLACE_WITH_...` values.
 
 ```json
 {
   "connection_id": "compliance_teradata",
   "meta_db": "CMS_COMPLIANCE_PROD",
-  "log_level": "INFO",
-  "settings": {
-    "QUARANTINE_URI": "s3://my-inbound-bucket/quarantine/",
-    "BUSINESS_TZ": "America/Chicago",
-    "NOTIFY_BACKEND": "airflow",
-    "DEFAULT_NOTIFY_EMAILS": "compliance-ops@example.com",
-    "RULE_ENGINE": "gre",
-    "GRE_ENTRYPOINT": "compliance_framework.gre_bridge:run_gre"
-  },
-  "gre": {"environment": "PROD", "meta_db": "GRE_META_PROD"}
+  "schedule_timezone": "America/Chicago",
+  "settings": {"QUARANTINE_URI": "s3://my-inbound-bucket/quarantine/", "NOTIFY_BACKEND": "airflow",
+               "DEFAULT_NOTIFY_EMAILS": "compliance-ops@example.com"},
+  "runs": {
+    "odr_daily_batches": {"schedule": "0 6 * * *", "project": "ODR", "steps": ["BATCH_CREATION"],
+                          "run_type": "DAILY", "period": "PREV_DAY", "alert_emails": ["odr-team@example.com"]},
+    "odr_file_load":     {"schedule": "*/15 * * * *", "project": "ODR",
+                          "steps": ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"]},
+    "odr_full_cycle":    {"project": "ODR", "run_type": "DAILY", "period": "PREV_DAY",
+                          "steps": ["BATCH_CREATION", "FILE_LOAD", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY"]}
+  }
 }
 ```
 
@@ -78,46 +86,48 @@ DELETE; on each project's staging and core databases: SELECT / INSERT / UPDATE /
 |---|---|
 | `meta_db` (required) | Teradata database holding the framework tables |
 | `connection_id` | Airflow Connection (default `compliance_teradata`) |
+| `schedule_timezone` | Time zone of the schedules (default `America/Chicago`; follows daylight saving) |
 | `settings` | Framework settings by name. Common: `QUARANTINE_URI`, `BUSINESS_TZ`, `AWS_REGION`, `NOTIFY_BACKEND` (`airflow` = Airflow's email backend, `ses`, `log`), `NOTIFY_FROM_EMAIL` (ses), `DEFAULT_NOTIFY_EMAILS`, `FILE_RULES_MODE` (`GATE` / `ANNOTATE`), `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `LOCK_TIMEOUT_SECONDS` (300), `LOCK_TTL_MINUTES` (240) |
+| `runs` | Named parameter sets, below |
 | `gre` | For `gre_bridge`: `meta_db` (GRE metadata database), `environment`, `package_dir` (folder holding the GRE's `run_rules.py`; default `<dags>/rules_engine`), `log_level` |
 | `fail_on_problems` | Per step, whether exit code 1 fails the task. Default: `BATCH_CREATION`, `BATCH_CLOSE`, `NOTIFY` true; `FILE_LOAD`, `OVERRIDE_DECISIONS` false (a bad file or override is audited and emailed, not a task failure) |
 | `log_level` | `INFO` (default), `DEBUG`, ... |
 
+Each entry of `runs` (name: letters, digits, `_`):
+
+| Key | Meaning |
+|---|---|
+| `steps` | Which steps, any of `BATCH_CREATION`, `FILE_LOAD`, `OVERRIDE_DECISIONS`, `BATCH_CLOSE`, `NOTIFY`; they always run in that order |
+| `project` | `Project_Cd`; leave out to run the steps for every project |
+| `run_type`, `period`, `table`, `lookback_days`, `lookback_weeks` | Passed to the steps that take them (`period`: `PREV_DAY`, `PREV_CALENDAR_MONTH`, `CURRENT_CALENDAR_MONTH`, `PREV_CALENDAR_WEEK`, ...) |
+| `schedule` | A cron expression. A run **with** a schedule becomes its own DAG `compliance_<run name>`; one without is only run by hand |
+| `alert_emails` | Who gets Airflow's failure email for that DAG |
+| `settings`, `fail_on_problems` | Overrides of the Variable's, for this run only |
+
 Files are read from S3 with the workers' AWS credentials (`OBJECT_STORE` = `s3`, the default).
-
-### 4. First run
-
-Trigger **`compliance_admin`** with configuration:
-
-1. `{"command": "init-db"}` creates the tables in `meta_db` (skipped when they exist).
-2. Insert the configuration rows (`ComplianceProject`, `ComplianceSourceSystem`, `ComplianceRunType`,
-   `ComplianceDataSetSourceXwalk`, `ComplianceSourceFileConfig`, `ComplianceRuleBinding`) and create each
-   project's staging and core tables (below).
-3. `{"command": "validate-config"}` must succeed.
-
-Then set the real projects, run types and times in `SCHEDULES` at the top of
-`compliance_framework_dag.py` and unpause the DAGs.
 
 ## DAGs
 
-| DAG | Schedule (America/Chicago, follows daylight saving) | Steps |
-|---|---|---|
-| `compliance_<project>_daily_batches` | 06:00 | `BATCH_CREATION` for the DAG's `run_type` / `period` |
-| `compliance_<project>_file_load` | every 15 minutes | `FILE_LOAD` → `OVERRIDE_DECISIONS` → `NOTIFY` |
-| `compliance_<project>_close` | hourly / 23:30 | `BATCH_CLOSE` → `NOTIFY` |
-| `compliance_all_projects_notify` | hourly | `NOTIFY` for events that belong to no project |
-| `compliance_manual_run` | manual | any steps for one project |
-| `compliance_admin` | manual | `init-db`, `validate-config`, `health`, `locks`, `release-lock`, `close-batch`, ... |
+| DAG | What it does |
+|---|---|
+| `compliance_batch_framework` | **The one DAG that calls every step**, in order, by hand: for a named run (`{"run": "odr_full_cycle"}`) or for parameters given at trigger time. Steps not in the run are skipped. |
+| `compliance_<run name>` | One per run that has a `schedule`, e.g. `compliance_odr_file_load`. Built from the Variable when Airflow parses the DAG file; `max_active_runs=1`. |
+| `compliance_admin` | `init-db`, `validate-config`, `health`, `locks`, `release-lock`, `close-batch`, ... |
 
-- One DAG per entry of `SCHEDULES`; add a project by adding its entries. `max_active_runs=1` keeps a
-  schedule from overlapping itself; overlapping DAGs are safe (locks, below).
-- Steps run in order; a failed step stops the rest and fails the run (`alert_emails` of the entry get
-  Airflow's failure email). Tasks retry once after 5 minutes: every step is idempotent.
-- **Manual run / re-run a missed day** — trigger with configuration; it overrides the DAG and the Variable:
-  - `compliance_manual_run`: `{"project": "ODR", "steps": ["BATCH_CREATION", "FILE_LOAD"], "run_type": "DAILY", "period": "PREV_DAY", "as_of": "2026-09-01"}`
-  - a scheduled DAG: `{"as_of": "2026-09-01"}`, or `{"variable_key": "compliance_framework_config_qa"}`
-- `compliance_admin` examples: `{"command": "close-batch", "args": ["--btch-id", "<Btch_ID>", "--closed-by", "jdoe"]}`,
-  `{"command": "release-lock", "args": ["--key", "BTCH:<Btch_ID>"]}`.
+- Change a run's parameters, add a project or add a schedule by editing the Variable; a new or changed
+  schedule appears at Airflow's next parse of the DAG file. A missing or invalid Variable never breaks
+  parsing: the scheduled DAGs are simply not created (see the scheduler log), the other two remain.
+- Steps run in order; a failed step stops the rest and fails the run. Tasks retry once after 5 minutes:
+  every step is idempotent. Overlapping DAGs are safe (locks, below).
+- A trigger's configuration overrides the run and the Variable. Examples for every case are in
+  [`examples/trigger_configurations.json`](examples/trigger_configurations.json):
+  - a named run: `{"run": "odr_full_cycle"}`; the same for a missed day: `{"run": "odr_full_cycle", "as_of": "2026-09-01"}`
+  - parameters given directly: `{"project": "UNIVERSE", "steps": ["BATCH_CREATION", "FILE_LOAD"], "run_type": "MONTHLY", "period": "PREV_CALENDAR_MONTH"}`
+  - a setting for one run: `{"project": "ODR", "steps": ["FILE_LOAD"], "settings": {"FILE_RULES_MODE": "ANNOTATE"}}`
+  - another environment's Variable: `{"variable_key": "compliance_framework_config_qa", "run": "odr_full_cycle"}`
+  - `compliance_admin`: `{"command": "close-batch", "args": ["--btch-id", "<Btch_ID>", "--closed-by", "jdoe"]}`
+- The scheduled DAGs read the Variable named by the `COMPLIANCE_VARIABLE_KEY` environment variable
+  (default `compliance_framework_config`).
 
 ## Teradata specifics
 
@@ -168,4 +178,4 @@ rules.
   `teradatasql` driver backed by PostgreSQL, and the DAGs run end to end in Airflow 2.10.
 - It has **not** been run against a real Teradata system. Before production, on a development Teradata
   system: run `init-db`, `validate-config`, then one full cycle (`BATCH_CREATION`, `FILE_LOAD` of a good
-  and a bad file, `BATCH_CLOSE`, `NOTIFY`) from `compliance_manual_run`, and check the tables.
+  and a bad file, `BATCH_CLOSE`, `NOTIFY`) from `compliance_batch_framework`, and check the tables.

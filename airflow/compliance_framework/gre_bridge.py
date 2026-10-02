@@ -1,15 +1,4 @@
-"""File rules through the GRE rules engine (the rules_engine Airflow package).
-
-Set in the framework settings:  RULE_ENGINE=gre, GRE_ENTRYPOINT=compliance_framework.gre_bridge:run_gre
-
-For each rule binding of a file the framework calls run_gre(); it runs that GRE rule_group
-(and rule_variant) with the file's batch as run parameters, then reads the verdict of every rule from
-gre_results. Rule SQL can use {btch_id}, {load_id}, {stg_schema_nm}, {stg_table_nm}, {project_cd},
-{table_nm}, {src_id}, {run_ty}, {rpt_start_dt_key}, {rpt_end_dt_key}, {req_dt_key}.
-
-Environment: GRE_META_DB (where gre_results lives), GRE_PACKAGE_DIR (folder holding run_rules.py; default:
-the rules_engine folder next to this package), plus what the GRE itself reads (GRE_ENVIRONMENT, TERADATA_*).
-"""
+"""File rules through the GRE rules engine: GRE_ENTRYPOINT=compliance_framework.gre_bridge:run_gre."""
 import logging
 import os
 import sys

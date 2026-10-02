@@ -153,7 +153,7 @@ def read_with_pandas(path: str, cfg: "FileConfig", expected_cols: int, settings:
         else:
             df = pd.read_parquet(path)
             df = df.astype("string").fillna("")
-    except Exception as e:  # noqa: BLE001 - any reader failure is a structural failure
+    except Exception as e:  # noqa: BLE001
         raise FileRejected("FILE_PARSE_ERROR", f"cannot read {cfg.src_file_ty}: {type(e).__name__}")
     if cfg.has_trailer and len(df):
         df = df.iloc[:-1]
@@ -188,7 +188,7 @@ def stage(conn: Connection, settings: "Settings", *, file_path: str, cfg: "FileC
             count = conn.executemany(insert, ([*rec, btch_id, load_id, src_file_nm, loaded_at] for rec in rows))
     except FileRejected:
         raise
-    except Exception as e:  # noqa: BLE001 - only data-conversion errors are a file problem
+    except Exception as e:  # noqa: BLE001
         if not db.is_data_error(e):
             raise
         raise FileRejected("FILE_PARSE_ERROR",

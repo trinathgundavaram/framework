@@ -1,12 +1,4 @@
-"""Library entry points: run one framework step or command in-process (no Airflow imports here).
-
-    outcome, exit_code = run_step("FILE_LOAD", project="ODR")
-    outcome, exit_code = run_command("validate-config")
-
-Reads TERADATA_HOST / TERADATA_USER / TERADATA_PASSWORD / TERADATA_LOGMECH from the environment;
-framework settings come from `settings` (name -> value) over FRAMEWORK_<NAME> environment variables.
-Exit codes: 0 done, 1 done with problems (see the outcome), 2 framework error.
-"""
+"""Run one framework step or command in-process (no Airflow imports); returns (outcome, exit code)."""
 from __future__ import annotations
 
 import contextlib
@@ -38,11 +30,7 @@ def _plain(value: Any) -> Any:
 
 def run_step(step: str, *, as_of: Optional[str] = None, settings: Optional[Mapping[str, Any]] = None,
              log_level: str = "INFO", **params) -> tuple[Optional[dict], int]:
-    """Run one module (BATCH_CREATION, FILE_LOAD, OVERRIDE_DECISIONS, BATCH_CLOSE, NOTIFY) for a project.
-
-    `params` are the run's context (project, run_type, period, table, ...); a value the module does not
-    take is ignored, so one context can be handed to every step of a run.
-    """
+    """Run one module for a project; context values the module does not take are ignored."""
     logging.getLogger(__package__).setLevel(log_level.upper())
     try:
         spec = resolve_module(step)

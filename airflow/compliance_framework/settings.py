@@ -102,7 +102,7 @@ class Settings:
             raw = build_teradata_connection(self.metadata_schema)
         except (EnvironmentError, ImportError) as e:
             raise ConfigError(str(e)) from e
-        except Exception as e:  # noqa: BLE001 - driver errors carry the reason in their first line
+        except Exception as e:  # noqa: BLE001
             raise ConfigError(f"cannot connect to {self.db_target()}: {str(e).strip().splitlines()[0]}") from e
         return Connection(raw, self.metadata_schema, self.lock_ttl_minutes * 60)
 

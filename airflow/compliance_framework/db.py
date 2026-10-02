@@ -167,7 +167,7 @@ class Connection:
             self._depth = 0
             try:
                 self._raw.rollback()
-            except Exception:  # noqa: BLE001 - Teradata already rolled the transaction back
+            except Exception:  # noqa: BLE001
                 log.debug("rollback after a failed statement", exc_info=True)
             finally:
                 self._autocommit(True)

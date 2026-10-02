@@ -200,7 +200,7 @@ class IngestPipeline:
         for loc_bucket, loc_prefix in locations:
             try:
                 objects = self.store.list_objects(loc_bucket, loc_prefix)
-            except Exception as e:  # noqa: BLE001 - an unreachable location does not stop the others
+            except Exception as e:  # noqa: BLE001
                 log.warning("could not list %s/%s: %s", loc_bucket, loc_prefix, e)
                 summary.errors.append(f"{loc_bucket}/{loc_prefix}: {type(e).__name__}: {e}")
                 continue
@@ -211,7 +211,7 @@ class IngestPipeline:
                     continue
                 try:
                     out = self.process_file(loc_bucket, info.key, info.version_id, listed=True)
-                except Exception as e:  # noqa: BLE001 - process_file already marked the load FAILED_TECHNICAL
+                except Exception as e:  # noqa: BLE001
                     summary.errors.append(f"{loc_bucket}/{info.key}: {type(e).__name__}: {e}")
                     continue
                 if out.result == "GONE":
@@ -260,7 +260,7 @@ class IngestPipeline:
                                                   File_Size_Byte, Load_Stat, Rules_Stat, Created_Dtts, Updated_Dtts)
                    VALUES (%s,%s,%s,%s,%s,%s,'RECEIVED','NOT_RUN',%s,%s)""",
                 (obj_hash, info.bucket, info.key, info.version_id, info.etag, info.size, now, now))
-        except Exception as e:  # noqa: BLE001 - the same version registered under another lock key
+        except Exception as e:  # noqa: BLE001
             if not db.is_duplicate_key(e):
                 raise
             return self.conn.execute(find, (obj_hash,)).fetchone(), False
@@ -533,7 +533,7 @@ class IngestPipeline:
     def _move(self, info: ObjectInfo, dest_uri: str, sub_prefix: str, load_id: int) -> None:
         try:
             self.store.move(info.bucket, info.key, dest_uri, info.version_id, sub_prefix)
-        except Exception as e:  # noqa: BLE001 - retried on the next event replay (C0)
+        except Exception as e:  # noqa: BLE001
             log.warning("move of %s failed: %s", info.key, e)
             with self.conn.transaction():
                 self.logger.audit("FILE_MOVE_FAILED", load_id=load_id, file_ref=s3_ref(info.bucket, info.key),

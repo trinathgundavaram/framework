@@ -1,0 +1,27 @@
+{
+  "connection_id": "compliance_teradata_dev",
+  "meta_db": "CMS_COMPLIANCE_DEV",
+  "log_level": "DEBUG",
+  "schedule_timezone": "America/Chicago",
+  "settings": {
+    "QUARANTINE_URI": "s3://REPLACE_WITH_DEV_INBOUND_BUCKET/quarantine/",
+    "BUSINESS_TZ": "America/Chicago",
+    "NOTIFY_BACKEND": "log",
+    "DEFAULT_NOTIFY_EMAILS": "compliance-dev@example.com",
+    "RULE_ENGINE": "none",
+    "LOCK_TTL_MINUTES": 60
+  },
+  "runs": {
+    "odr_file_load": {
+      "schedule": "0 * * * *",
+      "project": "ODR",
+      "steps": ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"]
+    },
+    "odr_full_cycle": {
+      "project": "ODR",
+      "steps": ["BATCH_CREATION", "FILE_LOAD", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY"],
+      "run_type": "DAILY",
+      "period": "PREV_DAY"
+    }
+  }
+}

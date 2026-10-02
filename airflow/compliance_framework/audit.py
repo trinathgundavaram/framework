@@ -150,7 +150,7 @@ class NotificationDispatcher:
                       "\n".join(f"{k}: {r[k]}" for k in _BODY_KEYS if r.get(k) is not None), recipients)
         try:
             self.channel.send(msg)
-        except Exception:  # noqa: BLE001 - never roll back pipeline state for a notification
+        except Exception:  # noqa: BLE001
             log.exception("notification for event %s failed", r["event_id"])
             return False
         return True
