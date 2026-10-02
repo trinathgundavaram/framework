@@ -24,7 +24,7 @@ class InvalidStatusTransition(FrameworkError):
 
 
 class TechnicalFailure(FrameworkError):
-    """Retryable infrastructure failure (DB, rules engine, object store...)."""
+    """Retryable infrastructure failure (DB, rules engine, file store...)."""
 
 
 class RuleEngineNotConfigured(TechnicalFailure):

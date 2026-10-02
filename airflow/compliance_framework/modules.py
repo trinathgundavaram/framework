@@ -78,19 +78,17 @@ def _batch_creation(app, p: dict) -> ModuleOutcome:
 
 
 def _file_load(app, p: dict) -> ModuleOutcome:
-    bucket, key, prefix, project = p.get("bucket"), p.get("key"), p.get("prefix"), p.get("project")
-    if project and (bucket or key or prefix):
-        raise ConfigError("FILE_LOAD takes --project (that project's configured locations) or "
-                          "--bucket/--key/--prefix, not both")
-    if key:
-        if not bucket:
-            raise ConfigError("FILE_LOAD with --key also needs --bucket")
-        if prefix:
-            raise ConfigError("FILE_LOAD takes --key (one object) or --prefix (one location), not both")
-        return ModuleOutcome("FILE_LOAD", app.pipeline.process_file(bucket, key, p.get("version_id")), 0)
-    if p.get("version_id"):
-        raise ConfigError("--version-id only applies to a single object (--key)")
-    s = app.pipeline.process_path(bucket, prefix, project)
+    share, file, folder, project = p.get("share"), p.get("file"), p.get("folder"), p.get("project")
+    if project and (share or file or folder):
+        raise ConfigError("FILE_LOAD takes --project (that project's configured folders) or "
+                          "--share/--file/--folder, not both")
+    if file:
+        if not share:
+            raise ConfigError("FILE_LOAD with --file also needs --share")
+        if folder:
+            raise ConfigError("FILE_LOAD takes --file (one file) or --folder (one folder), not both")
+        return ModuleOutcome("FILE_LOAD", app.pipeline.process_file(share, file), 0)
+    s = app.pipeline.process_path(share, folder, project)
     return ModuleOutcome("FILE_LOAD", s, 1 if s.errors else 0)
 
 
@@ -128,9 +126,9 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
                   Param("lookback_days", int), Param("lookback_weeks", int)),
         handler=_batch_creation),
     ModuleSpec(
-        "FILE_LOAD", "load inbound files: one object (--bucket --key), one location (--bucket --prefix), "
-                     "one project's configured locations (--project) or every configured location (no arguments)",
-        required=(), optional=(Param("bucket"), Param("key"), Param("prefix"), Param("version_id"), Param("project")),
+        "FILE_LOAD", "load inbound files: one file (--share --file), one folder (--share --folder), "
+                     "one project's configured folders (--project) or every configured folder (no arguments)",
+        required=(), optional=(Param("share"), Param("file"), Param("folder"), Param("project")),
         handler=_file_load),
     ModuleSpec(
         "FILE_RULES", "run the bound rules on the files already loaded to core that have not had them yet; "

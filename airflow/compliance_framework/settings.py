@@ -24,7 +24,7 @@ class Settings:
     aws_region: str = "us-east-1"
     business_tz: str = "America/Chicago"
 
-    object_store: str = "nas"
+    file_store: str = "nas"
     local_store_root: str = "./.local_store"
     archive_folder: str = "Archive"
     error_folder: str = "Error"
@@ -95,7 +95,7 @@ class Settings:
             raise ConfigError(f"ENV_VALUE {self.env_value!r} must be letters, digits or _")
         for name, allowed in (("file_rules_mode", ("GATE", "ANNOTATE")),
                               ("file_effective_date_basis", ("RPT_START", "RPT_END")),
-                              ("notify_backend", ("log", "ses", "airflow")), ("object_store", ("nas", "s3", "local"))):
+                              ("notify_backend", ("log", "ses", "airflow")), ("file_store", ("nas", "local"))):
             if getattr(self, name) not in allowed:
                 raise ConfigError(f"{name.upper()} must be one of {allowed}, got {getattr(self, name)!r}")
         for name in ("archive_folder", "error_folder"):

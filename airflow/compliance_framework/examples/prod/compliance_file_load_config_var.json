@@ -17,7 +17,7 @@
   "settings": {
     "BUSINESS_TZ": "America/Chicago",
     "LOCK_TTL_MINUTES": 240,
-    "OBJECT_STORE": "nas",
+    "FILE_STORE": "nas",
     "ARCHIVE_FOLDER": "Archive",
     "ERROR_FOLDER": "Error",
     "NAS_MIN_AGE_SECONDS": 120

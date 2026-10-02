@@ -63,7 +63,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceFileConfig (
   Src_File_Has_Hdr_Ind   SMALLINT     NOT NULL,
   Src_File_Has_Trlr_Ind  SMALLINT     NOT NULL,
   Allow_Zero_Rcd_Ind     SMALLINT     NOT NULL,
-  S3_Src_File_Path       VARCHAR(500) NOT NULL,
+  Src_File_Path          VARCHAR(500) NOT NULL,
   Stg_Schema_Nm          VARCHAR(63)  NOT NULL,
   Stg_Table_Nm           VARCHAR(63)  NOT NULL,
   Core_Schema_Nm         VARCHAR(63)  NOT NULL,
@@ -141,11 +141,10 @@ ON {{META_DB}}.ComplianceRequestControl;
 
 CREATE MULTISET TABLE {{META_DB}}.ComplianceFileLoad (
   Load_ID           BIGINT GENERATED ALWAYS AS IDENTITY,
-  Obj_Hash          CHAR(64)      NOT NULL,
-  S3_Bucket         VARCHAR(100)  NOT NULL,
-  S3_Key            VARCHAR(1024) NOT NULL,
-  S3_Version_Id     VARCHAR(200),
-  S3_ETag           VARCHAR(200)  NOT NULL,
+  File_Hash         CHAR(64)      NOT NULL,
+  File_Share        VARCHAR(200)  NOT NULL,
+  File_Path         VARCHAR(1024) NOT NULL,
+  File_Version      VARCHAR(200)  NOT NULL,
   File_Size_Byte    BIGINT        NOT NULL,
   File_Sha256       CHAR(64),
   Cfg_ID            BIGINT,
@@ -161,7 +160,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceFileLoad (
 )
 UNIQUE PRIMARY INDEX (Load_ID);
 
-CREATE UNIQUE INDEX uq_fileload_object (Obj_Hash)
+CREATE UNIQUE INDEX uq_fileload_file (File_Hash)
 ON {{META_DB}}.ComplianceFileLoad;
 
 CREATE INDEX ix_fileload_batch (Btch_ID)
@@ -170,7 +169,7 @@ ON {{META_DB}}.ComplianceFileLoad;
 CREATE INDEX ix_fileload_sha (File_Sha256)
 ON {{META_DB}}.ComplianceFileLoad;
 
-CREATE INDEX ix_fileload_key (S3_Key)
+CREATE INDEX ix_fileload_path (File_Path)
 ON {{META_DB}}.ComplianceFileLoad;
 
 CREATE MULTISET TABLE {{META_DB}}.ComplianceBatchOverride (

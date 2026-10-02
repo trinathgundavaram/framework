@@ -12,7 +12,7 @@ from typing import Optional
 
 from . import config as cfgmod
 from . import db
-from .adapters import ObjectInfo, ObjectStore, basename, dirname, parse_uri, sha256_file
+from .adapters import FileInfo, FileStore, basename, dirname, parse_uri, sha256_file
 from .audit import EventLogger
 from .batches import get_batch, promoted_load
 from .common import COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch, check_transition
@@ -116,7 +116,7 @@ class PathIngestSummary:
 
 
 class IngestPipeline:
-    def __init__(self, conn: Connection, clock: Clock, settings: Settings, store: ObjectStore):
+    def __init__(self, conn: Connection, clock: Clock, settings: Settings, store: FileStore):
         self.conn = conn
         self.clock = clock
         self.settings = settings
@@ -125,21 +125,20 @@ class IngestPipeline:
         self._sweep_config: Optional[tuple[TemplateMatcher, tuple[str, ...]]] = None
         self._scope_project: Optional[str] = None
 
-    def process_file(self, bucket: str, key: str, version_id: Optional[str] = None, *,
-                     listed: bool = False) -> IngestOutcome:
-        """Process one object; `listed` = it came from a folder listing, so another run may have moved it since."""
-        obj = db.object_key(bucket, key, version_id)
+    def process_file(self, share: str, path: str, *, listed: bool = False) -> IngestOutcome:
+        """Process one file; `listed` = it came from a folder listing, so another run may have moved it since."""
+        obj = db.file_key(share, path)
         if not db.try_lock(self.conn, obj):
-            return IngestOutcome(None, "IN_PROGRESS", message="another process is loading this object")
+            return IngestOutcome(None, "IN_PROGRESS", message="another process is loading this file")
         try:
-            if listed and not self.store.exists(bucket, key):
+            if listed and not self.store.exists(share, path):
                 return IngestOutcome(None, "GONE", message="already moved by another run")
-            return self._process_object(bucket, key, version_id)
+            return self._process_registered(share, path)
         finally:
             db.unlock(self.conn, obj)
 
-    def _process_object(self, bucket: str, key: str, version_id: Optional[str]) -> IngestOutcome:
-        info = self.store.head(bucket, key, version_id)
+    def _process_registered(self, share: str, path: str) -> IngestOutcome:
+        info = self.store.head(share, path)
         load, is_new = self._register(info)
         if not is_new:
             if load["load_stat"] in TERMINAL_LOAD_STATS and not self._retryable_quarantine(load):
@@ -155,18 +154,18 @@ class IngestPipeline:
             self._mark_technical_failure(load["load_id"], e)
             raise
 
-    def process_path(self, bucket: Optional[str] = None, prefix: Optional[str] = None,
+    def process_path(self, share: Optional[str] = None, folder: Optional[str] = None,
                      project_cd: Optional[str] = None) -> PathIngestSummary:
-        """Process every object at one location, a project's locations, or every configured location."""
-        if bool(bucket) != bool(prefix):
-            raise ValueError("bucket and prefix must be given together, or both omitted")
-        if project_cd and bucket:
-            raise ValueError("a project sweep covers that project's configured locations; omit bucket and prefix")
+        """Process every file in one folder, a project's folders, or every configured folder."""
+        if bool(share) != bool(folder):
+            raise ValueError("share and folder must be given together, or both omitted")
+        if project_cd and share:
+            raise ValueError("a project sweep covers that project's configured locations; omit share and folder")
         own = None
         if project_cd:
             locations, shared, own = self._project_locations(project_cd)
         else:
-            locations = [(bucket, prefix if not prefix or prefix.endswith("/") else prefix + "/")] if bucket \
+            locations = [(share, folder if not folder or folder.endswith("/") else folder + "/")] if share \
                 else self._configured_locations()
             shared = set()
         summary = PathIngestSummary(locations=[f"{b}/{p}" for b, p in locations])
@@ -184,28 +183,28 @@ class IngestPipeline:
         """(the project's inbound locations, the ones other projects also use, its own templates)."""
         cfgs = cfgmod.active_file_configs(self.conn, self.settings)
         mine = [c for c in cfgs if c.project_cd == project_cd]
-        locations = sorted({parse_uri(c.s3_src_file_path) for c in mine})
-        shared = {parse_uri(c.s3_src_file_path) for c in cfgs if c.project_cd != project_cd} & set(locations)
+        locations = sorted({parse_uri(c.src_file_path) for c in mine})
+        shared = {parse_uri(c.src_file_path) for c in cfgs if c.project_cd != project_cd} & set(locations)
         return locations, shared, TemplateMatcher(mine, self.settings.filename_case_sensitive)
 
     def _sweep(self, locations: list[tuple[str, str]], summary: PathIngestSummary, shared: set,
                own: Optional[TemplateMatcher]) -> None:
-        for loc_bucket, loc_prefix in locations:
+        for loc_share, loc_folder in locations:
             try:
-                objects = self.store.list_objects(loc_bucket, loc_prefix)
+                files = self.store.list_files(loc_share, loc_folder)
             except Exception as e:  # noqa: BLE001
-                log.warning("could not list %s/%s: %s", loc_bucket, loc_prefix, e)
-                summary.errors.append(f"{loc_bucket}/{loc_prefix}: {type(e).__name__}: {e}")
+                log.warning("could not list %s/%s: %s", loc_share, loc_folder, e)
+                summary.errors.append(f"{loc_share}/{loc_folder}: {type(e).__name__}: {e}")
                 continue
-            for info in objects:
+            for info in files:
                 summary.scanned += 1
-                if (loc_bucket, loc_prefix) in shared and not own.candidates(basename(info.key)):
+                if (loc_share, loc_folder) in shared and not own.candidates(basename(info.path)):
                     summary.skipped += 1
                     continue
                 try:
-                    out = self.process_file(loc_bucket, info.key, info.version_id, listed=True)
+                    out = self.process_file(loc_share, info.path, listed=True)
                 except Exception as e:  # noqa: BLE001
-                    summary.errors.append(f"{loc_bucket}/{info.key}: {type(e).__name__}: {e}")
+                    summary.errors.append(f"{loc_share}/{info.path}: {type(e).__name__}: {e}")
                     continue
                 if out.result == "GONE":
                     summary.skipped += 1
@@ -218,8 +217,8 @@ class IngestPipeline:
                 tuple(cfgmod.run_types(self.conn)))
 
     def _configured_locations(self) -> list[tuple[str, str]]:
-        """The distinct (bucket, prefix) inbound locations of every active file config."""
-        return sorted({parse_uri(c.s3_src_file_path) for c in cfgmod.active_file_configs(self.conn, self.settings)})
+        """The distinct (share, folder) inbound locations of every active file config."""
+        return sorted({parse_uri(c.src_file_path) for c in cfgmod.active_file_configs(self.conn, self.settings)})
 
     def health(self) -> dict[str, list[dict]]:
         """Loads stuck mid-pipeline, and current quarantine counts by reason (design §15.3)."""
@@ -227,7 +226,7 @@ class IngestPipeline:
         stale_before = self.clock.now() - timedelta(minutes=self.settings.heartbeat_stale_minutes)
         return {
             "stale_loads": q(
-                """SELECT Load_ID, S3_Key, Load_Stat, Updated_Dtts FROM ComplianceFileLoad
+                """SELECT Load_ID, File_Path, Load_Stat, Updated_Dtts FROM ComplianceFileLoad
                     WHERE Load_Stat IN ('RECEIVED','STAGING','STAGED','RULES_RUNNING','FAILED_TECHNICAL')
                       AND Updated_Dtts < %s ORDER BY Load_ID""", stale_before),
             "quarantine_by_reason": q("""SELECT Quarantine_Rsn_Cd, count(*) AS n FROM ComplianceFileLoad
@@ -239,51 +238,51 @@ class IngestPipeline:
         """A file quarantined only because its batch was closed is reprocessed when it is delivered again."""
         return load["load_stat"] == "QUARANTINED" and load["quarantine_rsn_cd"] == "FILE_REJECTED_BATCH_CLOSED"
 
-    def _register(self, info: ObjectInfo) -> tuple[dict, bool]:
-        """The load row of this object version (the caller holds the object lock); True when it is new."""
-        obj_hash = db.object_hash(info.bucket, info.key, info.version_id or info.etag)
-        find = "SELECT * FROM ComplianceFileLoad WHERE Obj_Hash=%s"
-        row = self.conn.execute(find, (obj_hash,)).fetchone()
+    def _register(self, info: FileInfo) -> tuple[dict, bool]:
+        """The load row of this delivery of the file (the caller holds the file lock); True when it is new."""
+        file_hash = db.file_hash(info.share, info.path, info.version)
+        find = "SELECT * FROM ComplianceFileLoad WHERE File_Hash=%s"
+        row = self.conn.execute(find, (file_hash,)).fetchone()
         if row:
             return row, False
         now = self.clock.now()
         try:
             self.conn.execute(
-                """INSERT INTO ComplianceFileLoad (Obj_Hash, S3_Bucket, S3_Key, S3_Version_Id, S3_ETag,
+                """INSERT INTO ComplianceFileLoad (File_Hash, File_Share, File_Path, File_Version,
                                                   File_Size_Byte, Load_Stat, Rules_Stat, Created_Dtts, Updated_Dtts)
-                   VALUES (%s,%s,%s,%s,%s,%s,'RECEIVED','NOT_RUN',%s,%s)""",
-                (obj_hash, info.bucket, info.key, info.version_id, info.etag, info.size, now, now))
+                   VALUES (%s,%s,%s,%s,%s,'RECEIVED','NOT_RUN',%s,%s)""",
+                (file_hash, info.share, info.path, info.version, info.size, now, now))
         except Exception as e:  # noqa: BLE001
             if not db.is_duplicate_key(e):
                 raise
-            return self.conn.execute(find, (obj_hash,)).fetchone(), False
-        return self.conn.execute(find, (obj_hash,)).fetchone(), True
+            return self.conn.execute(find, (file_hash,)).fetchone(), False
+        return self.conn.execute(find, (file_hash,)).fetchone(), True
 
-    def _replay(self, load: dict, info: ObjectInfo) -> IngestOutcome:
+    def _replay(self, load: dict, info: FileInfo) -> IngestOutcome:
         with self.conn.transaction():
             self.logger.audit("FILE_EVENT_REPLAY_IGNORED", load_id=load["load_id"], req_id=load["req_id"],
-                              btch_id=load["btch_id"], file_ref=self.store.uri(info.bucket, info.key),
+                              btch_id=load["btch_id"], file_ref=self.store.uri(info.share, info.path),
                               description=f"load already {load['load_stat']}")
-        if self.store.exists(info.bucket, info.key):
+        if self.store.exists(info.share, info.path):
             self._archive(info, load["load_id"], rejected=load["load_stat"] in ERROR_LOAD_STATS)
         return IngestOutcome(load["load_id"], "REPLAY_IGNORED", req_id=load["req_id"])
 
-    def _process(self, load_id: int, info: ObjectInfo) -> IngestOutcome:
-        name = basename(info.key)
+    def _process(self, load_id: int, info: FileInfo) -> IngestOutcome:
+        name = basename(info.path)
         matcher, run_type_codes = self._sweep_config or self._load_config()
         try:
             m = matcher.match(name)
         except MatchError as e:
             return self._quarantine(load_id, info, e.event_ty, str(e), e.cfg)
         cfg = m.cfg
-        bucket, prefix = parse_uri(cfg.s3_src_file_path)
-        if info.bucket != bucket or dirname(info.key) != prefix:
+        share, folder = parse_uri(cfg.src_file_path)
+        if info.share != share or dirname(info.path) != folder:
             return self._quarantine(load_id, info, "FILE_REJECTED_UNPARSEABLE",
                                     f"{name} matched Cfg_ID {cfg.cfg_id} but is not in its inbound location", cfg)
         if not self.settings.load_duplicate:
             loaded = self.conn.execute(
-                """SELECT TOP 1 Load_ID FROM ComplianceFileLoad WHERE S3_Bucket=%s AND S3_Key=%s AND Load_ID<>%s
-                  AND Load_Stat IN ('PROMOTED','SUPERSEDED') ORDER BY Load_ID DESC""", (info.bucket, info.key, load_id)).fetchone()
+                """SELECT TOP 1 Load_ID FROM ComplianceFileLoad WHERE File_Share=%s AND File_Path=%s AND Load_ID<>%s
+                  AND Load_Stat IN ('PROMOTED','SUPERSEDED') ORDER BY Load_ID DESC""", (info.share, info.path, load_id)).fetchone()
             if loaded:
                 return self._quarantine(load_id, info, "FILE_REJECTED_DUPLICATE",
                                         f"{name} was already loaded (load {loaded['load_id']}); "
@@ -352,11 +351,11 @@ class IngestPipeline:
     def _has_data(self, batch: dict) -> bool:
         return batch["resolution_ty"] == "CARRY_FORWARD" or promoted_load(self.conn, batch["btch_id"]) is not None
 
-    def _process_locked(self, load_id: int, info: ObjectInfo, cfg: FileConfig, req_id: int) -> IngestOutcome:
+    def _process_locked(self, load_id: int, info: FileInfo, cfg: FileConfig, req_id: int) -> IngestOutcome:
         batch = get_batch(self.conn, req_id)
         with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, basename(info.key))
-            self.store.download(info.bucket, info.key, path, info.version_id)
+            path = os.path.join(tmp, basename(info.path))
+            self.store.download(info.share, info.path, path)
             sha = sha256_file(path)
             with self.conn.transaction():
                 self.conn.execute("UPDATE ComplianceFileLoad SET File_Sha256=%s, Updated_Dtts=%s WHERE Load_ID=%s",
@@ -367,13 +366,13 @@ class IngestPipeline:
             if other:
                 with self.conn.transaction():
                     self.logger.audit("FILE_SAME_CONTENT_OTHER_BATCH", load_id=load_id, req_id=req_id,
-                                      btch_id=batch["btch_id"], file_ref=self.store.uri(info.bucket, info.key),
+                                      btch_id=batch["btch_id"], file_ref=self.store.uri(info.share, info.path),
                                       project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_id=cfg.src_id,
                                       run_ty=batch["run_ty"],
                                       description=f"same content as load {other['load_id']} ({other['btch_id']})")
             try:
                 staged_rows = stage(self.conn, self.settings, file_path=path, cfg=cfg, btch_id=batch["btch_id"],
-                                    load_id=load_id, src_file_nm=basename(info.key), loaded_at=self.clock.now())
+                                    load_id=load_id, src_file_nm=basename(info.path), loaded_at=self.clock.now())
             except FileRejected as e:
                 return self._quarantine(load_id, info, e.event_ty, str(e), cfg, batch)
         with self.conn.transaction():
@@ -393,7 +392,7 @@ class IngestPipeline:
 
     def _resolve(self, load_id, info, cfg, req_id, passed, rules_stat, failure_event, detail) -> IngestOutcome:
         now = self.clock.now()
-        ref = self.store.uri(info.bucket, info.key)
+        ref = self.store.uri(info.share, info.path)
         today = self.clock.today(self.settings.business_tz)
         with self.conn.transaction():
             b = get_batch(self.conn, req_id)
@@ -482,7 +481,7 @@ class IngestPipeline:
                 WHERE Load_ID=%s""",
             (rules_stat, detail[:4000] if detail else detail, now, load_id))
 
-    def _quarantine(self, load_id: int, info: ObjectInfo, event_ty: str, message: str,
+    def _quarantine(self, load_id: int, info: FileInfo, event_ty: str, message: str,
                     cfg: Optional[FileConfig] = None, batch: Optional[dict] = None) -> IngestOutcome:
         with self.conn.transaction():
             self.conn.execute(
@@ -495,21 +494,21 @@ class IngestPipeline:
                 ctx.update(project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_id=cfg.src_id)
             if batch:
                 ctx.update(run_ty=batch["run_ty"], req_id=batch["req_id"], btch_id=batch["btch_id"])
-            self.logger.audit(event_ty, load_id=load_id, file_ref=self.store.uri(info.bucket, info.key),
+            self.logger.audit(event_ty, load_id=load_id, file_ref=self.store.uri(info.share, info.path),
                               description=message, **ctx)
         self._archive(info, load_id, rejected=True)
         return IngestOutcome(load_id, "QUARANTINED", event_ty=event_ty, message=message,
                              req_id=batch["req_id"] if batch else None)
 
-    def _archive(self, info: ObjectInfo, load_id: int, rejected: bool = False) -> None:
+    def _archive(self, info: FileInfo, load_id: int, rejected: bool = False) -> None:
         """A loaded file moves to <its folder>/Archive/, one that was not loaded to <its folder>/Error/."""
         folder = self.settings.error_folder if rejected else self.settings.archive_folder
         try:
-            self.store.archive(info.bucket, info.key, folder, info.version_id)
+            self.store.archive(info.share, info.path, folder)
         except Exception as e:  # noqa: BLE001
-            log.warning("moving %s to %s/ failed: %s", info.key, folder, e)
+            log.warning("moving %s to %s/ failed: %s", info.path, folder, e)
             with self.conn.transaction():
-                self.logger.audit("FILE_MOVE_FAILED", load_id=load_id, file_ref=self.store.uri(info.bucket, info.key),
+                self.logger.audit("FILE_MOVE_FAILED", load_id=load_id, file_ref=self.store.uri(info.share, info.path),
                                   description=f"{type(e).__name__} moving to {folder}/")
 
     def _mark_technical_failure(self, load_id: int, err: Exception) -> None:
@@ -532,11 +531,11 @@ class IngestPipeline:
                              "AND Event_Ty='FILE_TECHNICAL_FAILURE'", (load_id,)).fetchone():
             return
         row = self.conn.execute(
-            """SELECT f.S3_Bucket, f.S3_Key, f.Req_ID, f.Btch_ID, c.Project_Cd, c.Table_Nm, c.Src_ID, c.Run_Ty
+            """SELECT f.File_Share, f.File_Path, f.Req_ID, f.Btch_ID, c.Project_Cd, c.Table_Nm, c.Src_ID, c.Run_Ty
                  FROM ComplianceFileLoad f LEFT JOIN ComplianceRequestControl c ON c.Req_ID = f.Req_ID
                 WHERE f.Load_ID=%s""", (load_id,)).fetchone()
         self.logger.audit("FILE_TECHNICAL_FAILURE", load_id=load_id, req_id=row["req_id"], btch_id=row["btch_id"],
-                          file_ref=self.store.uri(row["s3_bucket"], row["s3_key"]),
+                          file_ref=self.store.uri(row["file_share"], row["file_path"]),
                           project_cd=row["project_cd"] or self._scope_project, table_nm=row["table_nm"],
                           src_id=row["src_id"], run_ty=row["run_ty"],
                           description=sanitize_db_error(f"{type(err).__name__}: {err}")[:500])

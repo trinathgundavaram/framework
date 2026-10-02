@@ -1,4 +1,4 @@
-"""Adapters to external systems: object store, rules engine, email."""
+"""Adapters to external systems: file store (NAS), rules engine, email."""
 from __future__ import annotations
 
 import errno
@@ -25,19 +25,18 @@ log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class ObjectInfo:
-    bucket: str
-    key: str
-    version_id: Optional[str]
-    etag: str
+class FileInfo:
+    share: str
+    path: str
+    version: str
     size: int
 
 
 def parse_uri(uri: str) -> tuple[str, str]:
-    """A file location -> (bucket, 'folder/').
+    """A file location -> (share, 'folder/').
 
     NAS: \\\\server\\share\\folder, //server/share/folder or smb://server/share/folder -> ('server/share', 'folder/');
-    nas://share/folder -> ('share', 'folder/') on the server of the NAS connection. Also s3://bucket/prefix/.
+    nas://share/folder -> ('share', 'folder/') on the server of the NAS connection.
     """
     text = (uri or "").strip().replace("\\", "/")
     p = urlparse(text)
@@ -45,24 +44,24 @@ def parse_uri(uri: str) -> tuple[str, str]:
         share, _, folder = p.path.lstrip("/").partition("/")
         if not p.netloc or not share:
             raise ValueError(f"NAS path {uri!r} must name a server and a share")
-        bucket = f"{p.netloc.lower()}/{share.lower()}"
+        share = f"{p.netloc.lower()}/{share.lower()}"
     elif p.scheme == "nas" and p.netloc:
-        bucket, folder = p.netloc.lower(), p.path
-    elif p.scheme in ("s3", "local") and p.netloc:
-        bucket, folder = p.netloc, p.path
+        share, folder = p.netloc.lower(), p.path
+    elif p.scheme == "local" and p.netloc:
+        share, folder = p.netloc, p.path
     else:
-        raise ValueError(f"unsupported file location {uri!r}: use \\\\server\\share\\folder, "
-                         "nas://share/folder or s3://bucket/prefix/")
+        raise ValueError(f"unsupported file location {uri!r}: use \\\\server\\share\\folder "
+                         "or nas://share/folder")
     folder = "/".join(x for x in folder.split("/") if x)
-    return bucket, folder + "/" if folder else ""
+    return share, folder + "/" if folder else ""
 
 
-def basename(key: str) -> str:
-    return key.rsplit("/", 1)[-1]
+def basename(path: str) -> str:
+    return path.rsplit("/", 1)[-1]
 
 
-def dirname(key: str) -> str:
-    return key.rsplit("/", 1)[0] + "/" if "/" in key else ""
+def dirname(path: str) -> str:
+    return path.rsplit("/", 1)[0] + "/" if "/" in path else ""
 
 
 def _hash_file(path, algorithm: str) -> str:
@@ -77,141 +76,89 @@ def sha256_file(path: str) -> str:
     return _hash_file(path, "sha256")
 
 
-class ObjectStore(ABC):
+class FileStore(ABC):
     @abstractmethod
-    def head(self, bucket: str, key: str, version_id: Optional[str] = None) -> ObjectInfo: ...
-
-    @abstractmethod
-    def exists(self, bucket: str, key: str) -> bool: ...
+    def head(self, share: str, path: str) -> FileInfo: ...
 
     @abstractmethod
-    def list_objects(self, bucket: str, prefix: str) -> list[ObjectInfo]: ...
+    def exists(self, share: str, path: str) -> bool: ...
 
     @abstractmethod
-    def download(self, bucket: str, key: str, dest: str, version_id: Optional[str] = None) -> None: ...
+    def list_files(self, share: str, folder: str) -> list[FileInfo]: ...
 
     @abstractmethod
-    def copy(self, src_bucket: str, src_key: str, dst_bucket: str, dst_key: str,
-             version_id: Optional[str] = None) -> None: ...
+    def download(self, share: str, path: str, dest: str) -> None: ...
 
     @abstractmethod
-    def delete(self, bucket: str, key: str) -> None: ...
+    def copy(self, src_share: str, src_path: str, dst_share: str, dst_path: str) -> None: ...
 
-    def uri(self, bucket: str, key: str) -> str:
-        return f"s3://{bucket}/{key}"
+    @abstractmethod
+    def delete(self, share: str, path: str) -> None: ...
 
-    def archive(self, bucket: str, key: str, folder: str, version_id: Optional[str] = None) -> str:
-        """Move a file into <its own folder>/<folder>/; returns the new key."""
-        dst_key = f"{dirname(key)}{folder}/{basename(key)}"
-        self.copy(bucket, key, bucket, dst_key, version_id)
-        self.delete(bucket, key)
-        return dst_key
+    def uri(self, share: str, path: str) -> str:
+        return f"//{share}/{path}"
+
+    def archive(self, share: str, path: str, folder: str) -> str:
+        """Move a file into <its own folder>/<folder>/; returns the new path."""
+        dst_path = f"{dirname(path)}{folder}/{basename(path)}"
+        self.copy(share, path, share, dst_path)
+        self.delete(share, path)
+        return dst_path
 
 
-class LocalObjectStore(ObjectStore):
-    """<root>/<bucket>/<key>."""
+class LocalFileStore(FileStore):
+    """<root>/<share>/<path>."""
 
     def __init__(self, root: str):
         self.root = Path(root)
 
-    def _path(self, bucket: str, key: str) -> Path:
-        p = (self.root / bucket / key).resolve()
+    def _path(self, share: str, path: str) -> Path:
+        p = (self.root / share / path).resolve()
         if not p.is_relative_to(self.root.resolve()):
             raise ValueError("path escapes the local store root")
         return p
 
-    def put(self, bucket: str, key: str, data: bytes) -> None:
-        p = self._path(bucket, key)
+    def put(self, share: str, path: str, data: bytes) -> None:
+        p = self._path(share, path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
 
-    def head(self, bucket, key, version_id=None):
-        p = self._path(bucket, key)
+    def head(self, share, path):
+        p = self._path(share, path)
         if not p.is_file():
-            raise FileNotFoundError(f"local://{bucket}/{key}")
-        return ObjectInfo(bucket, key, None, _hash_file(p, "md5"), p.stat().st_size)
+            raise FileNotFoundError(f"local://{share}/{path}")
+        return FileInfo(share, path, _hash_file(p, "md5"), p.stat().st_size)
 
-    def exists(self, bucket, key):
-        return self._path(bucket, key).is_file()
+    def exists(self, share, path):
+        return self._path(share, path).is_file()
 
-    def list_objects(self, bucket, prefix):
-        """Files directly under <bucket>/<prefix>, not recursive."""
-        d = self._path(bucket, prefix)
+    def list_files(self, share, folder):
+        """Files directly under <share>/<folder>, not recursive."""
+        d = self._path(share, folder)
         if not d.is_dir():
             return []
-        return [ObjectInfo(bucket, f"{prefix}{p.name}", None, _hash_file(p, "md5"), p.stat().st_size)
+        return [FileInfo(share, f"{folder}{p.name}", _hash_file(p, "md5"), p.stat().st_size)
                 for p in sorted(d.iterdir()) if p.is_file()]
 
-    def download(self, bucket, key, dest, version_id=None):
-        shutil.copyfile(self._path(bucket, key), dest)
+    def download(self, share, path, dest):
+        shutil.copyfile(self._path(share, path), dest)
 
-    def copy(self, src_bucket, src_key, dst_bucket, dst_key, version_id=None):
-        dst = self._path(dst_bucket, dst_key)
+    def copy(self, src_share, src_path, dst_share, dst_path):
+        dst = self._path(dst_share, dst_path)
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(self._path(src_bucket, src_key), dst)
+        shutil.copyfile(self._path(src_share, src_path), dst)
 
-    def delete(self, bucket, key):
-        p = self._path(bucket, key)
+    def delete(self, share, path):
+        p = self._path(share, path)
         if p.exists():
             os.remove(p)
-
-
-class S3ObjectStore(ObjectStore):
-    def __init__(self, region: str):
-        import boto3
-
-        self.s3 = boto3.client("s3", region_name=region)
-
-    def head(self, bucket, key, version_id=None):
-        kw = {"Bucket": bucket, "Key": key}
-        if version_id:
-            kw["VersionId"] = version_id
-        r = self.s3.head_object(**kw)
-        etag = r["ETag"].strip('"')
-        return ObjectInfo(bucket, key, r.get("VersionId") if r.get("VersionId") != "null" else None,
-                          f"{etag}-{r['LastModified']:%Y%m%d%H%M%S}", r["ContentLength"])
-
-    def exists(self, bucket, key):
-        from botocore.exceptions import ClientError
-
-        try:
-            self.s3.head_object(Bucket=bucket, Key=key)
-            return True
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
-                return False
-            raise
-
-    def list_objects(self, bucket, prefix):
-        """Objects directly under prefix, not recursive."""
-        out: list[ObjectInfo] = []
-        paginator = self.s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
-            for obj in page.get("Contents", []):
-                if obj["Key"] == prefix:
-                    continue
-                out.append(ObjectInfo(bucket, obj["Key"], None, obj["ETag"].strip('"'), obj["Size"]))
-        return out
-
-    def download(self, bucket, key, dest, version_id=None):
-        extra = {"VersionId": version_id} if version_id else None
-        self.s3.download_file(bucket, key, dest, ExtraArgs=extra)
-
-    def copy(self, src_bucket, src_key, dst_bucket, dst_key, version_id=None):
-        src = {"Bucket": src_bucket, "Key": src_key}
-        if version_id:
-            src["VersionId"] = version_id
-        self.s3.copy(src, dst_bucket, dst_key, ExtraArgs={"ServerSideEncryption": "aws:kms"})
-
-    def delete(self, bucket, key):
-        self.s3.delete_object(Bucket=bucket, Key=key)
 
 
 _SMB_NOT_FOUND = {0xC000000F, 0xC0000034, 0xC000003A}
 
 
-class NasObjectStore(ObjectStore):
-    """Files on an SMB share; bucket = '<server>/<share>', or '<share>' on the server of the NAS connection."""
+class NasFileStore(FileStore):
+    """Files on an SMB share; share = '<server>/<share>', or '<share>' on the server of the NAS connection."""
 
     def __init__(self, settings: Settings):
         self.min_age_seconds = settings.nas_min_age_seconds
@@ -229,81 +176,79 @@ class NasObjectStore(ObjectStore):
         """Session arguments of every smbclient call; read when the first file is touched."""
         return {k: v for k, v in nas_settings().items() if k != "server"}
 
-    def _target(self, bucket: str) -> tuple[str, str]:
-        server, _, share = bucket.rpartition("/")
+    def _target(self, share: str) -> tuple[str, str]:
+        server, _, share = share.rpartition("/")
         return server or self.server, share
 
-    def _path(self, bucket: str, key: str) -> str:
-        server, share = self._target(bucket)
-        parts = [p for p in key.split("/") if p]
+    def _path(self, share: str, path: str) -> str:
+        server, share = self._target(share)
+        parts = [p for p in path.split("/") if p]
         if not share or ".." in parts:
-            raise ValueError(f"invalid NAS path {bucket}/{key}")
+            raise ValueError(f"invalid NAS path {share}/{path}")
         return "\\\\" + "\\".join([server, share, *parts])
 
     @staticmethod
-    def _info(bucket: str, key: str, size: int, modified: datetime) -> ObjectInfo:
-        return ObjectInfo(bucket, key, None, f"{size}-{modified:%Y%m%d%H%M%S%f}", size)
+    def _info(share: str, path: str, size: int, modified: datetime) -> FileInfo:
+        return FileInfo(share, path, f"{size}-{modified:%Y%m%d%H%M%S%f}", size)
 
-    def uri(self, bucket, key):
-        return "//" + "/".join([*self._target(bucket), key])
+    def uri(self, share, path):
+        return "//" + "/".join([*self._target(share), path])
 
-    def head(self, bucket, key, version_id=None):
-        st = self.smb.stat(self._path(bucket, key), **self.nas)
-        return self._info(bucket, key, st.st_size, datetime.fromtimestamp(st.st_mtime_ns // 1000 / 1e6, timezone.utc))
+    def head(self, share, path):
+        st = self.smb.stat(self._path(share, path), **self.nas)
+        return self._info(share, path, st.st_size, datetime.fromtimestamp(st.st_mtime_ns // 1000 / 1e6, timezone.utc))
 
-    def exists(self, bucket, key):
+    def exists(self, share, path):
         try:
-            st = self.smb.stat(self._path(bucket, key), **self.nas)
+            st = self.smb.stat(self._path(share, path), **self.nas)
         except OSError as e:
             if e.errno == errno.ENOENT or getattr(e, "ntstatus", None) in _SMB_NOT_FOUND:
                 return False
             raise
         return stat.S_ISREG(st.st_mode)
 
-    def list_objects(self, bucket, prefix):
+    def list_files(self, share, folder):
         """Files directly in the folder; one changed in the last NAS_MIN_AGE_SECONDS may still be arriving and waits."""
         newest = datetime.now(timezone.utc) - timedelta(seconds=self.min_age_seconds)
         out = []
-        for entry in self.smb.scandir(self._path(bucket, prefix), **self.nas):
+        for entry in self.smb.scandir(self._path(share, folder), **self.nas):
             if entry.is_file():
                 size, modified = entry.smb_info.end_of_file, entry.smb_info.last_write_time
                 if modified <= newest:
-                    out.append(self._info(bucket, f"{prefix}{entry.name}", size, modified))
-        return sorted(out, key=lambda o: o.key)
+                    out.append(self._info(share, f"{folder}{entry.name}", size, modified))
+        return sorted(out, key=lambda o: o.path)
 
-    def download(self, bucket, key, dest, version_id=None):
-        with self.smb.open_file(self._path(bucket, key), mode="rb", **self.nas) as src, open(dest, "wb") as dst:
+    def download(self, share, path, dest):
+        with self.smb.open_file(self._path(share, path), mode="rb", **self.nas) as src, open(dest, "wb") as dst:
             shutil.copyfileobj(src, dst, 1024 * 1024)
 
-    def copy(self, src_bucket, src_key, dst_bucket, dst_key, version_id=None):
-        self.smb.makedirs(self._path(dst_bucket, dirname(dst_key)), exist_ok=True, **self.nas)
-        with self.smb.open_file(self._path(src_bucket, src_key), mode="rb", **self.nas) as src, \
-                self.smb.open_file(self._path(dst_bucket, dst_key), mode="wb", **self.nas) as dst:
+    def copy(self, src_share, src_path, dst_share, dst_path):
+        self.smb.makedirs(self._path(dst_share, dirname(dst_path)), exist_ok=True, **self.nas)
+        with self.smb.open_file(self._path(src_share, src_path), mode="rb", **self.nas) as src, \
+                self.smb.open_file(self._path(dst_share, dst_path), mode="wb", **self.nas) as dst:
             shutil.copyfileobj(src, dst, 1024 * 1024)
 
-    def delete(self, bucket, key):
-        self.smb.remove(self._path(bucket, key), **self.nas)
+    def delete(self, share, path):
+        self.smb.remove(self._path(share, path), **self.nas)
 
-    def archive(self, bucket, key, folder, version_id=None):
-        dst_key = f"{dirname(key)}{folder}/{basename(key)}"
-        self.smb.makedirs(self._path(bucket, dirname(dst_key)), exist_ok=True, **self.nas)
+    def archive(self, share, path, folder):
+        dst_path = f"{dirname(path)}{folder}/{basename(path)}"
+        self.smb.makedirs(self._path(share, dirname(dst_path)), exist_ok=True, **self.nas)
         try:
-            self.smb.replace(self._path(bucket, key), self._path(bucket, dst_key), **self.nas)
+            self.smb.replace(self._path(share, path), self._path(share, dst_path), **self.nas)
         except OSError as e:
-            log.info("rename of %s not possible (%s); copying instead", key, e)
-            self.copy(bucket, key, bucket, dst_key)
-            self.delete(bucket, key)
-        return dst_key
+            log.info("rename of %s not possible (%s); copying instead", path, e)
+            self.copy(share, path, share, dst_path)
+            self.delete(share, path)
+        return dst_path
 
 
-def build_object_store(settings: Settings) -> ObjectStore:
-    if settings.object_store == "nas":
-        return NasObjectStore(settings)
-    if settings.object_store == "local":
-        return LocalObjectStore(settings.local_store_root)
-    if settings.object_store == "s3":
-        return S3ObjectStore(settings.aws_region)
-    raise ValueError(f"unknown object store {settings.object_store!r}")
+def build_file_store(settings: Settings) -> FileStore:
+    if settings.file_store == "nas":
+        return NasFileStore(settings)
+    if settings.file_store == "local":
+        return LocalFileStore(settings.local_store_root)
+    raise ValueError(f"unknown file store {settings.file_store!r}")
 
 
 PASSED, PASSED_WITH_WARNINGS, FAILED, ERROR = "PASSED", "PASSED_WITH_WARNINGS", "FAILED", "ERROR"

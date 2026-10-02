@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Optional
 
-from .adapters import ObjectStore, RuleEngine, build_channel, build_object_store, build_rule_engine
+from .adapters import FileStore, RuleEngine, build_channel, build_file_store, build_rule_engine
 from .audit import NotificationDispatcher
 from .batches import IntakeProcessor, ScheduleSummary, create_batches
 from .closing import BatchCloser
@@ -23,7 +23,7 @@ class App:
     conn: Connection
     clock: Clock
     settings: Settings
-    store: ObjectStore
+    store: FileStore
     rules: RuleEngine
 
     @classmethod
@@ -33,7 +33,7 @@ class App:
             if not schema_exists(conn, settings.metadata_schema):
                 raise ConfigError(f"the framework tables were not found in {settings.metadata_schema!r}; "
                                   "they are created separately from sql/schema.sql")
-            return cls(conn, clock or Clock(), settings, build_object_store(settings), build_rule_engine(settings))
+            return cls(conn, clock or Clock(), settings, build_file_store(settings), build_rule_engine(settings))
         except BaseException:
             conn.close()
             raise

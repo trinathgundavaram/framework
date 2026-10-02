@@ -265,13 +265,13 @@ def batch_key(btch_id: str) -> str:
     return f"BTCH:{btch_id}"
 
 
-def object_key(bucket: str, key: str, version_id: Optional[str]) -> str:
-    """Lock key of one S3 object version."""
-    return "OBJ:" + object_hash(bucket, key, version_id)
+def file_key(share: str, path: str) -> str:
+    """Lock key of one file."""
+    return "OBJ:" + file_hash(share, path, "")
 
 
-def object_hash(bucket: str, key: str, version: Optional[str]) -> str:
-    return hashlib.sha256(f"{bucket}/{key}@{version or ''}".encode("utf-8")).hexdigest()
+def file_hash(share: str, path: str, version: str) -> str:
+    return hashlib.sha256(f"{share}/{path}@{version}".encode("utf-8")).hexdigest()
 
 
 def seq_key(project: str, table: str, src: str, run_ty: str) -> str:

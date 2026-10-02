@@ -117,7 +117,7 @@ as the Variable's value (Admin → Variables) and replace the `REPLACE_WITH_...`
   "email_recipient": "compliance-dev@example.com",
   "project": "CMS_UNIVERSE",
   "load_duplicate": "no",
-  "settings": {"OBJECT_STORE": "nas", "ARCHIVE_FOLDER": "Archive", "ERROR_FOLDER": "Error"},
+  "settings": {"FILE_STORE": "nas", "ARCHIVE_FOLDER": "Archive", "ERROR_FOLDER": "Error"},
   "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES", "OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"]
 }
 ```
@@ -146,7 +146,7 @@ Keys by step:
 | Step | Scope keys | Settings worth setting |
 |---|---|---|
 | `BATCH_CREATION` | `project` (required), `run_type`, `period` (`PREV_DAY`, `PREV_CALENDAR_MONTH`, `CURRENT_CALENDAR_MONTH`, `PREV_CALENDAR_WEEK`, ...), `table`, `lookback_days`, `lookback_weeks` | — |
-| `FILE_LOAD` | `project` (leave out for every project), `load_duplicate` (`yes` / `no`, default `no`) | `OBJECT_STORE` (`nas`), `ARCHIVE_FOLDER`, `ERROR_FOLDER`, `NAS_MIN_AGE_SECONDS` |
+| `FILE_LOAD` | `project` (leave out for every project), `load_duplicate` (`yes` / `no`, default `no`) | `FILE_STORE` (`nas`), `ARCHIVE_FOLDER`, `ERROR_FOLDER`, `NAS_MIN_AGE_SECONDS` |
 | `FILE_RULES` | `project`; `gre` (the GRE's own Airflow Variable, as it is: `connection_type`, `connection_id`, `environment`, `meta_db`, `meta_connection`, `project_name`, `run_params`, `text_params`, `extra_filters`, `log_level`, `max_parallel_rules`; plus `package_dir`, the folder holding the GRE's `run_rules.py`, default `<dags>/rules_engine`) | `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `FILE_RULES_MODE` |
 | `OVERRIDE_DECISIONS` | `project` | — |
 | `BATCH_CLOSE` | `project`, `table`, `run_type` | — |
@@ -178,9 +178,9 @@ date or timestamp used as "now", for a missed day), `settings` and `gre`.
 
 ## Files on the NAS
 
-Files are read from the NAS over SMB (`OBJECT_STORE` = `nas`, the default; library `smbprotocol`).
+Files are read from the NAS over SMB (`FILE_STORE` = `nas`, the default; library `smbprotocol`).
 
-**Inbound folder** — `ComplianceSourceFileConfig.S3_Src_File_Path` (the column keeps its name) holds the folder:
+**Inbound folder** — `ComplianceSourceFileConfig.Src_File_Path` holds the folder:
 
 | Written as | Server | Share | Folder |
 |---|---|---|---|
@@ -212,9 +212,11 @@ A path with its own server uses that server with the NAS Connection's login. `$e
   on the NAS with the worker's clock.
 - A file is identified by its path, size and modified time: delivering the same name again is a new
   load; a sweep that sees an untouched file again (one whose move failed) does not reload it.
-- `ComplianceFileLoad.S3_Bucket` holds `<server>/<share>` and `S3_Key` the path inside the share; audit
+- `ComplianceFileLoad.File_Share` holds `<server>/<share>`, `File_Path` the path inside the share and
+  `File_Version` the size and modified time that identify one delivery of the file; audit
   rows show the file as `//server/share/path`.
-- `OBJECT_STORE` = `s3` (needs `boto3`) and `local` still exist; the Archive / Error rule is the same.
+- There is no S3 in this version: no bucket, key or object-version columns and no AWS file store.
+  `FILE_STORE` = `local` (a folder on the worker) exists for development only.
 
 ## File rules run after the load
 
@@ -267,7 +269,7 @@ a `$env` token, so one set of configuration rows works in every environment (the
 | `cms_core_$env_t` | `cms_core_dev_t` | `cms_core_test_t` | `cms_core_qa_t` | `cms_core_t` |
 | `//nas01/Compliance/$env/odr/in` | `//nas01/Compliance/dev/odr/in` | `//nas01/Compliance/test/odr/in` | `//nas01/Compliance/qa/odr/in` | `//nas01/Compliance/odr/in` |
 
-- Columns: `Stg_Schema_Nm`, `Core_Schema_Nm`, `S3_Src_File_Path`.
+- Columns: `Stg_Schema_Nm`, `Core_Schema_Nm`, `Src_File_Path`.
 - The token matches in any casing and is replaced in its own casing (`$env` → `dev`, `$ENV` → `DEV`,
   `$Env` → `Dev`). PROD and UAT replace it with nothing; a doubled underscore left in a database name
   collapses (paths are left as they are, so prefer a database-style name where PROD has no suffix).
@@ -307,6 +309,7 @@ CHECK constraints (the validator checks references).
 | `COPY` into staging | Batched parameterised inserts |
 | Report periods as SQL | Computed in Python (`batches.PERIODS`); `--period-file` still takes Teradata SQL |
 | Spark load engine | Not included |
+| Files in S3 (`S3_Src_File_Path`, `S3_Bucket`, `S3_Key`, `S3_Version_Id`, `S3_ETag`) | Files on the NAS (`Src_File_Path`, `File_Share`, `File_Path`, `File_Version`); `FILE_LOAD` is scoped by `--share` / `--folder` / `--file` |
 
 Reads use `LOCKING ROW FOR ACCESS`; every change to a batch is made under that batch's lock row.
 String comparisons follow the session's transaction mode (Teradata mode is not case specific).

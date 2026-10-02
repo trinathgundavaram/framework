@@ -13,7 +13,7 @@ STEPS = ("BATCH_CREATION", "FILE_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BAT
 FAIL_ON_PROBLEMS = {"BATCH_CREATION": True, "FILE_LOAD": False, "FILE_RULES": True, "OVERRIDE_DECISIONS": False,
                     "BATCH_CLOSE": True, "NOTIFY": True}
 SCOPE_KEYS = ("project", "run_type", "period", "table", "period_file", "lookback_days", "lookback_weeks",
-              "bucket", "key", "prefix", "version_id")
+              "share", "file", "folder")
 _GRE_ENV = {"environment": "GRE_ENVIRONMENT", "meta_db": "GRE_META_DB", "log_level": "GRE_LOG_LEVEL",
             "log_dir": "GRE_LOG_DIR", "max_parallel_rules": "GRE_MAX_PARALLEL_RULES",
             "package_dir": "GRE_PACKAGE_DIR", "project_name": "GRE_PROJECT_NAME"}
@@ -130,7 +130,7 @@ def run_compliance_step(step: str, variable_key: str, overrides: dict = None, sc
     """Run one framework step; raises RuntimeError when it fails, returns its outcome otherwise."""
     step = step.strip().upper()
     config, settings = resolve_config(variable_key, overrides, scope_index)
-    if step == "FILE_LOAD" and str(settings.get("OBJECT_STORE") or "nas").lower() == "nas" and not config.get(NAS_CONN_KEY):
+    if step == "FILE_LOAD" and str(settings.get("FILE_STORE") or "nas").lower() == "nas" and not config.get(NAS_CONN_KEY):
         raise ValueError(f"'{NAS_CONN_KEY}' (the Airflow Connection of the NAS file server) is required in "
                          f"Airflow Variable '{variable_key}'")
     _connect_environment(config, connection_id)

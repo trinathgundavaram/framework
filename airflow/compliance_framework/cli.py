@@ -63,10 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--period-file", help="BATCH_CREATION: project .py file defining PERIOD_SQL")
     sp.add_argument("--lookback-days", type=int, help="BATCH_CREATION")
     sp.add_argument("--lookback-weeks", type=int, help="BATCH_CREATION")
-    sp.add_argument("--bucket", help="FILE_LOAD: inbound bucket")
-    sp.add_argument("--key", help="FILE_LOAD: one object (with --bucket)")
-    sp.add_argument("--prefix", help="FILE_LOAD: one location (with --bucket)")
-    sp.add_argument("--version-id", help="FILE_LOAD: object version of --key")
+    sp.add_argument("--share", help="FILE_LOAD: NAS share, as <server>/<share> or <share>")
+    sp.add_argument("--file", help="FILE_LOAD: one file, its path inside the share (with --share)")
+    sp.add_argument("--folder", help="FILE_LOAD: one folder inside the share (with --share)")
     add("show-config", "print resolved settings (with their source) and the database target")
     add("test-connection", "connect to the database and check the schema")
     add("validate-config", "validate the configuration tables and target tables")
@@ -124,8 +123,7 @@ def _dispatch(app: App, args) -> int:
         return 1 if errors else 0
     if c == "run":
         params = {k: getattr(args, k) for k in ("project", "table", "run_type", "period", "period_file",
-                                                "lookback_days", "lookback_weeks", "bucket", "key", "prefix",
-                                                "version_id")}
+                                                "lookback_days", "lookback_weeks", "share", "file", "folder")}
         out = run_module(app, args.module, params)
         _print({"module": out.module, "result": out.result})
         return out.exit_code
