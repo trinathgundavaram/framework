@@ -1,4 +1,5 @@
 """Airflow bridge: one Variable (configuration) + the Teradata and NAS Connections -> the framework."""
+import json
 import logging
 import os
 import re
@@ -17,7 +18,8 @@ SCOPE_KEYS = ("project", "run_type", "period", "table", "period_file", "lookback
               "bucket", "key", "prefix", "version_id")
 _GRE_ENV = {"environment": "GRE_ENVIRONMENT", "meta_db": "GRE_META_DB", "log_level": "GRE_LOG_LEVEL",
             "log_dir": "GRE_LOG_DIR", "max_parallel_rules": "GRE_MAX_PARALLEL_RULES",
-            "package_dir": "GRE_PACKAGE_DIR"}
+            "package_dir": "GRE_PACKAGE_DIR", "project_name": "GRE_PROJECT_NAME"}
+_GRE_PARAMS = {"run_params": "GRE_RUN_PARAMS", "text_params": "GRE_TEXT_PARAMS", "extra_filters": "GRE_EXTRA_FILTERS"}
 _RUN_NAME = re.compile(r"^[A-Za-z0-9_]{1,200}$")
 _DAG_ID = re.compile(r"^[A-Za-z0-9_.-]{1,250}$")
 
@@ -119,7 +121,8 @@ def resolve_run(variable_key: str = DEFAULT_VARIABLE_KEY, overrides: dict = None
                 **(overrides.pop("settings", None) or {})}
     fail_on = {**FAIL_ON_PROBLEMS, **(config.get("fail_on_problems") or {}),
                **(run_config.pop("fail_on_problems", None) or {}), **(overrides.pop("fail_on_problems", None) or {})}
-    config = {**{k: v for k, v in config.items() if k != "runs"}, **run_config, **overrides}
+    gre = {**(config.get("gre") or {}), **(run_config.pop("gre", None) or {}), **(overrides.pop("gre", None) or {})}
+    config = {**{k: v for k, v in config.items() if k != "runs"}, **run_config, **overrides, "gre": gre}
     if not config.get("meta_db"):
         raise ValueError(f"'meta_db' is required in Airflow Variable '{variable_key}'")
     config["run"] = run
@@ -130,21 +133,28 @@ def resolve_run(variable_key: str = DEFAULT_VARIABLE_KEY, overrides: dict = None
     settings["METADATA_SCHEMA"] = config["meta_db"]
     if config.get("load_duplicate") not in (None, ""):
         settings["LOAD_DUPLICATE"] = config["load_duplicate"]
-    environment = config.get("load_env") or (config.get("gre") or {}).get("environment")
+    environment = config.get("load_env") or config.get("environment") or (config.get("gre") or {}).get("environment")
     if environment:
         settings.setdefault("ENVIRONMENT", environment)
     return config, settings
 
 
 def _connect_environment(config: dict, settings: dict, connection_id: str = None) -> None:
-    _load_teradata_connection(connection_id or config.get(TD_CONN_KEY) or DEFAULT_CONNECTION_ID)
+    gre = config.get("gre") or {}
+    _load_teradata_connection(connection_id or config.get(TD_CONN_KEY) or config.get("connection_id")
+                              or gre.get("connection_id") or DEFAULT_CONNECTION_ID)
     if str(settings.get("OBJECT_STORE") or "nas").lower() == "nas":
         if not config.get(NAS_CONN_KEY):
             raise ValueError(f"'{NAS_CONN_KEY}' (the Airflow Connection of the NAS file server) is required")
         _load_nas_connection(config[NAS_CONN_KEY])
-    gre = config.get("gre") or {}
+    if gre and str(gre.get("connection_type") or "teradata").lower() != "teradata":
+        raise ValueError("gre.connection_type must be 'teradata': the rules run on the framework's Teradata connection")
     for key, env_key in _GRE_ENV.items():
         _set_env(env_key, gre.get(key))
+    for key, env_key in _GRE_PARAMS.items():
+        if gre.get(key) is not None and not isinstance(gre[key], dict):
+            raise ValueError(f"gre.{key} must be a JSON object")
+        os.environ[env_key] = json.dumps(gre.get(key) or {})
     if gre:
         _set_env("GRE_META_CONNECTION", gre.get("meta_connection") or "teradata")
 

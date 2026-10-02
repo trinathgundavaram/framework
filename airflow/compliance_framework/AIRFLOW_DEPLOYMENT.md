@@ -101,9 +101,9 @@ as the Variable's value (Admin → Variables) and replace the `REPLACE_WITH_...`
 | Key | Meaning |
 |---|---|
 | `meta_db` (required) | Teradata database holding the framework tables |
-| `td_conn_var` | Airflow Connection of Teradata (default `compliance_teradata`) |
+| `td_conn_var` | Airflow Connection of Teradata. Falls back to `connection_id`, then `gre.connection_id`, then `compliance_teradata` |
 | `wdc_comp_oper_nas_var` (required for NAS) | Airflow Connection of the NAS file server |
-| `load_env` | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); defaults to `gre.environment`, else `DEV` |
+| `load_env` | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); falls back to `environment`, then `gre.environment`, else `DEV` |
 | `load_duplicate` | `yes` / `no` (default `no`): load a file whose name was already loaded, or reject it. A run and a trigger can set their own |
 | `email_recipient` | Who gets the DAG success / failure emails (`success_email`, `fail_email` tasks); a run can set its own. Without it the DAGs have no email tasks |
 | `snow_assignment_group` | ServiceNow assignment group of the incident opened when a task fails (default `D&AE - EDE Govt Compliance`) |
@@ -111,7 +111,7 @@ as the Variable's value (Admin → Variables) and replace the `REPLACE_WITH_...`
 | `schedule_timezone` | Time zone of the schedules (default `America/Chicago`; follows daylight saving) |
 | `settings` | Framework settings by name. Common: `ARCHIVE_FOLDER` (`Archive`), `ERROR_FOLDER` (`Error`), `NAS_MIN_AGE_SECONDS` (120), `BUSINESS_TZ`, `NOTIFY_BACKEND` (`airflow` = Airflow's email backend, `ses`, `log`), `NOTIFY_FROM_EMAIL` (ses), `DEFAULT_NOTIFY_EMAILS`, `FILE_RULES_MODE` (`GATE` / `ANNOTATE`), `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `LOCK_TIMEOUT_SECONDS` (300), `LOCK_TTL_MINUTES` (240) |
 | `runs` | Named parameter sets, below |
-| `gre` | For `gre_bridge`: `meta_db` (GRE metadata database), `environment`, `package_dir` (folder holding the GRE's `run_rules.py`; default `<dags>/rules_engine`), `log_level` |
+| `gre` | For `gre_bridge`. It takes the GRE's own Airflow Variable as it is: `connection_type` (`teradata`), `connection_id`, `environment`, `meta_db` (GRE metadata database), `meta_connection`, `project_name`, `run_params`, `text_params`, `extra_filters`, `log_level`, `max_parallel_rules`; plus `package_dir` (folder holding the GRE's `run_rules.py`; default `<dags>/rules_engine`) |
 | `fail_on_problems` | Per step, whether exit code 1 fails the task. Default: `BATCH_CREATION`, `BATCH_CLOSE`, `NOTIFY` true; `FILE_LOAD`, `OVERRIDE_DECISIONS` false (a bad file or override is audited and emailed, not a task failure) |
 | `log_level` | `INFO` (default), `DEBUG`, ... |
 
@@ -267,6 +267,12 @@ GRE's `run_rules()`, with `run_key = CBF_LOAD_<Load_ID>` and the file's context 
 from `<gre meta_db>.gre_results`: `PASS` / `WARN` pass, `FAIL` fails the file (GATE) or annotates it
 (ANNOTATE), anything else is a technical failure that is retried. Use `RULE_ENGINE=none` to load without
 rules.
+
+The Variable's `gre` section is passed on to `run_rules()`: `project_name`, `text_params` and
+`extra_filters` as written, and `run_params` merged with the file's context (the file's values win).
+`text_params` and `extra_filters` are the same for every file of the Variable: where they name a run type
+(e.g. `{"RUNTYPE": "MNT"}`, `{"run_ty": "MNT"}`), give a run that loads another run type its own values
+under that run's `gre` key. The rules run on the framework's Teradata connection.
 
 ## Validation status
 

@@ -1,4 +1,5 @@
 """File rules through the GRE rules engine: GRE_ENTRYPOINT=compliance_framework.gre_bridge:run_gre."""
+import json
 import logging
 import os
 import sys
@@ -27,16 +28,24 @@ def _text(value) -> str:
     return value.isoformat() if isinstance(value, (date, datetime)) else str(value)
 
 
+def _configured(env_key: str) -> dict:
+    """run_params / text_params / extra_filters of the Variable's gre section."""
+    return json.loads(os.environ.get(env_key) or "{}")
+
+
 def run_gre(conn, rule_group: str, rule_variant: str, run_params: dict) -> list:
     """One GRE rule_group for one staged file -> [{"rule_ref", "passed"}]; raises on a technical failure."""
     meta_db = os.environ.get("GRE_META_DB")
     if not meta_db:
         raise RuntimeError("GRE_META_DB is not set")
     run_key = f"CBF_LOAD_{run_params['load_id']}"
-    params = {k: _text(v) for k, v in run_params.items() if v is not None}
+    params = {**_configured("GRE_RUN_PARAMS"), **{k: _text(v) for k, v in run_params.items() if v is not None}}
     variant = None if rule_variant in (None, "", "*") else rule_variant
-    outcome, exit_code = _run_rules()(rule_group=rule_group, rule_variant=variant, run_key=run_key,
-                                      run_params=params, log_level=os.environ.get("GRE_LOG_LEVEL") or "ERROR")
+    outcome, exit_code = _run_rules()(project_name=os.environ.get("GRE_PROJECT_NAME") or None, rule_group=rule_group,
+                                      rule_variant=variant, run_key=run_key, run_params=params,
+                                      extra_filters=_configured("GRE_EXTRA_FILTERS"),
+                                      text_params=_configured("GRE_TEXT_PARAMS"),
+                                      log_level=os.environ.get("GRE_LOG_LEVEL") or "ERROR")
     summary = (outcome or {}).get("rule_groups", {}).get(rule_group)
     if summary is None:
         raise RuntimeError(f"GRE returned nothing for rule_group {rule_group} (exit_code={exit_code})")

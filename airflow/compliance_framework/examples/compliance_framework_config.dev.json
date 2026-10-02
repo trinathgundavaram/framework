@@ -1,7 +1,7 @@
 {
-  "td_conn_var": "compliance_teradata_dev",
+  "td_conn_var": "DEV",
   "wdc_comp_oper_nas_var": "wdc_comp_oper_nas_dev",
-  "meta_db": "CMS_COMPLIANCE_DEV",
+  "meta_db": "HSABC_dev",
   "load_env": "DEV",
   "load_duplicate": "no",
   "email_recipient": "compliance-dev@example.com",
@@ -11,7 +11,7 @@
     "Compliance",
     "Compliance_Batch_Framework"
   ],
-  "log_level": "DEBUG",
+  "log_level": "INFO",
   "schedule_timezone": "America/Chicago",
   "settings": {
     "OBJECT_STORE": "nas",
@@ -20,21 +20,39 @@
     "BUSINESS_TZ": "America/Chicago",
     "NOTIFY_BACKEND": "log",
     "DEFAULT_NOTIFY_EMAILS": "compliance-dev@example.com",
-    "RULE_ENGINE": "none",
-    "LOCK_TTL_MINUTES": 60
+    "RULE_ENGINE": "gre",
+    "LOCK_TTL_MINUTES": 60,
+    "GRE_ENTRYPOINT": "compliance_framework.gre_bridge:run_gre"
+  },
+  "gre": {
+    "connection_type": "teradata",
+    "connection_id": "DEV",
+    "environment": "DEV",
+    "meta_db": "HSABC_dev",
+    "meta_connection": "teradata",
+    "project_name": "CMS_UNIVERSE",
+    "run_params": {},
+    "text_params": {
+      "RUNTYPE": "MNT"
+    },
+    "extra_filters": {
+      "run_ty": "MNT"
+    },
+    "log_level": "INFO",
+    "max_parallel_rules": 1
   },
   "runs": {
-    "odr_file_load": {
+    "cms_universe_file_load": {
       "schedule_interval": "0 * * * *",
-      "project": "ODR",
+      "project": "CMS_UNIVERSE",
       "steps": [
         "FILE_LOAD",
         "OVERRIDE_DECISIONS",
         "NOTIFY"
       ]
     },
-    "odr_full_cycle": {
-      "project": "ODR",
+    "cms_universe_full_cycle": {
+      "project": "CMS_UNIVERSE",
       "steps": [
         "BATCH_CREATION",
         "FILE_LOAD",
@@ -42,8 +60,8 @@
         "BATCH_CLOSE",
         "NOTIFY"
       ],
-      "run_type": "DAILY",
-      "period": "PREV_DAY"
+      "run_type": "MNT",
+      "period": "PREV_CALENDAR_MONTH"
     }
   }
 }

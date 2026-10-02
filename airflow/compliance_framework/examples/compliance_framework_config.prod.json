@@ -1,5 +1,5 @@
 {
-  "td_conn_var": "compliance_teradata",
+  "td_conn_var": "PROD",
   "wdc_comp_oper_nas_var": "wdc_comp_oper_nas",
   "meta_db": "CMS_COMPLIANCE_PROD",
   "load_env": "PROD",
@@ -26,8 +26,16 @@
     "LOCK_TTL_MINUTES": 240
   },
   "gre": {
+    "connection_type": "teradata",
+    "connection_id": "PROD",
     "environment": "PROD",
-    "meta_db": "GRE_META_PROD"
+    "meta_db": "GRE_META_PROD",
+    "meta_connection": "teradata",
+    "run_params": {},
+    "text_params": {},
+    "extra_filters": {},
+    "log_level": "INFO",
+    "max_parallel_rules": 1
   },
   "fail_on_problems": {
     "FILE_LOAD": false,
