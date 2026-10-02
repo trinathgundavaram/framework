@@ -106,6 +106,9 @@ def resolve_run(variable_key: str = DEFAULT_VARIABLE_KEY, overrides: dict = None
     settings = {str(k).upper(): ",".join(map(str, v)) if isinstance(v, (list, tuple)) else v
                 for k, v in settings.items()}
     settings["METADATA_SCHEMA"] = config["meta_db"]
+    environment = config.get("environment") or (config.get("gre") or {}).get("environment")
+    if environment:
+        settings.setdefault("ENVIRONMENT", environment)
     return config, settings
 
 
@@ -140,7 +143,7 @@ def run_compliance_step(step: str, variable_key: str = DEFAULT_VARIABLE_KEY, ove
 
 def run_compliance_command(command: str, args: list = None, variable_key: str = DEFAULT_VARIABLE_KEY,
                            overrides: dict = None, connection_id: str = None):
-    """Run one framework command (init-db, validate-config, health, locks, release-lock, close-batch, ...)."""
+    """Run one framework command (validate-config, health, locks, release-lock, close-batch, ...)."""
     config, settings = resolve_run(variable_key, overrides)
     _connect_environment(config, connection_id)
     from .run_framework import run_command

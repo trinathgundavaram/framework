@@ -1,7 +1,9 @@
 """Staging load and core promotion on Teradata (design §9.4, §10)."""
 from __future__ import annotations
 
+import codecs
 import csv
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,6 +17,8 @@ from .db import Connection
 if TYPE_CHECKING:
     from .config import FileConfig
     from .settings import Settings
+
+log = logging.getLogger(__name__)
 
 STAGING_FRAMEWORK_COLS = ("btch_id", "load_id", "src_file_nm", "stg_load_dtts")
 CORE_FRAMEWORK_COLS = ("btch_id", "load_id", "current_ind", "load_dtts", "end_dtts")
@@ -61,6 +65,7 @@ def _table(schema: str, table: str) -> str:
     return db.qualified(schema, table)
 
 
+DELIMITED_FILE_TYPES = (".txt", ".csv", ".dat", ".psv", ".tsv")
 _DELIMS = {"TAB": "\t", "\\T": "\t", "PIPE": "|", "COMMA": ",", "SEMICOLON": ";"}
 Rows = Iterable[list[Optional[str]]]
 
@@ -99,6 +104,48 @@ def _lf_lines(parts: Iterable[str]) -> Iterator[str]:
         yield buf
 
 
+def _undecodable_line(path: str, encoding: str) -> Optional[int]:
+    """Line number of the first bytes that are not valid in `encoding`."""
+    decoder = codecs.getincrementaldecoder(encoding)()
+    line = 1
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(65536)
+            state = decoder.getstate()
+            try:
+                line += decoder.decode(chunk, final=not chunk).count("\n")
+            except UnicodeDecodeError:
+                decoder.setstate(state)
+                try:
+                    for i in range(len(chunk)):
+                        line += decoder.decode(chunk[i:i + 1]).count("\n")
+                except UnicodeDecodeError:
+                    pass
+                return line
+            if not chunk:
+                return None
+
+
+def _not_decodable(path: str, encoding: str, e: UnicodeDecodeError) -> FileRejected:
+    line = _undecodable_line(path, encoding)
+    where = f" at line {line}" if line else ""
+    return FileRejected("FILE_PARSE_ERROR", f"file is not valid {encoding}{where}: {e.reason}")
+
+
+def row_position(path: str, cfg: "FileConfig", settings: "Settings", row_no: Optional[int]) -> str:
+    """Where data row `row_no` (1-based) sits in the file: 'line N' for delimited files, else 'data row N'."""
+    if not row_no:
+        return ""
+    if cfg.src_file_ty in DELIMITED_FILE_TYPES:
+        reader = csv.reader(_lf_lines(_file_lines(path, settings.file_encoding)), delimiter=delimiter_for(cfg),
+                            quotechar=settings.quote_char or None, strict=True)
+        target = row_no + (1 if cfg.has_header else 0)
+        for i, _ in enumerate(reader, 1):
+            if i == target:
+                return f"line {reader.line_num}"
+    return f"data row {row_no}"
+
+
 def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> Iterator[list]:
     """Rows yielded one at a time; LF and CRLF line endings are both accepted, trailing blank lines ignored."""
     delim = delimiter_for(cfg)
@@ -108,7 +155,7 @@ def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "
             if line.strip() != "":
                 content_cnt, last = n, line
     except UnicodeDecodeError as e:
-        raise FileRejected("FILE_PARSE_ERROR", f"file is not valid {settings.file_encoding}: {e.reason}")
+        raise _not_decodable(path, settings.file_encoding, e)
     trailer_count = None
     if cfg.has_trailer:
         if not content_cnt:
@@ -166,7 +213,7 @@ def read_file(path: str, cfg: "FileConfig", expected_cols: int, settings: "Setti
     ft = cfg.src_file_ty
     if ft not in settings.supported_file_types:
         raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} is not enabled (Q-02)")
-    if ft in (".txt", ".csv", ".dat", ".psv", ".tsv"):
+    if ft in DELIMITED_FILE_TYPES:
         return read_delimited(path, cfg, expected_cols, settings)
     if ft in (".xlsx", ".xls", ".parquet"):
         return read_with_pandas(path, cfg, expected_cols, settings)
@@ -191,9 +238,23 @@ def stage(conn: Connection, settings: "Settings", *, file_path: str, cfg: "FileC
     except Exception as e:  # noqa: BLE001
         if not db.is_data_error(e):
             raise
-        raise FileRejected("FILE_PARSE_ERROR",
-                           f"value does not fit staging column types: {sanitize_db_error(str(e).splitlines()[0])}")
+        where = row_position(file_path, cfg, settings, _rejected_row(conn, insert, e))
+        raise FileRejected("FILE_PARSE_ERROR", f"value does not fit staging column types{' at ' + where if where else ''}: "
+                                               f"{sanitize_db_error(str(e).splitlines()[0])}")
     return count
+
+
+def _rejected_row(conn: Connection, insert: str, e: Exception) -> Optional[int]:
+    """1-based data row the database refused, found by re-sending parts of the failed batch."""
+    rows = getattr(e, "failed_rows", None)
+    if not rows:
+        return None
+    try:
+        at = conn.first_rejected(insert, rows)
+    except Exception:  # noqa: BLE001
+        log.warning("the rejected row could not be located", exc_info=True)
+        return None
+    return None if at is None else e.failed_offset + at + 1
 
 
 @dataclass

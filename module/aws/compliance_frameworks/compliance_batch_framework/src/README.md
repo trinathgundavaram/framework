@@ -21,7 +21,7 @@ the batches. PostgreSQL + Python; runs locally or as AWS Glue jobs.
 ```bash
 pip install .                             # Python 3.9+
 export FRAMEWORK_DB_DSN=postgresql://user@host:5432/db
-framework init-db
+framework test-connection                                                    # the tables already exist
 framework list-modules                                                       # every module, its parameters
 framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
 framework run --module BATCH_CREATION --project PRJA                         # that project's ad-hoc requests only
@@ -50,7 +50,7 @@ src/
   pyproject.toml          package name, version, dependencies, what goes into the wheel
   framework/              the package (the only thing inside the wheel)
     ingest.py batches.py closing.py overrides.py audit.py modules.py cli.py ...
-    sql/schema.sql        metadata tables, created by `framework init-db`
+    sql/schema.sql        DDL of the metadata tables (created separately; the framework never creates them)
     sql/approvals.sql     manual override templates
   build_wheel.sh          builds the wheel into ../code/wheels
   run_workflow.sh         starts a project's Step Functions workflow by hand
@@ -61,12 +61,12 @@ src/
 ### Changing the framework
 
 1. Edit the files under `framework/`.
-2. Bump `version` in `pyproject.toml` and `__version__` in `framework/__init__.py` (e.g. 0.3.1 → 0.3.2),
+2. Bump `version` in `pyproject.toml` and `__version__` in `framework/__init__.py` (e.g. 0.3.3 → 0.3.4),
    so every deployed build is identifiable. The Terraform picks up any wheel name.
 3. Rebuild the wheel, with GitHub Actions or locally (below).
 4. Deploy the `glue` submodule. The next Glue run installs the new wheel.
 
-A changed `sql/schema.sql` does not alter an existing database: `init-db` only creates a missing schema.
+A changed `sql/schema.sql` is applied to the database separately: the framework never creates or alters tables.
 
 ### Rebuilding the wheel with GitHub Actions
 

@@ -35,7 +35,7 @@ def build_command(args: dict, module_params) -> tuple:
     if module and raw:
         raise SystemExit("give --FW_MODULE (a module) or --FW_ARGS (a command), not both")
     if not module and not raw:
-        raise SystemExit("--FW_MODULE (e.g. FILE_LOAD) or --FW_ARGS (e.g. 'init-db') is required")
+        raise SystemExit("--FW_MODULE (e.g. FILE_LOAD) or --FW_ARGS (e.g. 'validate-config') is required")
     dropped = []
     if module:
         accepted = module_params(module)

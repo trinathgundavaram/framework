@@ -18,7 +18,7 @@ framework/
   app.py                  service wiring only; health() composes each service's own report (§15.3)
   settings.py             settings (job args > env > .env > default) and the database connection
   common.py               errors, clock, Btch_ID, Req_Stat values/transitions
-  db.py                   init-db, advisory locks
+  db.py                   connections, advisory locks
   config.py               configuration rows, filename templates, validator
   period_sql.py           report-period SQL by name
   modules.py              module dispatcher: a name (BATCH_CREATION, FILE_LOAD) selects the service
@@ -159,7 +159,6 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 
 | Command | Purpose | Typical trigger |
 |---|---|---|
-| `init-db` | Schema (once) | Deploy |
 | `run --module NAME [module parameters]` | Run one module by name: `BATCH_CREATION`, `FILE_LOAD` (see below). One Glue job / Step Functions state can start any of them | Any schedule or event |
 | `list-modules` | Module names and parameters (no database needed) | Ops |
 | `show-config` | Settings with value and source; database target (no password) | Ops |

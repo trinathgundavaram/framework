@@ -104,6 +104,24 @@ They can also be given for one run: `metadata_schema` / `metadata_db` in a workf
 job arguments above on a direct Glue run. A run's value wins over the project's settings and the job
 default. `metadata_load` adds the schema to a `--TABLE_NAME` that has none.
 
+## Environment in database names (`$env`)
+
+The staging and core database (schema) names and the S3 paths of `ComplianceSourceFileConfig` can carry
+a `$env` token, so one set of configuration rows works in every environment (the GRE convention):
+
+| Authored | DEV | TEST | QA | PROD / UAT |
+|---|---|---|---|---|
+| `CMS_STG_$ENV` | `CMS_STG_DEV` | `CMS_STG_TEST` | `CMS_STG_QA` | `CMS_STG` |
+| `cms_core_$env_t` | `cms_core_dev_t` | `cms_core_test_t` | `cms_core_qa_t` | `cms_core_t` |
+| `s3://inbound-$env/odr/in/` | `s3://inbound-dev/odr/in/` | `s3://inbound-test/odr/in/` | `s3://inbound-qa/odr/in/` | `s3://inbound-/odr/in/` |
+
+- Columns: `Stg_Schema_Nm`, `Core_Schema_Nm`, `S3_Src_File_Path`, `Src_File_Archive_Path`.
+- The token matches in any casing and is replaced in its own casing (`$env` → `dev`, `$ENV` → `DEV`,
+  `$Env` → `Dev`). PROD and UAT replace it with nothing; a doubled underscore left in a database name
+  collapses (paths are left as they are, so prefer a database-style name where PROD has no suffix).
+- The environment is the `ENVIRONMENT` setting (the Glue jobs get `--FRAMEWORK_ENVIRONMENT` = the deploy `env`, upper-cased); `ENV_VALUE` overrides the replacement text for
+  that environment (e.g. `ENV_VALUE=uat` where UAT databases do carry a suffix).
+
 ## Running steps by hand
 
 ```bash
@@ -122,7 +140,6 @@ Commands that are not steps run on the runner job directly:
 
 ```bash
 R=compliance_batch_framework_runner_dev
-aws glue start-job-run --job-name $R --arguments '{"--FW_ARGS": "init-db"}'
 aws glue start-job-run --job-name $R --arguments '{"--FW_ARGS": "validate-config"}'
 aws glue start-job-run --job-name $R --arguments \
   '{"--FW_ARGS": "close-batch --btch-id 20260201_ODR_ROPENS_50_DAILY_2026_1 --closed-by jdoe"}'
@@ -139,7 +156,7 @@ run names the module and project.
 | A step fails, or the input names an unknown step | the project's `project_alert_emails` + `alert_email` | the workflow publishes: subject `[FAILED] project ODR dev: StepFailed`, body with the schedule (or "manual run"), the failed step (`step BATCH_CLOSE (2 of 3)`), the Glue error and a link to the execution |
 | An execution times out (`workflow_timeout_hours`) or is aborted | same | EventBridge rule on the workflow's `TIMED_OUT` / `ABORTED` events |
 | A schedule cannot start its workflow (after 1 hour of retries) | `alert_email` | a CloudWatch alarm on the rule's `FailedInvocations` emails |
-| A Glue run fails, times out or errors (also runs started by hand: `init-db`, `metadata_load`) | glue `alert_emails` | EventBridge rule `..._glue_failed_<env>` → SNS `..._glue_alerts_<env>` |
+| A Glue run fails, times out or errors (also runs started by hand: `validate-config`, `metadata_load`) | glue `alert_emails` | EventBridge rule `..._glue_failed_<env>` → SNS `..._glue_alerts_<env>` |
 | Business events: quarantined file, missing source, invalid override, technical failure of a file | the file config's recipients / `DEFAULT_NOTIFY_EMAILS` | the framework's `NOTIFY` step (SES) |
 
 SNS email subscriptions must be confirmed once from the email SNS sends.
@@ -264,7 +281,8 @@ through `--additional-python-modules`, like the team's other Glue jobs. Database
 
 ### First run in a new environment
 
-1. `init-db` on the runner (see *Running steps by hand*) — creates the metadata schema.
+1. The framework tables already exist: they are created separately from `src/framework/sql/schema.sql`
+   in the `metadata_schema` of the metadata database (the framework never creates or alters tables).
 2. Load the configuration tables (below): project, source system, run type, crosswalk, file config,
    rule binding. The project's staging and core tables are created by the project (their framework
    columns: `docs/framework-package.md`, Onboarding).
@@ -296,8 +314,8 @@ same way. Run `validate-config` after every change.
 ## Updating
 
 - **Framework code**: edit `src/framework/`, rebuild the wheel (the *Build Compliance Framework Wheel*
-  workflow, or `src/build_wheel.sh`), deploy `glue`. A changed schema needs the database re-created
-  (`init-db` only creates a missing schema).
+  workflow, or `src/build_wheel.sh`), deploy `glue`. A changed `sql/schema.sql` is applied to the
+  database separately; the framework never alters tables.
 - **Schedules / projects**: edit `local.projects` in `stepfunctions/_local.tf`, deploy `stepfunctions`.
 - **Job settings**: edit `glue/env-config/us-east-1/<env>.tfvars` (or `glue/_local.tf` for S3 keys and
   packages), deploy `glue`.

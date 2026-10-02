@@ -25,9 +25,6 @@
   "any scheduled DAG: re-run for a past date": {
     "as_of": "2026-09-01"
   },
-  "compliance_admin: create the tables": {
-    "command": "init-db"
-  },
   "compliance_admin: check the configuration": {
     "command": "validate-config"
   },

@@ -30,8 +30,8 @@ class App:
         conn = settings.connect()
         try:
             if not schema_exists(conn, settings.metadata_schema):
-                raise ConfigError(f"metadata schema {settings.metadata_schema!r} is not initialised - "
-                                  "run 'framework init-db'")
+                raise ConfigError(f"the framework tables were not found in {settings.metadata_schema!r}; "
+                                  "they are created separately from sql/schema.sql")
             return cls(conn, clock or Clock(), settings, build_object_store(settings), build_rule_engine(settings))
         except BaseException:
             conn.close()

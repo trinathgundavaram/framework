@@ -41,6 +41,7 @@ locals {
       DB_SECRET_NAME        = var.rds_secret_name
       DB_SSLMODE            = "require"
       METADATA_SCHEMA       = var.metadata_schema
+      ENVIRONMENT           = upper(var.env)
       AWS_REGION            = local.region
       BUSINESS_TZ           = local.business_tz
       OBJECT_STORE          = "s3"

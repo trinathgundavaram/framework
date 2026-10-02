@@ -1,7 +1,9 @@
 """Shared primitives."""
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta, timezone
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 
@@ -47,6 +49,24 @@ class CloseBlocked(FrameworkError):
 
 class CloseDeferred(FrameworkError):
     """The batch is locked by another process; try again later."""
+
+
+ENV_TOKEN_VALUES = {"DEV": "dev", "QA": "qa", "INT": "int", "UAT": "", "PROD": ""}
+_ENV_TOKEN = re.compile(r"\$env", re.IGNORECASE)
+
+
+def resolve_env(text: Optional[str], environment: str, value: Optional[str] = None, identifier: bool = True):
+    """Replace $env / $ENV / $Env with the environment's value in the token's own casing (GRE convention)."""
+    if not text or not _ENV_TOKEN.search(text):
+        return text
+    low = (value if value is not None else ENV_TOKEN_VALUES.get(environment.upper(), environment.lower())).lower()
+
+    def sub(m):
+        token = m.group(0)[1:]
+        return low.upper() if token.isupper() else low if token.islower() else low.capitalize()
+
+    out = _ENV_TOKEN.sub(sub, text)
+    return re.sub(r"_{2,}", "_", out) if identifier else out
 
 
 class Clock:

@@ -74,12 +74,14 @@ class FileConfig:
         return os.path.splitext(self.src_file_nm_tmplt)[1].lower()
 
     @classmethod
-    def from_row(cls, r: dict) -> "FileConfig":
+    def from_row(cls, r: dict, settings=None) -> "FileConfig":
+        """`settings` resolves $env tokens in the staging / core database names and the S3 paths."""
+        name = settings.resolve_env if settings else (lambda text, identifier=True: text)
         return cls(r["cfg_id"], r["project_cd"], r["table_nm"], r["src_id"], r["src_file_nm_tmplt"], r["delmtr_cd"],
                    r["src_file_has_hdr_ind"] == 1, r["src_file_has_trlr_ind"] == 1, r["allow_zero_rcd_ind"] == 1,
-                   r["s3_src_file_path"], r["src_file_archive_path"], r["stg_schema_nm"], r["stg_table_nm"],
-                   r["core_schema_nm"], r["sucs_email_notfn_id"], r["failr_email_notfn_id"], r["email_subjct_txt"],
-                   r["active_ind"] == 1)
+                   name(r["s3_src_file_path"], False), name(r["src_file_archive_path"], False),
+                   name(r["stg_schema_nm"]), r["stg_table_nm"], name(r["core_schema_nm"]),
+                   r["sucs_email_notfn_id"], r["failr_email_notfn_id"], r["email_subjct_txt"], r["active_ind"] == 1)
 
 
 @dataclass(frozen=True)
@@ -124,23 +126,24 @@ def effective_sources(conn, project_cd, table_nm, run_ty, on_date: date) -> list
             if x.effective_on(on_date)]
 
 
-def active_file_configs(conn: Connection) -> list[FileConfig]:
+def active_file_configs(conn: Connection, settings=None) -> list[FileConfig]:
     rows = conn.execute("SELECT * FROM ComplianceSourceFileConfig WHERE Active_Ind = 1 ORDER BY Cfg_ID").fetchall()
-    return [FileConfig.from_row(r) for r in rows]
+    return [FileConfig.from_row(r, settings) for r in rows]
 
 
-def file_config(conn, project_cd: str, table_nm: str, src_id: Optional[str] = None) -> Optional[FileConfig]:
+def file_config(conn, project_cd: str, table_nm: str, src_id: Optional[str] = None,
+                settings=None) -> Optional[FileConfig]:
     """Active file config of a source; with src_id=None any source of the table (all share the core table)."""
     where, params = "Project_Cd=%s AND Table_Nm=%s AND Active_Ind=1", [project_cd, table_nm]
     if src_id is not None:
         where, params = where + " AND Src_ID=%s", params + [src_id]
     rows = conn.execute(f"SELECT * FROM ComplianceSourceFileConfig WHERE {where} ORDER BY Cfg_ID", params).fetchall()
-    return FileConfig.from_row(rows[0]) if rows else None
+    return FileConfig.from_row(rows[0], settings) if rows else None
 
 
-def file_config_by_id(conn: Connection, cfg_id: int) -> Optional[FileConfig]:
+def file_config_by_id(conn: Connection, cfg_id: int, settings=None) -> Optional[FileConfig]:
     r = conn.execute("SELECT * FROM ComplianceSourceFileConfig WHERE Cfg_ID=%s", (cfg_id,)).fetchone()
-    return FileConfig.from_row(r) if r else None
+    return FileConfig.from_row(r, settings) if r else None
 
 
 def rule_bindings(conn, project_cd: str, table_nm: str, src_id: str, run_ty: str) -> list[RuleBinding]:
@@ -273,7 +276,7 @@ class Issue:
     severity: str = "ERROR"
 
 
-def validate_all(conn: Connection, case_sensitive: bool = True) -> list[Issue]:
+def validate_all(conn: Connection, case_sensitive: bool = True, settings=None) -> list[Issue]:
     """Validate the configuration tables and the target tables they point to."""
     issues: list[Issue] = []
 
@@ -290,7 +293,7 @@ def validate_all(conn: Connection, case_sensitive: bool = True) -> list[Issue]:
                 for r in conn.execute("SELECT Project_Cd, Active_Ind FROM ComplianceProject").fetchall()}
     sources = {r["src_id"] for r in conn.execute("SELECT Src_ID FROM ComplianceSourceSystem").fetchall()}
     xw = xwalk_rows(conn)
-    cfgs = active_file_configs(conn)
+    cfgs = active_file_configs(conn, settings)
     seen_cfg: dict[tuple, int] = {}
     for c in cfgs:
         key = (c.project_cd, c.table_nm, c.src_id)

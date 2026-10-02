@@ -8,7 +8,7 @@ import typing
 from dataclasses import dataclass, field, fields
 from typing import Any, Mapping, Optional
 
-from .common import ConfigError
+from .common import ConfigError, resolve_env
 from .connection_factory import build_teradata_connection
 from .db import Connection
 
@@ -19,6 +19,8 @@ _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 @dataclass
 class Settings:
     metadata_schema: str = "cms_compliance"
+    environment: str = "DEV"
+    env_value: Optional[str] = None
     aws_region: str = "us-east-1"
     business_tz: str = "America/Chicago"
 
@@ -83,6 +85,11 @@ class Settings:
     def validate(self) -> None:
         if not _IDENT.match(self.metadata_schema or ""):
             raise ConfigError(f"METADATA_SCHEMA {self.metadata_schema!r} is not a valid identifier")
+        self.environment = (self.environment or "").strip().upper()
+        if not re.match(r"^[A-Z0-9_]{1,20}$", self.environment):
+            raise ConfigError(f"ENVIRONMENT {self.environment!r} must be letters, digits or _ (e.g. DEV, TEST, PROD)")
+        if self.env_value is not None and not re.match(r"^[A-Za-z0-9_]{0,20}$", self.env_value):
+            raise ConfigError(f"ENV_VALUE {self.env_value!r} must be letters, digits or _")
         for name, allowed in (("file_rules_mode", ("GATE", "ANNOTATE")),
                               ("file_effective_date_basis", ("RPT_START", "RPT_END")),
                               ("notify_backend", ("log", "ses", "airflow")), ("object_store", ("s3", "local"))):
@@ -105,6 +112,10 @@ class Settings:
         except Exception as e:  # noqa: BLE001
             raise ConfigError(f"cannot connect to {self.db_target()}: {str(e).strip().splitlines()[0]}") from e
         return Connection(raw, self.metadata_schema, self.lock_ttl_minutes * 60)
+
+    def resolve_env(self, text: Optional[str], identifier: bool = True) -> Optional[str]:
+        """$env tokens of a configured name -> this environment's value."""
+        return resolve_env(text, self.environment, self.env_value, identifier)
 
     def describe(self) -> dict:
         return {n: {"value": getattr(self, n), "source": self.sources.get(n, "default")} for n in self.names()}

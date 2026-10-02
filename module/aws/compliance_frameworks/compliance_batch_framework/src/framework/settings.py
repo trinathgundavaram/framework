@@ -13,7 +13,7 @@ import psycopg
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import dict_row
 
-from .common import ConfigError
+from .common import ConfigError, resolve_env
 
 PREFIX = "FRAMEWORK_"
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
@@ -26,6 +26,8 @@ _SECRET_KEYS = {"host": ("host",), "port": ("port",), "dbname": ("dbname", "data
 @dataclass
 class Settings:
     metadata_schema: str = "cms_compliance"
+    environment: str = "DEV"
+    env_value: Optional[str] = None
     aws_region: str = "us-east-1"
     business_tz: str = "America/Chicago"
 
@@ -93,6 +95,11 @@ class Settings:
     def validate(self) -> None:
         if not _IDENT.match(self.metadata_schema or ""):
             raise ConfigError(f"METADATA_SCHEMA {self.metadata_schema!r} is not a valid identifier")
+        self.environment = (self.environment or "").strip().upper()
+        if not re.match(r"^[A-Z0-9_]{1,20}$", self.environment):
+            raise ConfigError(f"ENVIRONMENT {self.environment!r} must be letters, digits or _ (e.g. DEV, TEST, PROD)")
+        if self.env_value is not None and not re.match(r"^[A-Za-z0-9_]{0,20}$", self.env_value):
+            raise ConfigError(f"ENV_VALUE {self.env_value!r} must be letters, digits or _")
         for name, allowed in (("load_engine", ("PANDAS", "SPARK")), ("file_rules_mode", ("GATE", "ANNOTATE")),
                               ("file_effective_date_basis", ("RPT_START", "RPT_END")),
                               ("notify_backend", ("log", "ses")), ("object_store", ("s3", "local"))):
@@ -138,6 +145,10 @@ class Settings:
                                    application_name="cms-compliance-framework")
         except psycopg.OperationalError as e:
             raise ConfigError(f"cannot connect to {desc}: {str(e).strip().splitlines()[0]}") from e
+
+    def resolve_env(self, text: Optional[str], identifier: bool = True) -> Optional[str]:
+        """$env tokens of a configured name -> this environment's value."""
+        return resolve_env(text, self.environment, self.env_value, identifier)
 
     def describe(self) -> dict:
         return {n: {"value": getattr(self, n), "source": self.sources.get(n, "default")} for n in self.names()}

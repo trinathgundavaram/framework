@@ -1,4 +1,4 @@
-"""Teradata database layer: connection wrapper, transactions, table-based locks, init-db."""
+"""Teradata database layer: connection wrapper, transactions, table-based locks."""
 from __future__ import annotations
 
 import hashlib
@@ -9,7 +9,6 @@ import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from importlib import resources
 from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence
 
 from .common import ConfigError, LockTimeout
@@ -87,6 +86,10 @@ def _clean(value: Any) -> Any:
     return value
 
 
+class _Probe(Exception):
+    """Raised to roll a trial insert back."""
+
+
 class Result:
     def __init__(self, rows: Optional[list[dict]], rowcount: int):
         self._rows = rows
@@ -145,9 +148,45 @@ class Connection:
             if chunk:
                 cur.executemany(text, chunk)
                 sent += len(chunk)
+        except Exception as e:
+            if chunk and not hasattr(e, "failed_rows"):
+                e.failed_rows, e.failed_offset = chunk, sent
+            raise
         finally:
             cur.close()
         return sent
+
+    def first_rejected(self, query: str, rows: list) -> Optional[int]:
+        """Index of the first row of a failed batch that the database refuses; every probe is rolled back."""
+        if self.in_transaction or not rows:
+            return None
+        text = _PARAM.sub("?", query)
+
+        def refused(part: list) -> bool:
+            cur = self._raw.cursor()
+            try:
+                with self.transaction():
+                    cur.executemany(text, part)
+                    raise _Probe()
+            except _Probe:
+                return False
+            except Exception as e:
+                if not is_data_error(e):
+                    raise
+                return True
+            finally:
+                cur.close()
+
+        if not refused(rows):
+            return None
+        lo, hi = 0, len(rows)
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if refused(rows[lo:mid]):
+                hi = mid
+            else:
+                lo = mid
+        return lo
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -213,10 +252,6 @@ def in_list(values: Sequence) -> tuple[str, list]:
     return ",".join(["%s"] * len(values)), values
 
 
-def sql_text(name: str) -> str:
-    return resources.files(__package__).joinpath("sql", name).read_text(encoding="utf-8")
-
-
 def table_exists(conn: Connection, database: str, table: str) -> bool:
     return conn.execute("SELECT 1 AS ok FROM DBC.TablesV WHERE UPPER(DatabaseName) = UPPER(%s) "
                         "AND UPPER(TableName) = UPPER(%s)", (database, table)).fetchone() is not None
@@ -224,27 +259,6 @@ def table_exists(conn: Connection, database: str, table: str) -> bool:
 
 def schema_exists(conn: Connection, schema: str) -> bool:
     return table_exists(conn, schema, "ComplianceRequestControl")
-
-
-def statements(script: str) -> list[str]:
-    """Split a DDL script into single statements, dropping comment lines."""
-    out = []
-    for chunk in script.split(";"):
-        lines = [ln for ln in chunk.splitlines() if ln.strip() and not ln.strip().startswith("--")]
-        if lines:
-            out.append("\n".join(lines))
-    return out
-
-
-def init_db(conn: Connection, schema: str) -> list[str]:
-    """Create the framework tables in the metadata database, one statement per request, once."""
-    ident(schema)
-    if schema_exists(conn, schema):
-        return ["schema.sql (skipped: schema already initialised)"]
-    for statement in statements(sql_text("schema.sql").replace("{{META_DB}}", schema)):
-        log.info("init-db: %s", statement.splitlines()[0][:100])
-        conn.execute(statement)
-    return ["schema.sql"]
 
 
 def batch_key(btch_id: str) -> str:

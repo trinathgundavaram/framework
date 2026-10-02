@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 STEPS = ("BATCH_CREATION", "FILE_LOAD", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY")
 STEP_PARAMS = ("project", "run_type", "period", "table", "period_file", "lookback_days", "lookback_weeks",
                "bucket", "key", "prefix", "version_id")
-COMMANDS = ("init-db", "test-connection", "show-config", "validate-config", "health", "locks", "release-lock",
+COMMANDS = ("test-connection", "show-config", "validate-config", "health", "locks", "release-lock",
             "close-batch", "close-batches", "process-decisions", "notify", "list-modules")
 
 
@@ -52,7 +52,7 @@ def run_step(step: str, *, as_of: Optional[str] = None, settings: Optional[Mappi
 
 def run_command(command: str, *, args: Optional[list] = None, as_of: Optional[str] = None,
                 settings: Optional[Mapping[str, Any]] = None, log_level: str = "INFO") -> tuple[Any, int]:
-    """Run one CLI command (init-db, validate-config, health, close-batch, locks, release-lock, ...)."""
+    """Run one CLI command (validate-config, health, close-batch, locks, release-lock, ...)."""
     if command not in COMMANDS:
         raise ValueError(f"unknown command {command!r}; one of {', '.join(COMMANDS)}")
     argv = [command, "--log-level", log_level]

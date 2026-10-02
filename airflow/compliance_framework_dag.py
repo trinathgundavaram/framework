@@ -20,7 +20,7 @@ VARIABLE_KEY = os.environ.get("COMPLIANCE_VARIABLE_KEY", DEFAULT_VARIABLE_KEY)
 STEP_TIMEOUT = {"BATCH_CREATION": timedelta(hours=1), "FILE_LOAD": timedelta(hours=2),
                 "OVERRIDE_DECISIONS": timedelta(minutes=30), "BATCH_CLOSE": timedelta(minutes=30),
                 "NOTIFY": timedelta(minutes=30)}
-ADMIN_COMMANDS = ["validate-config", "health", "init-db", "test-connection", "show-config", "locks",
+ADMIN_COMMANDS = ["validate-config", "health", "test-connection", "show-config", "locks",
                   "release-lock", "close-batch"]
 RUN_PARAMS = ("project", "run_type", "period", "table", "as_of")
 
@@ -125,7 +125,7 @@ with DAG(
 
 with DAG(
     dag_id="compliance_admin",
-    description="compliance batch framework - init-db, validate-config, health, locks, release-lock, close-batch",
+    description="compliance batch framework - validate-config, health, locks, release-lock, close-batch",
     default_args={"owner": "data-engineering", "retries": 0},
     schedule=None,
     start_date=_START,

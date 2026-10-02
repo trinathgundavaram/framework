@@ -1,6 +1,7 @@
 {
   "connection_id": "compliance_teradata_dev",
   "meta_db": "CMS_COMPLIANCE_DEV",
+  "environment": "DEV",
   "log_level": "DEBUG",
   "schedule_timezone": "America/Chicago",
   "settings": {

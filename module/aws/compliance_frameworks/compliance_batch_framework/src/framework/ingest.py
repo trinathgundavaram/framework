@@ -191,7 +191,7 @@ class IngestPipeline:
 
     def _project_locations(self, project_cd: str) -> tuple[list[tuple[str, str]], set, TemplateMatcher]:
         """(the project's inbound locations, the ones other projects also use, its own templates)."""
-        cfgs = cfgmod.active_file_configs(self.conn)
+        cfgs = cfgmod.active_file_configs(self.conn, self.settings)
         mine = [c for c in cfgs if c.project_cd == project_cd]
         locations = sorted({parse_uri(c.s3_src_file_path) for c in mine})
         shared = {parse_uri(c.s3_src_file_path) for c in cfgs if c.project_cd != project_cd} & set(locations)
@@ -223,12 +223,12 @@ class IngestPipeline:
 
     def _load_config(self) -> tuple[TemplateMatcher, tuple[str, ...]]:
         """The compiled filename templates of every active file config, and the run type codes."""
-        return (TemplateMatcher(cfgmod.active_file_configs(self.conn), self.settings.filename_case_sensitive),
+        return (TemplateMatcher(cfgmod.active_file_configs(self.conn, self.settings), self.settings.filename_case_sensitive),
                 tuple(cfgmod.run_types(self.conn)))
 
     def _configured_locations(self) -> list[tuple[str, str]]:
         """The distinct (bucket, prefix) inbound locations of every active file config."""
-        return sorted({parse_uri(c.s3_src_file_path) for c in cfgmod.active_file_configs(self.conn)})
+        return sorted({parse_uri(c.s3_src_file_path) for c in cfgmod.active_file_configs(self.conn, self.settings)})
 
     def health(self) -> dict[str, list[dict]]:
         """Loads stuck mid-pipeline, and current quarantine counts by reason (design §15.3)."""
@@ -274,7 +274,7 @@ class IngestPipeline:
         if self.store.exists(info.bucket, info.key):
             if load["load_stat"] == "QUARANTINED":
                 self._move(info, self.settings.quarantine_uri, f"{load['quarantine_rsn_cd']}/", load["load_id"])
-            elif load["load_stat"] in ARCHIVE_LOAD_STATS and (cfg := cfgmod.file_config_by_id(self.conn, load["cfg_id"])):
+            elif load["load_stat"] in ARCHIVE_LOAD_STATS and (cfg := cfgmod.file_config_by_id(self.conn, load["cfg_id"], self.settings)):
                 self._move(info, cfg.src_file_archive_path, "", load["load_id"])
         return IngestOutcome(load["load_id"], "REPLAY_IGNORED", req_id=load["req_id"])
 

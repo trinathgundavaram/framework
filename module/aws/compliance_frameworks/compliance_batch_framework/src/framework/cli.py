@@ -12,7 +12,7 @@ from .app import App
 from .audit import EventLogger
 from .common import FrameworkError, parse_as_of
 from .config import validate_all
-from .db import init_db, schema_exists
+from .db import schema_exists
 from .modules import describe_modules, run_module
 from .settings import Settings
 
@@ -54,7 +54,6 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--table")
         sp.add_argument("--run-type", required=project_required)
 
-    add("init-db", "apply schema and seed data")
     add("list-modules", "list the modules that 'run --module' can call, with their parameters")
     sp = add("run", "run one module by name (see list-modules)")
     sp.add_argument("--module", required=True, help="module name (see list-modules); case-insensitive")
@@ -88,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             _print(describe_modules())
             return 0
         settings = Settings.load(overrides=dict(args.settings), env_file=args.env_file)
-        if args.cmd in ("init-db", "test-connection", "show-config"):
+        if args.cmd in ("test-connection", "show-config"):
             return _no_app(args, settings)
         with App.from_settings(settings, parse_as_of(args.as_of, settings.business_tz)) as app:
             return _dispatch(app, args)
@@ -103,18 +102,15 @@ def _no_app(args, settings: Settings) -> int:
         _print({"database": target, "settings": settings.describe()})
         return 0
     with settings.connect() as conn:
-        if args.cmd == "init-db":
-            _print({"database": target, "applied": init_db(conn, settings.metadata_schema)})
-            return 0
         ok = schema_exists(conn, settings.metadata_schema)
-        _print({"database": target, "ok": ok, "error": None if ok else "schema not initialised (run init-db)"})
+        _print({"database": target, "ok": ok, "error": None if ok else "framework tables not found (created separately from sql/schema.sql)"})
         return 0 if ok else 1
 
 
 def _dispatch(app: App, args) -> int:
     c = args.cmd
     if c == "validate-config":
-        issues = validate_all(app.conn, app.settings.filename_case_sensitive)
+        issues = validate_all(app.conn, app.settings.filename_case_sensitive, app.settings)
         _print([asdict(i) for i in issues])
         errors = [i for i in issues if i.severity == "ERROR"]
         if errors:

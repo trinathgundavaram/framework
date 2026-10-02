@@ -1,6 +1,6 @@
 # CMS Compliance Framework: Module Reference
 
-What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.1 (design v5).
+What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.3 (design v5).
 
 - **Design:** [`design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md). `D-nn` = decision, `Q-nn` = open question, `§n` = design section.
 - **Setup, configuration, commands:** [`framework-package.md`](framework-package.md).
@@ -73,7 +73,6 @@ What each file in `framework/` does, what it owns, and what it leaves to other m
 | `run --module BATCH_CREATION` | P2, P4 | `modules` → `App.create_batches` for the project/run type/period when a ROUTINE run type is given, and always `batches.IntakeProcessor.run(project_cd=..., run_ty=...)` for that project - one project-scoped call for both routine and ad-hoc batch creation |
 | `run --module FILE_LOAD` | P5, P6 | `modules` → `ingest.IngestPipeline.process_file` (`--key`) or `process_path` (`--prefix`, or every configured location) |
 | `list-modules` | ops | `cli` → `modules.describe_modules` (no settings, no database) |
-| `init-db` | deploy | `cli` → `settings.connect` → `db.init_db` → `sql/schema.sql` |
 | `show-config` | ops | `cli` → `settings.describe` / `settings.db_conninfo` (no password) |
 | `test-connection` | ops | `cli` → `settings.connect` → `db.schema_exists` |
 | `validate-config` | P1 | `config.validate_all` → `load.columns` |
@@ -91,7 +90,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 
 ### `cli.py`
 - Parses arguments (options go **after** the command), loads `Settings` with `--set NAME=VALUE` overrides and `--env-file`, builds the `App`, calls one service, prints JSON, sets the exit code.
-- `init-db`, `show-config` and `test-connection` run without the `App` (the schema may not exist yet).
+- `show-config` and `test-connection` run without the `App`.
 - `validate-config` writes one `CONFIG_VALIDATION_FAILED` audit event when errors are found.
 - Scope arguments `--project / --table / --run-type` select what `run --module BATCH_CREATION` and `close-batches` work on, so one scheduled job per project carries that project's settings.
 
@@ -114,7 +113,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 - `Req_Stat` values and `TRANSITIONS` / `check_transition` (§6.1). **Replaces** `ComplianceRequestStatus` and `ComplianceRequestStatusTransition`.
 
 ### `db.py`
-- `connect(dsn, schema)` for tests and ad-hoc use; `init_db` creates the schema and applies `schema.sql` once (no extensions, no seed data); `fetch_all` for the health queries.
+- `connect(dsn, schema)` for tests and ad-hoc use; `fetch_all` for the health queries.
 - Advisory locks (§12.2): `held` (session lock with timeout), `try_lock` / `unlock`, `xact_lock`; key builders `batch_key`, `seq_key`.
 
 ### `config.py`
@@ -188,7 +187,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 
 | File | Purpose |
 |---|---|
-| `sql/schema.sql` | All 12 framework tables with named keys, foreign keys and the few indexes the framework needs; no CHECK constraints. Schema-unqualified, `CREATE`-only; applied once by `init-db`. |
+| `sql/schema.sql` | All 12 framework tables with named keys, foreign keys and the few indexes the framework needs; no CHECK constraints. Schema-unqualified, `CREATE`-only; applied separately (the framework assumes the tables exist). |
 | `sql/approvals.sql` | The six manual override templates (insert an approved `REUSE` / `LATE_ARRIVAL` / `CORRECTION`, approve, reject, stop early). Each statement must report 1 row. |
 
 ---

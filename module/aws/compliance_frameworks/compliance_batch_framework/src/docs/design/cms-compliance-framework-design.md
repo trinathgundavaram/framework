@@ -152,7 +152,6 @@ All of these were withdrawn by D-34, D-30 or D-39:
 
 | CLI command | Service | Eventual trigger (D-13) |
 |---|---|---|
-| `init-db` | `db.init_db` (schema once) | deploy |
 | `show-config` / `test-connection` | `settings` (D-66, D-67) | deploy / ops |
 | `validate-config` | `config.validate_all` | CI, and before any config change is applied |
 | `run --module BATCH_CREATION --project [--run-type --period] [--as-of]` | `batches.create_batches` (ROUTINE) + `batches.IntakeProcessor` (ad-hoc request windows, D-79) | project schedule (D-71) |
@@ -529,7 +528,7 @@ Every failure except C0 quarantines the file, sets `Load_Stat = QUARANTINED` wit
 | C7–C10 | Reserved | — |
 | C11 | SHA-256 equals the batch's current or pending candidate load | `FILE_REJECTED_DUPLICATE` |
 | C11 | SHA-256 equals a load of a **different** batch → **continue** (D-52) | `FILE_SAME_CONTENT_OTHER_BATCH` (warning) |
-| C12 | Read failure (delimiter, encoding, structure) | `FILE_PARSE_ERROR` |
+| C12 | Read failure (delimiter, encoding, structure); the message names the line | `FILE_PARSE_ERROR` |
 | C13 | Data column count ≠ staging business-column count (D-59) | `FILE_COLUMN_COUNT_MISMATCH` |
 | C14 | Trailer count mismatch (when `Src_File_Has_Trlr_Ind = 1`, ⚠ Q-02) | `FILE_TRAILER_COUNT_MISMATCH` |
 
@@ -549,6 +548,9 @@ Every failure except C0 quarantines the file, sets `Load_Stat = QUARANTINED` wit
   - With a header row, the header is skipped and names are ignored.
   - With a trailer, the trailer is removed before counting.
   - All values are read as text and cast to the staging column types; a cast failure → `FILE_PARSE_ERROR`.
+  - The rejection message names the file line: bytes that are not valid in `FILE_ENCODING`
+    (`file is not valid utf-8 at line N`), and a value the database refuses
+    (`value does not fit staging column types at line N (column c)`). Values are never written to the message.
 
 ### 10.2 Promotion (D-01): one transaction (D-68)
 ```sql
@@ -767,7 +769,7 @@ framework/
 ├── app.py        service wiring, health report
 ├── settings.py   settings + database connection (.env / Secrets Manager) (D-66, D-67)
 ├── common.py     errors, clock, Btch_ID, Req_Stat values and transitions (§6.1)
-├── db.py         init-db, advisory locks (§12.2)
+├── db.py         connections, advisory locks (§12.2)
 ├── config.py     configuration rows, templates (§9), validator (P1)
 ├── period_sql.py report-period SQL by name (D-71)
 ├── batches.py    batch creation (P2), intake (P4), CRC rows
@@ -935,7 +937,7 @@ The following v2 questions are closed: O-01, O-02, O-03, O-05–O-08, O-10, O-11
 
 ## Appendix A: PostgreSQL DDL (tested on PostgreSQL 16)
 
-The DDL is maintained in one place: [`framework/sql/schema.sql`](../../framework/sql/schema.sql). `framework init-db` applies it (once) into the metadata schema, and the Glue metadata-load deployment uploads the same file for reference. §5 describes every table; §5.4 lists the framework columns each staging and core table needs.
+The DDL is maintained in one place: [`framework/sql/schema.sql`](../../framework/sql/schema.sql). It is applied separately, into the metadata schema; the framework assumes the tables exist and never creates them. §5 describes every table; §5.4 lists the framework columns each staging and core table needs.
 
 ---
 

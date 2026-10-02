@@ -11,7 +11,7 @@ airflow/
     compliance_task.py            the only Airflow-aware module: Variable + Connection -> framework
     run_framework.py              run_step() / run_command(): the framework in-process, no Airflow
     connection_factory.py         teradatasql connection from TERADATA_* environment variables
-    db.py                         Teradata layer: transactions, lock table, init-db
+    db.py                         Teradata layer: transactions, lock table
     gre_bridge.py                 file rules through the GRE rules engine
     batches.py ingest.py load.py overrides.py closing.py audit.py config.py modules.py
     adapters.py app.py cli.py common.py settings.py
@@ -42,8 +42,9 @@ No `.env` file and no AWS Secrets Manager: credentials come from the Airflow Con
    DAGs folder, side by side.
 2. Install `compliance_framework/requirements.txt` in the workers' environment. Airflow 2.4+, Python 3.9+.
 3. Create the Connection and the Variable (below; ready-made examples in `examples/`).
-4. Trigger `compliance_admin` with `{"command": "init-db"}`, load the configuration tables, then
-   `{"command": "validate-config"}`.
+4. The framework tables already exist: they are created separately from `sql/schema.sql` (replace
+   `{{META_DB}}` with the metadata database). The framework never creates or alters tables.
+5. Load the configuration tables, then trigger `compliance_admin` with `{"command": "validate-config"}`.
 
 ### Airflow Connection
 
@@ -54,8 +55,7 @@ No `.env` file and no AWS Secrets Manager: credentials come from the Airflow Con
 | Host / Login / Password | the Teradata system and the framework's service account |
 | Extra (optional) | `{"logmech": "LDAP"}` (default LDAP) |
 
-The account needs, on the metadata database: CREATE TABLE (for `init-db`) and SELECT / INSERT / UPDATE /
-DELETE; on each project's staging and core databases: SELECT / INSERT / UPDATE / DELETE; and SELECT on
+The account needs, on the metadata database: SELECT / INSERT / UPDATE / DELETE (no CREATE); on each project's staging and core databases: SELECT / INSERT / UPDATE / DELETE; and SELECT on
 `DBC.TablesV` and `DBC.ColumnsV`.
 
 ### Airflow Variable `compliance_framework_config`
@@ -86,6 +86,7 @@ as the Variable's value (Admin → Variables) and replace the `REPLACE_WITH_...`
 |---|---|
 | `meta_db` (required) | Teradata database holding the framework tables |
 | `connection_id` | Airflow Connection (default `compliance_teradata`) |
+| `environment` | `DEV`, `TEST`, `QA`, `PROD`, ...: what `$env` in configured database names resolves to (below); defaults to `gre.environment`, else `DEV` |
 | `schedule_timezone` | Time zone of the schedules (default `America/Chicago`; follows daylight saving) |
 | `settings` | Framework settings by name. Common: `QUARANTINE_URI`, `BUSINESS_TZ`, `AWS_REGION`, `NOTIFY_BACKEND` (`airflow` = Airflow's email backend, `ses`, `log`), `NOTIFY_FROM_EMAIL` (ses), `DEFAULT_NOTIFY_EMAILS`, `FILE_RULES_MODE` (`GATE` / `ANNOTATE`), `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `LOCK_TIMEOUT_SECONDS` (300), `LOCK_TTL_MINUTES` (240) |
 | `runs` | Named parameter sets, below |
@@ -112,7 +113,7 @@ Files are read from S3 with the workers' AWS credentials (`OBJECT_STORE` = `s3`,
 |---|---|
 | `compliance_batch_framework` | **The one DAG that calls every step**, in order, by hand: for a named run (`{"run": "odr_full_cycle"}`) or for parameters given at trigger time. Steps not in the run are skipped. |
 | `compliance_<run name>` | One per run that has a `schedule`, e.g. `compliance_odr_file_load`. Built from the Variable when Airflow parses the DAG file; `max_active_runs=1`. |
-| `compliance_admin` | `init-db`, `validate-config`, `health`, `locks`, `release-lock`, `close-batch`, ... |
+| `compliance_admin` | `validate-config`, `health`, `locks`, `release-lock`, `close-batch`, ... |
 
 - Change a run's parameters, add a project or add a schedule by editing the Variable; a new or changed
   schedule appears at Airflow's next parse of the DAG file. A missing or invalid Variable never breaks
@@ -129,9 +130,27 @@ Files are read from S3 with the workers' AWS credentials (`OBJECT_STORE` = `s3`,
 - The scheduled DAGs read the Variable named by the `COMPLIANCE_VARIABLE_KEY` environment variable
   (default `compliance_framework_config`).
 
+## Environment in database names (`$env`)
+
+The staging and core database names and the S3 paths of `ComplianceSourceFileConfig` can carry
+a `$env` token, so one set of configuration rows works in every environment (the GRE convention):
+
+| Authored | DEV | TEST | QA | PROD / UAT |
+|---|---|---|---|---|
+| `CMS_STG_$ENV` | `CMS_STG_DEV` | `CMS_STG_TEST` | `CMS_STG_QA` | `CMS_STG` |
+| `cms_core_$env_t` | `cms_core_dev_t` | `cms_core_test_t` | `cms_core_qa_t` | `cms_core_t` |
+| `s3://inbound-$env/odr/in/` | `s3://inbound-dev/odr/in/` | `s3://inbound-test/odr/in/` | `s3://inbound-qa/odr/in/` | `s3://inbound-/odr/in/` |
+
+- Columns: `Stg_Schema_Nm`, `Core_Schema_Nm`, `S3_Src_File_Path`, `Src_File_Archive_Path`.
+- The token matches in any casing and is replaced in its own casing (`$env` → `dev`, `$ENV` → `DEV`,
+  `$Env` → `Dev`). PROD and UAT replace it with nothing; a doubled underscore left in a database name
+  collapses (paths are left as they are, so prefer a database-style name where PROD has no suffix).
+- The environment is the `ENVIRONMENT` setting (the Variable's `environment`); `ENV_VALUE` overrides the replacement text for
+  that environment (e.g. `ENV_VALUE=uat` where UAT databases do carry a suffix).
+
 ## Teradata specifics
 
-**Tables.** `sql/schema.sql` creates 13 MULTISET tables in `meta_db`: the 12 framework tables plus
+**Tables.** `sql/schema.sql` defines 13 MULTISET tables for `meta_db`, created separately: the 12 framework tables plus
 `ComplianceLock`. Identity columns are `GENERATED ALWAYS AS IDENTITY`; there are no foreign keys or
 CHECK constraints (the validator checks references).
 
@@ -142,6 +161,10 @@ CHECK constraints (the validator checks references).
   `src_file_nm VARCHAR(1024)`, `stg_load_dtts TIMESTAMP(6) WITH TIME ZONE`. File values arrive as
   text: declare business columns VARCHAR, or types Teradata converts from text implicitly (a value that
   does not convert quarantines the file as `FILE_PARSE_ERROR`).
+- Rejected rows: the `FILE_PARSE_ERROR` message names the file line, both for bytes that are not valid
+  in `FILE_ENCODING` and for a value Teradata refuses (untranslatable character, bad number or date,
+  overflow). Teradata does not say which row of a batch failed, so the framework re-sends parts of the
+  failed batch (about a dozen trial inserts, each rolled back) to find it.
 - Core: the business columns, then `btch_id`, `load_id`, `current_ind SMALLINT`,
   `load_dtts TIMESTAMP(6) WITH TIME ZONE`, `end_dtts TIMESTAMP(6) WITH TIME ZONE`.
 
@@ -177,5 +200,5 @@ rules.
   locks) and the GRE bridge pass the framework's test suite when run against a stand-in for the
   `teradatasql` driver backed by PostgreSQL, and the DAGs run end to end in Airflow 2.10.
 - It has **not** been run against a real Teradata system. Before production, on a development Teradata
-  system: run `init-db`, `validate-config`, then one full cycle (`BATCH_CREATION`, `FILE_LOAD` of a good
+  system: create the tables from `sql/schema.sql`, run `validate-config`, then one full cycle (`BATCH_CREATION`, `FILE_LOAD` of a good
   and a bad file, `BATCH_CLOSE`, `NOTIFY`) from `compliance_batch_framework`, and check the tables.

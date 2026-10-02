@@ -1,4 +1,4 @@
--- CMS Compliance Framework schema for Teradata (v6). {{META_DB}} is replaced by `init-db`.
+-- CMS Compliance Framework schema for Teradata (v6). Replace {{META_DB}} with the metadata database and run once.
 
 CREATE MULTISET TABLE {{META_DB}}.ComplianceProject (
   Project_Cd    VARCHAR(30)  NOT NULL,

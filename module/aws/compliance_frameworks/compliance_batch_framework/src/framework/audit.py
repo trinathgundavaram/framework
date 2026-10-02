@@ -123,7 +123,7 @@ class NotificationDispatcher:
     def _send(self, r: dict, configs: dict) -> bool:
         key = (r["project_cd"], r["table_nm"], r["src_id"])
         if key not in configs:
-            configs[key] = cfgmod.file_config(self.conn, *key) if all(key) else None
+            configs[key] = cfgmod.file_config(self.conn, *key, settings=self.settings) if all(key) else None
         cfg = configs[key]
         if cfg:
             failure = AUDIT_EVENTS.get(r["event_ty"], _EXC_ERROR).category == "EXCEPTION"

@@ -1,4 +1,4 @@
--- CMS Compliance Framework schema (v6), applied by `framework init-db`.
+-- CMS Compliance Framework schema (v6). Run once with search_path set to the metadata schema.
 
 CREATE TABLE ComplianceProject (
   Project_Cd    VARCHAR(30)  NOT NULL,
