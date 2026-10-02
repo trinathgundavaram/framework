@@ -1,5 +1,5 @@
 {
-  "Comment": "compliance batch framework - ${workflow_label}: runs the requested steps in order, one Glue runner run per step. Input: {\"steps\": [...], \"run_type\"?, \"period\"?, \"table\"?, \"as_of\"?, \"metadata_schema\"?, \"metadata_db\"?, \"schedule\"?}",
+  "Comment": "compliance batch framework - ${workflow_label}: runs the requested steps in order, one Glue runner run per step. Input: {\"steps\": [...], \"run_type\"?, \"period\"?, \"table\"?, \"as_of\"?, \"metadata_schema\"?, \"metadata_db\"?, \"load_duplicate\"? (yes/no), \"schedule\"?}",
   "QueryLanguage": "JSONata",
   "TimeoutSeconds": ${timeout_seconds},
   "StartAt": "Validate",
@@ -35,7 +35,7 @@
               "JobName": "${runner_job_name}",
               "MaxCapacity": "{% $lookup(${step_capacity}, $states.input.step) %}",
               "Timeout": "{% $lookup(${step_timeout}, $states.input.step) %}",
-              "Arguments": "{% $merge([${project_settings}, ${project_arg}, {'--FW_MODULE': $states.input.step, '--FW_FAIL_ON_EXIT_CODES': $lookup(${step_fail_on}, $states.input.step)}, $states.input.ctx.run_type ? {'--FW_RUN_TYPE': $string($states.input.ctx.run_type)} : {}, $states.input.ctx.period ? {'--FW_PERIOD': $string($states.input.ctx.period)} : {}, $states.input.ctx.table ? {'--FW_TABLE': $string($states.input.ctx.table)} : {}, $states.input.ctx.as_of ? {'--FW_AS_OF': $string($states.input.ctx.as_of)} : {}, $states.input.ctx.metadata_schema ? {'--FRAMEWORK_METADATA_SCHEMA': $string($states.input.ctx.metadata_schema)} : {}, $states.input.ctx.metadata_db ? {'--FRAMEWORK_DB_NAME': $string($states.input.ctx.metadata_db)} : {}]) %}"
+              "Arguments": "{% $merge([${project_settings}, ${project_arg}, {'--FW_MODULE': $states.input.step, '--FW_FAIL_ON_EXIT_CODES': $lookup(${step_fail_on}, $states.input.step)}, $states.input.ctx.run_type ? {'--FW_RUN_TYPE': $string($states.input.ctx.run_type)} : {}, $states.input.ctx.period ? {'--FW_PERIOD': $string($states.input.ctx.period)} : {}, $states.input.ctx.table ? {'--FW_TABLE': $string($states.input.ctx.table)} : {}, $states.input.ctx.as_of ? {'--FW_AS_OF': $string($states.input.ctx.as_of)} : {}, $states.input.ctx.metadata_schema ? {'--FRAMEWORK_METADATA_SCHEMA': $string($states.input.ctx.metadata_schema)} : {}, $states.input.ctx.metadata_db ? {'--FRAMEWORK_DB_NAME': $string($states.input.ctx.metadata_db)} : {}, $exists($states.input.ctx.load_duplicate) ? {'--FRAMEWORK_LOAD_DUPLICATE': $string($states.input.ctx.load_duplicate)} : {}]) %}"
             },
             "TimeoutSeconds": "{% ($lookup(${step_timeout}, $states.input.step) + 15) * 60 %}",
             "Retry": [

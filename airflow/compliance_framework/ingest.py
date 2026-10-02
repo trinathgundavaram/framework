@@ -25,7 +25,7 @@ from .settings import Settings
 log = logging.getLogger(__name__)
 
 TERMINAL_LOAD_STATS = {"QUARANTINED", "RULES_FAILED", "PROMOTED", "SUPERSEDED"}
-ARCHIVE_LOAD_STATS = {"RULES_FAILED", "PROMOTED", "SUPERSEDED"}
+ERROR_LOAD_STATS = {"QUARANTINED", "RULES_FAILED"}
 
 
 class Action(str, Enum):
@@ -82,10 +82,6 @@ class IngestOutcome:
     req_id: Optional[int] = None
     ovrd_id: Optional[int] = None
     message: Optional[str] = None
-
-
-def s3_ref(bucket: str, key: str) -> str:
-    return f"s3://{bucket}/{key}"
 
 
 PROMOTED_RESULTS = ("PROMOTED", "LATE_PROMOTED", "CORRECTION_PROMOTED")
@@ -269,13 +265,10 @@ class IngestPipeline:
     def _replay(self, load: dict, info: ObjectInfo) -> IngestOutcome:
         with self.conn.transaction():
             self.logger.audit("FILE_EVENT_REPLAY_IGNORED", load_id=load["load_id"], req_id=load["req_id"],
-                              btch_id=load["btch_id"], file_ref=s3_ref(info.bucket, info.key),
+                              btch_id=load["btch_id"], file_ref=self.store.uri(info.bucket, info.key),
                               description=f"load already {load['load_stat']}")
         if self.store.exists(info.bucket, info.key):
-            if load["load_stat"] == "QUARANTINED":
-                self._move(info, self.settings.quarantine_uri, f"{load['quarantine_rsn_cd']}/", load["load_id"])
-            elif load["load_stat"] in ARCHIVE_LOAD_STATS and (cfg := cfgmod.file_config_by_id(self.conn, load["cfg_id"], self.settings)):
-                self._move(info, cfg.src_file_archive_path, "", load["load_id"])
+            self._archive(info, load["load_id"], rejected=load["load_stat"] in ERROR_LOAD_STATS)
         return IngestOutcome(load["load_id"], "REPLAY_IGNORED", req_id=load["req_id"])
 
     def _process(self, load_id: int, info: ObjectInfo) -> IngestOutcome:
@@ -290,6 +283,14 @@ class IngestPipeline:
         if info.bucket != bucket or dirname(info.key) != prefix:
             return self._quarantine(load_id, info, "FILE_REJECTED_UNPARSEABLE",
                                     f"{name} matched Cfg_ID {cfg.cfg_id} but is not in its inbound location", cfg)
+        if not self.settings.load_duplicate:
+            loaded = self.conn.execute(
+                """SELECT TOP 1 Load_ID FROM ComplianceFileLoad WHERE S3_Bucket=%s AND S3_Key=%s AND Load_ID<>%s
+                  AND Load_Stat IN ('PROMOTED','SUPERSEDED') ORDER BY Load_ID DESC""", (info.bucket, info.key, load_id)).fetchone()
+            if loaded:
+                return self._quarantine(load_id, info, "FILE_REJECTED_DUPLICATE",
+                                        f"{name} was already loaded (load {loaded['load_id']}); "
+                                        "LOAD_DUPLICATE=yes loads it again", cfg)
         run_ty = self._resolve_run_type(m.run_ty, run_type_codes)
         ref_date = m.rpt_start if self.settings.file_effective_date_basis == "RPT_START" else m.rpt_end
         x = cfgmod.effective_xwalk(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_id, run_ty, ref_date) if run_ty else None
@@ -363,18 +364,13 @@ class IngestPipeline:
             with self.conn.transaction():
                 self.conn.execute("UPDATE ComplianceFileLoad SET File_Sha256=%s, Updated_Dtts=%s WHERE Load_ID=%s",
                                   (sha, self.clock.now(), load_id))
-            current = promoted_load(self.conn, batch["btch_id"])
-            if current and current["file_sha256"] == sha and current["load_id"] != load_id:
-                return self._quarantine(load_id, info, "FILE_REJECTED_DUPLICATE",
-                                        f"identical to load {current['load_id']} of batch {batch['btch_id']}",
-                                        cfg, batch)
             other = self.conn.execute(
                 """SELECT TOP 1 Load_ID, Btch_ID FROM ComplianceFileLoad WHERE File_Sha256=%s AND Btch_ID<>%s
                       AND Load_Stat <> 'QUARANTINED'""", (sha, batch["btch_id"])).fetchone()
             if other:
                 with self.conn.transaction():
                     self.logger.audit("FILE_SAME_CONTENT_OTHER_BATCH", load_id=load_id, req_id=req_id,
-                                      btch_id=batch["btch_id"], file_ref=s3_ref(info.bucket, info.key),
+                                      btch_id=batch["btch_id"], file_ref=self.store.uri(info.bucket, info.key),
                                       project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_id=cfg.src_id,
                                       run_ty=batch["run_ty"],
                                       description=f"same content as load {other['load_id']} ({other['btch_id']})")
@@ -417,12 +413,12 @@ class IngestPipeline:
             passed = True
 
         result = self._resolve(load_id, info, cfg, req_id, passed, rules_stat, failure_event, detail)
-        self._move(info, cfg.src_file_archive_path, "", load_id)
+        self._archive(info, load_id, rejected=result.result not in PROMOTED_RESULTS)
         return result
 
     def _resolve(self, load_id, info, cfg, req_id, passed, rules_stat, failure_event, detail) -> IngestOutcome:
         now = self.clock.now()
-        ref = s3_ref(info.bucket, info.key)
+        ref = self.store.uri(info.bucket, info.key)
         today = self.clock.today(self.settings.business_tz)
         with self.conn.transaction():
             b = get_batch(self.conn, req_id)
@@ -524,20 +520,22 @@ class IngestPipeline:
                 ctx.update(project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_id=cfg.src_id)
             if batch:
                 ctx.update(run_ty=batch["run_ty"], req_id=batch["req_id"], btch_id=batch["btch_id"])
-            self.logger.audit(event_ty, load_id=load_id, file_ref=s3_ref(info.bucket, info.key),
+            self.logger.audit(event_ty, load_id=load_id, file_ref=self.store.uri(info.bucket, info.key),
                               description=message, **ctx)
-        self._move(info, self.settings.quarantine_uri, f"{event_ty}/", load_id)
+        self._archive(info, load_id, rejected=True)
         return IngestOutcome(load_id, "QUARANTINED", event_ty=event_ty, message=message,
                              req_id=batch["req_id"] if batch else None)
 
-    def _move(self, info: ObjectInfo, dest_uri: str, sub_prefix: str, load_id: int) -> None:
+    def _archive(self, info: ObjectInfo, load_id: int, rejected: bool = False) -> None:
+        """A loaded file moves to <its folder>/Archive/, one that was not loaded to <its folder>/Error/."""
+        folder = self.settings.error_folder if rejected else self.settings.archive_folder
         try:
-            self.store.move(info.bucket, info.key, dest_uri, info.version_id, sub_prefix)
+            self.store.archive(info.bucket, info.key, folder, info.version_id)
         except Exception as e:  # noqa: BLE001
-            log.warning("move of %s failed: %s", info.key, e)
+            log.warning("moving %s to %s/ failed: %s", info.key, folder, e)
             with self.conn.transaction():
-                self.logger.audit("FILE_MOVE_FAILED", load_id=load_id, file_ref=s3_ref(info.bucket, info.key),
-                                  description=f"{type(e).__name__} moving to {dest_uri}{sub_prefix}")
+                self.logger.audit("FILE_MOVE_FAILED", load_id=load_id, file_ref=self.store.uri(info.bucket, info.key),
+                                  description=f"{type(e).__name__} moving to {folder}/")
 
     def _mark_technical_failure(self, load_id: int, err: Exception) -> None:
         try:
@@ -563,7 +561,7 @@ class IngestPipeline:
                  FROM ComplianceFileLoad f LEFT JOIN ComplianceRequestControl c ON c.Req_ID = f.Req_ID
                 WHERE f.Load_ID=%s""", (load_id,)).fetchone()
         self.logger.audit("FILE_TECHNICAL_FAILURE", load_id=load_id, req_id=row["req_id"], btch_id=row["btch_id"],
-                          file_ref=s3_ref(row["s3_bucket"], row["s3_key"]),
+                          file_ref=self.store.uri(row["s3_bucket"], row["s3_key"]),
                           project_cd=row["project_cd"] or self._scope_project, table_nm=row["table_nm"],
                           src_id=row["src_id"], run_ty=row["run_ty"],
                           description=sanitize_db_error(f"{type(err).__name__}: {err}")[:500])

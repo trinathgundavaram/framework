@@ -1,11 +1,22 @@
 {
-  "connection_id": "compliance_teradata_dev",
+  "td_conn_var": "compliance_teradata_dev",
+  "wdc_comp_oper_nas_var": "wdc_comp_oper_nas_dev",
   "meta_db": "CMS_COMPLIANCE_DEV",
-  "environment": "DEV",
+  "load_env": "DEV",
+  "load_duplicate": "no",
+  "email_recipient": "compliance-dev@example.com",
+  "owner": "oss",
+  "snow_assignment_group": "D&AE - EDE Govt Compliance",
+  "tags": [
+    "Compliance",
+    "Compliance_Batch_Framework"
+  ],
   "log_level": "DEBUG",
   "schedule_timezone": "America/Chicago",
   "settings": {
-    "QUARANTINE_URI": "s3://REPLACE_WITH_DEV_INBOUND_BUCKET/quarantine/",
+    "OBJECT_STORE": "nas",
+    "ARCHIVE_FOLDER": "Archive",
+    "NAS_MIN_AGE_SECONDS": 120,
     "BUSINESS_TZ": "America/Chicago",
     "NOTIFY_BACKEND": "log",
     "DEFAULT_NOTIFY_EMAILS": "compliance-dev@example.com",
@@ -14,13 +25,23 @@
   },
   "runs": {
     "odr_file_load": {
-      "schedule": "0 * * * *",
+      "schedule_interval": "0 * * * *",
       "project": "ODR",
-      "steps": ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"]
+      "steps": [
+        "FILE_LOAD",
+        "OVERRIDE_DECISIONS",
+        "NOTIFY"
+      ]
     },
     "odr_full_cycle": {
       "project": "ODR",
-      "steps": ["BATCH_CREATION", "FILE_LOAD", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY"],
+      "steps": [
+        "BATCH_CREATION",
+        "FILE_LOAD",
+        "OVERRIDE_DECISIONS",
+        "BATCH_CLOSE",
+        "NOTIFY"
+      ],
       "run_type": "DAILY",
       "period": "PREV_DAY"
     }

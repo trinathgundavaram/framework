@@ -59,7 +59,8 @@ The environment variable is `FRAMEWORK_<NAME>`; the job argument is `--set <NAME
 | `AWS_REGION` | `us-east-1` | |
 | `BUSINESS_TZ` | `America/Chicago` | Run date, `Req_Dt_Key`, SLA hold. (Was `Business_Tz` on the crosswalk.) |
 | `OBJECT_STORE`, `LOCAL_STORE_ROOT` | `s3`, `./.local_store` | `local` for development. |
-| `QUARANTINE_URI` | placeholder | Where rejected files go, under `<reason>/`. (Replaces the per-config `S3_Quarantine_Path`.) |
+| `LOAD_DUPLICATE` | `false` | `yes` loads a file whose name was already loaded; otherwise it is rejected with `FILE_REJECTED_DUPLICATE`. |
+| `ARCHIVE_FOLDER` / `ERROR_FOLDER` | `Archive` / `Error` | Subfolders of the inbound folder that processed and rejected files move to. (Replaces `QUARANTINE_URI`, the per-config archive path and `S3_Quarantine_Path`.) |
 | `FILENAME_CASE_SENSITIVE`, `FILE_EFFECTIVE_DATE_BASIS` | `true`, `RPT_START` | **Q-03**, **Q-04** |
 | `SUPPORTED_FILE_TYPES` | `.txt,.csv` | **Q-02**. `.xlsx` / `.parquet` readers exist but are disabled by default. |
 | `FILE_ENCODING`, `QUOTE_CHAR`, `EMPTY_AS_NULL` | `utf-8`, `"`, `true` | **Q-02** |
@@ -112,7 +113,7 @@ framework validate-config
    2. `ComplianceSourceSystem` — `Src_ID`, name, type.
    3. `ComplianceRunType` — `SLA_Days` ≥ 1 (the hold is `Req_Dt_Key + SLA_Days − 1`); `Carry_Fwd_Ind = 1` if batches of this run type may reuse the previous batch's data after approval; code letters/digits only.
    4. `ComplianceDataSetSourceXwalk` — one effective-dated row per project / table / source / run type. Nothing else.
-   5. `ComplianceSourceFileConfig` — one active row per project / table / source: filename template (project, table and source written literally, e.g. `PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt`; its extension is the file type), delimiter, header/trailer flags, inbound and archive paths, staging table, core schema (the core table is `Table_Nm`), email recipients.
+   5. `ComplianceSourceFileConfig` — one active row per project / table / source: filename template (project, table and source written literally, e.g. `PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt`; its extension is the file type), delimiter, header/trailer flags, inbound path (files then move to its `Archive/` or `Error/` subfolder), staging table, core schema (the core table is `Table_Nm`), email recipients.
    6. `ComplianceRuleBinding` — GRE rules run on each staged file, bound at any level: `'*'` in `Table_Nm`, `Src_ID` or `Run_Ty` means all. Every matching binding runs (additive); a rule bound at two levels runs once. Optional: a file with no matching binding skips the rules.
 
       | Level | `Table_Nm` | `Src_ID` | `Run_Ty` |

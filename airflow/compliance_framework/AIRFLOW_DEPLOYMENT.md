@@ -8,9 +8,9 @@ layout and connection style of the GRE rules engine's Airflow package (`DQ_COMPL
 airflow/
   compliance_framework_dag.py     the only file outside the package: the DAGs
   compliance_framework/
-    compliance_task.py            the only Airflow-aware module: Variable + Connection -> framework
+    compliance_task.py            the only Airflow-aware module: Variable + Connections -> framework
     run_framework.py              run_step() / run_command(): the framework in-process, no Airflow
-    connection_factory.py         teradatasql connection from TERADATA_* environment variables
+    connection_factory.py         Teradata connection (TERADATA_*) and NAS / SMB settings (NAS_*)
     db.py                         Teradata layer: transactions, lock table
     gre_bridge.py                 file rules through the GRE rules engine
     batches.py ingest.py load.py overrides.py closing.py audit.py config.py modules.py
@@ -26,34 +26,48 @@ airflow/
 1. **One Airflow Variable** (`compliance_framework_config`, JSON) holds everything about the runs: the
    metadata database, the framework settings, and the named **runs** (project, steps, run type, period,
    schedule). Nothing about a run is hardcoded in the DAG file.
-2. **One Airflow Connection** (`compliance_teradata`) holds the Teradata host, login and password. The
-   bridge exports them as `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD` / `TERADATA_LOGMECH`.
+2. **Two Airflow Connections**, both named in the Variable: Teradata (`td_conn_var`) and the NAS file
+   server (`wdc_comp_oper_nas_var`). The bridge exports them as `TERADATA_HOST` / `TERADATA_USER` /
+   `TERADATA_PASSWORD` / `TERADATA_LOGMECH` and `NAS_HOST` / `NAS_USER` / `NAS_PASSWORD` / `NAS_PORT`.
 3. A DAG task calls `compliance_task.run_compliance_step(step, ...)`, which merges, in this order: the
    Variable, the named run inside it, the trigger's configuration. It then runs one module in-process:
    `BATCH_CREATION`, `FILE_LOAD`, `OVERRIDE_DECISIONS`, `BATCH_CLOSE` or `NOTIFY`.
 4. The task fails on a framework error (exit code 2), and on "completed with problems" (exit code 1)
    for the steps configured that way; otherwise the outcome is the task's XCom.
 
-No `.env` file and no AWS Secrets Manager: credentials come from the Airflow Connection only.
+No `.env` file and no AWS Secrets Manager: credentials come from the Airflow Connections only.
 
 ## Deploying
 
 1. Copy `airflow/compliance_framework_dag.py` and the `airflow/compliance_framework/` folder into the
    DAGs folder, side by side.
 2. Install `compliance_framework/requirements.txt` in the workers' environment. Airflow 2.4+, Python 3.9+.
-3. Create the Connection and the Variable (below; ready-made examples in `examples/`).
+3. Create the two Connections and the Variable (below; ready-made examples in `examples/`).
 4. The framework tables already exist: they are created separately from `sql/schema.sql` (replace
    `{{META_DB}}` with the metadata database). The framework never creates or alters tables.
-5. Load the configuration tables, then trigger `compliance_admin` with `{"command": "validate-config"}`.
+5. Load the configuration tables, then trigger `COMPLIANCE_ADMIN` with `{"command": "validate-config"}`.
 
-### Airflow Connection
+### Airflow Connections
+
+**Teradata** — the Connection named by the Variable's `td_conn_var` (default `compliance_teradata`):
 
 | Field | Value |
 |---|---|
-| Connection Id | `compliance_teradata` (or name it in the Variable's `connection_id`) |
 | Connection Type | Teradata, or Generic |
 | Host / Login / Password | the Teradata system and the framework's service account |
 | Extra (optional) | `{"logmech": "LDAP"}` (default LDAP) |
+
+**NAS file server (SMB)** — the Connection named by the Variable's `wdc_comp_oper_nas_var`:
+
+| Field | Value |
+|---|---|
+| Connection Type | Samba, or Generic |
+| Host | the file server, e.g. `nas01.corp.example` |
+| Login / Password | the service account that can read, write and delete in the inbound folders (`DOMAIN\user` or `user@domain` where a domain is needed) |
+| Port (optional) | default 445 |
+
+The NAS account needs read, write, create-folder and delete on every inbound folder: files are read from
+it and then moved into its `Archive` or `Error` subfolder.
 
 The account needs, on the metadata database: SELECT / INSERT / UPDATE / DELETE (no CREATE); on each project's staging and core databases: SELECT / INSERT / UPDATE / DELETE; and SELECT on
 `DBC.TablesV` and `DBC.ColumnsV`.
@@ -66,15 +80,17 @@ as the Variable's value (Admin → Variables) and replace the `REPLACE_WITH_...`
 
 ```json
 {
-  "connection_id": "compliance_teradata",
+  "td_conn_var": "compliance_teradata",
+  "wdc_comp_oper_nas_var": "wdc_comp_oper_nas",
   "meta_db": "CMS_COMPLIANCE_PROD",
+  "load_env": "PROD",
+  "email_recipient": "compliance-ops@example.com",
   "schedule_timezone": "America/Chicago",
-  "settings": {"QUARANTINE_URI": "s3://my-inbound-bucket/quarantine/", "NOTIFY_BACKEND": "airflow",
-               "DEFAULT_NOTIFY_EMAILS": "compliance-ops@example.com"},
+  "settings": {"NOTIFY_BACKEND": "airflow", "DEFAULT_NOTIFY_EMAILS": "compliance-ops@example.com"},
   "runs": {
-    "odr_daily_batches": {"schedule": "0 6 * * *", "project": "ODR", "steps": ["BATCH_CREATION"],
-                          "run_type": "DAILY", "period": "PREV_DAY", "alert_emails": ["odr-team@example.com"]},
-    "odr_file_load":     {"schedule": "*/15 * * * *", "project": "ODR",
+    "odr_daily_batches": {"schedule_interval": "0 6 * * *", "project": "ODR", "steps": ["BATCH_CREATION"],
+                          "run_type": "DAILY", "period": "PREV_DAY", "email_recipient": "odr-team@example.com"},
+    "odr_file_load":     {"schedule_interval": "*/15 * * * *", "project": "ODR",
                           "steps": ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"]},
     "odr_full_cycle":    {"project": "ODR", "run_type": "DAILY", "period": "PREV_DAY",
                           "steps": ["BATCH_CREATION", "FILE_LOAD", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY"]}
@@ -85,10 +101,15 @@ as the Variable's value (Admin → Variables) and replace the `REPLACE_WITH_...`
 | Key | Meaning |
 |---|---|
 | `meta_db` (required) | Teradata database holding the framework tables |
-| `connection_id` | Airflow Connection (default `compliance_teradata`) |
-| `environment` | `DEV`, `TEST`, `QA`, `PROD`, ...: what `$env` in configured database names resolves to (below); defaults to `gre.environment`, else `DEV` |
+| `td_conn_var` | Airflow Connection of Teradata (default `compliance_teradata`) |
+| `wdc_comp_oper_nas_var` (required for NAS) | Airflow Connection of the NAS file server |
+| `load_env` | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); defaults to `gre.environment`, else `DEV` |
+| `load_duplicate` | `yes` / `no` (default `no`): load a file whose name was already loaded, or reject it. A run and a trigger can set their own |
+| `email_recipient` | Who gets the DAG success / failure emails (`success_email`, `fail_email` tasks); a run can set its own. Without it the DAGs have no email tasks |
+| `snow_assignment_group` | ServiceNow assignment group of the incident opened when a task fails (default `D&AE - EDE Govt Compliance`) |
+| `owner`, `tags` | DAG owner (default `oss`) and tags |
 | `schedule_timezone` | Time zone of the schedules (default `America/Chicago`; follows daylight saving) |
-| `settings` | Framework settings by name. Common: `QUARANTINE_URI`, `BUSINESS_TZ`, `AWS_REGION`, `NOTIFY_BACKEND` (`airflow` = Airflow's email backend, `ses`, `log`), `NOTIFY_FROM_EMAIL` (ses), `DEFAULT_NOTIFY_EMAILS`, `FILE_RULES_MODE` (`GATE` / `ANNOTATE`), `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `LOCK_TIMEOUT_SECONDS` (300), `LOCK_TTL_MINUTES` (240) |
+| `settings` | Framework settings by name. Common: `ARCHIVE_FOLDER` (`Archive`), `ERROR_FOLDER` (`Error`), `NAS_MIN_AGE_SECONDS` (120), `BUSINESS_TZ`, `NOTIFY_BACKEND` (`airflow` = Airflow's email backend, `ses`, `log`), `NOTIFY_FROM_EMAIL` (ses), `DEFAULT_NOTIFY_EMAILS`, `FILE_RULES_MODE` (`GATE` / `ANNOTATE`), `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `LOCK_TIMEOUT_SECONDS` (300), `LOCK_TTL_MINUTES` (240) |
 | `runs` | Named parameter sets, below |
 | `gre` | For `gre_bridge`: `meta_db` (GRE metadata database), `environment`, `package_dir` (folder holding the GRE's `run_rules.py`; default `<dags>/rules_engine`), `log_level` |
 | `fail_on_problems` | Per step, whether exit code 1 fails the task. Default: `BATCH_CREATION`, `BATCH_CLOSE`, `NOTIFY` true; `FILE_LOAD`, `OVERRIDE_DECISIONS` false (a bad file or override is audited and emailed, not a task failure) |
@@ -101,53 +122,104 @@ Each entry of `runs` (name: letters, digits, `_`):
 | `steps` | Which steps, any of `BATCH_CREATION`, `FILE_LOAD`, `OVERRIDE_DECISIONS`, `BATCH_CLOSE`, `NOTIFY`; they always run in that order |
 | `project` | `Project_Cd`; leave out to run the steps for every project |
 | `run_type`, `period`, `table`, `lookback_days`, `lookback_weeks` | Passed to the steps that take them (`period`: `PREV_DAY`, `PREV_CALENDAR_MONTH`, `CURRENT_CALENDAR_MONTH`, `PREV_CALENDAR_WEEK`, ...) |
-| `schedule` | A cron expression. A run **with** a schedule becomes its own DAG `compliance_<run name>`; one without is only run by hand |
-| `alert_emails` | Who gets Airflow's failure email for that DAG |
+| `schedule_interval` | A cron expression. A run **with** one becomes its own DAG; one without is only run by hand |
+| `dag_id` | Name of that DAG (default `COMPLIANCE_<RUN NAME>`, upper case) |
+| `email_recipient`, `tags` | For that DAG, instead of / in addition to the Variable's |
 | `settings`, `fail_on_problems` | Overrides of the Variable's, for this run only |
 
-Files are read from S3 with the workers' AWS credentials (`OBJECT_STORE` = `s3`, the default).
+## Files on the NAS
+
+Files are read from the NAS over SMB (`OBJECT_STORE` = `nas`, the default; library `smbprotocol`).
+
+**Inbound folder** — `ComplianceSourceFileConfig.S3_Src_File_Path` (the column keeps its name) holds the folder:
+
+| Written as | Server | Share | Folder |
+|---|---|---|---|
+| `\\nas01\Compliance\odr\in` or `//nas01/Compliance/odr/in` | `nas01` | `Compliance` | `odr/in` |
+| `smb://nas01.corp.example/Compliance/odr/in` | `nas01.corp.example` | `Compliance` | `odr/in` |
+| `nas://Compliance/odr/in` | the NAS Connection's host | `Compliance` | `odr/in` |
+
+A path with its own server uses that server with the NAS Connection's login. `$env` works in the path.
+
+**Where files go after a run** — into a subfolder of the folder they arrived in:
+
+| Outcome | Moves to |
+|---|---|
+| Loaded to core | `<inbound folder>\Archive\` |
+| Not loaded: unknown name, no batch or a closed batch, wrong column count, bad characters, an empty file where one is not allowed, failed its file rules, a name already loaded (unless `load_duplicate` = `yes`) | `<inbound folder>\Error\` |
+| Technical failure | stays in place and is retried by the next sweep |
+
+- **Duplicate file names (`LOAD_DUPLICATE`).** A file whose name was already loaded is rejected by
+  default (`FILE_REJECTED_DUPLICATE`, moved to `Error`). With `LOAD_DUPLICATE` = `yes` it is loaded like
+  any other file: while the batch is open it replaces the batch's data; a closed batch still needs the
+  usual override. A name whose earlier delivery was rejected can always be delivered again.
+  Set it in the Variable (`"load_duplicate": "yes"` at the top or inside one run), or for one trigger of
+  `COMPLIANCE_BATCH_FRAMEWORK` with the `load_duplicate` parameter / `{"load_duplicate": "yes"}`.
+- There is no quarantine path and no archive path to configure. The subfolders are created when first
+  needed and are never swept. Their names are the `ARCHIVE_FOLDER` / `ERROR_FOLDER` settings.
+- A file moved into `Archive` / `Error` replaces one of the same name already there.
+- **Files still being copied:** a file changed in the last `NAS_MIN_AGE_SECONDS` (default 120) is left
+  for the next sweep, so a half-written file is not loaded. The check compares the file's modified time
+  on the NAS with the worker's clock.
+- A file is identified by its path, size and modified time: delivering the same name again is a new
+  load; a sweep that sees an untouched file again (one whose move failed) does not reload it.
+- `ComplianceFileLoad.S3_Bucket` holds `<server>/<share>` and `S3_Key` the path inside the share; audit
+  rows show the file as `//server/share/path`.
+- `OBJECT_STORE` = `s3` (needs `boto3`) and `local` still exist; the Archive / Error rule is the same.
+
+## Failure tickets and emails
+
+- Every task has `on_failure_callback`: a failed task opens a ServiceNow incident through
+  `snow.snow_integrations.create_incident(context, assignment_group)`. If the `snow` package is not
+  installed on the workers, a warning is logged instead.
+- With `email_recipient` set, each DAG ends with `success_email` (no step failed) and `fail_email` (a
+  step failed), subjects `Airflow EDEG-Compliance <load_env> Success|Failure: <dag id> DAG`. They use
+  Airflow's own email settings.
+- These are about the DAG run. Business events (a rejected file, a missing source, an override) are
+  emailed by the `NOTIFY` step to the file config's recipients.
 
 ## DAGs
 
 | DAG | What it does |
 |---|---|
-| `compliance_batch_framework` | **The one DAG that calls every step**, in order, by hand: for a named run (`{"run": "odr_full_cycle"}`) or for parameters given at trigger time. Steps not in the run are skipped. |
-| `compliance_<run name>` | One per run that has a `schedule`, e.g. `compliance_odr_file_load`. Built from the Variable when Airflow parses the DAG file; `max_active_runs=1`. |
-| `compliance_admin` | `validate-config`, `health`, `locks`, `release-lock`, `close-batch`, ... |
+| `COMPLIANCE_BATCH_FRAMEWORK` | **The one DAG that calls every step**, in order, by hand: for a named run (`{"run": "odr_full_cycle"}`) or for parameters given at trigger time. Steps not in the run are skipped. |
+| `COMPLIANCE_<RUN NAME>` (or the run's `dag_id`) | One per run that has a `schedule_interval`, e.g. `COMPLIANCE_ODR_FILE_LOAD`. Built from the Variable when Airflow parses the DAG file; `max_active_runs=1`. |
+| `COMPLIANCE_ADMIN` | `validate-config`, `health`, `locks`, `release-lock`, `close-batch`, ... |
 
 - Change a run's parameters, add a project or add a schedule by editing the Variable; a new or changed
   schedule appears at Airflow's next parse of the DAG file. A missing or invalid Variable never breaks
   parsing: the scheduled DAGs are simply not created (see the scheduler log), the other two remain.
-- Steps run in order; a failed step stops the rest and fails the run. Tasks retry once after 5 minutes:
-  every step is idempotent. Overlapping DAGs are safe (locks, below).
+- Steps run in order; a failed step stops the rest and fails the run. Tasks do not retry (`retries: 0`);
+  every step is idempotent, so the next scheduled run or a manual re-run picks up. Overlapping DAGs are
+  safe (locks, below).
 - A trigger's configuration overrides the run and the Variable. Examples for every case are in
   [`examples/trigger_configurations.json`](examples/trigger_configurations.json):
   - a named run: `{"run": "odr_full_cycle"}`; the same for a missed day: `{"run": "odr_full_cycle", "as_of": "2026-09-01"}`
   - parameters given directly: `{"project": "UNIVERSE", "steps": ["BATCH_CREATION", "FILE_LOAD"], "run_type": "MONTHLY", "period": "PREV_CALENDAR_MONTH"}`
   - a setting for one run: `{"project": "ODR", "steps": ["FILE_LOAD"], "settings": {"FILE_RULES_MODE": "ANNOTATE"}}`
   - another environment's Variable: `{"variable_key": "compliance_framework_config_qa", "run": "odr_full_cycle"}`
-  - `compliance_admin`: `{"command": "close-batch", "args": ["--btch-id", "<Btch_ID>", "--closed-by", "jdoe"]}`
+  - `COMPLIANCE_ADMIN`: `{"command": "close-batch", "args": ["--btch-id", "<Btch_ID>", "--closed-by", "jdoe"]}`
 - The scheduled DAGs read the Variable named by the `COMPLIANCE_VARIABLE_KEY` environment variable
   (default `compliance_framework_config`).
 
 ## Environment in database names (`$env`)
 
-The staging and core database names and the S3 paths of `ComplianceSourceFileConfig` can carry
+The staging and core database names and the inbound path of `ComplianceSourceFileConfig` can carry
 a `$env` token, so one set of configuration rows works in every environment (the GRE convention):
 
 | Authored | DEV | TEST | QA | PROD / UAT |
 |---|---|---|---|---|
 | `CMS_$ENV_STG` | `CMS_DEV_STG` | `CMS_TEST_STG` | `CMS_QA_STG` | `CMS_STG` |
 | `cms_core_$env_t` | `cms_core_dev_t` | `cms_core_test_t` | `cms_core_qa_t` | `cms_core_t` |
-| `s3://inbound-$env/odr/in/` | `s3://inbound-dev/odr/in/` | `s3://inbound-test/odr/in/` | `s3://inbound-qa/odr/in/` | `s3://inbound-/odr/in/` |
+| `//nas01/Compliance/$env/odr/in` | `//nas01/Compliance/dev/odr/in` | `//nas01/Compliance/test/odr/in` | `//nas01/Compliance/qa/odr/in` | `//nas01/Compliance/odr/in` |
 
-- Columns: `Stg_Schema_Nm`, `Core_Schema_Nm`, `S3_Src_File_Path`, `Src_File_Archive_Path`.
+- Columns: `Stg_Schema_Nm`, `Core_Schema_Nm`, `S3_Src_File_Path`.
 - The token matches in any casing and is replaced in its own casing (`$env` → `dev`, `$ENV` → `DEV`,
   `$Env` → `Dev`). PROD and UAT replace it with nothing; a doubled underscore left in a database name
   collapses (paths are left as they are, so prefer a database-style name where PROD has no suffix).
 - Keep the token in the middle of a database name: at the very end or start it leaves the underscore
   behind in PROD and UAT (`CMS_STG_$ENV` → `CMS_STG_`), exactly as GRE does.
-- The environment is the `ENVIRONMENT` setting (the Variable's `environment`); `ENV_VALUE` overrides the replacement text for
+- The environment is the `ENVIRONMENT` setting (the Variable's `load_env`); `ENV_VALUE` overrides the replacement text for
   that environment (e.g. `ENV_VALUE=uat` where UAT databases do carry a suffix).
 
 ## Teradata specifics
@@ -203,4 +275,8 @@ rules.
   `teradatasql` driver backed by PostgreSQL, and the DAGs run end to end in Airflow 2.10.
 - It has **not** been run against a real Teradata system. Before production, on a development Teradata
   system: create the tables from `sql/schema.sql`, run `validate-config`, then one full cycle (`BATCH_CREATION`, `FILE_LOAD` of a good
-  and a bad file, `BATCH_CLOSE`, `NOTIFY`) from `compliance_batch_framework`, and check the tables.
+  and a bad file, `BATCH_CLOSE`, `NOTIFY`) from `COMPLIANCE_BATCH_FRAMEWORK`, and check the tables.
+- The NAS store was checked against a local SMB test server for connect, list, read and download only,
+  and with a stand-in for the rest. Moving files (`Archive` / `Error`), creating the subfolders and the
+  modified-time check have **not** been run against your NAS: verify them with one good and one bad file.
+- The ServiceNow callback and the email tasks ran with stand-ins for `snow` and the email backend.

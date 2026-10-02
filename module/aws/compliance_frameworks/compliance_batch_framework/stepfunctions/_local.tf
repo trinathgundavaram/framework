@@ -50,6 +50,7 @@ locals {
       as_of           = try(s.as_of, null)
       metadata_schema = try(s.metadata_schema, null)
       metadata_db     = try(s.metadata_db, null)
+      load_duplicate  = try(s.load_duplicate, null)
       enabled         = try(s.enabled, true)
     } }
   } }
@@ -69,6 +70,7 @@ locals {
         as_of           = s.as_of
         metadata_schema = s.metadata_schema
         metadata_db     = s.metadata_db
+        load_duplicate  = s.load_duplicate
       } : k => v if v != null })
     })
   }]...)

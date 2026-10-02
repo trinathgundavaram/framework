@@ -1,4 +1,4 @@
-"""Airflow bridge: one Variable (configuration) + one Connection (Teradata) -> the framework."""
+"""Airflow bridge: one Variable (configuration) + the Teradata and NAS Connections -> the framework."""
 import logging
 import os
 import re
@@ -7,6 +7,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_VARIABLE_KEY = "compliance_framework_config"
 DEFAULT_CONNECTION_ID = "compliance_teradata"
+TD_CONN_KEY = "td_conn_var"
+NAS_CONN_KEY = "wdc_comp_oper_nas_var"
 DEFAULT_TIMEZONE = "America/Chicago"
 STEPS = ("BATCH_CREATION", "FILE_LOAD", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY")
 FAIL_ON_PROBLEMS = {"BATCH_CREATION": True, "FILE_LOAD": False, "OVERRIDE_DECISIONS": False,
@@ -17,6 +19,7 @@ _GRE_ENV = {"environment": "GRE_ENVIRONMENT", "meta_db": "GRE_META_DB", "log_lev
             "log_dir": "GRE_LOG_DIR", "max_parallel_rules": "GRE_MAX_PARALLEL_RULES",
             "package_dir": "GRE_PACKAGE_DIR"}
 _RUN_NAME = re.compile(r"^[A-Za-z0-9_]{1,200}$")
+_DAG_ID = re.compile(r"^[A-Za-z0-9_.-]{1,250}$")
 
 
 def _set_env(key: str, value) -> None:
@@ -40,6 +43,19 @@ def _load_teradata_connection(conn_id: str) -> None:
                 conn_id, conn.host, conn.login, os.environ.get("TERADATA_LOGMECH"))
 
 
+def _load_nas_connection(conn_id: str) -> None:
+    from airflow.hooks.base import BaseHook
+
+    conn = BaseHook.get_connection(conn_id)
+    if not conn.host or not conn.login or not conn.password:
+        raise ValueError(f"Airflow Connection '{conn_id}' needs host, login and password")
+    _set_env("NAS_HOST", conn.host)
+    _set_env("NAS_USER", conn.login)
+    _set_env("NAS_PASSWORD", conn.password)
+    _set_env("NAS_PORT", conn.port)
+    logger.info("Loaded NAS connection '%s': host=%s user=%s (password not logged)", conn_id, conn.host, conn.login)
+
+
 def _load_variable(variable_key: str) -> dict:
     from airflow.models import Variable
 
@@ -60,26 +76,32 @@ def _steps(value) -> list:
     return steps
 
 
-def scheduled_runs(variable_key: str = DEFAULT_VARIABLE_KEY) -> tuple:
-    """(schedule timezone, {run name: run}) for the DAG file; never raises, so a bad Variable cannot break parsing."""
+def load_dag_config(variable_key: str = DEFAULT_VARIABLE_KEY) -> dict:
+    """The Variable for the DAG file ({} when missing or invalid, so a bad Variable cannot break parsing)."""
     try:
-        config = _load_variable(variable_key)
+        return _load_variable(variable_key)
     except Exception as e:  # noqa: BLE001
         logger.warning("no scheduled compliance DAGs: %s", e)
-        return DEFAULT_TIMEZONE, {}
+        return {}
+
+
+def scheduled_runs(config: dict) -> dict:
+    """{run name: run} of the runs that have a schedule_interval; an invalid run is skipped."""
     out = {}
     for name, run in (config.get("runs") or {}).items():
         try:
             if not _RUN_NAME.match(str(name)) or not isinstance(run, dict):
                 raise ValueError("the name must be letters, digits or _ and the value a JSON object")
-            if run.get("schedule") and not _steps(run.get("steps")):
+            if run.get("dag_id") and not _DAG_ID.match(str(run["dag_id"])):
+                raise ValueError("dag_id must be letters, digits, _ . or -")
+            if run.get("schedule_interval") and not _steps(run.get("steps")):
                 raise ValueError("a scheduled run needs steps")
         except ValueError as e:
             logger.warning("compliance run %r ignored: %s", name, e)
             continue
-        if run.get("schedule"):
+        if run.get("schedule_interval"):
             out[str(name)] = run
-    return config.get("schedule_timezone") or DEFAULT_TIMEZONE, out
+    return out
 
 
 def resolve_run(variable_key: str = DEFAULT_VARIABLE_KEY, overrides: dict = None, run: str = None) -> tuple:
@@ -106,14 +128,20 @@ def resolve_run(variable_key: str = DEFAULT_VARIABLE_KEY, overrides: dict = None
     settings = {str(k).upper(): ",".join(map(str, v)) if isinstance(v, (list, tuple)) else v
                 for k, v in settings.items()}
     settings["METADATA_SCHEMA"] = config["meta_db"]
-    environment = config.get("environment") or (config.get("gre") or {}).get("environment")
+    if config.get("load_duplicate") not in (None, ""):
+        settings["LOAD_DUPLICATE"] = config["load_duplicate"]
+    environment = config.get("load_env") or (config.get("gre") or {}).get("environment")
     if environment:
         settings.setdefault("ENVIRONMENT", environment)
     return config, settings
 
 
-def _connect_environment(config: dict, connection_id: str = None) -> None:
-    _load_teradata_connection(connection_id or config.get("connection_id") or DEFAULT_CONNECTION_ID)
+def _connect_environment(config: dict, settings: dict, connection_id: str = None) -> None:
+    _load_teradata_connection(connection_id or config.get(TD_CONN_KEY) or DEFAULT_CONNECTION_ID)
+    if str(settings.get("OBJECT_STORE") or "nas").lower() == "nas":
+        if not config.get(NAS_CONN_KEY):
+            raise ValueError(f"'{NAS_CONN_KEY}' (the Airflow Connection of the NAS file server) is required")
+        _load_nas_connection(config[NAS_CONN_KEY])
     gre = config.get("gre") or {}
     for key, env_key in _GRE_ENV.items():
         _set_env(env_key, gre.get(key))
@@ -125,7 +153,7 @@ def run_compliance_step(step: str, variable_key: str = DEFAULT_VARIABLE_KEY, ove
                         connection_id: str = None, run: str = None, **scope):
     """Run one framework step; raises RuntimeError when it fails, returns its outcome otherwise."""
     config, settings = resolve_run(variable_key, overrides, run)
-    _connect_environment(config, connection_id)
+    _connect_environment(config, settings, connection_id)
     from .run_framework import run_step
 
     step = step.strip().upper()
@@ -145,7 +173,7 @@ def run_compliance_command(command: str, args: list = None, variable_key: str = 
                            overrides: dict = None, connection_id: str = None):
     """Run one framework command (validate-config, health, locks, release-lock, close-batch, ...)."""
     config, settings = resolve_run(variable_key, overrides)
-    _connect_environment(config, connection_id)
+    _connect_environment(config, settings, connection_id)
     from .run_framework import run_command
 
     outcome, exit_code = run_command(command, args=args, as_of=config.get("as_of"), settings=settings,

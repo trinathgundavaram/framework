@@ -64,7 +64,6 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceFileConfig (
   Src_File_Has_Trlr_Ind  SMALLINT     NOT NULL,
   Allow_Zero_Rcd_Ind     SMALLINT     NOT NULL,
   S3_Src_File_Path       VARCHAR(500) NOT NULL,
-  Src_File_Archive_Path  VARCHAR(500) NOT NULL,
   Stg_Schema_Nm          VARCHAR(63)  NOT NULL,
   Stg_Table_Nm           VARCHAR(63)  NOT NULL,
   Core_Schema_Nm         VARCHAR(63)  NOT NULL,
@@ -169,6 +168,9 @@ CREATE INDEX ix_fileload_batch (Btch_ID)
 ON {{META_DB}}.ComplianceFileLoad;
 
 CREATE INDEX ix_fileload_sha (File_Sha256)
+ON {{META_DB}}.ComplianceFileLoad;
+
+CREATE INDEX ix_fileload_key (S3_Key)
 ON {{META_DB}}.ComplianceFileLoad;
 
 CREATE MULTISET TABLE {{META_DB}}.ComplianceBatchOverride (

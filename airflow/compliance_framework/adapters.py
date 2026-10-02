@@ -1,19 +1,23 @@
 """Adapters to external systems: object store, rules engine, email."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import html
 import importlib
 import logging
 import os
 import shutil
+import stat
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 from urllib.parse import urlparse
 
 from .common import ConfigError, RuleEngineNotConfigured
+from .connection_factory import nas_settings, smb_client
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -29,14 +33,27 @@ class ObjectInfo:
 
 
 def parse_uri(uri: str) -> tuple[str, str]:
-    """s3://bucket/prefix/ -> (bucket, 'prefix/')."""
-    p = urlparse(uri)
-    if p.scheme not in ("s3", "local"):
-        raise ValueError(f"unsupported storage URI {uri!r}")
-    prefix = p.path.lstrip("/")
-    if prefix and not prefix.endswith("/"):
-        prefix += "/"
-    return p.netloc, prefix
+    """A file location -> (bucket, 'folder/').
+
+    NAS: \\\\server\\share\\folder, //server/share/folder or smb://server/share/folder -> ('server/share', 'folder/');
+    nas://share/folder -> ('share', 'folder/') on the server of the NAS connection. Also s3://bucket/prefix/.
+    """
+    text = (uri or "").strip().replace("\\", "/")
+    p = urlparse(text)
+    if text.startswith("//") or p.scheme == "smb":
+        share, _, folder = p.path.lstrip("/").partition("/")
+        if not p.netloc or not share:
+            raise ValueError(f"NAS path {uri!r} must name a server and a share")
+        bucket = f"{p.netloc.lower()}/{share.lower()}"
+    elif p.scheme == "nas" and p.netloc:
+        bucket, folder = p.netloc.lower(), p.path
+    elif p.scheme in ("s3", "local") and p.netloc:
+        bucket, folder = p.netloc, p.path
+    else:
+        raise ValueError(f"unsupported file location {uri!r}: use \\\\server\\share\\folder, "
+                         "nas://share/folder or s3://bucket/prefix/")
+    folder = "/".join(x for x in folder.split("/") if x)
+    return bucket, folder + "/" if folder else ""
 
 
 def basename(key: str) -> str:
@@ -79,13 +96,14 @@ class ObjectStore(ABC):
     @abstractmethod
     def delete(self, bucket: str, key: str) -> None: ...
 
-    def move(self, src_bucket: str, src_key: str, dst_uri: str, version_id: Optional[str] = None,
-             sub_prefix: str = "") -> str:
-        """Copy to dst_uri/<sub_prefix>/<basename> then delete the source."""
-        b, prefix = parse_uri(dst_uri)
-        dst_key = f"{prefix}{sub_prefix}{basename(src_key)}"
-        self.copy(src_bucket, src_key, b, dst_key, version_id)
-        self.delete(src_bucket, src_key)
+    def uri(self, bucket: str, key: str) -> str:
+        return f"s3://{bucket}/{key}"
+
+    def archive(self, bucket: str, key: str, folder: str, version_id: Optional[str] = None) -> str:
+        """Move a file into <its own folder>/<folder>/; returns the new key."""
+        dst_key = f"{dirname(key)}{folder}/{basename(key)}"
+        self.copy(bucket, key, bucket, dst_key, version_id)
+        self.delete(bucket, key)
         return dst_key
 
 
@@ -148,8 +166,9 @@ class S3ObjectStore(ObjectStore):
         if version_id:
             kw["VersionId"] = version_id
         r = self.s3.head_object(**kw)
+        etag = r["ETag"].strip('"')
         return ObjectInfo(bucket, key, r.get("VersionId") if r.get("VersionId") != "null" else None,
-                          r["ETag"].strip('"'), r["ContentLength"])
+                          f"{etag}-{r['LastModified']:%Y%m%d%H%M%S}", r["ContentLength"])
 
     def exists(self, bucket, key):
         from botocore.exceptions import ClientError
@@ -187,7 +206,88 @@ class S3ObjectStore(ObjectStore):
         self.s3.delete_object(Bucket=bucket, Key=key)
 
 
+_SMB_NOT_FOUND = {0xC000000F, 0xC0000034, 0xC000003A}
+
+
+class NasObjectStore(ObjectStore):
+    """Files on an SMB share; bucket = '<server>/<share>', or '<share>' on the server of the NAS connection."""
+
+    def __init__(self, settings: Settings):
+        self.smb = smb_client()
+        self.nas = nas_settings()
+        self.server = self.nas.pop("server")
+        self.min_age_seconds = settings.nas_min_age_seconds
+
+    def _target(self, bucket: str) -> tuple[str, str]:
+        server, _, share = bucket.rpartition("/")
+        return server or self.server, share
+
+    def _path(self, bucket: str, key: str) -> str:
+        server, share = self._target(bucket)
+        parts = [p for p in key.split("/") if p]
+        if not share or ".." in parts:
+            raise ValueError(f"invalid NAS path {bucket}/{key}")
+        return "\\\\" + "\\".join([server, share, *parts])
+
+    @staticmethod
+    def _info(bucket: str, key: str, size: int, modified: datetime) -> ObjectInfo:
+        return ObjectInfo(bucket, key, None, f"{size}-{modified:%Y%m%d%H%M%S%f}", size)
+
+    def uri(self, bucket, key):
+        return "//" + "/".join([*self._target(bucket), key])
+
+    def head(self, bucket, key, version_id=None):
+        st = self.smb.stat(self._path(bucket, key), **self.nas)
+        return self._info(bucket, key, st.st_size, datetime.fromtimestamp(st.st_mtime_ns // 1000 / 1e6, timezone.utc))
+
+    def exists(self, bucket, key):
+        try:
+            st = self.smb.stat(self._path(bucket, key), **self.nas)
+        except OSError as e:
+            if e.errno == errno.ENOENT or getattr(e, "ntstatus", None) in _SMB_NOT_FOUND:
+                return False
+            raise
+        return stat.S_ISREG(st.st_mode)
+
+    def list_objects(self, bucket, prefix):
+        """Files directly in the folder; one changed in the last NAS_MIN_AGE_SECONDS may still be arriving and waits."""
+        newest = datetime.now(timezone.utc) - timedelta(seconds=self.min_age_seconds)
+        out = []
+        for entry in self.smb.scandir(self._path(bucket, prefix), **self.nas):
+            if entry.is_file():
+                size, modified = entry.smb_info.end_of_file, entry.smb_info.last_write_time
+                if modified <= newest:
+                    out.append(self._info(bucket, f"{prefix}{entry.name}", size, modified))
+        return sorted(out, key=lambda o: o.key)
+
+    def download(self, bucket, key, dest, version_id=None):
+        with self.smb.open_file(self._path(bucket, key), mode="rb", **self.nas) as src, open(dest, "wb") as dst:
+            shutil.copyfileobj(src, dst, 1024 * 1024)
+
+    def copy(self, src_bucket, src_key, dst_bucket, dst_key, version_id=None):
+        self.smb.makedirs(self._path(dst_bucket, dirname(dst_key)), exist_ok=True, **self.nas)
+        with self.smb.open_file(self._path(src_bucket, src_key), mode="rb", **self.nas) as src, \
+                self.smb.open_file(self._path(dst_bucket, dst_key), mode="wb", **self.nas) as dst:
+            shutil.copyfileobj(src, dst, 1024 * 1024)
+
+    def delete(self, bucket, key):
+        self.smb.remove(self._path(bucket, key), **self.nas)
+
+    def archive(self, bucket, key, folder, version_id=None):
+        dst_key = f"{dirname(key)}{folder}/{basename(key)}"
+        self.smb.makedirs(self._path(bucket, dirname(dst_key)), exist_ok=True, **self.nas)
+        try:
+            self.smb.replace(self._path(bucket, key), self._path(bucket, dst_key), **self.nas)
+        except OSError as e:
+            log.info("rename of %s not possible (%s); copying instead", key, e)
+            self.copy(bucket, key, bucket, dst_key)
+            self.delete(bucket, key)
+        return dst_key
+
+
 def build_object_store(settings: Settings) -> ObjectStore:
+    if settings.object_store == "nas":
+        return NasObjectStore(settings)
     if settings.object_store == "local":
         return LocalObjectStore(settings.local_store_root)
     if settings.object_store == "s3":

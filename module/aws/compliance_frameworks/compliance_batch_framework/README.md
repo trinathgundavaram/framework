@@ -17,7 +17,7 @@ Glue  compliance_batch_framework_runner_dev             ONE job for every projec
    framework run --module <STEP> --project ODR [--run-type --period --table --as-of]
         │
         ▼
-existing RDS PostgreSQL (VPC)  +  S3 inbound / archive / quarantine  +  SES email
+existing RDS PostgreSQL (VPC)  +  S3 inbound (with Archive/ and Error/)  +  SES email
 ```
 
 - **Two Glue jobs in total.** `runner` runs every module for every project (one module, one project per
@@ -104,6 +104,29 @@ They can also be given for one run: `metadata_schema` / `metadata_db` in a workf
 job arguments above on a direct Glue run. A run's value wins over the project's settings and the job
 default. `metadata_load` adds the schema to a `--TABLE_NAME` that has none.
 
+## Where files go after a run
+
+Every file leaves the inbound folder once it has been processed, into a subfolder of that same folder:
+
+| Outcome | Moves to |
+|---|---|
+| Loaded to core | `<inbound folder>/Archive/` |
+| Not loaded: unknown name, no batch or a closed batch, wrong column count, bad characters, an empty file where one is not allowed, failed its file rules, a name already loaded (unless `LOAD_DUPLICATE` = `yes`) | `<inbound folder>/Error/` |
+| Technical failure | stays in place and is retried by the next sweep |
+
+- **Duplicate file names (`LOAD_DUPLICATE`).** A file whose name was already loaded is rejected by
+  default (`FILE_REJECTED_DUPLICATE`, moved to `Error`). With `LOAD_DUPLICATE` = `yes` it is loaded like
+  any other file: while the batch is open it replaces the batch's data; a closed batch still needs the
+  usual override. A name whose earlier delivery was rejected can always be delivered again.
+  Set it for the environment with `load_duplicate = true` in `glue/env-config/us-east-1/<env>.tfvars`, for one
+  run with `"load_duplicate": "yes"` in the workflow input (`run_workflow.sh ... --load-duplicate yes`), or on
+  a Glue run started by hand with `--FRAMEWORK_LOAD_DUPLICATE yes`.
+- There is no quarantine path and no archive path to configure: `s3://bucket/odr/in/X.txt` goes to
+  `s3://bucket/odr/in/Archive/X.txt` or `s3://bucket/odr/in/Error/X.txt`. Sweeps are not recursive, so
+  the two subfolders are never picked up again.
+- The folder names are the `ARCHIVE_FOLDER` and `ERROR_FOLDER` settings (defaults `Archive`, `Error`).
+- The reason for a rejection is in `ComplianceFileLoad.Quarantine_Rsn_Cd` / `Error_Txt` and in the email.
+
 ## Environment in database names (`$env`)
 
 The staging and core database (schema) names and the S3 paths of `ComplianceSourceFileConfig` can carry
@@ -115,7 +138,7 @@ a `$env` token, so one set of configuration rows works in every environment (the
 | `cms_core_$env_t` | `cms_core_dev_t` | `cms_core_test_t` | `cms_core_qa_t` | `cms_core_t` |
 | `s3://inbound-$env/odr/in/` | `s3://inbound-dev/odr/in/` | `s3://inbound-test/odr/in/` | `s3://inbound-qa/odr/in/` | `s3://inbound-/odr/in/` |
 
-- Columns: `Stg_Schema_Nm`, `Core_Schema_Nm`, `S3_Src_File_Path`, `Src_File_Archive_Path`.
+- Columns: `Stg_Schema_Nm`, `Core_Schema_Nm`, `S3_Src_File_Path`.
 - The token matches in any casing and is replaced in its own casing (`$env` → `dev`, `$ENV` → `DEV`,
   `$Env` → `Dev`). PROD and UAT replace it with nothing; a doubled underscore left in a database name
   collapses (paths are left as they are, so prefer a database-style name where PROD has no suffix).
@@ -233,8 +256,8 @@ s3://silverton-maa-global-artifactory-<env>/compliance_batch_framework/
 ```
 
 The `glue` submodule uploads `glue/` and `whl/` on every apply; the Glue role can read the whole prefix
-and write only `tmp/`. Inbound, archive and quarantine files are not here: they live in the data
-buckets named by `ComplianceSourceFileConfig` and `quarantine_uri` (`data_bucket_names`).
+and write only `tmp/`. Inbound files are not here: they live in the data buckets named by
+`ComplianceSourceFileConfig` (`data_bucket_names`), with their `Archive/` and `Error/` subfolders.
 
 ## Deployer role (gov-compliance-it-deployer)
 
@@ -266,8 +289,8 @@ state and provider, and adds its own `env-config/${TF_VAR_region}/common.tfvars`
 No credentials are passed: the jobs read the database secret at run time.
 
 Before the first deploy, fill in every `REPLACE_WITH_...`: the Glue connection name in `glue/_local.tf`
-and the values in `glue/env-config/us-east-1/<env>.tfvars` (database secret, data buckets, quarantine
-path, emails) and `stepfunctions/env-config/us-east-1/<env>.tfvars` (alert emails). Everything else
+and the values in `glue/env-config/us-east-1/<env>.tfvars` (database secret, data buckets,
+emails) and `stepfunctions/env-config/us-east-1/<env>.tfvars` (alert emails). Everything else
 (names, S3 keys, packages, schema, time zone, projects and schedules) is in each submodule's `_local.tf`.
 Locally:
 

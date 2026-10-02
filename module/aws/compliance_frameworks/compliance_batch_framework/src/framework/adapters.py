@@ -80,13 +80,14 @@ class ObjectStore(ABC):
     @abstractmethod
     def delete(self, bucket: str, key: str) -> None: ...
 
-    def move(self, src_bucket: str, src_key: str, dst_uri: str, version_id: Optional[str] = None,
-             sub_prefix: str = "") -> str:
-        """Copy to dst_uri/<sub_prefix>/<basename> then delete the source."""
-        b, prefix = parse_uri(dst_uri)
-        dst_key = f"{prefix}{sub_prefix}{basename(src_key)}"
-        self.copy(src_bucket, src_key, b, dst_key, version_id)
-        self.delete(src_bucket, src_key)
+    def uri(self, bucket: str, key: str) -> str:
+        return f"s3://{bucket}/{key}"
+
+    def archive(self, bucket: str, key: str, folder: str, version_id: Optional[str] = None) -> str:
+        """Move a file into <its own folder>/<folder>/; returns the new key."""
+        dst_key = f"{dirname(key)}{folder}/{basename(key)}"
+        self.copy(bucket, key, bucket, dst_key, version_id)
+        self.delete(bucket, key)
         return dst_key
 
 
@@ -149,8 +150,9 @@ class S3ObjectStore(ObjectStore):
         if version_id:
             kw["VersionId"] = version_id
         r = self.s3.head_object(**kw)
+        etag = r["ETag"].strip('"')
         return ObjectInfo(bucket, key, r.get("VersionId") if r.get("VersionId") != "null" else None,
-                          r["ETag"].strip('"'), r["ContentLength"])
+                          f"{etag}-{r['LastModified']:%Y%m%d%H%M%S}", r["ContentLength"])
 
     def exists(self, bucket, key):
         from botocore.exceptions import ClientError

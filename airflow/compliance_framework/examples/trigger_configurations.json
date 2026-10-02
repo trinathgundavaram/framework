@@ -1,38 +1,43 @@
 {
-  "compliance_batch_framework: a named run of the Variable": {
+  "COMPLIANCE_BATCH_FRAMEWORK: a named run of the Variable": {
     "run": "odr_full_cycle"
   },
-  "compliance_batch_framework: a named run for a missed day": {
+  "COMPLIANCE_BATCH_FRAMEWORK: a named run for a missed day": {
     "run": "odr_full_cycle",
     "as_of": "2026-09-01"
   },
-  "compliance_batch_framework: parameters given directly": {
+  "COMPLIANCE_BATCH_FRAMEWORK: parameters given directly": {
     "project": "UNIVERSE",
     "steps": ["BATCH_CREATION", "FILE_LOAD"],
     "run_type": "MONTHLY",
     "period": "PREV_CALENDAR_MONTH"
   },
-  "compliance_batch_framework: one table, rules annotated instead of gating": {
+  "COMPLIANCE_BATCH_FRAMEWORK: one table, rules annotated instead of gating": {
     "project": "ODR",
     "steps": ["FILE_LOAD", "NOTIFY"],
     "table": "ROPENS",
     "settings": {"FILE_RULES_MODE": "ANNOTATE"}
   },
-  "compliance_batch_framework: another environment's Variable": {
+  "COMPLIANCE_BATCH_FRAMEWORK: another environment's Variable": {
     "variable_key": "compliance_framework_config_qa",
     "run": "odr_full_cycle"
+  },
+  "COMPLIANCE_BATCH_FRAMEWORK: load files whose names were already loaded": {
+    "project": "ODR",
+    "steps": ["FILE_LOAD", "NOTIFY"],
+    "load_duplicate": "yes"
   },
   "any scheduled DAG: re-run for a past date": {
     "as_of": "2026-09-01"
   },
-  "compliance_admin: check the configuration": {
+  "COMPLIANCE_ADMIN: check the configuration": {
     "command": "validate-config"
   },
-  "compliance_admin: close a batch without data": {
+  "COMPLIANCE_ADMIN: close a batch without data": {
     "command": "close-batch",
     "args": ["--btch-id", "20260901_ODR_ROPENS_50_DAILY_2026_1", "--closed-by", "jdoe"]
   },
-  "compliance_admin: list locks, release one left by a crashed run": {
+  "COMPLIANCE_ADMIN: list locks, release one left by a crashed run": {
     "command": "release-lock",
     "args": ["--key", "BTCH:20260901_ODR_ROPENS_50_DAILY_2026_1"]
   }

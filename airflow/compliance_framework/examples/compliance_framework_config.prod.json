@@ -1,13 +1,23 @@
 {
-  "connection_id": "compliance_teradata",
+  "td_conn_var": "compliance_teradata",
+  "wdc_comp_oper_nas_var": "wdc_comp_oper_nas",
   "meta_db": "CMS_COMPLIANCE_PROD",
-  "environment": "PROD",
+  "load_env": "PROD",
+  "load_duplicate": "no",
+  "email_recipient": "compliance-ops@example.com",
+  "owner": "oss",
+  "snow_assignment_group": "D&AE - EDE Govt Compliance",
+  "tags": [
+    "Compliance",
+    "Compliance_Batch_Framework"
+  ],
   "log_level": "INFO",
   "schedule_timezone": "America/Chicago",
   "settings": {
-    "QUARANTINE_URI": "s3://REPLACE_WITH_PROD_INBOUND_BUCKET/quarantine/",
+    "OBJECT_STORE": "nas",
+    "ARCHIVE_FOLDER": "Archive",
+    "NAS_MIN_AGE_SECONDS": 120,
     "BUSINESS_TZ": "America/Chicago",
-    "AWS_REGION": "us-east-1",
     "NOTIFY_BACKEND": "airflow",
     "DEFAULT_NOTIFY_EMAILS": "compliance-ops@example.com",
     "FILE_RULES_MODE": "GATE",
@@ -25,69 +35,101 @@
   },
   "runs": {
     "odr_daily_batches": {
-      "schedule": "0 6 * * *",
+      "schedule_interval": "0 6 * * *",
       "project": "ODR",
-      "steps": ["BATCH_CREATION"],
+      "steps": [
+        "BATCH_CREATION"
+      ],
       "run_type": "DAILY",
       "period": "PREV_DAY",
-      "alert_emails": ["odr-team@example.com"]
+      "email_recipient": "odr-team@example.com"
     },
     "odr_file_load": {
-      "schedule": "*/15 * * * *",
+      "schedule_interval": "*/15 * * * *",
       "project": "ODR",
-      "steps": ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"],
-      "alert_emails": ["odr-team@example.com"]
+      "steps": [
+        "FILE_LOAD",
+        "OVERRIDE_DECISIONS",
+        "NOTIFY"
+      ],
+      "email_recipient": "odr-team@example.com"
     },
     "odr_close": {
-      "schedule": "0 * * * *",
+      "schedule_interval": "0 * * * *",
       "project": "ODR",
-      "steps": ["BATCH_CLOSE", "NOTIFY"],
-      "alert_emails": ["odr-team@example.com"]
+      "steps": [
+        "BATCH_CLOSE",
+        "NOTIFY"
+      ],
+      "email_recipient": "odr-team@example.com"
     },
     "universe_monthly_batches": {
-      "schedule": "0 6 1 * *",
+      "schedule_interval": "0 6 1 * *",
       "project": "UNIVERSE",
-      "steps": ["BATCH_CREATION"],
+      "steps": [
+        "BATCH_CREATION"
+      ],
       "run_type": "MONTHLY",
       "period": "PREV_CALENDAR_MONTH",
-      "alert_emails": ["universe-team@example.com"]
+      "email_recipient": "universe-team@example.com"
     },
     "universe_weekly_batches": {
-      "schedule": "0 6 * * 1",
+      "schedule_interval": "0 6 * * 1",
       "project": "UNIVERSE",
-      "steps": ["BATCH_CREATION"],
+      "steps": [
+        "BATCH_CREATION"
+      ],
       "run_type": "WEEKLY",
       "period": "PREV_CALENDAR_WEEK",
-      "alert_emails": ["universe-team@example.com"]
+      "email_recipient": "universe-team@example.com"
     },
     "universe_daily_batches": {
-      "schedule": "0 6 * * *",
+      "schedule_interval": "0 6 * * *",
       "project": "UNIVERSE",
-      "steps": ["BATCH_CREATION"],
+      "steps": [
+        "BATCH_CREATION"
+      ],
       "run_type": "CMS",
       "period": "CURRENT_CALENDAR_MONTH",
-      "alert_emails": ["universe-team@example.com"]
+      "email_recipient": "universe-team@example.com"
     },
     "universe_file_load": {
-      "schedule": "5-59/15 * * * *",
+      "schedule_interval": "5-59/15 * * * *",
       "project": "UNIVERSE",
-      "steps": ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"],
-      "settings": {"FILE_RULES_MODE": "ANNOTATE"},
-      "alert_emails": ["universe-team@example.com"]
+      "steps": [
+        "FILE_LOAD",
+        "OVERRIDE_DECISIONS",
+        "NOTIFY"
+      ],
+      "settings": {
+        "FILE_RULES_MODE": "ANNOTATE"
+      },
+      "email_recipient": "universe-team@example.com"
     },
     "universe_close": {
-      "schedule": "30 23 * * *",
+      "schedule_interval": "30 23 * * *",
       "project": "UNIVERSE",
-      "steps": ["BATCH_CLOSE", "NOTIFY"],
-      "alert_emails": ["universe-team@example.com"]
+      "steps": [
+        "BATCH_CLOSE",
+        "NOTIFY"
+      ],
+      "email_recipient": "universe-team@example.com"
     },
     "all_projects_notify": {
-      "schedule": "0 * * * *",
-      "steps": ["NOTIFY"]
+      "schedule_interval": "0 * * * *",
+      "steps": [
+        "NOTIFY"
+      ]
     },
     "odr_full_cycle": {
       "project": "ODR",
-      "steps": ["BATCH_CREATION", "FILE_LOAD", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY"],
+      "steps": [
+        "BATCH_CREATION",
+        "FILE_LOAD",
+        "OVERRIDE_DECISIONS",
+        "BATCH_CLOSE",
+        "NOTIFY"
+      ],
       "run_type": "DAILY",
       "period": "PREV_DAY"
     }

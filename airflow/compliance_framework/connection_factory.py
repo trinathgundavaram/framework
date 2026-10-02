@@ -1,4 +1,4 @@
-"""Teradata connection from TERADATA_* environment variables (teradatasql)."""
+"""Teradata connection (TERADATA_*) and NAS / SMB session settings (NAS_*) from environment variables."""
 import logging
 import os
 
@@ -30,3 +30,18 @@ def build_teradata_connection(database: str = None):
     if database:
         kwargs["database"] = database
     return teradatasql.connect(**kwargs)
+
+
+def nas_settings() -> dict:
+    """SMB server and credentials of the NAS connection."""
+    return {"server": _require("NAS_HOST").lower(), "username": _require("NAS_USER"),
+            "password": _require("NAS_PASSWORD"), "port": int(os.getenv("NAS_PORT") or 445)}
+
+
+def smb_client():
+    """The smbclient module (smbprotocol)."""
+    try:
+        import smbclient
+    except ImportError:
+        raise ImportError("smbprotocol is required for NAS file paths. Install with: pip install smbprotocol")
+    return smbclient

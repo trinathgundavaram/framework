@@ -53,9 +53,10 @@ variable "metadata_schema" {
   }
 }
 
-variable "quarantine_uri" {
-  description = "Where rejected files go."
-  type        = string
+variable "load_duplicate" {
+  description = "true = load a file whose name was already loaded; false = reject it (FILE_REJECTED_DUPLICATE). A run can override it."
+  type        = bool
+  default     = false
 }
 
 variable "notify_from_email" {
@@ -76,7 +77,7 @@ variable "permissions_boundary" {
 }
 
 variable "data_bucket_names" {
-  description = "Buckets of the file configs (inbound, archive) and the quarantine."
+  description = "Buckets of the file configs; loaded files move to <folder>/Archive/ and rejected files to <folder>/Error/ in the same bucket."
   type        = list(string)
 }
 

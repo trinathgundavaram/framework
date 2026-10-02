@@ -225,7 +225,7 @@ The DDL is `framework/sql/schema.sql` (Appendix A).
 | Business time zone | `BUSINESS_TZ` |
 | File rule mode | `FILE_RULES_MODE` (GATE / ANNOTATE) |
 | Load engine | `LOAD_ENGINE` |
-| Quarantine location | `QUARANTINE_URI` (files go under `<reason>/`) |
+| Where files go | `ARCHIVE_FOLDER` (`Archive`) and `ERROR_FOLDER` (`Error`): subfolders of the inbound folder for processed and rejected files |
 | Email | `NOTIFY_BACKEND` (`log` / `ses`), `NOTIFY_FROM_EMAIL`, `DEFAULT_NOTIFY_EMAILS` |
 | `Req_Stat` values and transitions | `common.TRANSITIONS` (D-69) |
 | Event vocabulary | `audit.BATCH_EVENTS`, `audit.AUDIT_EVENTS` (category, severity, emailed) |
@@ -238,7 +238,7 @@ The DDL is `framework/sql/schema.sql` (Appendix A).
 | Filename | `Src_File_Nm_Tmplt` (D-28): project, table and source written literally; the extension is the file type |
 | File format | `Delmtr_Cd`, `Src_File_Has_Hdr_Ind`, `Src_File_Has_Trlr_Ind` (⚠ Q-02); LF and CRLF line endings are both read |
 | Handling | `Allow_Zero_Rcd_Ind` (D-60) |
-| S3 paths | `S3_Src_File_Path` (inbound), `Src_File_Archive_Path` |
+| S3 path | `S3_Src_File_Path` (inbound; processed files move to `<path>/Archive/`, rejected ones to `<path>/Error/`) |
 | Targets | `Stg_Schema_Nm`, `Stg_Table_Nm`; core table `Core_Schema_Nm`.`Table_Nm` (D-25) — same database |
 | Email | `Sucs_Email_Notfn_Id`, `Failr_Email_Notfn_Id` (comma-separated recipients), `Email_Subjct_Txt` |
 
@@ -248,7 +248,7 @@ The DDL is `framework/sql/schema.sql` (Appendix A).
 - A file config with no active crosswalk row, or an active crosswalk row with no file config; overlapping crosswalk windows.
 - A run type whose code is not letters/digits, whose category is not `ROUTINE`/`ADHOC`, or whose `SLA_Days < 1`.
 - Staging / core tables missing or lacking framework columns.
-- Inbound / archive paths that are not `s3://` URIs.
+- Inbound paths that are not `s3://` URIs.
 - It warns about crosswalk rows whose run type or project is inactive.
 - Job-level values are checked when they are used: an unknown period name or a missing lookback raises `ConfigError` and the command exits 2.
 
@@ -320,7 +320,7 @@ Each `BATCH_CREATION` run handles a request once per run date while `Req_Start_D
 | Area | FD events | EA events |
 |---|---|---|
 | Batches | `BATCH_CREATED` [I], `BATCH_CLOSED` [I] | `INTAKE_FAILED` [E ✉], `BATCH_CLOSE_BLOCKED` [W], `BATCH_CLOSE_DEFERRED_LOCKED` [I], `SOURCE_MISSING_AT_CLOSE` [W ✉] |
-| File intake | `FILE_RECEIVED` [I], `FILE_REPLACED_BEFORE_CLOSE` [I] | `FILE_REJECTED_UNPARSEABLE`, `FILE_REJECTED_AMBIGUOUS_TEMPLATE`, `FILE_REJECTED_INVALID_TOKEN`, `FILE_REJECTED_RUNTY_NOT_CONFIGURED`, `FILE_REJECTED_NO_BATCH`, `FILE_REJECTED_BATCH_CLOSED`, `FILE_PARSE_ERROR`, `FILE_COLUMN_COUNT_MISMATCH`, `FILE_TRAILER_COUNT_MISMATCH`, `FILE_ZERO_RECORDS_REJECTED`, `FILE_TYPE_NOT_SUPPORTED` [E ✉]; `FILE_REJECTED_DUPLICATE`, `FILE_SAME_CONTENT_OTHER_BATCH` [W ✉]; `FILE_EVENT_REPLAY_IGNORED` [I]; `FILE_MOVE_FAILED` [W] |
+| File intake | `FILE_RECEIVED` [I], `FILE_REPLACED_BEFORE_CLOSE` [I] | `FILE_REJECTED_UNPARSEABLE`, `FILE_REJECTED_AMBIGUOUS_TEMPLATE`, `FILE_REJECTED_INVALID_TOKEN`, `FILE_REJECTED_RUNTY_NOT_CONFIGURED`, `FILE_REJECTED_NO_BATCH`, `FILE_REJECTED_BATCH_CLOSED`, `FILE_PARSE_ERROR`, `FILE_COLUMN_COUNT_MISMATCH`, `FILE_TRAILER_COUNT_MISMATCH`, `FILE_ZERO_RECORDS_REJECTED`, `FILE_TYPE_NOT_SUPPORTED` [E ✉]; `FILE_SAME_CONTENT_OTHER_BATCH` [W ✉]; `FILE_EVENT_REPLAY_IGNORED` [I]; `FILE_MOVE_FAILED` [W] |
 | Validation / load | `FILE_PROMOTED` [I], `FILE_RULES_FAILED` [E] | `RULES_VALIDATION_FAILED`, `RULES_ENGINE_TECHNICAL_FAILURE`, `CORE_LOAD_ROWCOUNT_MISMATCH`, `FILE_TECHNICAL_FAILURE` (once per load) [E ✉] |
 | Overrides | `LATE_ARRIVAL_PROMOTED` [I], `CORRECTION_PROMOTED` [I], `CARRY_FORWARD_APPLIED` [I], `CARRY_FORWARD_REMOVED` [I] | `OVERRIDE_APPROVED` [W ✉], `OVERRIDE_EXPIRED` [W ✉], `OVERRIDE_INVALID_DETECTED` [E ✉] |
 | Config | — | `CONFIG_VALIDATION_FAILED` [E ✉] |
@@ -526,7 +526,7 @@ Every failure except C0 quarantines the file, sets `Load_Stat = QUARANTINED` wit
 | C5 | Run type not configured or not effective for this source | `FILE_REJECTED_RUNTY_NOT_CONFIGURED` |
 | C6 | No batch for the grain (D-15) | `FILE_REJECTED_NO_BATCH` |
 | C7–C10 | Reserved | — |
-| C11 | SHA-256 equals the batch's current or pending candidate load | `FILE_REJECTED_DUPLICATE` |
+| C11 | A file whose name was already loaded | `FILE_REJECTED_DUPLICATE`, unless `LOAD_DUPLICATE` = yes: then it is loaded like any other file and replaces the batch's data while the batch is open |
 | C11 | SHA-256 equals a load of a **different** batch → **continue** (D-52) | `FILE_SAME_CONTENT_OTHER_BATCH` (warning) |
 | C12 | Read failure (delimiter, encoding, structure); the message names the line | `FILE_PARSE_ERROR` |
 | C13 | Data column count ≠ staging business-column count (D-59) | `FILE_COLUMN_COUNT_MISMATCH` |

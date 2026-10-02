@@ -10,6 +10,7 @@ from itertools import combinations
 from typing import Iterable, Optional, Sequence
 
 from . import db
+from .adapters import parse_uri
 from .db import Connection
 from .load import CORE_FRAMEWORK_COLS, STAGING_FRAMEWORK_COLS, columns
 
@@ -59,7 +60,6 @@ class FileConfig:
     has_trailer: bool
     allow_zero_records: bool
     s3_src_file_path: str
-    src_file_archive_path: str
     stg_schema_nm: str
     stg_table_nm: str
     core_schema_nm: str
@@ -79,7 +79,7 @@ class FileConfig:
         name = settings.resolve_env if settings else (lambda text, identifier=True: text)
         return cls(r["cfg_id"], r["project_cd"], r["table_nm"], r["src_id"], r["src_file_nm_tmplt"], r["delmtr_cd"],
                    r["src_file_has_hdr_ind"] == 1, r["src_file_has_trlr_ind"] == 1, r["allow_zero_rcd_ind"] == 1,
-                   name(r["s3_src_file_path"], False), name(r["src_file_archive_path"], False),
+                   name(r["s3_src_file_path"], False),
                    name(r["stg_schema_nm"]), r["stg_table_nm"], name(r["core_schema_nm"]),
                    r["sucs_email_notfn_id"], r["failr_email_notfn_id"], r["email_subjct_txt"], r["active_ind"] == 1)
 
@@ -139,11 +139,6 @@ def file_config(conn, project_cd: str, table_nm: str, src_id: Optional[str] = No
         where, params = where + " AND Src_ID=%s", params + [src_id]
     rows = conn.execute(f"SELECT * FROM ComplianceSourceFileConfig WHERE {where} ORDER BY Cfg_ID", params).fetchall()
     return FileConfig.from_row(rows[0], settings) if rows else None
-
-
-def file_config_by_id(conn: Connection, cfg_id: int, settings=None) -> Optional[FileConfig]:
-    r = conn.execute("SELECT * FROM ComplianceSourceFileConfig WHERE Cfg_ID=%s", (cfg_id,)).fetchone()
-    return FileConfig.from_row(r, settings) if r else None
 
 
 def rule_bindings(conn, project_cd: str, table_nm: str, src_id: str, run_ty: str) -> list[RuleBinding]:
@@ -340,9 +335,10 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None) -
             add("TEMPLATE_EXTENSION", f"{label}: template must end with a file extension such as .txt")
         if (c.project_cd, c.table_nm, c.src_id) not in xw_by_source:
             add("FILE_CONFIG_NO_XWALK", f"{label}: no active crosswalk row")
-        for p in ("s3_src_file_path", "src_file_archive_path"):
-            if not getattr(c, p).startswith(("s3://", "local://")):
-                add("PATH", f"{label}: {p} must be an s3:// URI")
+        try:
+            parse_uri(c.s3_src_file_path)
+        except ValueError as e:
+            add("PATH", f"{label}: {e}")
         for kind, schema, table, required in (("staging", c.stg_schema_nm, c.stg_table_nm, STAGING_FRAMEWORK_COLS),
                                               ("core", c.core_schema_nm, c.table_nm, CORE_FRAMEWORK_COLS)):
             found = {col.name for col in columns(conn, schema, table)}

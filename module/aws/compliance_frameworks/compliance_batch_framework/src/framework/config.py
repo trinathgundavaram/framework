@@ -59,7 +59,6 @@ class FileConfig:
     has_trailer: bool
     allow_zero_records: bool
     s3_src_file_path: str
-    src_file_archive_path: str
     stg_schema_nm: str
     stg_table_nm: str
     core_schema_nm: str
@@ -79,7 +78,7 @@ class FileConfig:
         name = settings.resolve_env if settings else (lambda text, identifier=True: text)
         return cls(r["cfg_id"], r["project_cd"], r["table_nm"], r["src_id"], r["src_file_nm_tmplt"], r["delmtr_cd"],
                    r["src_file_has_hdr_ind"] == 1, r["src_file_has_trlr_ind"] == 1, r["allow_zero_rcd_ind"] == 1,
-                   name(r["s3_src_file_path"], False), name(r["src_file_archive_path"], False),
+                   name(r["s3_src_file_path"], False),
                    name(r["stg_schema_nm"]), r["stg_table_nm"], name(r["core_schema_nm"]),
                    r["sucs_email_notfn_id"], r["failr_email_notfn_id"], r["email_subjct_txt"], r["active_ind"] == 1)
 
@@ -138,11 +137,6 @@ def file_config(conn, project_cd: str, table_nm: str, src_id: Optional[str] = No
         """SELECT * FROM ComplianceSourceFileConfig WHERE Project_Cd=%s AND Table_Nm=%s
               AND (%s::text IS NULL OR Src_ID=%s) AND Active_Ind=1 ORDER BY Cfg_ID LIMIT 1""",
         (project_cd, table_nm, src_id, src_id)).fetchone()
-    return FileConfig.from_row(r, settings) if r else None
-
-
-def file_config_by_id(conn: psycopg.Connection, cfg_id: int, settings=None) -> Optional[FileConfig]:
-    r = conn.execute("SELECT * FROM ComplianceSourceFileConfig WHERE Cfg_ID=%s", (cfg_id,)).fetchone()
     return FileConfig.from_row(r, settings) if r else None
 
 
@@ -322,9 +316,8 @@ def validate_all(conn: psycopg.Connection, case_sensitive: bool = True, settings
             add("TEMPLATE_EXTENSION", f"{label}: template must end with a file extension such as .txt")
         if (c.project_cd, c.table_nm, c.src_id) not in xw_by_source:
             add("FILE_CONFIG_NO_XWALK", f"{label}: no active crosswalk row")
-        for p in ("s3_src_file_path", "src_file_archive_path"):
-            if not getattr(c, p).startswith(("s3://", "local://")):
-                add("PATH", f"{label}: {p} must be an s3:// URI")
+        if not c.s3_src_file_path.startswith(("s3://", "local://")):
+            add("PATH", f"{label}: s3_src_file_path must be an s3:// URI")
         for kind, schema, table, required in (("staging", c.stg_schema_nm, c.stg_table_nm, STAGING_FRAMEWORK_COLS),
                                               ("core", c.core_schema_nm, c.table_nm, CORE_FRAMEWORK_COLS)):
             found = {col.name for col in columns(conn, schema, table)}

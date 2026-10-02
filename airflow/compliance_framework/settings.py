@@ -24,11 +24,14 @@ class Settings:
     aws_region: str = "us-east-1"
     business_tz: str = "America/Chicago"
 
-    object_store: str = "s3"
+    object_store: str = "nas"
     local_store_root: str = "./.local_store"
-    quarantine_uri: str = "s3://quarantine-bucket-not-configured/"
+    archive_folder: str = "Archive"
+    error_folder: str = "Error"
+    nas_min_age_seconds: int = 120
 
     filename_case_sensitive: bool = True
+    load_duplicate: bool = False
     file_effective_date_basis: str = "RPT_START"
     supported_file_types: list[str] = field(default_factory=lambda: [".txt", ".csv"])
     file_encoding: str = "utf-8"
@@ -92,9 +95,14 @@ class Settings:
             raise ConfigError(f"ENV_VALUE {self.env_value!r} must be letters, digits or _")
         for name, allowed in (("file_rules_mode", ("GATE", "ANNOTATE")),
                               ("file_effective_date_basis", ("RPT_START", "RPT_END")),
-                              ("notify_backend", ("log", "ses", "airflow")), ("object_store", ("s3", "local"))):
+                              ("notify_backend", ("log", "ses", "airflow")), ("object_store", ("nas", "s3", "local"))):
             if getattr(self, name) not in allowed:
                 raise ConfigError(f"{name.upper()} must be one of {allowed}, got {getattr(self, name)!r}")
+        for name in ("archive_folder", "error_folder"):
+            if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_ .-]{0,99}$", getattr(self, name) or ""):
+                raise ConfigError(f"{name.upper()} {getattr(self, name)!r} must be a plain folder name")
+        if self.nas_min_age_seconds < 0:
+            raise ConfigError("NAS_MIN_AGE_SECONDS must be >= 0")
         if self.lock_ttl_minutes < 1:
             raise ConfigError("LOCK_TTL_MINUTES must be >= 1")
 

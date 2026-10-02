@@ -67,7 +67,6 @@ CREATE TABLE ComplianceSourceFileConfig (
   Src_File_Has_Trlr_Ind  SMALLINT     NOT NULL,
   Allow_Zero_Rcd_Ind     SMALLINT     NOT NULL,
   S3_Src_File_Path       VARCHAR(500) NOT NULL,
-  Src_File_Archive_Path  VARCHAR(500) NOT NULL,
   Stg_Schema_Nm          VARCHAR(63)  NOT NULL,
   Stg_Table_Nm           VARCHAR(63)  NOT NULL,
   Core_Schema_Nm         VARCHAR(63)  NOT NULL,
