@@ -42,13 +42,15 @@ locals {
     settings     = try(p.settings, {})
     alert_emails = lookup(var.project_alert_emails, code, [])
     schedules = { for name, s in try(p.schedules, {}) : name => {
-      expression = s.expression
-      steps      = s.steps
-      run_type   = try(s.run_type, null)
-      period     = try(s.period, null)
-      table      = try(s.table, null)
-      as_of      = try(s.as_of, null)
-      enabled    = try(s.enabled, true)
+      expression      = s.expression
+      steps           = s.steps
+      run_type        = try(s.run_type, null)
+      period          = try(s.period, null)
+      table           = try(s.table, null)
+      as_of           = try(s.as_of, null)
+      metadata_schema = try(s.metadata_schema, null)
+      metadata_db     = try(s.metadata_db, null)
+      enabled         = try(s.enabled, true)
     } }
   } }
   workflow_name = { for k in keys(local.workflows) : k => "${local.name_prefix}_${k}_${var.env}" }
@@ -59,12 +61,14 @@ locals {
       name     = name
       enabled  = var.enable_schedules && wf.enabled && s.enabled
       input = jsonencode({ for k, v in {
-        schedule = name
-        steps    = s.steps
-        run_type = s.run_type
-        period   = s.period
-        table    = s.table
-        as_of    = s.as_of
+        schedule        = name
+        steps           = s.steps
+        run_type        = s.run_type
+        period          = s.period
+        table           = s.table
+        as_of           = s.as_of
+        metadata_schema = s.metadata_schema
+        metadata_db     = s.metadata_db
       } : k => v if v != null })
     })
   }]...)

@@ -37,9 +37,20 @@ variable "rds_secret_name" {
 }
 
 variable "rds_database_name" {
-  description = "Database name, when it differs from the secret's dbname."
+  description = "Metadata database name, passed to the jobs; null = the dbname of the secret."
   type        = string
   default     = null
+}
+
+variable "metadata_schema" {
+  description = "Schema of the framework tables, passed to the jobs as --FRAMEWORK_METADATA_SCHEMA / --METADATA_SCHEMA."
+  type        = string
+  default     = "cms_compliance"
+
+  validation {
+    condition     = can(regex("^[A-Za-z_][A-Za-z0-9_]{0,62}$", var.metadata_schema))
+    error_message = "metadata_schema must be a plain identifier."
+  }
 }
 
 variable "quarantine_uri" {

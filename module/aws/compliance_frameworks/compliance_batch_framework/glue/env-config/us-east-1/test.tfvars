@@ -1,4 +1,6 @@
-rds_secret_name = "REPLACE_WITH_TEST_RDS_SECRET_NAME"
+rds_secret_name   = "REPLACE_WITH_TEST_RDS_SECRET_NAME"
+rds_database_name = null
+metadata_schema   = "cms_compliance"
 
 data_bucket_names = ["REPLACE_WITH_TEST_INBOUND_BUCKET"]
 quarantine_uri    = "s3://REPLACE_WITH_TEST_INBOUND_BUCKET/quarantine/"

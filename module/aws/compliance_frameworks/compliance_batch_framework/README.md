@@ -90,6 +90,20 @@ projects = {
 - Keep the `all_projects` hourly `NOTIFY`: it emails events that belong to no project (e.g.
   `CONFIG_VALIDATION_FAILED`). `plan` warns if it is missing.
 
+## Metadata database and schema
+
+Both are inputs of the Glue jobs, set per environment in `glue/env-config/us-east-1/<env>.tfvars`:
+
+| tfvars | Glue job argument | Meaning |
+|---|---|---|
+| `metadata_schema` | `--FRAMEWORK_METADATA_SCHEMA` (runner), `--METADATA_SCHEMA` (metadata_load) | PostgreSQL schema holding the framework tables (default `cms_compliance`) |
+| `rds_database_name` | `--FRAMEWORK_DB_NAME` (runner), `--RDS_DATABASE_NM` (metadata_load) | PostgreSQL database; `null` = the `dbname` of the secret |
+
+They can also be given for one run: `metadata_schema` / `metadata_db` in a workflow's input
+(`run_workflow.sh --metadata-schema S --metadata-db DB`, or a schedule entry of `local.projects`), or the
+job arguments above on a direct Glue run. A run's value wins over the project's settings and the job
+default. `metadata_load` adds the schema to a `--TABLE_NAME` that has none.
+
 ## Running steps by hand
 
 ```bash
@@ -97,6 +111,7 @@ src/run_workflow.sh dev ODR FILE_LOAD,BATCH_CLOSE                               
 src/run_workflow.sh dev UNIVERSE BATCH_CREATION --run-type MONTHLY --period PREV_CALENDAR_MONTH
 src/run_workflow.sh prod ODR BATCH_CREATION --run-type DAILY --period PREV_DAY --as-of 2026-09-01   # missed run
 src/run_workflow.sh dev all_projects NOTIFY
+src/run_workflow.sh dev ODR FILE_LOAD --metadata-schema cms_compliance_v2 --metadata-db compliance   # another metadata schema / database
 ```
 
 Or, in the Step Functions console, **Start execution** on `compliance_batch_framework_<PROJECT>_<env>` with
@@ -266,7 +281,7 @@ into one table (the header is the column list; audit columns are skipped).
 J=compliance_batch_framework_metadata_load_dev
 load() {  # table, file, primary key
   aws glue start-job-run --job-name $J --arguments \
-    "{\"--TABLE_NAME\": \"cms_compliance.$1\", \"--S3_FILE_NAME\": \"$2\", \"--PRIMARY_KEY\": \"$3\"}"
+    "{\"--TABLE_NAME\": \"$1\", \"--S3_FILE_NAME\": \"$2\", \"--PRIMARY_KEY\": \"$3\"}"
 }
 load complianceproject            compliance_project.csv              project_cd
 load compliancesourcesystem       compliance_source_system.csv        src_id

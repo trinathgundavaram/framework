@@ -3,7 +3,6 @@ locals {
   region     = data.aws_region.current.name
 
   name_prefix                = "compliance_batch_framework"
-  metadata_schema            = "cms_compliance"
   business_tz                = "America/Chicago"
   rule_engine                = "gre"
   gre_entrypoint             = ""
@@ -41,7 +40,7 @@ locals {
     {
       DB_SECRET_NAME        = var.rds_secret_name
       DB_SSLMODE            = "require"
-      METADATA_SCHEMA       = local.metadata_schema
+      METADATA_SCHEMA       = var.metadata_schema
       AWS_REGION            = local.region
       BUSINESS_TZ           = local.business_tz
       OBJECT_STORE          = "s3"

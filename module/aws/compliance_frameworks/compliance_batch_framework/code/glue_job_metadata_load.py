@@ -101,6 +101,9 @@ def main():
         return default
 
     table = args["TABLE_NAME"]
+    schema = opt("METADATA_SCHEMA")
+    if schema and "." not in table:
+        table = f"{schema}.{table}"
     file_name = args["S3_FILE_NAME"]
     pk_cols = [c.strip() for c in args["PRIMARY_KEY"].split(",") if c.strip()]
     if not pk_cols:

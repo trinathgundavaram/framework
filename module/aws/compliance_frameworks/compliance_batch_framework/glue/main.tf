@@ -81,10 +81,11 @@ resource "aws_glue_job" "metadata_load" {
   default_arguments = merge(
     local.common_arguments,
     {
-      "--extra-py-files" = "s3://${local.artifacts_bucket}/${local.rds_conn_script_key}"
-      "--S3_INPUT_PATH"  = "s3://${local.artifacts_bucket}/${local.config_data_prefix}/"
-      "--RDS_SECRET_NM"  = var.rds_secret_name
-      "--REGION"         = local.region
+      "--extra-py-files"  = "s3://${local.artifacts_bucket}/${local.rds_conn_script_key}"
+      "--S3_INPUT_PATH"   = "s3://${local.artifacts_bucket}/${local.config_data_prefix}/"
+      "--RDS_SECRET_NM"   = var.rds_secret_name
+      "--METADATA_SCHEMA" = var.metadata_schema
+      "--REGION"          = local.region
     },
     var.rds_database_name == null ? {} : { "--RDS_DATABASE_NM" = var.rds_database_name },
   )
