@@ -37,7 +37,7 @@ every resource carries the `required_common_tags` of `common.tfvars` plus `Envir
 
 | Step | Framework module | Default Glue size / timeout | A "completed with problems" result… |
 |---|---|---|---|
-| `BATCH_CREATION` | the scheduled batches due today by each run type's `Batch_Sql_Txt`, and the project's ad-hoc intake requests | 0.0625 DPU / 60 min | stops the workflow (configuration problem) |
+| `BATCH_CREATION` | the scheduled batches due today (`Batch_Schedule_Sql_Txt` of the run type, dates from the crosswalk's `Rpt_Dt_Sql_Txt`), and the project's ad-hoc intake requests | 0.0625 DPU / 60 min | stops the workflow (configuration problem) |
 | `FILE_LOAD` | every file waiting in the project's inbound folders | 1 DPU / 120 min | continues: a bad file is audited, retried next sweep and emailed once |
 | `FILE_RULES` | the rules of every loaded file that has not had them yet (separate execution, after the load) | 0.0625 DPU / 120 min | a failed rule is audited and emailed; stops only when the rules engine cannot run |
 | `OVERRIDE_DECISIONS` | apply / expire approved REUSE overrides | 0.0625 DPU / 30 min | continues: an invalid override is audited and emailed once |
@@ -154,105 +154,108 @@ yet (`ComplianceFileLoad.Load_Stat = PROMOTED`, `Rules_Stat = NOT_RUN`), runs th
   `src/run_workflow.sh dev ODR FILE_RULES,NOTIFY`.
 
 
-## Scheduled batches: one SQL statement per run type (metadata)
+## Scheduled batches: when they are created and for which dates (metadata)
 
-When a scheduled run type's batches are created, for which tables, and with which report dates, is one SQL
-statement in the metadata: `ComplianceRunType.Batch_Sql_Txt`. Nothing about it is in the DAG, the Airflow
-Variable, the Glue job or the code. The scheduler only starts `BATCH_CREATION` for a project, normally
-once a day, and a run started by hand behaves the same way.
+Scheduled batch creation is configured in the metadata with two SQL statements. Nothing about it is in
+the DAG, the Airflow Variable, the Glue job or the code. The scheduler only starts `BATCH_CREATION` for a
+project, normally once a day, and a run started by hand behaves the same way.
 
-**What the statement returns** — for the run date, one row per table that is due:
+| Question | Table (one statement per ...) | Column |
+|---|---|---|
+| **When** are batches created? | `ComplianceRunType` (run type) | `Batch_Schedule_Sql_Txt` |
+| **Which report dates** does a batch get? | `ComplianceDataSetSourceXwalk` (project, table, source, run type) | `Rpt_Dt_Sql_Txt` |
 
-| Column | Meaning |
+Which tables and sources get batches of a run type is the crosswalk itself, as before: one active,
+effective row per project, table, source and run type. A table with weekly and monthly batches has a row
+under each run type; a source with only monthly batches has no row under the weekly run type.
+
+### When: `ComplianceRunType.Batch_Schedule_Sql_Txt`
+
+A single `SELECT` that returns **one row on a day batches are due and no row on any other day**.
+
+- `{run_date}` is the run date (today in `BUSINESS_TZ`, or `as_of`); `{project_cd}` and `{run_ty}` are
+  the project and run type of the run. Use `{run_date}`, not `CURRENT_DATE`, so a re-run for a missed day works.
+- What the row contains is up to you, and **every column it returns can be used by name in the report
+  date statements** — for example a `period_dt` the dates are counted from.
+- A run type without a statement gets no scheduled batches (only a run that passes `period`, below).
+
+Examples (PostgreSQL):
+
+| Batches are due | `Batch_Schedule_Sql_Txt` |
 |---|---|
-| `table_nm` | A `Table_Nm` of the crosswalk, or `'*'` for every table of the run type that has no row of its own |
-| `rpt_start`, `rpt_end` | The report dates of the batch |
-| `src_id` (optional) | One source of that table; leave the column out, or `'*'`, for every source |
+| Every day | `SELECT 1 AS due` |
+| Every Monday | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE extract(dow FROM d) = 1` |
+| First 5 days of the month | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE extract(day FROM d) <= 5` |
+| Only the Sunday before the 3rd Tuesday of the month | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE extract(dow FROM d) = 0 AND extract(day FROM d + 2) BETWEEN 15 AND 21` |
+| Any day of the 4th quarter | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE extract(quarter FROM d) = 4` |
+| Any day of the second month of the second quarter (May) | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE extract(month FROM d) = 5` |
 
-- **No rows = nothing is due** that day: no batch is created, whoever starts the run.
-- `{run_date}` stands for the run date (today in `BUSINESS_TZ`, or `as_of`) and `{project_cd}` for the
-  project; both are bound as parameters. Use `{run_date}`, not `CURRENT_DATE`, so that a re-run for a
-  missed day works.
-- The most specific row wins for a crosswalk row: its table and source, then its table, then `'*'`.
-- It must be a single `SELECT` (or `WITH ... SELECT`) and runs in a read-only transaction. It runs with the framework's database
-  account. `validate-config` runs it for today and reports a statement that fails (`BATCH_SQL`).
+### Which dates: `ComplianceDataSetSourceXwalk.Rpt_Dt_Sql_Txt`
 
-**Which tables and sources get batches** is the crosswalk, as before: a batch is created only for an
-active, effective `ComplianceDataSetSourceXwalk` row (project, table, source, run type) that the
-statement gives dates to. A table that should have weekly and monthly batches has a crosswalk row under
-each run type; a source that should only have monthly batches has no row under the weekly run type. A
-table the statement names but the crosswalk does not have is ignored.
+A single `SELECT` that returns **one row with `rpt_start` and `rpt_end`** for that table, source and run
+type. It only runs on a day the run type is due.
 
-**One batch per window** — a stretch of consecutive due days with the same report dates gets one batch:
-the first run inside it creates the batch, later runs find it, and a missed first day is caught up on
-any later day of the stretch. The next stretch gets a new batch, even when its report dates are the same
-as last time. (A stretch longer than 62 days starts a new batch.)
+- It can use `{run_date}`, `{project_cd}`, `{run_ty}`, `{table_nm}`, `{src_id}` and every column of the
+  schedule row (`{period_dt}` in the example below).
+- **No row** = this table has no batch this time (the other tables of the run type are not affected).
+- A crosswalk row **without** a statement uses `rpt_start` / `rpt_end` of the schedule row when the
+  schedule statement returns them (one default for the run type); otherwise the run reports it as an error.
 
-A run type without `Batch_Sql_Txt` gets batches only when a run passes `period` (one of the built-in
-periods below) — that also replaces the statement for that one run.
+For example "the day before the run": `SELECT CAST({run_date} AS DATE) - 1 AS rpt_start, CAST({run_date} AS DATE) - 1 AS rpt_end`
+
+### How a run uses them
+
+1. For every scheduled run type of the project, the schedule statement runs for the run date. No row:
+   every crosswalk row of that run type is reported as `not due`.
+2. Otherwise each effective crosswalk row's date statement runs and the batch is created with those dates.
+3. **One batch per window** — a stretch of consecutive due days with the same report dates gets one
+   batch: the first run inside it creates the batch, later runs find it, and a missed first day is caught
+   up on any later day of the stretch. The next stretch gets a new batch, even when its report dates are
+   the same as last time. (A stretch longer than 366 days starts a new batch.)
+4. A statement that fails, returns more than one row, or returns dates that are not valid is reported for
+   that crosswalk row; the other rows are still processed and the step ends with exit code 1.
+
+Both statements must be a single `SELECT` (or `WITH ... SELECT`) and runs in a read-only transaction with the framework's database account. Placeholders are bound as
+parameters, so write `CAST({run_date} AS DATE)`; a placeholder the run does not have is an error that
+lists the available ones. `validate-config` runs the schedule statements for today (or `as_of`)
+and, when a run type is due, every date statement (`BATCH_SCHEDULE_SQL`, `RPT_DT_SQL`).
+
+A run that passes `period` (a built-in period, below) creates one batch for that period and ignores both
+statements for that run.
 
 ### Example: weekly and monthly submissions around a Tuesday
 
 This reproduces a typical requirement; none of it is in the code. Two run types (any codes; here `MNT`
 monthly and `WKL` weekly), both due from the Sunday before a Tuesday through the Thursday after it:
+`MNT` in the week of the **3rd Tuesday** of the month, `WKL` in every other Tuesday week. The schedule
+row returns that Tuesday as `period_dt`, so every day of a window gives the same dates, also when the
+week straddles two months.
 
-- `MNT` in the week of the **3rd Tuesday** of the month; `WKL` in every other Tuesday week;
-- dates by table:
+`Batch_Schedule_Sql_Txt` of `MNT` (`WKL` is the same statement with `<> 3`):
 
-| Table | `MNT` (monthly) | `WKL` (weekly) |
+```sql
+SELECT tue AS period_dt
+FROM (SELECT CAST({run_date} AS DATE) + (2 - CAST(extract(dow FROM CAST({run_date} AS DATE)) AS INT)) AS tue) x
+WHERE extract(dow FROM CAST({run_date} AS DATE)) <= 4
+  AND (CAST(extract(day FROM tue) AS INT) - 1) / 7 + 1 = 3
+```
+
+`Rpt_Dt_Sql_Txt` of the crosswalk rows:
+
+| Crosswalk rows | Report dates | `Rpt_Dt_Sql_Txt` |
 |---|---|---|
-| every other table (`'*'`, e.g. CDAG / ODAG) | previous calendar month | 60 days ending the last Saturday |
-| `SNPCC1` | last day of the previous month | the same |
-| `FA1` | last 14 days of the previous month | no weekly crosswalk row |
-| `FA2` | Jan 1 → Jan 31 | no weekly crosswalk row |
-| `FA3` | Nov 1 → Dec 31 of the year before | no weekly crosswalk row |
-| `FA4` | Nov 1 of the year before → Jan 31 | the same |
+| CDAG / ODAG tables, `MNT` | previous calendar month | `SELECT CAST(date_trunc('month', p) - interval '1 month' AS DATE) AS rpt_start, CAST(date_trunc('month', p) AS DATE) - 1 AS rpt_end FROM (SELECT CAST({period_dt} AS DATE) AS p) d` |
+| CDAG / ODAG tables, `WKL` | 60 days ending the last Saturday | `SELECT p - 62 AS rpt_start, p - 3 AS rpt_end FROM (SELECT CAST({period_dt} AS DATE) AS p) d` |
+| `SNPCC1`, `MNT` and `WKL` | last day of the previous month | `SELECT CAST(date_trunc('month', p) AS DATE) - 1 AS rpt_start, CAST(date_trunc('month', p) AS DATE) - 1 AS rpt_end FROM (SELECT CAST({period_dt} AS DATE) AS p) d` |
+| `FA1`, `MNT` | last 14 days of the previous month | `SELECT CAST(date_trunc('month', p) AS DATE) - 1 - 13 AS rpt_start, CAST(date_trunc('month', p) AS DATE) - 1 AS rpt_end FROM (SELECT CAST({period_dt} AS DATE) AS p) d` |
+| `FA2`, `MNT` | Jan 1 → Jan 31 | `SELECT make_date(yr, 1, 1) AS rpt_start, make_date(yr, 1, 31) AS rpt_end FROM (SELECT CAST(extract(year FROM CAST({period_dt} AS DATE) - interval '1 month') AS INT) AS yr) d` |
+| `FA3`, `MNT` | Nov 1 → Dec 31 of the year before | `SELECT make_date(yr - 1, 11, 1) AS rpt_start, make_date(yr - 1, 12, 31) AS rpt_end FROM (SELECT CAST(extract(year FROM CAST({period_dt} AS DATE) - interval '1 month') AS INT) AS yr) d` |
+| `FA4`, `MNT` and `WKL` | Nov 1 of the year before → Jan 31 | `SELECT make_date(yr - 1, 11, 1) AS rpt_start, make_date(yr, 1, 31) AS rpt_end FROM (SELECT CAST(extract(year FROM CAST({period_dt} AS DATE) - interval '1 month') AS INT) AS yr) d` |
 
-The yearly FA dates move to the next year in February (a January run still uses the previous cycle).
-Months and years are taken from the Tuesday, so every day of a window gives the same dates.
-
-`Batch_Sql_Txt` of the monthly run type:
-
-```sql
-WITH d AS (
-  SELECT tue,
-         CAST(date_trunc('month', tue) AS DATE) - 1 AS prev_month_end,
-         CAST({run_date} AS DATE) - CAST(extract(dow FROM CAST({run_date} AS DATE)) AS INT) - 1 AS last_sat,
-         CAST(extract(year FROM tue) AS INT) - CASE WHEN extract(month FROM tue) = 1 THEN 1 ELSE 0 END AS yr
-  FROM (SELECT CAST({run_date} AS DATE) + (2 - CAST(extract(dow FROM CAST({run_date} AS DATE)) AS INT)) AS tue) x
-  WHERE extract(dow FROM CAST({run_date} AS DATE)) <= 4
-    AND (CAST(extract(day FROM tue) AS INT) - 1) / 7 + 1 = 3
-)
-
-SELECT '*' AS table_nm, CAST(date_trunc('month', prev_month_end) AS DATE) AS rpt_start, prev_month_end AS rpt_end FROM d
-UNION ALL SELECT 'SNPCC1', prev_month_end, prev_month_end FROM d
-UNION ALL SELECT 'FA1', prev_month_end - 13, prev_month_end FROM d
-UNION ALL SELECT 'FA2', make_date(yr, 1, 1), make_date(yr, 1, 31) FROM d
-UNION ALL SELECT 'FA3', make_date(yr - 1, 11, 1), make_date(yr - 1, 12, 31) FROM d
-UNION ALL SELECT 'FA4', make_date(yr - 1, 11, 1), make_date(yr, 1, 31) FROM d
-```
-
-`Batch_Sql_Txt` of the weekly run type — the same `WITH` with `<> 3`, and its own dates:
-
-```sql
-WITH d AS (
-  SELECT tue,
-         CAST(date_trunc('month', tue) AS DATE) - 1 AS prev_month_end,
-         CAST({run_date} AS DATE) - CAST(extract(dow FROM CAST({run_date} AS DATE)) AS INT) - 1 AS last_sat,
-         CAST(extract(year FROM tue) AS INT) - CASE WHEN extract(month FROM tue) = 1 THEN 1 ELSE 0 END AS yr
-  FROM (SELECT CAST({run_date} AS DATE) + (2 - CAST(extract(dow FROM CAST({run_date} AS DATE)) AS INT)) AS tue) x
-  WHERE extract(dow FROM CAST({run_date} AS DATE)) <= 4
-    AND (CAST(extract(day FROM tue) AS INT) - 1) / 7 + 1 <> 3
-)
-
-SELECT '*' AS table_nm, last_sat - 59 AS rpt_start, last_sat AS rpt_end FROM d
-UNION ALL SELECT 'SNPCC1', prev_month_end, prev_month_end FROM d
-UNION ALL SELECT 'FA4', make_date(yr - 1, 11, 1), make_date(yr, 1, 31) FROM d
-```
-
-With the batch job running daily in October 2026: `WKL` batches on Oct 4, 11 and 25 (ODAG 60 days to the
-Saturday before; FA4 2025-11-01 → 2026-01-31 each time), `MNT` batches on Oct 18 (ODAG 2026-09-01 →
-2026-09-30, FA1 2026-09-17 → 2026-09-30, ...), nothing on any other day.
+`FA1`, `FA2` and `FA3` have no crosswalk row under `WKL`, so they get no weekly batches. The yearly FA
+dates move to the next year in February (a January run still uses the previous cycle). A daily run
+creates the `MNT` batches on 2026-10-18 (ODAG 2026-09-01 → 2026-09-30, FA1 2026-09-17 → 2026-09-30, ...),
+finds them on 2026-10-19 to 2026-10-22, and creates nothing on 2026-10-23 and 2026-10-24.
 
 ### Built-in periods for a run that passes `period`
 

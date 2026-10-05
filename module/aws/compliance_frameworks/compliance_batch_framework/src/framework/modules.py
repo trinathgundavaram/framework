@@ -122,8 +122,8 @@ def _notify(app, p: dict) -> ModuleOutcome:
 MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
     ModuleSpec(
         "BATCH_CREATION",
-        "one project's batches: the scheduled batches that are due by each run type's Batch_Sql_Txt (or for "
-        "--period when given), and that project's "
+        "one project's batches: the scheduled batches that are due by each run type's Batch_Schedule_Sql_Txt, with "
+        "the report dates of each crosswalk row's Rpt_Dt_Sql_Txt (or for --period when given), and that project's "
         "pending ad-hoc intake requests - both in one call, scoped to --project",
         required=(Param("project"),),
         optional=(Param("run_type"), Param("period"), Param("table"), Param("period_file"),

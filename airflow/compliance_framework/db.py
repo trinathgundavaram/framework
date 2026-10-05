@@ -118,7 +118,11 @@ class Connection:
         return self._depth > 0
 
     def execute(self, query: str, params=None) -> Result:
-        text, values = _to_qmark(query, params)
+        return self.execute_qmark(*_to_qmark(query, params))
+
+    def execute_qmark(self, text: str, values: Sequence = ()) -> Result:
+        """Run a statement that already uses '?' markers; its text is sent as written."""
+        values = [_bind(v) for v in values]
         if text.lstrip()[:6].upper() == "SELECT":
             text = "LOCKING ROW FOR ACCESS " + text.lstrip()
         cur = self._raw.cursor()

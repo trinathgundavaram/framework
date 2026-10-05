@@ -113,7 +113,8 @@ def _no_app(args, settings: Settings) -> int:
 def _dispatch(app: App, args) -> int:
     c = args.cmd
     if c == "validate-config":
-        issues = validate_all(app.conn, app.settings.filename_case_sensitive, app.settings)
+        issues = validate_all(app.conn, app.settings.filename_case_sensitive, app.settings,
+                              app.clock.today(app.settings.business_tz))
         _print([asdict(i) for i in issues])
         errors = [i for i in issues if i.severity == "ERROR"]
         if errors:

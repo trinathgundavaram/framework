@@ -77,7 +77,7 @@ The environment variable is `FRAMEWORK_<NAME>`; the job argument is `--set <NAME
 ### Report periods
 
 `run --module BATCH_CREATION --period <NAME>` picks a statement from `framework/period_sql.py`:
-`SAME_DAY`, `PREV_DAY`, `PREV_N_DAYS` (`--lookback-days`), `PREV_WEEK_SAME_DAY` (`--lookback-weeks`), `PREV_CALENDAR_WEEK`, `CURRENT_CALENDAR_MONTH`, `PREV_CALENDAR_MONTH`, `ROLLING_1_MONTH`, `PREV_CALENDAR_QUARTER`, `PREV_CALENDAR_YEAR`, and `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])` for the same dates every year. These are for a run that passes `--period`. Scheduled batches normally come from each run type's `Batch_Sql_Txt`: one SQL statement that returns, for the run date, the tables that are due and their report dates (see the module README).
+`SAME_DAY`, `PREV_DAY`, `PREV_N_DAYS` (`--lookback-days`), `PREV_WEEK_SAME_DAY` (`--lookback-weeks`), `PREV_CALENDAR_WEEK`, `CURRENT_CALENDAR_MONTH`, `PREV_CALENDAR_MONTH`, `ROLLING_1_MONTH`, `PREV_CALENDAR_QUARTER`, `PREV_CALENDAR_YEAR`, and `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])` for the same dates every year. These are for a run that passes `--period`. Scheduled batches normally come from the metadata: the run type's `Batch_Schedule_Sql_Txt` says when batches are due, and each crosswalk row's `Rpt_Dt_Sql_Txt` gives its report dates (see the module README).
 
 A project with its own calendar ships a file and passes it with `--period-file`:
 

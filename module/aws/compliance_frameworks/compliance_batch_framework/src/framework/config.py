@@ -27,12 +27,12 @@ class RunType:
     sla_days: int
     carry_fwd: bool
     active: bool
-    batch_sql: Optional[str] = None
+    schedule_sql: Optional[str] = None
 
     @classmethod
     def from_row(cls, r: dict) -> "RunType":
         return cls(code(r["run_ty"]), code(r["run_category_cd"]), r["sla_days"], r["carry_fwd_ind"] == 1, r["active_ind"] == 1,
-                   _text(r.get("batch_sql_txt")))
+                   _text(r.get("batch_schedule_sql_txt")))
 
 
 @dataclass(frozen=True)
@@ -45,11 +45,13 @@ class XwalkRow:
     effective_end_dt: Optional[date]
     cmplnc_vrsn: str
     active: bool
+    rpt_dt_sql: Optional[str] = None
 
     @classmethod
     def from_row(cls, r: dict) -> "XwalkRow":
         return cls(code(r["project_cd"]), code(r["table_nm"]), code(r["src_id"]), code(r["run_ty"]), r["effective_start_dt_key"],
-                   r["effective_end_dt_key"], code(r["cmplnc_vrsn"]), r["active_ind"] == 1)
+                   r["effective_end_dt_key"], code(r["cmplnc_vrsn"]), r["active_ind"] == 1,
+                   _text(r.get("rpt_dt_sql_txt")))
 
     def effective_on(self, d: date) -> bool:
         return self.active and self.effective_start_dt <= d and (self.effective_end_dt is None or d <= self.effective_end_dt)
@@ -280,7 +282,8 @@ class Issue:
     severity: str = "ERROR"
 
 
-def validate_all(conn: psycopg.Connection, case_sensitive: bool = True, settings=None) -> list[Issue]:
+def validate_all(conn: psycopg.Connection, case_sensitive: bool = True, settings=None,
+                 run_date: Optional[date] = None) -> list[Issue]:
     """Validate the configuration tables and the target tables they point to."""
     issues: list[Issue] = []
 
@@ -293,22 +296,37 @@ def validate_all(conn: psycopg.Connection, case_sensitive: bool = True, settings
                               "HAVING count(*) > 1").fetchall():
             add("CODE_CASE_DUPLICATE", f"{table}: {r['n']} rows have {column} {r['cd']} in different upper / lower case")
     rts = run_types(conn)
-    from .batches import batch_schedule
-
     for rt in rts.values():
         if not rt.run_ty.isalnum():
             add("RUN_TYPE", f"run type {rt.run_ty!r} must be letters and digits only (it is the {{RUNTY}} token)")
-        if rt.batch_sql:
-            try:
-                batch_schedule(conn, rt, date.today(), "*")
-            except ConfigError as e:
-                add("BATCH_SQL", str(e))
         if rt.run_category_cd not in (SCHEDULED, ADHOC) or rt.sla_days < 1:
             add("RUN_TYPE", f"run type {rt.run_ty}: category must be SCHEDULED/ADHOC and SLA_Days >= 1")
     projects = {code(r["project_cd"]): r["active_ind"] == 1
                 for r in conn.execute("SELECT Project_Cd, Active_Ind FROM ComplianceProject").fetchall()}
     sources = {code(r["src_id"]) for r in conn.execute("SELECT Src_ID FROM ComplianceSourceSystem").fetchall()}
     xw = xwalk_rows(conn)
+    from .batches import batch_due, report_dates
+
+    run_date, cache, due = run_date or date.today(), {}, {}
+    for x in xw:
+        rt = rts.get(x.run_ty)
+        if rt is None or not rt.active or rt.run_category_cd != SCHEDULED or not rt.schedule_sql or not x.effective_on(run_date):
+            continue
+        key = (x.project_cd, x.run_ty)
+        if key not in due:
+            try:
+                due[key] = batch_due(conn, rt, run_date, x.project_cd, cache)
+            except ConfigError as e:
+                due[key] = e
+                add("BATCH_SCHEDULE_SQL", f"project {x.project_cd}: {e}")
+        if isinstance(due[key], dict):
+            try:
+                report_dates(conn, x, run_date, due[key], cache)
+            except ConfigError as e:
+                add("RPT_DT_SQL", str(e))
+        elif x.rpt_dt_sql and not re.match(r"^\s*(SELECT|WITH)\b[^;]*;?\s*$", x.rpt_dt_sql, re.IGNORECASE):
+            add("RPT_DT_SQL", f"Rpt_Dt_Sql_Txt of {x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty} must be a single "
+                              "SELECT statement")
     cfgs = active_file_configs(conn, settings)
     for c in cfgs:
         if c.project_cd not in projects or c.src_id not in sources:

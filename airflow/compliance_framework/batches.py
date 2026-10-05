@@ -163,50 +163,78 @@ def compute_period(conn: Connection, name: str, sched_dt: date, lookback_days: O
     return start, end
 
 
-MAX_STRETCH_DAYS = 62
+MAX_STRETCH_DAYS = 366
+RESERVED_PARAMS = ("run_date", "project_cd", "run_ty", "table_nm", "src_id")
+_PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
 
-def batch_schedule(conn, rt: RunType, run_date: date, project_cd: str) -> list[dict]:
-    """The rows of the run type's Batch_Sql_Txt for a run date: table_nm, rpt_start, rpt_end and optionally src_id."""
-    body = rt.batch_sql.strip().rstrip(";").strip()
+def _config_sql(conn, what: str, sql: str, params: dict, cache: Optional[dict] = None) -> list[dict]:
+    """Rows of a configured SELECT; its {name} placeholders are bound as parameters."""
+    body = sql.strip().rstrip(";").strip()
     if ";" in body or not re.match(r"^(SELECT|WITH)\b", body, re.IGNORECASE):
-        raise ConfigError(f"run type {rt.run_ty}: Batch_Sql_Txt must be a single SELECT statement")
-    query = body.replace("{run_date}", "%(run_date)s").replace("{project_cd}", "%(project_cd)s")
+        raise ConfigError(f"{what} must be a single SELECT statement")
+    names = sorted({n.lower() for n in _PLACEHOLDER.findall(body)})
+    unknown = [n for n in names if n not in params]
+    if unknown:
+        raise ConfigError(f"{what} uses {{{unknown[0]}}}; available: {', '.join('{' + p + '}' for p in params)}")
+    values = {n: params[n] for n in names}
+    key = (body, tuple(values.items()))
+    if cache is not None and key in cache:
+        return cache[key]
+    order = [n.lower() for n in _PLACEHOLDER.findall(body)]
     try:
-        rows = conn.execute(query, {"run_date": run_date, "project_cd": project_cd}).fetchall()
+        rows = conn.execute_qmark(_PLACEHOLDER.sub("?", body), [params[n] for n in order]).fetchall()
     except Exception as e:  # noqa: BLE001
-        raise ConfigError(f"run type {rt.run_ty}: Batch_Sql_Txt failed for {run_date}: "
-                          f"{str(e).strip().splitlines()[0]}") from None
-    for r in rows:
-        r.update({c: db.as_date(r[c]) for c in ("rpt_start", "rpt_end") if c in r})
-    return _schedule_rows(rt, rows)
+        raise ConfigError(f"{what} failed for {params.get('run_date')}: {str(e).strip().splitlines()[0]}") from None
+    if cache is not None:
+        cache[key] = rows
+    return rows
 
 
-def _schedule_rows(rt: RunType, rows: list[dict]) -> list[dict]:
-    out = []
-    for r in rows:
-        missing = [c for c in ("table_nm", "rpt_start", "rpt_end") if c not in r]
-        if missing:
-            raise ConfigError(f"run type {rt.run_ty}: Batch_Sql_Txt must return {', '.join(missing)}")
-        table, start, end = code(r["table_nm"]), r["rpt_start"], r["rpt_end"]
-        if not table or not isinstance(start, date) or not isinstance(end, date) or end < start:
-            raise ConfigError(f"run type {rt.run_ty}: Batch_Sql_Txt returned an invalid row "
-                              f"(table_nm={r['table_nm']!r}, rpt_start={start}, rpt_end={end})")
-        out.append({"table_nm": table, "src_id": code(r.get("src_id")) or "*", "rpt_start": start, "rpt_end": end})
-    return out
+def batch_due(conn, rt: RunType, run_date: date, project_cd: str, cache: Optional[dict] = None) -> Optional[dict]:
+    """The row of the run type's Batch_Schedule_Sql_Txt for a run date, or None when no batch is due that day.
 
-
-def scheduled_period(rows: list[dict], x: XwalkRow) -> Optional[tuple[date, date]]:
-    """The report dates the schedule gives a crosswalk row: its own table / source row wins over '*' rows."""
-    found = [(2 * (r["table_nm"] != "*") + (r["src_id"] != "*"), r["rpt_start"], r["rpt_end"]) for r in rows
-             if r["table_nm"] in ("*", x.table_nm) and r["src_id"] in ("*", x.src_id)]
-    if not found:
+    Its columns are available by name to the report date statements of the crosswalk.
+    """
+    what = f"run type {rt.run_ty}: Batch_Schedule_Sql_Txt"
+    rows = _config_sql(conn, what, rt.schedule_sql,
+                       {"run_date": run_date, "project_cd": code(project_cd), "run_ty": rt.run_ty}, cache)
+    if not rows:
         return None
-    best = max(f[0] for f in found)
-    periods = {(f[1], f[2]) for f in found if f[0] == best}
-    if len(periods) > 1:
-        raise ConfigError(f"the schedule returns {len(periods)} different report periods for {x.table_nm}/{x.src_id}")
-    return periods.pop()
+    if len(rows) > 1:
+        raise ConfigError(f"{what} returned {len(rows)} rows for {run_date}; it must return one row on a day "
+                          "batches are due and no row on any other day")
+    taken = [c for c in rows[0] if c in RESERVED_PARAMS]
+    if taken:
+        raise ConfigError(f"{what} must not return a column named {taken[0]}")
+    return dict(rows[0])
+
+
+def report_dates(conn, x: XwalkRow, run_date: date, due: dict, cache: Optional[dict] = None) -> Optional[tuple[date, date]]:
+    """The report dates of a crosswalk row's batch: its Rpt_Dt_Sql_Txt, else rpt_start / rpt_end of the schedule row.
+
+    None = the statement returned no row: this table has no batch for the run date.
+    """
+    what = f"Rpt_Dt_Sql_Txt of {x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty}"
+    if x.rpt_dt_sql:
+        rows = _config_sql(conn, what, x.rpt_dt_sql, {**due, "run_date": run_date, "project_cd": x.project_cd,
+                                                      "run_ty": x.run_ty, "table_nm": x.table_nm, "src_id": x.src_id}, cache)
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ConfigError(f"{what} returned {len(rows)} rows for {run_date}; it must return one row")
+        row = rows[0]
+        missing = [c for c in ("rpt_start", "rpt_end") if c not in row]
+        if missing:
+            raise ConfigError(f"{what} must return {', '.join(missing)}")
+    elif "rpt_start" in due and "rpt_end" in due:
+        row, what = due, f"run type {x.run_ty}: Batch_Schedule_Sql_Txt"
+    else:
+        raise ConfigError(f"{x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty} has no Rpt_Dt_Sql_Txt")
+    start, end = db.as_date(row["rpt_start"]), db.as_date(row["rpt_end"])
+    if not isinstance(start, date) or not isinstance(end, date) or end < start:
+        raise ConfigError(f"{what} returned invalid report dates for {run_date}: rpt_start={start}, rpt_end={end}")
+    return start, end
 
 
 @dataclass
@@ -224,9 +252,9 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
                    lookback_days: Optional[int] = None, lookback_weeks: Optional[int] = None) -> ScheduleSummary:
     """The scheduled batches due on the run date for the project's effective crosswalk rows.
 
-    Each run type's Batch_Sql_Txt says, for the run date, which tables are due and their report dates; a
-    stretch of consecutive due days with the same dates gets one batch. `period` replaces the schedule for
-    this call: one batch for that period on this run date.
+    The run type's Batch_Schedule_Sql_Txt says whether batches are due on the run date; the crosswalk row's
+    Rpt_Dt_Sql_Txt gives its report dates. A stretch of consecutive due days with the same dates gets one
+    batch. `period` replaces both for this call: one batch for that period on this run date.
     """
     if period and not period_file:
         check_period(period)
@@ -242,12 +270,11 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
             and run_types[x.run_ty].run_category_cd == SCHEDULED]
     if not rows and (run_ty or table_nm):
         s.errors.append(f"no effective crosswalk rows for {project_cd}/{table_nm or '*'}/{run_ty or '*'} on {s.run_date}")
-    schedules: dict = {}
+    cache: dict = {}
 
-    def schedule(rt: RunType, day: date) -> list[dict]:
-        if (rt.run_ty, day) not in schedules:
-            schedules[rt.run_ty, day] = batch_schedule(conn, rt, day, code(project_cd))
-        return schedules[rt.run_ty, day]
+    def dates_on(x: XwalkRow, day: date) -> Optional[tuple[date, date]]:
+        due = batch_due(conn, run_types[x.run_ty], day, x.project_cd, cache)
+        return None if due is None else report_dates(conn, x, day, due, cache)
 
     for x in rows:
         rt = run_types[x.run_ty]
@@ -255,21 +282,21 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
         try:
             if period:
                 dates = compute_period(conn, period, s.run_date, lookback_days, lookback_weeks, period_file)
-            elif rt.batch_sql:
-                dates = scheduled_period(schedule(rt, s.run_date), x)
+            elif rt.schedule_sql:
+                dates = dates_on(x, s.run_date)
                 if dates is None:
                     s.not_due += 1
                     s.batches.append(f"{label}: not due")
                     continue
-                if _already_created(conn, x, dates, s.run_date, lambda day: scheduled_period(schedule(rt, day), x)):
+                if _already_created(conn, x, dates, s.run_date, lambda day: dates_on(x, day)):
                     s.existing += 1
                     s.batches.append(f"{label} {dates[0]}..{dates[1]}: exists")
                     continue
             elif run_ty is None:
-                s.batches.append(f"{label}: run type {rt.run_ty} has no Batch_Sql_Txt")
+                s.batches.append(f"{label}: run type {rt.run_ty} has no Batch_Schedule_Sql_Txt")
                 continue
             else:
-                raise ConfigError(f"run type {rt.run_ty} has no Batch_Sql_Txt; set it or pass --period")
+                raise ConfigError(f"run type {rt.run_ty} has no Batch_Schedule_Sql_Txt; set it or pass --period")
         except ConfigError as e:
             s.errors.append(f"{label}: {e}")
             continue

@@ -1,6 +1,6 @@
 # CMS Compliance Framework: Module Reference
 
-What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.6 (design v5).
+What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.7 (design v5).
 
 - **Design:** [`design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md). `D-nn` = decision, `Q-nn` = open question, `§n` = design section.
 - **Setup, configuration, commands:** [`framework-package.md`](framework-package.md).
@@ -70,7 +70,7 @@ What each file in `framework/` does, what it owns, and what it leaves to other m
 | Command | Flow (§7) | Modules, in order |
 |---|---|---|
 | `run --module NAME` | any | `cli` → `modules.run_module` → the module's service (rows below) |
-| `run --module BATCH_CREATION` | P2, P4 | `modules` → `App.create_batches` for the project (every SCHEDULED run type that is due per its `Batch_Sql_Txt`, or only `--run-type`; `--period` replaces the statement for one run), and always `batches.IntakeProcessor.run(project_cd=..., run_ty=...)` for that project - one project-scoped call for both scheduled and ad-hoc batch creation |
+| `run --module BATCH_CREATION` | P2, P4 | `modules` → `App.create_batches` for the project (every SCHEDULED run type that is due per its `Batch_Schedule_Sql_Txt`, dates from each crosswalk row's `Rpt_Dt_Sql_Txt`, or only `--run-type`; `--period` replaces both for one run), and always `batches.IntakeProcessor.run(project_cd=..., run_ty=...)` for that project - one project-scoped call for both scheduled and ad-hoc batch creation |
 | `run --module FILE_LOAD` | P5, P6 | `modules` → `ingest.IngestPipeline.process_file` (`--key`) or `process_path` (`--prefix`, or every configured location) |
 | `list-modules` | ops | `cli` → `modules.describe_modules` (no settings, no database) |
 | `show-config` | ops | `cli` → `settings.describe` / `settings.db_conninfo` (no password) |
