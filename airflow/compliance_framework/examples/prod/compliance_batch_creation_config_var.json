@@ -12,18 +12,7 @@
   "schedule_timezone": "America/Chicago",
   "log_level": "INFO",
   "schedule_interval": "0 6 * * *",
-  "runs": [
-    {
-      "project": "ODR",
-      "run_type": "DAILY",
-      "period": "PREV_DAY"
-    },
-    {
-      "project": "UNIVERSE",
-      "run_type": "CMS",
-      "period": "CURRENT_CALENDAR_MONTH"
-    }
-  ],
+  "project": "CMS_UNIVERSE",
   "settings": {
     "BUSINESS_TZ": "America/Chicago",
     "LOCK_TTL_MINUTES": 240

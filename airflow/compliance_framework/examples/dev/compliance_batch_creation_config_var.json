@@ -11,10 +11,8 @@
   ],
   "schedule_timezone": "America/Chicago",
   "log_level": "INFO",
-  "schedule_interval": "0 6 1 * *",
+  "schedule_interval": "0 6 * * *",
   "project": "CMS_UNIVERSE",
-  "run_type": "MNT",
-  "period": "PREV_CALENDAR_MONTH",
   "settings": {
     "BUSINESS_TZ": "America/Chicago",
     "LOCK_TTL_MINUTES": 240

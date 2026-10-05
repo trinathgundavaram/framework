@@ -15,7 +15,8 @@ from . import db
 from .adapters import FileInfo, FileStore, basename, dirname, parse_uri, sha256_file
 from .audit import EventLogger
 from .batches import get_batch, promoted_load
-from .common import COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch, check_transition
+from .common import (COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch, check_transition,
+                     code)
 from .config import FileConfig, MatchError, TemplateMatcher
 from .db import Connection
 from .load import sanitize_db_error, stage, swap
@@ -157,6 +158,7 @@ class IngestPipeline:
     def process_path(self, share: Optional[str] = None, folder: Optional[str] = None,
                      project_cd: Optional[str] = None) -> PathIngestSummary:
         """Process every file in one folder, a project's folders, or every configured folder."""
+        project_cd = code(project_cd)
         if bool(share) != bool(folder):
             raise ValueError("share and folder must be given together, or both omitted")
         if project_cd and share:
@@ -313,14 +315,9 @@ class IngestPipeline:
         with db.held(self.conn, db.batch_key(batch["btch_id"]), self.settings.lock_timeout_seconds):
             return self._process_locked(load_id, info, cfg, batch["req_id"])
 
-    def _resolve_run_type(self, token: str, codes: tuple[str, ...]) -> Optional[str]:
-        if token in codes:
-            return token
-        if not self.settings.filename_case_sensitive:
-            for c in codes:
-                if c.lower() == token.lower():
-                    return c
-        return None
+    @staticmethod
+    def _resolve_run_type(token: str, codes: tuple[str, ...]) -> Optional[str]:
+        return code(token) if code(token) in codes else None
 
     def _select_batch(self, cfg: FileConfig, run_ty: str, rpt_start, rpt_end) -> tuple[Optional[dict], Optional[str]]:
         """The batch a file belongs to (D-78)."""
@@ -339,13 +336,13 @@ class IngestPipeline:
         for r in rows:
             ovrd = self.active_override(r, required_override_ty(self._has_data(r)), today)
             if ovrd:
-                return r, ovrd["override_ty"]
+                return r, code(ovrd["override_ty"])
         return None, "CLOSED"
 
     def active_override(self, batch: dict, override_ty: str, today) -> Optional[dict]:
         return self.conn.execute(
             """SELECT * FROM ComplianceBatchOverride
-                WHERE Req_ID=%s AND Override_Ty=%s AND Apprvl_Stat='APPROVED' AND Valid_Thru_Dt_Key >= %s""",
+                WHERE Req_ID=%s AND UPPER(Override_Ty)=%s AND UPPER(Apprvl_Stat)='APPROVED' AND Valid_Thru_Dt_Key >= %s""",
             (batch["req_id"], override_ty, today)).fetchone()
 
     def _has_data(self, batch: dict) -> bool:
@@ -400,7 +397,7 @@ class IngestPipeline:
             has_data = self._has_data(b)
             ovrd = self.active_override(b, required_override_ty(has_data), today) if closed else None
             d = decide(ResolutionInput(batch_closed=closed, has_data=has_data, file_passed=passed,
-                                       override_ty=ovrd["override_ty"] if ovrd else None))
+                                       override_ty=code(ovrd["override_ty"]) if ovrd else None))
             ctx = dict(project_cd=b["project_cd"], table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"],
                        req_id=req_id, btch_id=b["btch_id"], load_id=load_id, file_ref=ref)
             out = IngestOutcome(load_id, "", d.rule, req_id=req_id, ovrd_id=ovrd["ovrd_id"] if ovrd else None)
@@ -462,10 +459,10 @@ class IngestPipeline:
     def _end_carry_forward(self, b: dict, load_id: int, now) -> None:
         """A real file replaced an applied carry-forward."""
         row = self.conn.execute("SELECT Ovrd_ID FROM ComplianceBatchOverride WHERE Req_ID=%s "
-                                "AND Override_Ty='REUSE' AND Apprvl_Stat='APPROVED'", (b["req_id"],)).fetchone()
+                                "AND UPPER(Override_Ty)='REUSE' AND UPPER(Apprvl_Stat)='APPROVED'", (b["req_id"],)).fetchone()
         self.conn.execute(
             """UPDATE ComplianceBatchOverride SET Valid_Thru_Dt_Key=%s, Updated_Dtts=%s, Updated_By='SYSTEM'
-                WHERE Req_ID=%s AND Override_Ty='REUSE' AND Apprvl_Stat='APPROVED'""",
+                WHERE Req_ID=%s AND UPPER(Override_Ty)='REUSE' AND UPPER(Apprvl_Stat)='APPROVED'""",
             (db.as_date(b["req_dt_key"]), now, b["req_id"]))
         self.logger.batch_event("CARRY_FORWARD_REMOVED", req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id,
                                 ovrd_id=row["ovrd_id"] if row else None,

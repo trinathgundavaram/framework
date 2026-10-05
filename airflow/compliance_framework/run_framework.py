@@ -53,6 +53,7 @@ def run_step(step: str, *, as_of: Optional[str] = None, settings: Optional[Mappi
 def run_command(command: str, *, args: Optional[list] = None, as_of: Optional[str] = None,
                 settings: Optional[Mapping[str, Any]] = None, log_level: str = "INFO") -> tuple[Any, int]:
     """Run one CLI command (validate-config, health, close-batch, locks, release-lock, ...)."""
+    command = command.strip().lower()
     if command not in COMMANDS:
         raise ValueError(f"unknown command {command!r}; one of {', '.join(COMMANDS)}")
     argv = [command, "--log-level", log_level]

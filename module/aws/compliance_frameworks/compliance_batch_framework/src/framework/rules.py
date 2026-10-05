@@ -10,7 +10,7 @@ from . import db
 from .adapters import ERROR, RuleEngine
 from .audit import EventLogger
 from .batches import get_batch
-from .common import Clock
+from .common import Clock, code
 from .load import sanitize_db_error
 from .settings import Settings
 
@@ -43,7 +43,7 @@ class RulesRunner:
         s = RulesSummary()
         where, params = "", []
         if project_cd is not None:
-            where, params = " AND c.Project_Cd = %s", [project_cd]
+            where, params = " AND c.Project_Cd = %s", [code(project_cd)]
         rows = self.conn.execute(
             "SELECT f.Load_ID, f.Btch_ID FROM ComplianceFileLoad f JOIN ComplianceRequestControl c ON c.Req_ID = f.Req_ID "
             "WHERE f.Load_Stat = 'PROMOTED' AND f.Rules_Stat IN ('NOT_RUN', 'ERROR')" + where + " ORDER BY f.Load_ID",

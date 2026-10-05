@@ -8,7 +8,7 @@ import psycopg
 
 from . import config as cfgmod
 from .adapters import Channel, Message
-from .common import Clock, ConfigError
+from .common import Clock, ConfigError, code
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -109,7 +109,7 @@ class NotificationDispatcher:
                         WHERE Notified_Ind = 0 AND (%(p)s::text IS NULL OR Project_Cd = %(p)s)
                           AND NOT (Event_ID = ANY(%(failed)s))
                         ORDER BY Event_ID LIMIT 1 FOR UPDATE SKIP LOCKED""",
-                    {"p": project_cd, "failed": self.failed}).fetchone()
+                    {"p": code(project_cd), "failed": self.failed}).fetchone()
                 if r is None:
                     break
                 if self._send(r, configs):

@@ -125,6 +125,7 @@ A single, **project-agnostic** framework for compliance source files. It does th
 | D-75 | **No `Current_Load_ID` (v5).** A batch's current data is its single `ComplianceFileLoad` row with `Load_Stat = 'PROMOTED'` (partial unique index `ux_fileload_promoted`). A promotion supersedes the previous row **before** it promotes the new one, inside the same transaction. |
 | D-76 | **The extract is a separate process (v6).** The framework does not generate, call, combine or track the extract: `ComplianceExtractTrigger` (v5) and `ComplianceExtractControl` (v6) are removed. The extract process reads the batches (`ComplianceRequestControl`), their current core rows and the batch timeline. |
 | D-77 | **Run date in the grain, SLA computed (v5).** The CRC grain includes `Req_Dt_Key`, so the same report period run daily for ten days gets ten batches, one per run date, each with its own hold. The SLA hold is `Req_Dt_Key + (SLA_Days − 1)`, computed from the run type whenever it is needed and **never stored** (`Earliest_Close_Dt` and `Earliest_Trigger_Dt` are removed). |
+| D-80 | **Scheduled batch creation is one SQL statement per run type (0.3.6).** `ComplianceRunType.Batch_Sql_Txt` holds a single `SELECT` with `{run_date}` / `{project_cd}` that returns, for the run date, `table_nm` (or `'*'`), optional `src_id`, `rpt_start`, `rpt_end`; no rows = nothing due. `BATCH_CREATION --project` creates batches for the effective crosswalk rows the statement gives dates to (most specific row wins), whoever starts the run. A stretch of consecutive due days with the same dates gets one batch (first run creates it); the next stretch gets a new one. `--period` replaces the statement for one run. Supersedes the period being a parameter of each schedule; D-77 applies only to runs that pass `--period`. |
 | D-78 | **Batch selection for an arriving file (v5).** A filename carries the report period but not the run date, so a file is matched to the **open** batch of its grain with the **latest run date ≤ today**. If every batch of that grain is closed, the most recent one is used and the file is promoted only under an approved, still-valid override; otherwise it is quarantined with `FILE_REJECTED_BATCH_CLOSED`, which is a **retryable** quarantine: re-delivering the same object after the override exists reprocesses the same `Load_ID`. |
 | D-79 | **Intake is ad-hoc only, with a request window (v5).** `ComplianceRequestInTake` is used by ADHOC run types. `Req_Start_Dt_Key` / `Req_End_Dt_Key` say how long batches must be created for the same report period: one batch per run date from the start date through the end date (equal dates = a one-off). v6: no status, request type, reason or error columns — a request is due while its window is open, `Last_Run_Dt_Key` records the last run date handled, and outcomes are audit events under the `Intake_ID`. Whether a batch was scheduled or requested follows from its run type's category. |
 | D-73 | **Leaner configuration rows (v4).** The crosswalk only says which (project, table, source, run type) apply and when (plus `Cmplnc_Vrsn`). The file config keeps the file contract, locations, targets and notification recipients; `Target_Connection_Nm`, `Engine_Cd`, `Rules_Vld_Md`, `Is_Rules_Engine_Required`, `Load_Exclude_Col_List` and `Sns_Topic_Arn` are removed. |
@@ -154,7 +155,7 @@ All of these were withdrawn by D-34, D-30 or D-39:
 |---|---|---|
 | `show-config` / `test-connection` | `settings` (D-66, D-67) | deploy / ops |
 | `validate-config` | `config.validate_all` | CI, and before any config change is applied |
-| `run --module BATCH_CREATION --project [--run-type --period] [--as-of]` | `batches.create_batches` (ROUTINE) + `batches.IntakeProcessor` (ad-hoc request windows, D-79) | project schedule (D-71) |
+| `run --module BATCH_CREATION --project [--run-type --period] [--as-of]` | `batches.create_batches` (SCHEDULED) + `batches.IntakeProcessor` (ad-hoc request windows, D-79) | project schedule (D-71) |
 | `run --module FILE_LOAD --bucket --key [--version-id]` | `ingest.IngestPipeline.process_file` | S3 event |
 | `run --module FILE_LOAD [--bucket --prefix]` | `ingest.IngestPipeline.process_path` (every object at one location, or at every configured location) | poll, or a bulk drop |
 | `process-decisions` | `overrides.DecisionProcessor` | poll (every few minutes) |
@@ -210,7 +211,7 @@ The DDL is `framework/sql/schema.sql` (Appendix A).
 |---|---|---|
 | `ComplianceProject` | `Project_Cd` | One row per project: `Project_Desc`, `Active_Ind`. Every `Project_Cd` in the framework references it; one framework instance serves many projects. |
 | `ComplianceSourceSystem` | `Src_ID` | Source master: `Src_Nm`, `Src_Ty`. |
-| `ComplianceRunType` | `Run_Ty` | `Run_Category_Cd` (`ROUTINE` scheduled / `ADHOC` requested). `SLA_Days ≥ 1` (hold, D-38). `Carry_Fwd_Ind` (D-70). Letters and digits only (it is the `{RUNTY}` token). |
+| `ComplianceRunType` | `Run_Ty` | `Run_Category_Cd` (`SCHEDULED` scheduled / `ADHOC` requested). `SLA_Days ≥ 1` (hold, D-38). `Carry_Fwd_Ind` (D-70). Letters and digits only (it is the `{RUNTY}` token). |
 | `ComplianceDataSetSourceXwalk` | `(Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key)` | Which (project, table, source, run type) combinations apply and when: `Cmplnc_Vrsn` (part of `Btch_ID`), `Active_Ind`, effective window. Windows for the same 4-part key must not overlap — `validate-config` reports `XWALK_OVERLAP` (D-51). Nothing about schedules, periods or time zones (D-71). |
 | `ComplianceSourceFileConfig` | `Cfg_ID`; one active row per `(Project_Cd, Table_Nm, Src_ID)` (D-33) | The file contract (below). |
 | `ComplianceRuleBinding` | `(Project_Cd, Table_Nm, Src_ID, Run_Ty, Gre_Rule_Group, Gre_Rule_Variant)` | Links GRE rules to any level: `'*'` in `Table_Nm`, `Src_ID` or `Run_Ty` means all (project, project + table, table + run type, one source …). **Additive:** every binding that matches a file (FILE_LEVEL) or a run (PERIOD_LEVEL, always `Src_ID = '*'`) runs; a group/variant bound at several levels runs once. A file with no matching FILE_LEVEL binding skips file rules. `validate-config` rejects a bad scope, a PERIOD_LEVEL row for one source, and a binding that matches no crosswalk row. The GATE/ANNOTATE modes are job settings (D-44, D-63). ⚠ Q-12 (GRE call details). |
@@ -246,7 +247,7 @@ The DDL is `framework/sql/schema.sql` (Appendix A).
 - Templates missing a required placeholder, using a placeholder twice, or using an unknown one (§9.1); a template without a file extension.
 - Two active configs that could match the same filename (§9.3).
 - A file config with no active crosswalk row, or an active crosswalk row with no file config; overlapping crosswalk windows.
-- A run type whose code is not letters/digits, whose category is not `ROUTINE`/`ADHOC`, or whose `SLA_Days < 1`.
+- A run type whose code is not letters/digits, whose category is not `SCHEDULED`/`ADHOC`, or whose `SLA_Days < 1`.
 - Staging / core tables missing or lacking framework columns.
 - Inbound paths that are not `s3://` URIs.
 - It warns about crosswalk rows whose run type or project is inactive.
@@ -388,7 +389,7 @@ Each flow is an idempotent service. **State changes and their audit events commi
 **P1. Config change.** Apply rows (Project → SourceSystem → RunType → Xwalk → SourceFileConfig → RuleBinding), then run `validate-config`. Job-level values (period, rule mode) are set on the project's scheduled jobs (D-71). Any failure → `CONFIG_VALIDATION_FAILED` and the change is not activated. Deactivation is soft (`Active_Ind`, `Effective_End_Dt_Key`). A new compliance version end-dates the old crosswalk row and inserts a new one (D-51).
 
 **P2. Scheduled batch creation (`run --module BATCH_CREATION --project --run-type --period [--table] [--as-of]`).** The external schedule of the project runs this command (D-71):
-1. The run type must be active and ROUTINE.
+1. The run type must be active and SCHEDULED.
 2. **Run date** = `as_of` (default now) in `BUSINESS_TZ`. It is also `Req_Dt_Key` (D-29).
 3. Compute the report period from the run date with the named period SQL (`period_sql.py` or `--period-file`; lookback arguments where the statement needs them).
 4. Take the active crosswalk rows of the project / run type (optionally one table) that are effective on the run date.

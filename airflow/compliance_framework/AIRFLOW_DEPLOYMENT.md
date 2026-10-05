@@ -145,7 +145,7 @@ Keys by step:
 
 | Step | Scope keys | Settings worth setting |
 |---|---|---|
-| `BATCH_CREATION` | `project` (required), `run_type`, `period` (`PREV_DAY`, `PREV_CALENDAR_MONTH`, `CURRENT_CALENDAR_MONTH`, `PREV_CALENDAR_WEEK`, ...), `table`, `lookback_days`, `lookback_weeks` | — |
+| `BATCH_CREATION` | `project` (required). What is due and for which dates comes from each run type's `Batch_Sql_Txt` in the metadata (below). Optional for one run: `run_type`, `table`, `period`, `lookback_days`, `lookback_weeks` | — |
 | `FILE_LOAD` | `project` (leave out for every project), `load_duplicate` (`yes` / `no`, default `no`) | `FILE_STORE` (`nas`), `ARCHIVE_FOLDER`, `ERROR_FOLDER`, `NAS_MIN_AGE_SECONDS` |
 | `FILE_RULES` | `project`; `gre` (the GRE's own Airflow Variable, as it is: `connection_type`, `connection_id`, `environment`, `meta_db`, `meta_connection`, `project_name`, `run_params`, `text_params`, `extra_filters`, `log_level`, `max_parallel_rules`; plus `package_dir`, the folder holding the GRE's `run_rules.py`, default `<dags>/rules_engine`) | `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `FILE_RULES_MODE` |
 | `OVERRIDE_DECISIONS` | `project` | — |
@@ -257,6 +257,133 @@ yet (`ComplianceFileLoad.Load_Stat = PROMOTED`, `Rules_Stat = NOT_RUN`), runs th
   Airflow's own email settings.
 - These are about the DAG run. Business events (a rejected file, a missing source, an override) are
   emailed by the `NOTIFY` step to the file config's recipients.
+
+## Scheduled batches: one SQL statement per run type (metadata)
+
+When a scheduled run type's batches are created, for which tables, and with which report dates, is one SQL
+statement in the metadata: `ComplianceRunType.Batch_Sql_Txt`. Nothing about it is in the DAG, the Airflow
+Variable, the Glue job or the code. The scheduler only starts `BATCH_CREATION` for a project, normally
+once a day, and a run started by hand behaves the same way.
+
+**What the statement returns** — for the run date, one row per table that is due:
+
+| Column | Meaning |
+|---|---|
+| `table_nm` | A `Table_Nm` of the crosswalk, or `'*'` for every table of the run type that has no row of its own |
+| `rpt_start`, `rpt_end` | The report dates of the batch |
+| `src_id` (optional) | One source of that table; leave the column out, or `'*'`, for every source |
+
+- **No rows = nothing is due** that day: no batch is created, whoever starts the run.
+- `{run_date}` stands for the run date (today in `BUSINESS_TZ`, or `as_of`) and `{project_cd}` for the
+  project; both are bound as parameters. Use `{run_date}`, not `CURRENT_DATE`, so that a re-run for a
+  missed day works.
+- The most specific row wins for a crosswalk row: its table and source, then its table, then `'*'`.
+- It must be a single `SELECT` (or `WITH ... SELECT`). It runs with the framework's database
+  account. `validate-config` runs it for today and reports a statement that fails (`BATCH_SQL`).
+
+**Which tables and sources get batches** is the crosswalk, as before: a batch is created only for an
+active, effective `ComplianceDataSetSourceXwalk` row (project, table, source, run type) that the
+statement gives dates to. A table that should have weekly and monthly batches has a crosswalk row under
+each run type; a source that should only have monthly batches has no row under the weekly run type. A
+table the statement names but the crosswalk does not have is ignored.
+
+**One batch per window** — a stretch of consecutive due days with the same report dates gets one batch:
+the first run inside it creates the batch, later runs find it, and a missed first day is caught up on
+any later day of the stretch. The next stretch gets a new batch, even when its report dates are the same
+as last time. (A stretch longer than 62 days starts a new batch.)
+
+A run type without `Batch_Sql_Txt` gets batches only when a run passes `period` (one of the built-in
+periods below) — that also replaces the statement for that one run.
+
+### Example: weekly and monthly submissions around a Tuesday
+
+This reproduces a typical requirement; none of it is in the code. Two run types (any codes; here `MNT`
+monthly and `WKL` weekly), both due from the Sunday before a Tuesday through the Thursday after it:
+
+- `MNT` in the week of the **3rd Tuesday** of the month; `WKL` in every other Tuesday week;
+- dates by table:
+
+| Table | `MNT` (monthly) | `WKL` (weekly) |
+|---|---|---|
+| every other table (`'*'`, e.g. CDAG / ODAG) | previous calendar month | 60 days ending the last Saturday |
+| `SNPCC1` | last day of the previous month | the same |
+| `FA1` | last 14 days of the previous month | no weekly crosswalk row |
+| `FA2` | Jan 1 → Jan 31 | no weekly crosswalk row |
+| `FA3` | Nov 1 → Dec 31 of the year before | no weekly crosswalk row |
+| `FA4` | Nov 1 of the year before → Jan 31 | the same |
+
+The yearly FA dates move to the next year in February (a January run still uses the previous cycle).
+Months and years are taken from the Tuesday, so every day of a window gives the same dates.
+
+`Batch_Sql_Txt` of the monthly run type:
+
+```sql
+WITH d AS (
+  SELECT tue,
+         tue - EXTRACT(DAY FROM tue) AS prev_month_end,
+         CAST({run_date} AS DATE) - TD_DAY_OF_WEEK(CAST({run_date} AS DATE)) AS last_sat,
+         EXTRACT(YEAR FROM tue) - CASE WHEN EXTRACT(MONTH FROM tue) = 1 THEN 1 ELSE 0 END AS yr
+  FROM (SELECT CAST({run_date} AS DATE) + (3 - TD_DAY_OF_WEEK(CAST({run_date} AS DATE))) AS tue) x
+  WHERE TD_DAY_OF_WEEK(CAST({run_date} AS DATE)) <= 5
+    AND (EXTRACT(DAY FROM tue) - 1) / 7 + 1 = 3
+)
+
+SELECT CAST('*' AS VARCHAR(63)) AS table_nm, ADD_MONTHS(prev_month_end + 1, -1) AS rpt_start, prev_month_end AS rpt_end FROM d
+UNION ALL SELECT 'SNPCC1', prev_month_end, prev_month_end FROM d
+UNION ALL SELECT 'FA1', prev_month_end - 13, prev_month_end FROM d
+UNION ALL SELECT 'FA2', CAST(TRIM(yr) || '-01-01' AS DATE), CAST(TRIM(yr) || '-01-31' AS DATE) FROM d
+UNION ALL SELECT 'FA3', CAST(TRIM(yr - 1) || '-11-01' AS DATE), CAST(TRIM(yr - 1) || '-12-31' AS DATE) FROM d
+UNION ALL SELECT 'FA4', CAST(TRIM(yr - 1) || '-11-01' AS DATE), CAST(TRIM(yr) || '-01-31' AS DATE) FROM d
+```
+
+`Batch_Sql_Txt` of the weekly run type — the same `WITH` with `<> 3`, and its own dates:
+
+```sql
+WITH d AS (
+  SELECT tue,
+         tue - EXTRACT(DAY FROM tue) AS prev_month_end,
+         CAST({run_date} AS DATE) - TD_DAY_OF_WEEK(CAST({run_date} AS DATE)) AS last_sat,
+         EXTRACT(YEAR FROM tue) - CASE WHEN EXTRACT(MONTH FROM tue) = 1 THEN 1 ELSE 0 END AS yr
+  FROM (SELECT CAST({run_date} AS DATE) + (3 - TD_DAY_OF_WEEK(CAST({run_date} AS DATE))) AS tue) x
+  WHERE TD_DAY_OF_WEEK(CAST({run_date} AS DATE)) <= 5
+    AND (EXTRACT(DAY FROM tue) - 1) / 7 + 1 <> 3
+)
+
+SELECT CAST('*' AS VARCHAR(63)) AS table_nm, last_sat - 59 AS rpt_start, last_sat AS rpt_end FROM d
+UNION ALL SELECT 'SNPCC1', prev_month_end, prev_month_end FROM d
+UNION ALL SELECT 'FA4', CAST(TRIM(yr - 1) || '-11-01' AS DATE), CAST(TRIM(yr) || '-01-31' AS DATE) FROM d
+```
+
+With the batch job running daily in October 2026: `WKL` batches on Oct 4, 11 and 25 (ODAG 60 days to the
+Saturday before; FA4 2025-11-01 → 2026-01-31 each time), `MNT` batches on Oct 18 (ODAG 2026-09-01 →
+2026-09-30, FA1 2026-09-17 → 2026-09-30, ...), nothing on any other day.
+
+### Built-in periods for a run that passes `period`
+
+`SAME_DAY`, `PREV_DAY`, `PREV_N_DAYS(n)`, `PREV_WEEK_SAME_DAY(n)`, `PREV_CALENDAR_WEEK`,
+`CURRENT_CALENDAR_MONTH`, `PREV_CALENDAR_MONTH`, `ROLLING_1_MONTH`, `PREV_CALENDAR_QUARTER`,
+`PREV_CALENDAR_YEAR`, `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])` (the same dates every year; moves to the next
+year on the third date, by default the day after the window ends). Example, one batch by hand:
+`BATCH_CREATION` with `run_type`, `table` and `period = PREV_CALENDAR_MONTH`.
+
+## Upper and lower case
+
+Codes and values that people type are compared without regard to case, everywhere:
+
+- project, table, source, run type and run category codes in every configuration table, in the
+  intake requests, in job parameters (`--project`, `--run-type`, `--table`, a Variable's `project`, ...);
+- override type and approval status in `ComplianceBatchOverride`, and a `Reuse_Btch_ID` or `--btch-id`;
+- file names against their templates (`FILENAME_CASE_SENSITIVE` now defaults to false), the run-type
+  token in a file name, and the template placeholders (`{RunTy}` = `{RUNTY}`);
+- step and module names, admin commands, period names and the choice settings (`FILE_RULES_MODE`,
+  `NOTIFY_BACKEND`, `RULE_ENGINE`, ...).
+
+The framework keeps codes upper case in what it writes (batch rows, `Btch_ID`, audit rows), so
+`odr`, `Odr` and `ODR` are one project. `validate-config` reports `CODE_CASE_DUPLICATE` when two rows of
+`ComplianceProject`, `ComplianceSourceSystem` or `ComplianceRunType` differ only in case.
+
+The run categories are `SCHEDULED` (batches created on a schedule for a period; was `ROUTINE`) and
+`ADHOC` (batches requested through `ComplianceRequestInTake`).
 
 ## Environment in database names (`$env`)
 

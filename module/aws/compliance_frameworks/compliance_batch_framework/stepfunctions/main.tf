@@ -49,7 +49,7 @@ resource "aws_sfn_state_machine" "workflow" {
 
   lifecycle {
     precondition {
-      condition     = alltrue([for s in values(each.value.schedules) : length(s.steps) > 0 && alltrue([for step in s.steps : contains(local.known_steps, step)])])
+      condition     = alltrue([for s in values(each.value.schedules) : length(s.steps) > 0 && alltrue([for step in s.steps : contains(local.known_steps, upper(step))])])
       error_message = "Workflow ${each.key}: every schedule needs steps, each one of ${join(", ", local.known_steps)}."
     }
   }

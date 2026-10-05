@@ -8,7 +8,7 @@
       "Type": "Choice",
       "Choices": [
         {
-          "Condition": "{% $count($append([], $states.input.steps)) > 0 and $count($append([], $states.input.steps)[$not($ in ${known_steps})]) = 0 %}",
+          "Condition": "{% $count($append([], $states.input.steps)) > 0 and $count($filter($append([], $states.input.steps), function($s) { $not($uppercase($string($s)) in ${known_steps}) })) = 0 %}",
           "Next": "RunSteps"
         }
       ],
@@ -21,7 +21,7 @@
     },
     "RunSteps": {
       "Type": "Map",
-      "Items": "{% $append([], $states.input.steps) %}",
+      "Items": "{% $append([], $map($append([], $states.input.steps), function($s) { $uppercase($string($s)) })) %}",
       "ItemSelector": "{% {'step': $states.context.Map.Item.Value, 'number': $states.context.Map.Item.Index + 1, 'of': $count($append([], $states.input.steps)), 'ctx': $states.input} %}",
       "MaxConcurrency": 1,
       "ItemProcessor": {

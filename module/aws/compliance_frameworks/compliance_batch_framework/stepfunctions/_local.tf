@@ -20,18 +20,18 @@ locals {
   projects = {
     ODR = {
       schedules = {
-        daily_batches = { expression = "cron(0 12 * * ? *)", steps = ["BATCH_CREATION"], run_type = "DAILY", period = "PREV_DAY" }
-        file_load     = { expression = "cron(0/15 * * * ? *)", steps = ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"] }
-        file_rules    = { expression = "cron(10/15 * * * ? *)", steps = ["FILE_RULES", "NOTIFY"], enabled = local.file_rules_enabled }
-        close         = { expression = "cron(0 * * * ? *)", steps = ["BATCH_CLOSE", "NOTIFY"] }
+        batches    = { expression = "cron(0 12 * * ? *)", steps = ["BATCH_CREATION"] }
+        file_load  = { expression = "cron(0/15 * * * ? *)", steps = ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"] }
+        file_rules = { expression = "cron(10/15 * * * ? *)", steps = ["FILE_RULES", "NOTIFY"], enabled = local.file_rules_enabled }
+        close      = { expression = "cron(0 * * * ? *)", steps = ["BATCH_CLOSE", "NOTIFY"] }
       }
     }
     UNIVERSE = {
       schedules = {
-        daily_batches = { expression = "cron(0 12 * * ? *)", steps = ["BATCH_CREATION"], run_type = "CMS", period = "CURRENT_CALENDAR_MONTH" }
-        file_load     = { expression = "cron(5/15 * * * ? *)", steps = ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"] }
-        file_rules    = { expression = "cron(0/15 * * * ? *)", steps = ["FILE_RULES", "NOTIFY"], enabled = local.file_rules_enabled }
-        close         = { expression = "cron(30 4 * * ? *)", steps = ["BATCH_CLOSE", "NOTIFY"] }
+        batches    = { expression = "cron(0 12 * * ? *)", steps = ["BATCH_CREATION"] }
+        file_load  = { expression = "cron(5/15 * * * ? *)", steps = ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"] }
+        file_rules = { expression = "cron(0/15 * * * ? *)", steps = ["FILE_RULES", "NOTIFY"], enabled = local.file_rules_enabled }
+        close      = { expression = "cron(30 4 * * ? *)", steps = ["BATCH_CLOSE", "NOTIFY"] }
       }
     }
     all_projects = {

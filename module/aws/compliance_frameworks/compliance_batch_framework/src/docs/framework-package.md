@@ -77,7 +77,7 @@ The environment variable is `FRAMEWORK_<NAME>`; the job argument is `--set <NAME
 ### Report periods
 
 `run --module BATCH_CREATION --period <NAME>` picks a statement from `framework/period_sql.py`:
-`SAME_DAY`, `PREV_DAY`, `PREV_N_DAYS` (`--lookback-days`), `PREV_WEEK_SAME_DAY` (`--lookback-weeks`), `PREV_CALENDAR_WEEK`, `CURRENT_CALENDAR_MONTH`, `PREV_CALENDAR_MONTH`, `ROLLING_1_MONTH`, `PREV_CALENDAR_QUARTER`, `PREV_CALENDAR_YEAR`.
+`SAME_DAY`, `PREV_DAY`, `PREV_N_DAYS` (`--lookback-days`), `PREV_WEEK_SAME_DAY` (`--lookback-weeks`), `PREV_CALENDAR_WEEK`, `CURRENT_CALENDAR_MONTH`, `PREV_CALENDAR_MONTH`, `ROLLING_1_MONTH`, `PREV_CALENDAR_QUARTER`, `PREV_CALENDAR_YEAR`, and `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])` for the same dates every year. These are for a run that passes `--period`. Scheduled batches normally come from each run type's `Batch_Sql_Txt`: one SQL statement that returns, for the run date, the tables that are due and their report dates (see the module README).
 
 A project with its own calendar ships a file and passes it with `--period-file`:
 
@@ -131,7 +131,7 @@ framework validate-config
    for the project:
 
    ```bash
-   # 06:00 on the 1st: routine batches AND this project's pending ad-hoc requests
+   # 06:00 on the 1st: scheduled batches AND this project's pending ad-hoc requests
    framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
    # every 15 minutes: load waiting files, apply / expire overrides, email events
    framework run --module FILE_LOAD --project PRJA
@@ -176,11 +176,11 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 
 ### Calling a module by name
 
-`framework run --module <NAME>` identifies the module from its name (case-insensitive; `-` and `_` are interchangeable, so `file-load` = `FILE_LOAD`), checks that the parameters belong to it, and calls the service that owns the work. An unknown module, a missing required parameter or a parameter the module does not take is exit 2 and nothing runs. The output is `{"module": ..., "result": ...}`. Batch creation (routine and ad-hoc) and file loading have no other entry point - there is no separate `create-batches` / `process-intake` / `ingest-file` / `ingest-path` command; `run --module BATCH_CREATION` / `run --module FILE_LOAD` is it.
+`framework run --module <NAME>` identifies the module from its name (case-insensitive; `-` and `_` are interchangeable, so `file-load` = `FILE_LOAD`), checks that the parameters belong to it, and calls the service that owns the work. An unknown module, a missing required parameter or a parameter the module does not take is exit 2 and nothing runs. The output is `{"module": ..., "result": ...}`. Batch creation (scheduled and ad-hoc) and file loading have no other entry point - there is no separate `create-batches` / `process-intake` / `ingest-file` / `ingest-path` command; `run --module BATCH_CREATION` / `run --module FILE_LOAD` is it.
 
 | Module | Does | Parameters |
 |---|---|---|
-| `BATCH_CREATION` | One project, both kinds, in one call: routine batches (when `--run-type`/`--period` name a ROUTINE run type) *and* that project's pending ad-hoc intake requests (always attempted, project-scoped; scoped further to the run type when it names an ADHOC one) | `--project` · `[--run-type] [--period] [--table] [--period-file] [--lookback-days] [--lookback-weeks]` |
+| `BATCH_CREATION` | One project, both kinds, in one call: scheduled batches (when `--run-type`/`--period` name a SCHEDULED run type) *and* that project's pending ad-hoc intake requests (always attempted, project-scoped; scoped further to the run type when it names an ADHOC one) | `--project` · `[--run-type] [--period] [--table] [--period-file] [--lookback-days] [--lookback-weeks]` |
 | `FILE_LOAD` | Load inbound files: one object, one location, one project's locations, or every configured location. In a folder shared with other projects, `--project` takes only its own templates' files | `--bucket --key [--version-id]` · `--bucket --prefix` · `--project` · none |
 | `OVERRIDE_DECISIONS` | Apply approved `REUSE` overrides, expire the ones that ran out (= `process-decisions`); an invalid override is reported once | `[--project]` |
 | `BATCH_CLOSE` | Close batches past their SLA hold that have data or are in exception (= `close-batches`); exit 0 even when some wait or are locked | `[--project] [--table] [--run-type]` |
@@ -188,7 +188,7 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 
 ```bash
 framework run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH
-framework run --module BATCH_CREATION --project PRJA                       # ad-hoc sweep only, no routine run
+framework run --module BATCH_CREATION --project PRJA                       # ad-hoc sweep only, no scheduled run
 framework run --module BATCH_CREATION --project PRJA --run-type ADHOC      # ad-hoc sweep scoped to that run type
 framework run --module FILE_LOAD --bucket inbound --key prja/in/<file>
 framework run --module FILE_LOAD --project PRJA                             # PRJA's inbound folders
@@ -196,7 +196,7 @@ framework run --module BATCH_CLOSE --project PRJA --run-type MONTHLY
 ```
 
 `BATCH_CREATION` is the single, per-project trigger for both kinds of batch creation (Glue job
-argument, EventBridge rule, cron line): it creates that project's routine batches and also picks up
+argument, EventBridge rule, cron line): it creates that project's scheduled batches and also picks up
 anything sitting in `ComplianceRequestInTake` for it, without a second trigger and without touching
 other projects' rows of either kind.
 

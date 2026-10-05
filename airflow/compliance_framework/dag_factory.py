@@ -134,8 +134,7 @@ def build_module_dag(dag_id: str, variable_key: str) -> DAG:
     """The generic DAG: runs whichever step its `module` parameter names, with the parameters given."""
     dag_config = load_dag_config(variable_key)
     names = sorted({name for step_names in STEP_PARAMS.values() for name in step_names})
-    params = {"module": Param(dag_config.get("module"), type=_TEXT, enum=[None, *STEPS],
-                              description="The step to run: " + ", ".join(STEPS)),
+    params = {"module": Param(dag_config.get("module"), type=_TEXT, description="The step to run: " + ", ".join(STEPS)),
               **{name: Param(None, type=_TEXT) for name in names}}
     dag = _dag(dag_id, dag_config, "compliance batch framework - any step, named by the 'module' parameter",
                params, "Run_Module")
@@ -159,14 +158,14 @@ def build_module_dag(dag_id: str, variable_key: str) -> DAG:
 def build_admin_dag(dag_id: str, variable_key: str) -> DAG:
     """validate-config, health, locks, release-lock, close-batch: run by hand."""
     dag_config = {**load_dag_config(variable_key), "schedule_interval": None}
-    params = {"command": Param("validate-config", type="string", enum=ADMIN_COMMANDS),
+    params = {"command": Param("validate-config", type="string", description=", ".join(ADMIN_COMMANDS)),
               "args": Param([], type="array", description='e.g. ["--btch-id", "<Btch_ID>", "--closed-by", "jdoe"]')}
     dag = _dag(dag_id, dag_config, "compliance batch framework - validate-config, health, locks, release-lock, "
                                    "close-batch", params, "Admin")
 
     def run_command(**context):
         conf = _overrides(context, ("command", "args"))
-        command, args = conf.pop("command"), conf.pop("args", [])
+        command, args = str(conf.pop("command")).strip().lower(), conf.pop("args", [])
         return run_compliance_command(command, variable_key, args=list(args), overrides=conf)
 
     PythonOperator(task_id="run_command", dag=dag, python_callable=run_command, execution_timeout=timedelta(hours=1))

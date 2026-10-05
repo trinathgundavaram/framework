@@ -30,7 +30,7 @@ class Settings:
     error_folder: str = "Error"
     nas_min_age_seconds: int = 120
 
-    filename_case_sensitive: bool = True
+    filename_case_sensitive: bool = False
     load_duplicate: bool = False
     file_effective_date_basis: str = "RPT_START"
     supported_file_types: list[str] = field(default_factory=lambda: [".txt", ".csv"])
@@ -93,6 +93,14 @@ class Settings:
             raise ConfigError(f"ENVIRONMENT {self.environment!r} must be letters, digits or _ (e.g. DEV, TEST, PROD)")
         if self.env_value is not None and not re.match(r"^[A-Za-z0-9_]{0,20}$", self.env_value):
             raise ConfigError(f"ENV_VALUE {self.env_value!r} must be letters, digits or _")
+        for name in ("file_rules_mode", "file_effective_date_basis", "load_engine"):
+            if isinstance(getattr(self, name, None), str):
+                setattr(self, name, getattr(self, name).strip().upper())
+        for name in ("notify_backend", "file_store", "object_store"):
+            if isinstance(getattr(self, name, None), str):
+                setattr(self, name, getattr(self, name).strip().lower())
+        if self.rule_engine.strip().lower() in ("gre", "none"):
+            self.rule_engine = self.rule_engine.strip().lower()
         for name, allowed in (("file_rules_mode", ("GATE", "ANNOTATE")),
                               ("file_effective_date_basis", ("RPT_START", "RPT_END")),
                               ("notify_backend", ("log", "ses", "airflow")), ("file_store", ("nas", "local"))):

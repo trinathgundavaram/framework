@@ -7,7 +7,7 @@ from typing import NamedTuple, Optional
 from . import config as cfgmod
 from . import db
 from .adapters import Channel, Message
-from .common import Clock, ConfigError
+from .common import Clock, ConfigError, code
 from .db import Connection
 from .settings import Settings
 
@@ -112,7 +112,7 @@ class NotificationDispatcher:
         configs: dict[tuple, Optional[cfgmod.FileConfig]] = {}
         where, params = "Notified_Ind = 0", []
         if project_cd is not None:
-            where, params = where + " AND Project_Cd = %s", [project_cd]
+            where, params = where + " AND Project_Cd = %s", [code(project_cd)]
         pending = self.conn.execute(f"SELECT TOP {int(limit)} Event_ID FROM CMS_ComplianceExceptionsAudit "
                                     f"WHERE {where} ORDER BY Event_Dtts, Event_ID", params).fetchall()
         for p in pending:

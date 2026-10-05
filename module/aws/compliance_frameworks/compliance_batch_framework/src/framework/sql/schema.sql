@@ -10,6 +10,7 @@ CREATE TABLE ComplianceProject (
   Updated_By    VARCHAR(100) NOT NULL DEFAULT current_user,
   CONSTRAINT pk_complianceproject PRIMARY KEY (Project_Cd)
 );
+CREATE UNIQUE INDEX uq_complianceproject_code ON ComplianceProject (UPPER(Project_Cd));
 
 CREATE TABLE ComplianceSourceSystem (
   Src_ID        VARCHAR(30)  NOT NULL,
@@ -22,6 +23,7 @@ CREATE TABLE ComplianceSourceSystem (
   Updated_By    VARCHAR(100) NOT NULL DEFAULT current_user,
   CONSTRAINT pk_compliancesourcesystem PRIMARY KEY (Src_ID)
 );
+CREATE UNIQUE INDEX uq_compliancesourcesystem_code ON ComplianceSourceSystem (UPPER(Src_ID));
 
 CREATE TABLE ComplianceRunType (
   Run_Ty          VARCHAR(20)  NOT NULL,
@@ -29,6 +31,7 @@ CREATE TABLE ComplianceRunType (
   Run_Category_Cd VARCHAR(10)  NOT NULL,
   SLA_Days        INT          NOT NULL,
   Carry_Fwd_Ind   SMALLINT     NOT NULL DEFAULT 0,
+  Batch_Sql_Txt   TEXT,
   Active_Ind      SMALLINT     NOT NULL DEFAULT 1,
   Created_Dtts    TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Created_By      VARCHAR(100) NOT NULL DEFAULT current_user,
@@ -36,6 +39,7 @@ CREATE TABLE ComplianceRunType (
   Updated_By      VARCHAR(100) NOT NULL DEFAULT current_user,
   CONSTRAINT pk_complianceruntype PRIMARY KEY (Run_Ty)
 );
+CREATE UNIQUE INDEX uq_complianceruntype_code ON ComplianceRunType (UPPER(Run_Ty));
 
 CREATE TABLE ComplianceDataSetSourceXwalk (
   Project_Cd             VARCHAR(30)  NOT NULL,
@@ -50,10 +54,7 @@ CREATE TABLE ComplianceDataSetSourceXwalk (
   Created_By             VARCHAR(100) NOT NULL DEFAULT current_user,
   Updated_Dtts           TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Updated_By             VARCHAR(100) NOT NULL DEFAULT current_user,
-  CONSTRAINT pk_compliancedatasetsourcexwalk PRIMARY KEY (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key),
-  CONSTRAINT fk_compliancedatasetsourcexwalk_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject,
-  CONSTRAINT fk_compliancedatasetsourcexwalk_source  FOREIGN KEY (Src_ID) REFERENCES ComplianceSourceSystem,
-  CONSTRAINT fk_compliancedatasetsourcexwalk_runtype FOREIGN KEY (Run_Ty) REFERENCES ComplianceRunType
+  CONSTRAINT pk_compliancedatasetsourcexwalk PRIMARY KEY (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key)
 );
 
 CREATE TABLE ComplianceSourceFileConfig (
@@ -78,12 +79,10 @@ CREATE TABLE ComplianceSourceFileConfig (
   Created_By             VARCHAR(100) NOT NULL DEFAULT current_user,
   Updated_Dtts           TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Updated_By             VARCHAR(100) NOT NULL DEFAULT current_user,
-  CONSTRAINT pk_compliancesourcefileconfig PRIMARY KEY (Cfg_ID),
-  CONSTRAINT fk_compliancesourcefileconfig_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject,
-  CONSTRAINT fk_compliancesourcefileconfig_source  FOREIGN KEY (Src_ID) REFERENCES ComplianceSourceSystem
+  CONSTRAINT pk_compliancesourcefileconfig PRIMARY KEY (Cfg_ID)
 );
 CREATE UNIQUE INDEX uq_compliancesourcefileconfig_active
-  ON ComplianceSourceFileConfig (Project_Cd, Table_Nm, Src_ID) WHERE Active_Ind = 1;
+  ON ComplianceSourceFileConfig (UPPER(Project_Cd), UPPER(Table_Nm), UPPER(Src_ID)) WHERE Active_Ind = 1;
 
 CREATE TABLE ComplianceRuleBinding (
   Project_Cd       VARCHAR(30)  NOT NULL,
@@ -97,8 +96,7 @@ CREATE TABLE ComplianceRuleBinding (
   Created_By       VARCHAR(100) NOT NULL DEFAULT current_user,
   Updated_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Updated_By       VARCHAR(100) NOT NULL DEFAULT current_user,
-  CONSTRAINT pk_compliancerulebinding PRIMARY KEY (Project_Cd, Table_Nm, Src_ID, Run_Ty, Gre_Rule_Group, Gre_Rule_Variant),
-  CONSTRAINT fk_compliancerulebinding_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject
+  CONSTRAINT pk_compliancerulebinding PRIMARY KEY (Project_Cd, Table_Nm, Src_ID, Run_Ty, Gre_Rule_Group, Gre_Rule_Variant)
 );
 
 CREATE TABLE ComplianceRequestInTake (
@@ -116,10 +114,7 @@ CREATE TABLE ComplianceRequestInTake (
   Created_By       VARCHAR(100) NOT NULL DEFAULT current_user,
   Updated_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Updated_By       VARCHAR(100) NOT NULL DEFAULT current_user,
-  CONSTRAINT pk_compliancerequestintake PRIMARY KEY (Intake_ID),
-  CONSTRAINT fk_compliancerequestintake_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject,
-  CONSTRAINT fk_compliancerequestintake_source  FOREIGN KEY (Src_ID) REFERENCES ComplianceSourceSystem,
-  CONSTRAINT fk_compliancerequestintake_runtype FOREIGN KEY (Run_Ty) REFERENCES ComplianceRunType
+  CONSTRAINT pk_compliancerequestintake PRIMARY KEY (Intake_ID)
 );
 
 CREATE TABLE ComplianceRequestControl (
@@ -140,10 +135,7 @@ CREATE TABLE ComplianceRequestControl (
   Updated_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   CONSTRAINT pk_compliancerequestcontrol PRIMARY KEY (Req_ID),
   CONSTRAINT uq_compliancerequestcontrol_btch UNIQUE (Btch_ID),
-  CONSTRAINT uq_compliancerequestcontrol UNIQUE (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key),
-  CONSTRAINT fk_compliancerequestcontrol_project FOREIGN KEY (Project_Cd) REFERENCES ComplianceProject,
-  CONSTRAINT fk_compliancerequestcontrol_source  FOREIGN KEY (Src_ID) REFERENCES ComplianceSourceSystem,
-  CONSTRAINT fk_compliancerequestcontrol_runtype FOREIGN KEY (Run_Ty) REFERENCES ComplianceRunType
+  CONSTRAINT uq_compliancerequestcontrol UNIQUE (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key)
 );
 CREATE INDEX ix_compliancerequestcontrol_open ON ComplianceRequestControl (Req_ID) WHERE Batch_Close_Ind = 0;
 
@@ -192,7 +184,7 @@ CREATE TABLE ComplianceBatchOverride (
   CONSTRAINT fk_compliancebatchoverride_batch FOREIGN KEY (Req_ID) REFERENCES ComplianceRequestControl
 );
 CREATE UNIQUE INDEX uq_compliancebatchoverride_active
-  ON ComplianceBatchOverride (Req_ID, Override_Ty) WHERE Apprvl_Stat IN ('PENDING_REVIEW', 'APPROVED');
+  ON ComplianceBatchOverride (Req_ID, UPPER(Override_Ty)) WHERE UPPER(Apprvl_Stat) IN ('PENDING_REVIEW', 'APPROVED');
 
 CREATE TABLE ComplianceRequestFileDetail (
   Detail_ID   BIGINT       GENERATED ALWAYS AS IDENTITY,

@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 import psycopg
@@ -12,7 +13,8 @@ import psycopg
 from . import config as cfg
 from . import db
 from .audit import EventLogger
-from .common import PENDING, Clock, ConfigError, build_btch_id
+from .common import (ADHOC, PENDING, SCHEDULED, Clock, ConfigError, annual_window, build_btch_id, code,
+                     period_lookback)
 from .config import RunType, XwalkRow
 from .period_sql import PERIOD_SQL
 from .settings import Settings
@@ -97,6 +99,10 @@ def period_sql(name: str, period_file: Optional[str] = None) -> str:
 
 def compute_period(conn: psycopg.Connection, name: str, sched_dt: date, lookback_days: Optional[int] = None,
                    lookback_weeks: Optional[int] = None, period_file: Optional[str] = None) -> tuple[date, date]:
+    if window := annual_window(name, sched_dt):
+        return window
+    name, days, weeks = period_lookback(name)
+    lookback_days, lookback_weeks = days or lookback_days, weeks or lookback_weeks
     text = period_sql(name, period_file)
     for param, value in (("lookback_days", lookback_days), ("lookback_weeks", lookback_weeks)):
         if f"%({param})s" in text and value is None:
@@ -109,38 +115,137 @@ def compute_period(conn: psycopg.Connection, name: str, sched_dt: date, lookback
     return start, end
 
 
+MAX_STRETCH_DAYS = 62
+
+
+def batch_schedule(conn, rt: RunType, run_date: date, project_cd: str) -> list[dict]:
+    """The rows of the run type's Batch_Sql_Txt for a run date: table_nm, rpt_start, rpt_end and optionally src_id."""
+    body = rt.batch_sql.strip().rstrip(";").strip()
+    if ";" in body or not re.match(r"^(SELECT|WITH)\b", body, re.IGNORECASE):
+        raise ConfigError(f"run type {rt.run_ty}: Batch_Sql_Txt must be a single SELECT statement")
+    query = body.replace("%", "%%").replace("{run_date}", "%(run_date)s").replace("{project_cd}", "%(project_cd)s")
+    try:
+        with conn.transaction():
+            conn.execute("SET TRANSACTION READ ONLY")
+            rows = conn.execute(query, {"run_date": run_date, "project_cd": project_cd}).fetchall()
+    except psycopg.Error as e:
+        raise ConfigError(f"run type {rt.run_ty}: Batch_Sql_Txt failed for {run_date}: "
+                          f"{str(e).strip().splitlines()[0]}") from None
+    return _schedule_rows(rt, rows)
+
+
+def _schedule_rows(rt: RunType, rows: list[dict]) -> list[dict]:
+    out = []
+    for r in rows:
+        missing = [c for c in ("table_nm", "rpt_start", "rpt_end") if c not in r]
+        if missing:
+            raise ConfigError(f"run type {rt.run_ty}: Batch_Sql_Txt must return {', '.join(missing)}")
+        table, start, end = code(r["table_nm"]), r["rpt_start"], r["rpt_end"]
+        if not table or not isinstance(start, date) or not isinstance(end, date) or end < start:
+            raise ConfigError(f"run type {rt.run_ty}: Batch_Sql_Txt returned an invalid row "
+                              f"(table_nm={r['table_nm']!r}, rpt_start={start}, rpt_end={end})")
+        out.append({"table_nm": table, "src_id": code(r.get("src_id")) or "*", "rpt_start": start, "rpt_end": end})
+    return out
+
+
+def scheduled_period(rows: list[dict], x: XwalkRow) -> Optional[tuple[date, date]]:
+    """The report dates the schedule gives a crosswalk row: its own table / source row wins over '*' rows."""
+    found = [(2 * (r["table_nm"] != "*") + (r["src_id"] != "*"), r["rpt_start"], r["rpt_end"]) for r in rows
+             if r["table_nm"] in ("*", x.table_nm) and r["src_id"] in ("*", x.src_id)]
+    if not found:
+        return None
+    best = max(f[0] for f in found)
+    periods = {(f[1], f[2]) for f in found if f[0] == best}
+    if len(periods) > 1:
+        raise ConfigError(f"the schedule returns {len(periods)} different report periods for {x.table_nm}/{x.src_id}")
+    return periods.pop()
+
+
 @dataclass
 class ScheduleSummary:
     run_date: Optional[date] = None
-    rpt_start: Optional[date] = None
-    rpt_end: Optional[date] = None
     created: int = 0
     existing: int = 0
+    not_due: int = 0
     errors: list[str] = field(default_factory=list)
+    batches: list[str] = field(default_factory=list)
 
 
-def create_batches(conn: psycopg.Connection, clock: Clock, settings: Settings, *, project_cd: str, run_ty: str,
-                   period: str, table_nm: Optional[str] = None, period_file: Optional[str] = None,
+def create_batches(conn: psycopg.Connection, clock: Clock, settings: Settings, *, project_cd: str, run_ty: Optional[str] = None,
+                   period: Optional[str] = None, table_nm: Optional[str] = None, period_file: Optional[str] = None,
                    lookback_days: Optional[int] = None, lookback_weeks: Optional[int] = None) -> ScheduleSummary:
-    """One batch per effective (table, source) of the project for the period computed from the run date."""
-    s = ScheduleSummary()
-    rt = cfg.run_type(conn, run_ty)
-    if rt is None or not rt.active or rt.run_category_cd != "ROUTINE":
-        raise ConfigError(f"run type {run_ty} is unknown, inactive or not ROUTINE")
-    s.run_date = clock.today(settings.business_tz)
-    s.rpt_start, s.rpt_end = compute_period(conn, period, s.run_date, lookback_days, lookback_weeks, period_file)
+    """The scheduled batches due on the run date for the project's effective crosswalk rows.
+
+    Each run type's Batch_Sql_Txt says, for the run date, which tables are due and their report dates; a
+    stretch of consecutive due days with the same dates gets one batch. `period` replaces the schedule for
+    this call: one batch for that period on this run date.
+    """
+    if period and not period_file:
+        check_period(period)
+    s = ScheduleSummary(run_date=clock.today(settings.business_tz))
+    run_types = cfg.run_types(conn)
+    if run_ty is not None:
+        rt = run_types.get(code(run_ty))
+        if rt is None or not rt.active or rt.run_category_cd != SCHEDULED:
+            raise ConfigError(f"run type {run_ty} is unknown, inactive or not {SCHEDULED}")
     logger = EventLogger(conn, clock)
     rows = [x for x in cfg.xwalk_rows(conn, project_cd=project_cd, table_nm=table_nm, run_ty=run_ty)
-            if x.effective_on(s.run_date)]
-    if not rows:
-        s.errors.append(f"no effective crosswalk rows for {project_cd}/{table_nm or '*'}/{run_ty} on {s.run_date}")
+            if x.effective_on(s.run_date) and x.run_ty in run_types and run_types[x.run_ty].active
+            and run_types[x.run_ty].run_category_cd == SCHEDULED]
+    if not rows and (run_ty or table_nm):
+        s.errors.append(f"no effective crosswalk rows for {project_cd}/{table_nm or '*'}/{run_ty or '*'} on {s.run_date}")
+    schedules: dict = {}
+
+    def schedule(rt: RunType, day: date) -> list[dict]:
+        if (rt.run_ty, day) not in schedules:
+            schedules[rt.run_ty, day] = batch_schedule(conn, rt, day, code(project_cd))
+        return schedules[rt.run_ty, day]
+
     for x in rows:
-        res = create_batch(conn, clock, logger, xwalk=x, rpt_start=s.rpt_start, rpt_end=s.rpt_end, req_dt=s.run_date)
+        rt = run_types[x.run_ty]
+        label = f"{x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty}"
+        try:
+            if period:
+                dates = compute_period(conn, period, s.run_date, lookback_days, lookback_weeks, period_file)
+            elif rt.batch_sql:
+                dates = scheduled_period(schedule(rt, s.run_date), x)
+                if dates is None:
+                    s.not_due += 1
+                    s.batches.append(f"{label}: not due")
+                    continue
+                if _already_created(conn, x, dates, s.run_date, lambda day: scheduled_period(schedule(rt, day), x)):
+                    s.existing += 1
+                    s.batches.append(f"{label} {dates[0]}..{dates[1]}: exists")
+                    continue
+            elif run_ty is None:
+                s.batches.append(f"{label}: run type {rt.run_ty} has no Batch_Sql_Txt")
+                continue
+            else:
+                raise ConfigError(f"run type {rt.run_ty} has no Batch_Sql_Txt; set it or pass --period")
+        except ConfigError as e:
+            s.errors.append(f"{label}: {e}")
+            continue
+        res = create_batch(conn, clock, logger, xwalk=x, rpt_start=dates[0], rpt_end=dates[1], req_dt=s.run_date)
         if res.created:
             s.created += 1
         else:
             s.existing += 1
+        s.batches.append(f"{label} {dates[0]}..{dates[1]}: {'created' if res.created else 'exists'}")
     return s
+
+
+def _already_created(conn, x: XwalkRow, dates: tuple, run_date: date, period_on) -> bool:
+    """Whether this stretch of consecutive due days (same report dates) already has its batch."""
+    made = [r["req_dt_key"] for r in conn.execute(
+        """SELECT Req_Dt_Key FROM ComplianceRequestControl WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s
+              AND Run_Ty=%s AND Rpt_Start_Dt_Key=%s AND Rpt_End_Dt_Key=%s AND Req_Dt_Key <= %s""",
+        (x.project_cd, x.table_nm, x.src_id, x.run_ty, dates[0], dates[1], run_date)).fetchall()]
+    if not made:
+        return False
+    last = max(made)
+    if (run_date - last).days > MAX_STRETCH_DAYS:
+        return False
+    return all(period_on(last + timedelta(days=n)) == dates for n in range(1, (run_date - last).days))
 
 
 @dataclass
@@ -174,16 +279,16 @@ class IntakeProcessor:
                         """SELECT * FROM ComplianceRequestInTake
                             WHERE %(d)s BETWEEN Req_Start_Dt_Key AND Req_End_Dt_Key
                               AND Last_Run_Dt_Key IS DISTINCT FROM %(d)s
-                              AND (%(p)s::text IS NULL OR Project_Cd = %(p)s) AND (%(r)s::text IS NULL OR Run_Ty = %(r)s)
+                              AND (%(p)s::text IS NULL OR UPPER(Project_Cd) = %(p)s) AND (%(r)s::text IS NULL OR UPPER(Run_Ty) = %(r)s)
                             ORDER BY Created_Dtts, Intake_ID LIMIT 1 FOR UPDATE SKIP LOCKED""",
-                        {"d": summary.run_date, "p": project_cd, "r": run_ty}).fetchone()
+                        {"d": summary.run_date, "p": code(project_cd), "r": code(run_ty)}).fetchone()
                     if row is None:
                         return summary
                     current = row["intake_id"]
                     summary.handled += 1
                     if run_types is None:
                         run_types = cfg.run_types(self.conn)
-                    self._process(row, summary, run_types)
+                    self._process(_coded(row), summary, run_types)
             except Exception as e:
                 if current is None:
                     raise
@@ -196,7 +301,7 @@ class IntakeProcessor:
     def _process(self, it: dict, summary: IntakeSummary, run_types: dict[str, RunType]) -> None:
         self._mark_run(it["intake_id"])
         rt = run_types.get(it["run_ty"])
-        if rt is None or not rt.active or rt.run_category_cd != "ADHOC":
+        if rt is None or not rt.active or rt.run_category_cd != ADHOC:
             self._fail(it, summary, f"run type {it['run_ty']} is unknown, inactive or not ADHOC")
             return
         sources = cfg.effective_sources(self.conn, it["project_cd"], it["table_nm"], it["run_ty"],
@@ -221,3 +326,20 @@ class IntakeProcessor:
     def _mark_run(self, intake_id: int) -> None:
         self.conn.execute("UPDATE ComplianceRequestInTake SET Last_Run_Dt_Key=%s, Updated_Dtts=%s WHERE Intake_ID=%s",
                           (self.clock.today(self.settings.business_tz), self.clock.now(), intake_id))
+
+
+def _coded(intake: dict) -> dict:
+    """An intake request with its codes in the framework's case."""
+    return {**intake, **{k: code(intake[k]) for k in ("project_cd", "table_nm", "src_id", "run_ty")}}
+
+
+KNOWN_PERIODS = frozenset(PERIOD_SQL)
+
+
+def check_period(spec: str) -> None:
+    """Raise ConfigError when a period passed to a run is not a built-in one."""
+    if annual_window(spec, date.today()):
+        return
+    name = period_lookback(spec)[0]
+    if code(name) not in KNOWN_PERIODS:
+        raise ConfigError(f"unknown period {spec!r}; built-in: {', '.join(sorted(KNOWN_PERIODS))}, ANNUAL_WINDOW(...)")

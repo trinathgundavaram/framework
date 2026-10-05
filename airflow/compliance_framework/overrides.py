@@ -10,7 +10,7 @@ from . import config as cfgmod
 from . import db
 from .audit import EventLogger
 from .batches import get_batch, promoted_load
-from .common import CARRIED_FORWARD, OPEN_STATUSES, PENDING, Clock, check_transition
+from .common import CARRIED_FORWARD, OPEN_STATUSES, PENDING, Clock, check_transition, code
 from .db import Connection
 from .settings import Settings
 
@@ -30,6 +30,7 @@ class DecisionProcessor:
     def run(self, project_cd: Optional[str] = None) -> DecisionSummary:
         """Expire, then apply, REUSE overrides - of one project, or of every project when project_cd is None."""
         s = DecisionSummary()
+        project_cd = code(project_cd)
         today = self.clock.today(self.settings.business_tz)
         self._expire(s, today, project_cd)
         self._apply(s, today, project_cd)
@@ -43,7 +44,7 @@ class DecisionProcessor:
         rows = self.conn.execute(
             f"""SELECT o.Ovrd_ID, c.Btch_ID FROM ComplianceBatchOverride o
                  JOIN ComplianceRequestControl c ON c.Req_ID = o.Req_ID
-                WHERE o.Override_Ty = 'REUSE' AND o.Apprvl_Stat = 'APPROVED' AND o.Valid_Thru_Dt_Key >= %s
+                WHERE UPPER(o.Override_Ty) = 'REUSE' AND UPPER(o.Apprvl_Stat) = 'APPROVED' AND o.Valid_Thru_Dt_Key >= %s
                   AND c.Batch_Close_Ind = 0 AND (c.Resolution_Ty IS NULL OR c.Resolution_Ty <> 'CARRY_FORWARD'){where}
                 ORDER BY o.Ovrd_ID""", params).fetchall()
         run_types = cfgmod.run_types(self.conn) if rows else {}
@@ -60,7 +61,7 @@ class DecisionProcessor:
     def _apply_one(self, s: DecisionSummary, ovrd_id: int, today: date, run_types: dict) -> None:
         o = self.conn.execute("SELECT * FROM ComplianceBatchOverride WHERE Ovrd_ID=%s", (ovrd_id,)).fetchone()
         valid_thru = db.as_date(o["valid_thru_dt_key"]) if o else None
-        if (o is None or o["override_ty"] != "REUSE" or o["apprvl_stat"] != "APPROVED"
+        if (o is None or code(o["override_ty"]) != "REUSE" or code(o["apprvl_stat"]) != "APPROVED"
                 or valid_thru is None or valid_thru < today):
             return
         b = get_batch(self.conn, o["req_id"])
@@ -83,7 +84,7 @@ class DecisionProcessor:
             """UPDATE ComplianceRequestControl SET Resolution_Ty='CARRY_FORWARD', Reuse_Btch_ID=%s,
                       Req_Stat=%s, Updated_Dtts=%s WHERE Req_ID=%s""",
             (src["btch_id"], CARRIED_FORWARD, self.clock.now(), b["req_id"]))
-        if o["reuse_btch_id"] != src["btch_id"]:
+        if code(o["reuse_btch_id"]) != src["btch_id"]:
             self.conn.execute("UPDATE ComplianceBatchOverride SET Reuse_Btch_ID=%s, Updated_Dtts=%s "
                               "WHERE Ovrd_ID=%s", (src["btch_id"], self.clock.now(), o["ovrd_id"]))
         self.logger.audit("OVERRIDE_APPROVED", actor=o["reviewed_by"],
@@ -101,7 +102,7 @@ class DecisionProcessor:
         rows = self.conn.execute(
             f"""SELECT c.Req_ID, c.Btch_ID, o.Ovrd_ID FROM ComplianceRequestControl c
                  LEFT JOIN ComplianceBatchOverride o
-                        ON o.Req_ID = c.Req_ID AND o.Override_Ty = 'REUSE' AND o.Apprvl_Stat = 'APPROVED'
+                        ON o.Req_ID = c.Req_ID AND UPPER(o.Override_Ty) = 'REUSE' AND UPPER(o.Apprvl_Stat) = 'APPROVED'
                 WHERE c.Resolution_Ty = 'CARRY_FORWARD' AND c.Batch_Close_Ind = 0
                   AND (o.Ovrd_ID IS NULL OR o.Valid_Thru_Dt_Key < %s){where}
                 ORDER BY c.Req_ID""", params).fetchall()
@@ -121,8 +122,8 @@ class DecisionProcessor:
                 or b["req_stat"] not in OPEN_STATUSES):
             return
         still_valid = self.conn.execute(
-            """SELECT 1 AS ok FROM ComplianceBatchOverride WHERE Req_ID=%s AND Override_Ty='REUSE'
-                  AND Apprvl_Stat='APPROVED' AND Valid_Thru_Dt_Key >= %s""", (b["req_id"], today)).fetchone()
+            """SELECT 1 AS ok FROM ComplianceBatchOverride WHERE Req_ID=%s AND UPPER(Override_Ty)='REUSE'
+                  AND UPPER(Apprvl_Stat)='APPROVED' AND Valid_Thru_Dt_Key >= %s""", (b["req_id"], today)).fetchone()
         if still_valid:
             return
         to_stat = PENDING if b["req_stat"] == CARRIED_FORWARD else b["req_stat"]
@@ -144,11 +145,11 @@ class DecisionProcessor:
         today = self.clock.today(self.settings.business_tz)
         return {
             "pending_reviews": q("""SELECT Ovrd_ID, Override_Ty, Req_ID, Btch_ID, Created_Dtts
-                                     FROM ComplianceBatchOverride WHERE Apprvl_Stat='PENDING_REVIEW'
+                                     FROM ComplianceBatchOverride WHERE UPPER(Apprvl_Stat)='PENDING_REVIEW'
                                      ORDER BY Ovrd_ID"""),
             "overrides_expiring_soon": q(
                 """SELECT Ovrd_ID, Override_Ty, Btch_ID, Valid_Thru_Dt_Key FROM ComplianceBatchOverride
-                    WHERE Apprvl_Stat='APPROVED' AND Valid_Thru_Dt_Key BETWEEN %s AND %s
+                    WHERE UPPER(Apprvl_Stat)='APPROVED' AND Valid_Thru_Dt_Key BETWEEN %s AND %s
                     ORDER BY Valid_Thru_Dt_Key""", today, today + timedelta(days=7)),
         }
 
@@ -170,7 +171,7 @@ class DecisionProcessor:
         params = [b["project_cd"], b["table_nm"], b["src_id"], b["run_ty"], b["req_id"],
                   b["rpt_start_dt_key"], b["rpt_start_dt_key"], b["req_dt_key"]]
         if o["reuse_btch_id"]:
-            where, params = " AND Btch_ID = %s", params + [o["reuse_btch_id"]]
+            where, params = " AND Btch_ID = %s", params + [code(o["reuse_btch_id"])]
         rows = self.conn.execute(
             f"""SELECT * FROM ComplianceRequestControl
                 WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s AND Run_Ty=%s AND Req_ID <> %s

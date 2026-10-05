@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("run", "run one module by name (see list-modules)")
     sp.add_argument("--module", required=True, help="module name (see list-modules); case-insensitive")
     scope(sp)
-    sp.add_argument("--period", help="BATCH_CREATION: ROUTINE run types only - name in period_sql.py (or --period-file)")
+    sp.add_argument("--period", help="BATCH_CREATION: SCHEDULED run types only - name in period_sql.py (or --period-file)")
     sp.add_argument("--period-file", help="BATCH_CREATION: project .py file defining PERIOD_SQL")
     sp.add_argument("--lookback-days", type=int, help="BATCH_CREATION")
     sp.add_argument("--lookback-weeks", type=int, help="BATCH_CREATION")

@@ -36,7 +36,7 @@ class Settings:
     archive_folder: str = "Archive"
     error_folder: str = "Error"
 
-    filename_case_sensitive: bool = True
+    filename_case_sensitive: bool = False
     load_duplicate: bool = False
     file_effective_date_basis: str = "RPT_START"
     supported_file_types: list[str] = field(default_factory=lambda: [".txt", ".csv"])
@@ -105,6 +105,14 @@ class Settings:
         for name in ("archive_folder", "error_folder"):
             if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_ .-]{0,99}$", getattr(self, name) or ""):
                 raise ConfigError(f"{name.upper()} {getattr(self, name)!r} must be a plain folder name")
+        for name in ("file_rules_mode", "file_effective_date_basis", "load_engine"):
+            if isinstance(getattr(self, name, None), str):
+                setattr(self, name, getattr(self, name).strip().upper())
+        for name in ("notify_backend", "file_store", "object_store"):
+            if isinstance(getattr(self, name, None), str):
+                setattr(self, name, getattr(self, name).strip().lower())
+        if self.rule_engine.strip().lower() in ("gre", "none"):
+            self.rule_engine = self.rule_engine.strip().lower()
         for name, allowed in (("load_engine", ("PANDAS", "SPARK")), ("file_rules_mode", ("GATE", "ANNOTATE")),
                               ("file_effective_date_basis", ("RPT_START", "RPT_END")),
                               ("notify_backend", ("log", "ses")), ("object_store", ("s3", "local"))):

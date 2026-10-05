@@ -11,7 +11,13 @@ from typing import Iterable, Optional, Sequence
 
 import psycopg
 
+from .common import ADHOC, SCHEDULED, ConfigError, code
 from .load import CORE_FRAMEWORK_COLS, STAGING_FRAMEWORK_COLS, columns
+
+
+
+def _text(value) -> Optional[str]:
+    return value.strip() or None if isinstance(value, str) else None
 
 
 @dataclass(frozen=True)
@@ -21,10 +27,12 @@ class RunType:
     sla_days: int
     carry_fwd: bool
     active: bool
+    batch_sql: Optional[str] = None
 
     @classmethod
     def from_row(cls, r: dict) -> "RunType":
-        return cls(r["run_ty"], r["run_category_cd"], r["sla_days"], r["carry_fwd_ind"] == 1, r["active_ind"] == 1)
+        return cls(code(r["run_ty"]), code(r["run_category_cd"]), r["sla_days"], r["carry_fwd_ind"] == 1, r["active_ind"] == 1,
+                   _text(r.get("batch_sql_txt")))
 
 
 @dataclass(frozen=True)
@@ -40,8 +48,8 @@ class XwalkRow:
 
     @classmethod
     def from_row(cls, r: dict) -> "XwalkRow":
-        return cls(r["project_cd"], r["table_nm"], r["src_id"], r["run_ty"], r["effective_start_dt_key"],
-                   r["effective_end_dt_key"], r["cmplnc_vrsn"], r["active_ind"] == 1)
+        return cls(code(r["project_cd"]), code(r["table_nm"]), code(r["src_id"]), code(r["run_ty"]), r["effective_start_dt_key"],
+                   r["effective_end_dt_key"], code(r["cmplnc_vrsn"]), r["active_ind"] == 1)
 
     def effective_on(self, d: date) -> bool:
         return self.active and self.effective_start_dt <= d and (self.effective_end_dt is None or d <= self.effective_end_dt)
@@ -76,7 +84,8 @@ class FileConfig:
     def from_row(cls, r: dict, settings=None) -> "FileConfig":
         """`settings` resolves $env tokens in the staging / core database names and the S3 paths."""
         name = settings.resolve_env if settings else (lambda text, identifier=True: text)
-        return cls(r["cfg_id"], r["project_cd"], r["table_nm"], r["src_id"], r["src_file_nm_tmplt"], r["delmtr_cd"],
+        return cls(r["cfg_id"], code(r["project_cd"]), code(r["table_nm"]), code(r["src_id"]), r["src_file_nm_tmplt"],
+                   r["delmtr_cd"],
                    r["src_file_has_hdr_ind"] == 1, r["src_file_has_trlr_ind"] == 1, r["allow_zero_rcd_ind"] == 1,
                    name(r["s3_src_file_path"], False),
                    name(r["stg_schema_nm"]), r["stg_table_nm"], name(r["core_schema_nm"]),
@@ -94,12 +103,12 @@ class RuleBinding:
 
 
 def run_type(conn: psycopg.Connection, run_ty: str) -> Optional[RunType]:
-    r = conn.execute("SELECT * FROM ComplianceRunType WHERE Run_Ty = %s", (run_ty,)).fetchone()
+    r = conn.execute("SELECT * FROM ComplianceRunType WHERE UPPER(Run_Ty) = %s", (code(run_ty),)).fetchone()
     return RunType.from_row(r) if r else None
 
 
 def run_types(conn: psycopg.Connection) -> dict[str, RunType]:
-    return {r["run_ty"]: RunType.from_row(r) for r in conn.execute("SELECT * FROM ComplianceRunType").fetchall()}
+    return {code(r["run_ty"]): RunType.from_row(r) for r in conn.execute("SELECT * FROM ComplianceRunType").fetchall()}
 
 
 def xwalk_rows(conn: psycopg.Connection, *, project_cd: Optional[str] = None, table_nm: Optional[str] = None,
@@ -108,8 +117,8 @@ def xwalk_rows(conn: psycopg.Connection, *, project_cd: Optional[str] = None, ta
     where, params = ["Active_Ind = 1"], []
     for col, val in (("Project_Cd", project_cd), ("Table_Nm", table_nm), ("Src_ID", src_id), ("Run_Ty", run_ty)):
         if val is not None:
-            where.append(f"{col} = %s")
-            params.append(val)
+            where.append(f"UPPER({col}) = %s")
+            params.append(code(val))
     rows = conn.execute(f"SELECT * FROM ComplianceDataSetSourceXwalk WHERE {' AND '.join(where)} "
                         "ORDER BY Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key", params).fetchall()
     return [XwalkRow.from_row(r) for r in rows]
@@ -134,9 +143,9 @@ def file_config(conn, project_cd: str, table_nm: str, src_id: Optional[str] = No
                 settings=None) -> Optional[FileConfig]:
     """Active file config of a source; with src_id=None any source of the table (all share the core table)."""
     r = conn.execute(
-        """SELECT * FROM ComplianceSourceFileConfig WHERE Project_Cd=%s AND Table_Nm=%s
-              AND (%s::text IS NULL OR Src_ID=%s) AND Active_Ind=1 ORDER BY Cfg_ID LIMIT 1""",
-        (project_cd, table_nm, src_id, src_id)).fetchone()
+        """SELECT * FROM ComplianceSourceFileConfig WHERE UPPER(Project_Cd)=%s AND UPPER(Table_Nm)=%s
+              AND (%s::text IS NULL OR UPPER(Src_ID)=%s) AND Active_Ind=1 ORDER BY Cfg_ID LIMIT 1""",
+        (code(project_cd), code(table_nm), code(src_id), code(src_id))).fetchone()
     return FileConfig.from_row(r, settings) if r else None
 
 
@@ -144,15 +153,16 @@ def rule_bindings(conn, project_cd: str, table_nm: str, src_id: str, run_ty: str
     """Every active binding that applies to a file (additive)."""
     rows = conn.execute(
         """SELECT * FROM ComplianceRuleBinding
-            WHERE Project_Cd = %(p)s AND Table_Nm IN (%(t)s, '*') AND Src_ID IN (%(s)s, '*')
-              AND Run_Ty IN (%(r)s, '*') AND Active_Ind = 1
+            WHERE UPPER(Project_Cd) = %(p)s AND UPPER(Table_Nm) IN (%(t)s, '*') AND UPPER(Src_ID) IN (%(s)s, '*')
+              AND UPPER(Run_Ty) IN (%(r)s, '*') AND Active_Ind = 1
             ORDER BY Gre_Rule_Group, Gre_Rule_Variant,
                      (Table_Nm = '*')::int + (Src_ID = '*')::int + (Run_Ty = '*')::int""",
-        {"p": project_cd, "t": table_nm, "s": src_id, "r": run_ty}).fetchall()
+        {"p": code(project_cd), "t": code(table_nm), "s": code(src_id), "r": code(run_ty)}).fetchall()
     out: dict[tuple[str, str], RuleBinding] = {}
     for r in rows:
         out.setdefault((r["gre_rule_group"], r["gre_rule_variant"]), RuleBinding(
-            r["project_cd"], r["table_nm"], r["src_id"], r["run_ty"], r["gre_rule_group"], r["gre_rule_variant"]))
+            code(r["project_cd"]), code(r["table_nm"]), code(r["src_id"]), code(r["run_ty"]), r["gre_rule_group"],
+            r["gre_rule_variant"]))
     return list(out.values())
 
 
@@ -189,7 +199,7 @@ def parse_template(template: str) -> list[tuple[str, str]]:
     for m in _TOKEN.finditer(template):
         if m.start() > pos:
             parts.append(("lit", template[pos:m.start()]))
-        parts.append(("ph", m.group(1)))
+        parts.append(("ph", m.group(1).upper()))
         pos = m.end()
     if pos < len(template):
         parts.append(("lit", template[pos:]))
@@ -277,25 +287,48 @@ def validate_all(conn: psycopg.Connection, case_sensitive: bool = True, settings
     def add(code: str, msg: str, severity: str = "ERROR") -> None:
         issues.append(Issue(code, msg, severity))
 
+    for table, column in (("ComplianceProject", "Project_Cd"), ("ComplianceSourceSystem", "Src_ID"),
+                          ("ComplianceRunType", "Run_Ty")):
+        for r in conn.execute(f"SELECT UPPER({column}) AS cd, count(*) AS n FROM {table} GROUP BY UPPER({column}) "
+                              "HAVING count(*) > 1").fetchall():
+            add("CODE_CASE_DUPLICATE", f"{table}: {r['n']} rows have {column} {r['cd']} in different upper / lower case")
     rts = run_types(conn)
+    from .batches import batch_schedule
+
     for rt in rts.values():
         if not rt.run_ty.isalnum():
             add("RUN_TYPE", f"run type {rt.run_ty!r} must be letters and digits only (it is the {{RUNTY}} token)")
-        if rt.run_category_cd not in ("ROUTINE", "ADHOC") or rt.sla_days < 1:
-            add("RUN_TYPE", f"run type {rt.run_ty}: category must be ROUTINE/ADHOC and SLA_Days >= 1")
-    projects = {r["project_cd"]: r["active_ind"] == 1
+        if rt.batch_sql:
+            try:
+                batch_schedule(conn, rt, date.today(), "*")
+            except ConfigError as e:
+                add("BATCH_SQL", str(e))
+        if rt.run_category_cd not in (SCHEDULED, ADHOC) or rt.sla_days < 1:
+            add("RUN_TYPE", f"run type {rt.run_ty}: category must be SCHEDULED/ADHOC and SLA_Days >= 1")
+    projects = {code(r["project_cd"]): r["active_ind"] == 1
                 for r in conn.execute("SELECT Project_Cd, Active_Ind FROM ComplianceProject").fetchall()}
+    sources = {code(r["src_id"]) for r in conn.execute("SELECT Src_ID FROM ComplianceSourceSystem").fetchall()}
     xw = xwalk_rows(conn)
     cfgs = active_file_configs(conn, settings)
+    for c in cfgs:
+        if c.project_cd not in projects or c.src_id not in sources:
+            add("FILE_CONFIG_REFERENCE", f"file config {c.cfg_id}: project {c.project_cd} or source {c.src_id} "
+                                         "is not configured")
     cfg_sources = {(c.project_cd, c.table_nm, c.src_id) for c in cfgs}
     xw_by_source: dict[tuple, list[XwalkRow]] = defaultdict(list)
     for x in xw:
         xw_by_source[(x.project_cd, x.table_nm, x.src_id)].append(x)
         label = f"xwalk {x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty}@{x.effective_start_dt}"
-        if not rts[x.run_ty].active:
+        if x.run_ty not in rts:
+            add("XWALK_RUN_TYPE", f"{label}: run type {x.run_ty} is not in ComplianceRunType")
+        elif not rts[x.run_ty].active:
             add("XWALK_RUN_TYPE", f"{label}: run type {x.run_ty} is inactive", "WARNING")
-        if not projects[x.project_cd]:
+        if x.project_cd not in projects:
+            add("XWALK_PROJECT", f"{label}: project {x.project_cd} is not in ComplianceProject")
+        elif not projects[x.project_cd]:
             add("XWALK_PROJECT", f"{label}: project {x.project_cd} is inactive", "WARNING")
+        if x.src_id not in sources:
+            add("XWALK_SOURCE", f"{label}: source {x.src_id} is not in ComplianceSourceSystem")
         if (x.project_cd, x.table_nm, x.src_id) not in cfg_sources:
             add("XWALK_NO_FILE_CONFIG", f"{label}: no active ComplianceSourceFileConfig")
     for rows in xw_by_source.values():
@@ -328,10 +361,12 @@ def validate_all(conn: psycopg.Connection, case_sensitive: bool = True, settings
 
     for r in conn.execute("SELECT * FROM ComplianceRuleBinding WHERE Active_Ind = 1 "
                           "ORDER BY Project_Cd, Table_Nm, Src_ID, Run_Ty").fetchall():
+        if code(r["project_cd"]) not in projects:
+            add("RULE_BINDING_PROJECT", f"rule binding project {r['project_cd']} is not in ComplianceProject")
         label = (f"rule binding {r['project_cd']}/{r['table_nm']}/{r['src_id']}/{r['run_ty']} "
                  f"{r['gre_rule_group']}:{r['gre_rule_variant']}")
-        if not any(x.project_cd == r["project_cd"] and r["table_nm"] in ("*", x.table_nm)
-                   and r["src_id"] in ("*", x.src_id) and r["run_ty"] in ("*", x.run_ty) for x in xw):
+        if not any(x.project_cd == code(r["project_cd"]) and code(r["table_nm"]) in ("*", x.table_nm)
+                   and code(r["src_id"]) in ("*", x.src_id) and code(r["run_ty"]) in ("*", x.run_ty) for x in xw):
             add("RULE_BINDING_NO_XWALK", f"{label}: matches no active crosswalk row")
 
     matcher = TemplateMatcher(cfgs, case_sensitive)

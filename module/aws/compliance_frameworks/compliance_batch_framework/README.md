@@ -4,7 +4,7 @@ Runs the compliance batch framework (the `cms-compliance-framework` Python packa
 
 ```
 EventBridge scheduled rules (UTC)               one rule per schedule entry
-   ODR  daily_batches  12:00 UTC   {steps: [BATCH_CREATION], run_type: DAILY, period: PREV_DAY}
+   ODR  batches        12:00 UTC   {steps: [BATCH_CREATION]}   (what is due: the metadata tables)
    ODR  file_load      every 15'   {steps: [FILE_LOAD, OVERRIDE_DECISIONS, NOTIFY]}
    ODR  close          hourly      {steps: [BATCH_CLOSE, NOTIFY]}
         │                                        manual: src/run_workflow.sh dev ODR FILE_LOAD,BATCH_CLOSE
@@ -37,7 +37,7 @@ every resource carries the `required_common_tags` of `common.tfvars` plus `Envir
 
 | Step | Framework module | Default Glue size / timeout | A "completed with problems" result… |
 |---|---|---|---|
-| `BATCH_CREATION` | routine batches for `run_type` / `period`, and the project's ad-hoc intake requests | 0.0625 DPU / 60 min | stops the workflow (configuration problem) |
+| `BATCH_CREATION` | the scheduled batches due today by each run type's `Batch_Sql_Txt`, and the project's ad-hoc intake requests | 0.0625 DPU / 60 min | stops the workflow (configuration problem) |
 | `FILE_LOAD` | every file waiting in the project's inbound folders | 1 DPU / 120 min | continues: a bad file is audited, retried next sweep and emailed once |
 | `FILE_RULES` | the rules of every loaded file that has not had them yet (separate execution, after the load) | 0.0625 DPU / 120 min | a failed rule is audited and emailed; stops only when the rules engine cannot run |
 | `OVERRIDE_DECISIONS` | apply / expire approved REUSE overrides | 0.0625 DPU / 30 min | continues: an invalid override is audited and emailed once |
@@ -58,9 +58,7 @@ projects = {
   UNIVERSE = {
     settings = { FILE_RULES_MODE = "ANNOTATE" }                # framework settings for this project only
     schedules = {
-      monthly_batches = { expression = "cron(0 12 1 * ? *)",  steps = ["BATCH_CREATION"], run_type = "MONTHLY", period = "PREV_CALENDAR_MONTH" }
-      weekly_batches  = { expression = "cron(0 12 ? * MON *)", steps = ["BATCH_CREATION"], run_type = "WEEKLY",  period = "PREV_CALENDAR_WEEK" }
-      daily_batches   = { expression = "cron(0 12 * * ? *)",  steps = ["BATCH_CREATION"], run_type = "CMS",     period = "CURRENT_CALENDAR_MONTH" }
+      batches         = { expression = "cron(0 12 * * ? *)",  steps = ["BATCH_CREATION"] }   # daily; the metadata decides what is due
       file_load       = { expression = "cron(0/15 * * * ? *)", steps = ["FILE_LOAD", "OVERRIDE_DECISIONS", "NOTIFY"] }
       close           = { expression = "cron(30 4 * * ? *)",   steps = ["BATCH_CLOSE", "NOTIFY"] }
     }
@@ -84,7 +82,7 @@ projects = {
 
   Keep daily times out of 05:00–06:59 UTC (Chicago midnight) so the run's business date never changes
   with daylight saving. One-time runs: use `src/run_workflow.sh`.
-- Optional per schedule: `run_type`, `period` (a name in the framework's `period_sql.py`), `table`,
+- Optional per schedule (normally left out: the metadata decides, see *Scheduled batches*): `run_type`, `period`, `table`,
   `as_of`, `enabled = false`. A project with `enabled = false` keeps its workflow for manual runs.
 - Adding a project = adding an entry to `local.projects` (and its emails to `project_alert_emails`) and
   deploying `stepfunctions`: a new workflow, schedule rules and alert topic; no new Glue job.
@@ -156,6 +154,139 @@ yet (`ComplianceFileLoad.Load_Stat = PROMOTED`, `Rules_Stat = NOT_RUN`), runs th
   `src/run_workflow.sh dev ODR FILE_RULES,NOTIFY`.
 
 
+## Scheduled batches: one SQL statement per run type (metadata)
+
+When a scheduled run type's batches are created, for which tables, and with which report dates, is one SQL
+statement in the metadata: `ComplianceRunType.Batch_Sql_Txt`. Nothing about it is in the DAG, the Airflow
+Variable, the Glue job or the code. The scheduler only starts `BATCH_CREATION` for a project, normally
+once a day, and a run started by hand behaves the same way.
+
+**What the statement returns** — for the run date, one row per table that is due:
+
+| Column | Meaning |
+|---|---|
+| `table_nm` | A `Table_Nm` of the crosswalk, or `'*'` for every table of the run type that has no row of its own |
+| `rpt_start`, `rpt_end` | The report dates of the batch |
+| `src_id` (optional) | One source of that table; leave the column out, or `'*'`, for every source |
+
+- **No rows = nothing is due** that day: no batch is created, whoever starts the run.
+- `{run_date}` stands for the run date (today in `BUSINESS_TZ`, or `as_of`) and `{project_cd}` for the
+  project; both are bound as parameters. Use `{run_date}`, not `CURRENT_DATE`, so that a re-run for a
+  missed day works.
+- The most specific row wins for a crosswalk row: its table and source, then its table, then `'*'`.
+- It must be a single `SELECT` (or `WITH ... SELECT`) and runs in a read-only transaction. It runs with the framework's database
+  account. `validate-config` runs it for today and reports a statement that fails (`BATCH_SQL`).
+
+**Which tables and sources get batches** is the crosswalk, as before: a batch is created only for an
+active, effective `ComplianceDataSetSourceXwalk` row (project, table, source, run type) that the
+statement gives dates to. A table that should have weekly and monthly batches has a crosswalk row under
+each run type; a source that should only have monthly batches has no row under the weekly run type. A
+table the statement names but the crosswalk does not have is ignored.
+
+**One batch per window** — a stretch of consecutive due days with the same report dates gets one batch:
+the first run inside it creates the batch, later runs find it, and a missed first day is caught up on
+any later day of the stretch. The next stretch gets a new batch, even when its report dates are the same
+as last time. (A stretch longer than 62 days starts a new batch.)
+
+A run type without `Batch_Sql_Txt` gets batches only when a run passes `period` (one of the built-in
+periods below) — that also replaces the statement for that one run.
+
+### Example: weekly and monthly submissions around a Tuesday
+
+This reproduces a typical requirement; none of it is in the code. Two run types (any codes; here `MNT`
+monthly and `WKL` weekly), both due from the Sunday before a Tuesday through the Thursday after it:
+
+- `MNT` in the week of the **3rd Tuesday** of the month; `WKL` in every other Tuesday week;
+- dates by table:
+
+| Table | `MNT` (monthly) | `WKL` (weekly) |
+|---|---|---|
+| every other table (`'*'`, e.g. CDAG / ODAG) | previous calendar month | 60 days ending the last Saturday |
+| `SNPCC1` | last day of the previous month | the same |
+| `FA1` | last 14 days of the previous month | no weekly crosswalk row |
+| `FA2` | Jan 1 → Jan 31 | no weekly crosswalk row |
+| `FA3` | Nov 1 → Dec 31 of the year before | no weekly crosswalk row |
+| `FA4` | Nov 1 of the year before → Jan 31 | the same |
+
+The yearly FA dates move to the next year in February (a January run still uses the previous cycle).
+Months and years are taken from the Tuesday, so every day of a window gives the same dates.
+
+`Batch_Sql_Txt` of the monthly run type:
+
+```sql
+WITH d AS (
+  SELECT tue,
+         CAST(date_trunc('month', tue) AS DATE) - 1 AS prev_month_end,
+         CAST({run_date} AS DATE) - CAST(extract(dow FROM CAST({run_date} AS DATE)) AS INT) - 1 AS last_sat,
+         CAST(extract(year FROM tue) AS INT) - CASE WHEN extract(month FROM tue) = 1 THEN 1 ELSE 0 END AS yr
+  FROM (SELECT CAST({run_date} AS DATE) + (2 - CAST(extract(dow FROM CAST({run_date} AS DATE)) AS INT)) AS tue) x
+  WHERE extract(dow FROM CAST({run_date} AS DATE)) <= 4
+    AND (CAST(extract(day FROM tue) AS INT) - 1) / 7 + 1 = 3
+)
+
+SELECT '*' AS table_nm, CAST(date_trunc('month', prev_month_end) AS DATE) AS rpt_start, prev_month_end AS rpt_end FROM d
+UNION ALL SELECT 'SNPCC1', prev_month_end, prev_month_end FROM d
+UNION ALL SELECT 'FA1', prev_month_end - 13, prev_month_end FROM d
+UNION ALL SELECT 'FA2', make_date(yr, 1, 1), make_date(yr, 1, 31) FROM d
+UNION ALL SELECT 'FA3', make_date(yr - 1, 11, 1), make_date(yr - 1, 12, 31) FROM d
+UNION ALL SELECT 'FA4', make_date(yr - 1, 11, 1), make_date(yr, 1, 31) FROM d
+```
+
+`Batch_Sql_Txt` of the weekly run type — the same `WITH` with `<> 3`, and its own dates:
+
+```sql
+WITH d AS (
+  SELECT tue,
+         CAST(date_trunc('month', tue) AS DATE) - 1 AS prev_month_end,
+         CAST({run_date} AS DATE) - CAST(extract(dow FROM CAST({run_date} AS DATE)) AS INT) - 1 AS last_sat,
+         CAST(extract(year FROM tue) AS INT) - CASE WHEN extract(month FROM tue) = 1 THEN 1 ELSE 0 END AS yr
+  FROM (SELECT CAST({run_date} AS DATE) + (2 - CAST(extract(dow FROM CAST({run_date} AS DATE)) AS INT)) AS tue) x
+  WHERE extract(dow FROM CAST({run_date} AS DATE)) <= 4
+    AND (CAST(extract(day FROM tue) AS INT) - 1) / 7 + 1 <> 3
+)
+
+SELECT '*' AS table_nm, last_sat - 59 AS rpt_start, last_sat AS rpt_end FROM d
+UNION ALL SELECT 'SNPCC1', prev_month_end, prev_month_end FROM d
+UNION ALL SELECT 'FA4', make_date(yr - 1, 11, 1), make_date(yr, 1, 31) FROM d
+```
+
+With the batch job running daily in October 2026: `WKL` batches on Oct 4, 11 and 25 (ODAG 60 days to the
+Saturday before; FA4 2025-11-01 → 2026-01-31 each time), `MNT` batches on Oct 18 (ODAG 2026-09-01 →
+2026-09-30, FA1 2026-09-17 → 2026-09-30, ...), nothing on any other day.
+
+### Built-in periods for a run that passes `period`
+
+`SAME_DAY`, `PREV_DAY`, `PREV_N_DAYS(n)`, `PREV_WEEK_SAME_DAY(n)`, `PREV_CALENDAR_WEEK`,
+`CURRENT_CALENDAR_MONTH`, `PREV_CALENDAR_MONTH`, `ROLLING_1_MONTH`, `PREV_CALENDAR_QUARTER`,
+`PREV_CALENDAR_YEAR`, `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])` (the same dates every year; moves to the next
+year on the third date, by default the day after the window ends). Example, one batch by hand:
+`BATCH_CREATION` with `run_type`, `table` and `period = PREV_CALENDAR_MONTH`.
+
+## Upper and lower case
+
+Codes and values that people type are compared without regard to case, everywhere:
+
+- project, table, source, run type and run category codes in every configuration table, in the
+  intake requests, in job parameters (`--project`, `--run-type`, `--table`, a Variable's `project`, ...);
+- override type and approval status in `ComplianceBatchOverride`, and a `Reuse_Btch_ID` or `--btch-id`;
+- file names against their templates (`FILENAME_CASE_SENSITIVE` now defaults to false), the run-type
+  token in a file name, and the template placeholders (`{RunTy}` = `{RUNTY}`);
+- step and module names, admin commands, period names and the choice settings (`FILE_RULES_MODE`,
+  `NOTIFY_BACKEND`, `RULE_ENGINE`, ...).
+
+The framework keeps codes upper case in what it writes (batch rows, `Btch_ID`, audit rows), so
+`odr`, `Odr` and `ODR` are one project. `validate-config` reports `CODE_CASE_DUPLICATE` when two rows of
+`ComplianceProject`, `ComplianceSourceSystem` or `ComplianceRunType` differ only in case.
+
+The PostgreSQL schema therefore has no foreign keys on project, source or run-type codes (they would
+compare case-sensitively); `validate-config` checks those references instead. Unique indexes on
+`UPPER(...)` keep `ComplianceProject`, `ComplianceSourceSystem` and `ComplianceRunType` codes unique
+whatever their case. Loading a configuration CSV whose code differs only in case from a row already in
+the table is refused: update that row in its existing case, or fix the CSV.
+
+The run categories are `SCHEDULED` (batches created on a schedule for a period; was `ROUTINE`) and
+`ADHOC` (batches requested through `ComplianceRequestInTake`).
+
 ## Environment in database names (`$env`)
 
 The staging and core database (schema) names and the S3 paths of `ComplianceSourceFileConfig` can carry
@@ -180,8 +311,8 @@ a `$env` token, so one set of configuration rows works in every environment (the
 
 ```bash
 src/run_workflow.sh dev ODR FILE_LOAD,BATCH_CLOSE                               # now, in this order
-src/run_workflow.sh dev UNIVERSE BATCH_CREATION --run-type MONTHLY --period PREV_CALENDAR_MONTH
-src/run_workflow.sh prod ODR BATCH_CREATION --run-type DAILY --period PREV_DAY --as-of 2026-09-01   # missed run
+src/run_workflow.sh dev UNIVERSE BATCH_CREATION                                 # whatever is due today
+src/run_workflow.sh prod ODR BATCH_CREATION --as-of 2026-09-01   # missed run
 src/run_workflow.sh dev all_projects NOTIFY
 src/run_workflow.sh dev ODR FILE_LOAD --metadata-schema cms_compliance_v2 --metadata-db compliance   # another metadata schema / database
 ```

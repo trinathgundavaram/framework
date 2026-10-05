@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
 from . import config as cfgmod
-from .common import ConfigError
+from .common import ADHOC, SCHEDULED, ConfigError, code
 
 
 @dataclass
@@ -34,6 +34,9 @@ class ModuleSpec:
         return {p.name: p for p in (*self.required, *self.optional)}
 
 
+CODE_PARAMS = ("project", "run_type", "table")
+
+
 def normalize(name: str) -> str:
     return (name or "").strip().upper().replace("-", "_").replace(" ", "_")
 
@@ -50,28 +53,26 @@ class BatchCreationSummary:
 
 
 def _batch_creation(app, p: dict) -> ModuleOutcome:
+    """Scheduled batches that are due by their configuration, then the project's ad-hoc intake requests."""
     project, run_type = p["project"], p.get("run_type")
     period_args = ("period", "period_file", "lookback_days", "lookback_weeks")
-    wants_period = any(k in p for k in period_args)
+    scheduled_kw = dict(project_cd=project, table_nm=p.get("table"), run_ty=run_type, period=p.get("period"),
+                        period_file=p.get("period_file"), lookback_days=p.get("lookback_days"),
+                        lookback_weeks=p.get("lookback_weeks"))
     scheduled = adhoc_run_ty = None
     if run_type:
         rt = cfgmod.run_type(app.conn, run_type)
         if rt is None or not rt.active:
             raise ConfigError(f"run type {run_type} is unknown or inactive")
-        if rt.run_category_cd == "ROUTINE":
-            if "period" not in p:
-                raise ConfigError("BATCH_CREATION needs --period for a ROUTINE run type")
-            scheduled = app.create_batches(project_cd=project, table_nm=p.get("table"), run_ty=run_type,
-                                           period=p["period"], period_file=p.get("period_file"),
-                                           lookback_days=p.get("lookback_days"),
-                                           lookback_weeks=p.get("lookback_weeks"))
+        if rt.run_category_cd == SCHEDULED:
+            scheduled = app.create_batches(**scheduled_kw)
+        elif any(k in p for k in period_args):
+            raise ConfigError(f"run type {run_type} is {ADHOC}; --period/--period-file/--lookback-* "
+                              f"only apply to a {SCHEDULED} run type")
         else:
-            if wants_period:
-                raise ConfigError(f"run type {run_type} is ADHOC; --period/--period-file/--lookback-* "
-                                  "only apply to a ROUTINE run type")
             adhoc_run_ty = run_type
-    elif wants_period:
-        raise ConfigError("BATCH_CREATION: --period/--period-file/--lookback-* need --run-type")
+    else:
+        scheduled = app.create_batches(**scheduled_kw)
     adhoc = app.intake.run(project_cd=project, run_ty=adhoc_run_ty)
     errors = bool(scheduled and scheduled.errors) or bool(adhoc.failed)
     return ModuleOutcome("BATCH_CREATION", BatchCreationSummary(scheduled, adhoc), 1 if errors else 0)
@@ -121,7 +122,8 @@ def _notify(app, p: dict) -> ModuleOutcome:
 MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
     ModuleSpec(
         "BATCH_CREATION",
-        "one project's batches: routine batches for a ROUTINE run type and period, and that project's "
+        "one project's batches: the scheduled batches that are due by each run type's Batch_Sql_Txt (or for "
+        "--period when given), and that project's "
         "pending ad-hoc intake requests - both in one call, scoped to --project",
         required=(Param("project"),),
         optional=(Param("run_type"), Param("period"), Param("table"), Param("period_file"),
@@ -182,6 +184,8 @@ def _coerce(spec: ModuleSpec, params: Mapping[str, Any]) -> dict[str, Any]:
         kind = known[name].kind
         try:
             out[name] = kind(value) if kind is not str else str(value)
+            if name in CODE_PARAMS:
+                out[name] = code(out[name])
         except (TypeError, ValueError):
             raise ConfigError(f"module {spec.name}: {name} must be {kind.__name__}, got {value!r}") from None
     if unknown:

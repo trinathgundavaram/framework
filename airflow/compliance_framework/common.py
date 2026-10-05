@@ -7,6 +7,12 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 
+def code(value):
+    """Codes (project, table, source, run type, category, override type, status) are compared case-insensitively:
+    the framework keeps them upper case."""
+    return value.strip().upper() if isinstance(value, str) else value
+
+
 class FrameworkError(Exception):
     """Base class."""
 
@@ -69,6 +75,59 @@ def resolve_env(text: Optional[str], environment: str, value: Optional[str] = No
     return re.sub(r"_{2,}", "_", out) if identifier else out
 
 
+
+
+_ANNUAL_WINDOW = re.compile(r"^ANNUAL_WINDOW\(\s*(\d\d)-(\d\d)\s*,\s*(\d\d)-(\d\d)\s*(?:,\s*(\d\d)-(\d\d)\s*)?\)$",
+                            re.IGNORECASE)
+
+
+def annual_window(period: str, run_date: date) -> Optional[tuple[date, date]]:
+    """ANNUAL_WINDOW(start MM-DD, end MM-DD[, from MM-DD]): the same dates every year, e.g. 12-01 to 01-31.
+
+    The window used is the latest one whose `from` date has passed; `from` defaults to the day after the
+    window ends, so (12-01,01-31) moves to the new December-January window every February 1.
+    None when `period` is not an ANNUAL_WINDOW.
+    """
+    if not (period or "").strip().upper().startswith("ANNUAL_WINDOW"):
+        return None
+    m = _ANNUAL_WINDOW.match(period.strip())
+    if not m:
+        raise ConfigError(f"period {period!r} must be ANNUAL_WINDOW(MM-DD,MM-DD) or ANNUAL_WINDOW(MM-DD,MM-DD,MM-DD)")
+    try:
+        (sm, sd), (em, ed) = (int(m.group(1)), int(m.group(2))), (int(m.group(3)), int(m.group(4)))
+        rollover = (int(m.group(5)), int(m.group(6))) if m.group(5) else None
+        for month, day in [(sm, sd), (em, ed), *([rollover] if rollover else [])]:
+            if (month, day) == (2, 29):
+                raise ValueError("02-29 is not in every year")
+            date(2001, month, day)
+    except ValueError as e:
+        raise ConfigError(f"period {period!r}: {e}") from None
+    for year in range(run_date.year + 1, run_date.year - 3, -1):
+        end = date(year, em, ed)
+        start = date(year if (sm, sd) <= (em, ed) else year - 1, sm, sd)
+        if rollover is None:
+            becomes_current = end + timedelta(days=1)
+        else:
+            becomes_current = date(year, *rollover)
+            if becomes_current <= end:
+                becomes_current = date(year + 1, *rollover)
+        if becomes_current <= run_date:
+            return start, end
+    raise ConfigError(f"period {period!r} has no window for {run_date}")
+
+
+_LOOKBACK = re.compile(r"^(PREV_N_DAYS|PREV_WEEK_SAME_DAY)\s*\(\s*(\d+)\s*\)$", re.IGNORECASE)
+
+
+def period_lookback(period: str) -> tuple:
+    """PREV_N_DAYS(7) -> ('PREV_N_DAYS', 7, None); PREV_WEEK_SAME_DAY(2) -> (name, None, 2); else (period, None, None)."""
+    m = _LOOKBACK.match((period or "").strip())
+    if not m:
+        return period, None, None
+    name, n = m.group(1).upper(), int(m.group(2))
+    return (name, n, None) if name == "PREV_N_DAYS" else (name, None, n)
+
+
 class Clock:
     """Injected time source."""
 
@@ -112,7 +171,7 @@ def build_btch_id(req_dt: date, project_cd: str, table_nm: str, src_id: str, run
     """{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Src}_{Run_Ty}_{Vrsn}_{Seq}."""
     if seq < 1:
         raise ValueError("seq must be >= 1")
-    value = f"{req_dt:%Y%m%d}_{project_cd}_{table_nm}_{src_id}_{run_ty}_{cmplnc_vrsn}_{seq}"
+    value = "_".join([f"{req_dt:%Y%m%d}", *map(code, (project_cd, table_nm, src_id, run_ty, cmplnc_vrsn)), str(seq)])
     if len(value) > BTCH_ID_MAX_LEN:
         raise ValueError(f"Btch_ID exceeds {BTCH_ID_MAX_LEN} characters: {value}")
     return value
@@ -124,6 +183,9 @@ def earliest_close_date(req_dt: date, sla_days: int) -> date:
         raise ValueError("SLA_Days must be >= 1")
     return req_dt + timedelta(days=sla_days - 1)
 
+
+SCHEDULED = "SCHEDULED"
+ADHOC = "ADHOC"
 
 PENDING = "PENDING"
 PROMOTED = "PROMOTED"

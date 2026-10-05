@@ -8,7 +8,7 @@ from typing import Optional
 from . import db
 from .audit import EventLogger
 from .common import (COMPLETED, COMPLETED_WITH_EXCEPTION, DATA_NOT_PROVIDED, EXCEPTION_PENDING, Clock,
-                     CloseBlocked, CloseDeferred, check_transition, earliest_close_date)
+                     CloseBlocked, CloseDeferred, check_transition, earliest_close_date, code)
 from .db import Connection
 from .settings import Settings
 
@@ -92,7 +92,7 @@ class BatchCloser:
     def _batch(self, btch_id: str) -> Optional[dict]:
         b = self.conn.execute(
             """SELECT c.*, r.SLA_Days FROM ComplianceRequestControl c
-                 LEFT JOIN ComplianceRunType r ON r.Run_Ty = c.Run_Ty WHERE c.Btch_ID = %s""", (btch_id,)).fetchone()
+                 LEFT JOIN ComplianceRunType r ON UPPER(r.Run_Ty) = c.Run_Ty WHERE c.Btch_ID = %s""", (code(btch_id),)).fetchone()
         if b:
             b["hold_dt"] = earliest_close_date(db.as_date(b["req_dt_key"]), 1 if b["sla_days"] is None else b["sla_days"])
         return b
@@ -100,7 +100,7 @@ class BatchCloser:
     def _open_past_hold(self, project_cd, table_nm, run_ty, last_hold: Optional[date] = None) -> list[dict]:
         """Open batches in scope whose hold ends on or before `last_hold` (default today)."""
         sql, params = _scope_sql(
-            """SELECT c.* FROM ComplianceRequestControl c JOIN ComplianceRunType r ON r.Run_Ty = c.Run_Ty
+            """SELECT c.* FROM ComplianceRequestControl c JOIN ComplianceRunType r ON UPPER(r.Run_Ty) = c.Run_Ty
                 WHERE c.Batch_Close_Ind = 0 AND c.Req_Dt_Key + (r.SLA_Days - 1) <= %(last_hold)s""",
             "ORDER BY c.Req_ID", project_cd, table_nm, run_ty, last_hold=last_hold or self._today())
         return self.conn.execute(sql, params).fetchall()
@@ -146,6 +146,6 @@ def _scope_sql(sql: str, order_by: str, project_cd, table_nm, run_ty, **params) 
     for col, name, value in (("c.Project_Cd", "p", project_cd), ("c.Table_Nm", "t", table_nm), ("c.Run_Ty", "r", run_ty)):
         if value is not None:
             sql += f" AND {col} = %({name})s"
-            params[name] = value
+            params[name] = code(value)
     return f"{sql} {order_by}", params
 
