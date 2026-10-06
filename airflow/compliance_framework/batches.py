@@ -11,7 +11,7 @@ from typing import Callable, Optional
 from . import config as cfg
 from . import db
 from .audit import EventLogger
-from .common import (ADHOC, PENDING, SCHEDULED, Clock, ConfigError, annual_window, build_btch_id, code,
+from .common import (ADHOC, REQUEST_CREATED, SCHEDULED, Clock, ConfigError, annual_window, build_btch_id, code,
                      period_lookback)
 from .config import RunType, XwalkRow
 from .db import Connection
@@ -70,7 +70,7 @@ def _create_batch(conn, clock, logger, x: XwalkRow, rpt_start, rpt_end, req_dt, 
         """INSERT INTO ComplianceRequestControl (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key,
              Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Req_Stat, Batch_Close_Ind, Created_Dtts, Updated_Dtts)
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s)""",
-        (x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt, btch, PENDING, now, now))
+        (x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt, btch, REQUEST_CREATED, now, now))
     req_id = conn.execute("SELECT Req_ID FROM ComplianceRequestControl WHERE Btch_ID=%s", (btch,)).fetchone()["req_id"]
     logger.batch_event("BATCH_CREATED", req_id=req_id, btch_id=btch, intake_id=intake_id,
                        detail=f"run_date={req_dt} period={rpt_start}..{rpt_end}")

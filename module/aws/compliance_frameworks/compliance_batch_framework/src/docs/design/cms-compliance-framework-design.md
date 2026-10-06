@@ -117,8 +117,8 @@ A single, **project-agnostic** framework for compliance source files. It does th
 | D-66 | **Connection from `.env` or Secrets Manager (v4).** Locally the database comes from `.env` (`FRAMEWORK_DB_DSN` or `FRAMEWORK_DB_*`); in AWS from the Secrets Manager secret named by `FRAMEWORK_DB_SECRET_NAME`. Explicit values override the secret. There is no connection table. |
 | D-67 | **Settings are not stored in tables (v4).** Precedence: job argument (`--set NAME=VALUE`) > environment (`FRAMEWORK_<NAME>`) > `.env` > built-in default. `ComplianceFrameworkSetting` is removed. |
 | D-68 | **Promotion is one transaction (v4).** Because staging, core and control share one database, the core swap, the CRC update and the audit rows commit or roll back together. *(Replaces v3.2's cross-database replay rule.)* |
-| D-69 | **Fixed `Req_Stat` list (v4, answers Q-01 for now).** `PENDING`, `PROMOTED`, `CARRIED_FORWARD`, `EXCEPTION_PENDING` (open); `COMPLETED`, `COMPLETED_WITH_EXCEPTION`, `DATA_NOT_PROVIDED` (closed). The values and the legal transitions are in code (`common.TRANSITIONS`; no CHECK constraint since v6). The status and transition tables are removed. |
-| D-70 | **Carry-forward by approval (v4, `REUSE` in v5).** `ComplianceRunType.Carry_Fwd_Ind = 1` allows an **open batch without data** to reuse the data of the latest earlier **closed batch with data** of the same (project, table, source, run type), after a manual `REUSE` override is approved (optionally naming `Reuse_Btch_ID`). The batch becomes `CARRIED_FORWARD` / `Resolution_Ty = CARRY_FORWARD` and closes like a batch with data; the extract process reads the reused batch's current core rows (no data is copied). A file arriving before close replaces it; when the approval runs out (`Valid_Thru_Dt_Key`), `process-decisions` returns the open batch to `PENDING`; a file after close needs a `LATE_ARRIVAL` override. |
+| D-69 | **Fixed `Req_Stat` list (v4, answers Q-01 for now).** `REQUEST_CREATED`, `PROMOTED`, `CARRIED_FORWARD`, `EXCEPTION_PENDING` (open); `COMPLETED`, `COMPLETED_WITH_EXCEPTION`, `DATA_NOT_PROVIDED` (closed). The values and the legal transitions are in code (`common.TRANSITIONS`; no CHECK constraint since v6). The status and transition tables are removed. |
+| D-70 | **Carry-forward by approval (v4, `REUSE` in v5).** `ComplianceRunType.Carry_Fwd_Ind = 1` allows an **open batch without data** to reuse the data of the latest earlier **closed batch with data** of the same (project, table, source, run type), after a manual `REUSE` override is approved (optionally naming `Reuse_Btch_ID`). The batch becomes `CARRIED_FORWARD` / `Resolution_Ty = CARRY_FORWARD` and closes like a batch with data; the extract process reads the reused batch's current core rows (no data is copied). A file arriving before close replaces it; when the approval runs out (`Valid_Thru_Dt_Key`), `process-decisions` returns the open batch to `REQUEST_CREATED`; a file after close needs a `LATE_ARRIVAL` override. |
 | D-71 | **Report period is a job parameter (v4).** The crosswalk no longer holds period strategy, lookback, cron or time zone. The project's scheduled job runs `run --module BATCH_CREATION --project --run-type --period <NAME>`; `<NAME>` is a statement in `period_sql.py` (or in a project `.py` file passed with `--period-file`). The run date is today in `BUSINESS_TZ` or `--as-of`. `CompliancePeriodStrategy`, cron expansion and the `catchup` command are removed. |
 | ~~D-72~~ | *Withdrawn in v6 (D-76).* `ComplianceExtractPolicy`, `ComplianceExtractJobParam` (v4) and the gating settings (v6) are gone; the run type's `SLA_Days` is the only close setting. |
 | D-74 | **One override shape, three types (v5).** `ComplianceBatchOverride` holds `REUSE`, `LATE_ARRIVAL` and `CORRECTION` rows with the same columns: the batch grain, an optional `Reuse_Btch_ID`, a reason, the approval fields and `Valid_Thru_Dt_Key`. Rows are written and approved by hand (D-12). **There is no revoke:** to stop an override, move its validity date into the past. `LATE_ARRIVAL` (closed batch with no data) and `CORRECTION` (closed batch with data) are read by the ingest pipeline; `REUSE` is applied and expired by `process-decisions`. Candidate/reviewed loads, promotion status and the decision watermark are gone: a decision is made on the batch, not on a particular file. |
@@ -347,7 +347,7 @@ The values and the legal moves are `common.TRANSITIONS` (any other move raises `
 
 | Value | Open / closed | Meaning |
 |---|---|---|
-| `PENDING` | open | No usable data yet |
+| `REQUEST_CREATED` | open | No usable data yet |
 | `PROMOTED` | open | Current data promoted |
 | `CARRIED_FORWARD` | open | Approved carry-forward reuses an earlier batch's data (D-70) |
 | `EXCEPTION_PENDING` | open | The latest file failed GATE (prior or carried data may still be current, D-46) |
@@ -357,14 +357,14 @@ The values and the legal moves are `common.TRANSITIONS` (any other move raises `
 
 | From | To | Trigger |
 |---|---|---|
-| — | `PENDING` | Batch created |
-| `PENDING` / `EXCEPTION_PENDING` / `CARRIED_FORWARD` | `PROMOTED` | Core swap committed (a file replaces a carry-forward) |
-| `PENDING` / `PROMOTED` / `CARRIED_FORWARD` | `EXCEPTION_PENDING` | File failed GATE |
-| `PENDING` / `EXCEPTION_PENDING` | `CARRIED_FORWARD` | `REUSE` override applied (D-70) |
-| `CARRIED_FORWARD` | `PENDING` | `REUSE` override ran out (D-74) |
+| — | `REQUEST_CREATED` | Batch created |
+| `REQUEST_CREATED` / `EXCEPTION_PENDING` / `CARRIED_FORWARD` | `PROMOTED` | Core swap committed (a file replaces a carry-forward) |
+| `REQUEST_CREATED` / `PROMOTED` / `CARRIED_FORWARD` | `EXCEPTION_PENDING` | File failed GATE |
+| `REQUEST_CREATED` / `EXCEPTION_PENDING` | `CARRIED_FORWARD` | `REUSE` override applied (D-70) |
+| `CARRIED_FORWARD` | `REQUEST_CREATED` | `REUSE` override ran out (D-74) |
 | `PROMOTED` / `CARRIED_FORWARD` | `COMPLETED` | Run closed |
 | `EXCEPTION_PENDING` | `COMPLETED_WITH_EXCEPTION` | Run closed (prior data or none) |
-| `PENDING` | `DATA_NOT_PROVIDED` | Run closed |
+| `REQUEST_CREATED` | `DATA_NOT_PROVIDED` | Run closed |
 | `COMPLETED` / `COMPLETED_WITH_EXCEPTION` / `DATA_NOT_PROVIDED` | `COMPLETED` | Late arrival or correction promoted (stays closed, D-04) |
 
 ### 6.2 Override `Apprvl_Stat` (D-74)
@@ -374,7 +374,7 @@ The values and the legal moves are `common.TRANSITIONS` (any other move raises `
 APPROVED  --(today > Valid_Thru_Dt_Key)-->  no longer usable
 ```
 - There is no `REVOKED`: an approval is stopped by moving `Valid_Thru_Dt_Key` into the past (template 6).
-- An applied `REUSE` whose date has passed is removed by the next `process-decisions` run (`OVERRIDE_EXPIRED`, `CARRY_FORWARD_REMOVED`) and its batch returns to `PENDING`.
+- An applied `REUSE` whose date has passed is removed by the next `process-decisions` run (`OVERRIDE_EXPIRED`, `CARRY_FORWARD_REMOVED`) and its batch returns to `REQUEST_CREATED`.
 - A rejected row frees the (`Req_ID`, `Override_Ty`) slot, so a new row of that type can be requested.
 
 ### 6.3 Batch close
@@ -393,7 +393,7 @@ Each flow is an idempotent service. **State changes and their audit events commi
 2. **Run date** = `as_of` (default now) in `BUSINESS_TZ`. It is also `Req_Dt_Key` (D-29).
 3. Compute the report period from the run date with the named period SQL (`period_sql.py` or `--period-file`; lookback arguments where the statement needs them).
 4. Take the active crosswalk rows of the project / run type (optionally one table) that are effective on the run date.
-5. For each row: `INSERT` the batch unless it exists (D-30, D-77 — a second run on the same date finds it). On insert: `Seq` / `Btch_ID` under the table/source/run-type lock; `PENDING`; log `BATCH_CREATED`.
+5. For each row: `INSERT` the batch unless it exists (D-30, D-77 — a second run on the same date finds it). On insert: `Seq` / `Btch_ID` under the table/source/run-type lock; `REQUEST_CREATED`; log `BATCH_CREATED`.
 
 Running the same period on ten consecutive days therefore produces ten batches, each with its own SLA hold (D-77).
 
@@ -433,7 +433,7 @@ A correction is **not** an intake row: it is a `CORRECTION` override on the batc
 | Detected | Action |
 |---|---|
 | `REUSE` `APPROVED`, `Valid_Thru_Dt_Key ≥ today`, batch open and not yet carried | Validate: the run type has `Carry_Fwd_Ind = 1`, the batch is open with no promoted load, and a source batch exists (the requested `Reuse_Btch_ID`, else the latest earlier **closed** batch of the same project/table/source/run type that has data; a carried batch resolves to its own source). Invalid → `OVERRIDE_INVALID_DETECTED`, batch unchanged. Valid → CRC `Resolution_Ty = CARRY_FORWARD`, `Reuse_Btch_ID`, `Req_Stat = CARRIED_FORWARD`; log `OVERRIDE_APPROVED` + `CARRY_FORWARD_APPLIED`. |
-| Carried batch whose override ran out, was rejected or is gone | CRC back to `PENDING`, `Resolution_Ty` and `Reuse_Btch_ID` cleared; log `OVERRIDE_EXPIRED` + `CARRY_FORWARD_REMOVED`. Closed batches are never touched. |
+| Carried batch whose override ran out, was rejected or is gone | CRC back to `REQUEST_CREATED`, `Resolution_Ty` and `Reuse_Btch_ID` cleared; log `OVERRIDE_EXPIRED` + `CARRY_FORWARD_REMOVED`. Closed batches are never touched. |
 
 The job is idempotent: an already-applied override is skipped, and an already-expired one has nothing left to remove.
 
@@ -589,7 +589,7 @@ COMMIT;
 |---|---|---|---|
 | Has data (`NEW_FILE`, or `CARRY_FORWARD` under an approved `REUSE`) | closes | closes | `COMPLETED` |
 | In exception (`EXCEPTION_PENDING`) | closes | closes | `COMPLETED_WITH_EXCEPTION` (resolution kept, or `MISSING`) |
-| No data (`PENDING`) | listed as `waiting` | closes | `DATA_NOT_PROVIDED` / `MISSING` (+ `SOURCE_MISSING_AT_CLOSE`) |
+| No data (`REQUEST_CREATED`) | listed as `waiting` | closes | `DATA_NOT_PROVIDED` / `MISSING` (+ `SOURCE_MISSING_AT_CLOSE`) |
 
 Every close: try-lock the batch (busy → `BATCH_CLOSE_DEFERRED_LOCKED`; the sweep retries, a manual close exits non-zero), re-read the row `FOR UPDATE`, check the transition (D-69), set `Batch_Close_Ind = 1` and log `BATCH_CLOSED` with the actor (`SYSTEM` for the sweep). A manual close inside the hold or of a closed batch is refused (`BATCH_CLOSE_BLOCKED`).
 

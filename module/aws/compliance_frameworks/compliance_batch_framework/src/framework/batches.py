@@ -13,7 +13,7 @@ import psycopg
 from . import config as cfg
 from . import db
 from .audit import EventLogger
-from .common import (ADHOC, PENDING, SCHEDULED, Clock, ConfigError, annual_window, build_btch_id, code,
+from .common import (ADHOC, REQUEST_CREATED, SCHEDULED, Clock, ConfigError, annual_window, build_btch_id, code,
                      period_lookback)
 from .config import RunType, XwalkRow
 from .period_sql import PERIOD_SQL
@@ -66,7 +66,7 @@ def create_batch(conn: psycopg.Connection, clock: Clock, logger: EventLogger, *,
             """INSERT INTO ComplianceRequestControl (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key,
                  Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Req_Stat, Created_Dtts, Updated_Dtts)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING Req_ID""",
-            (x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt, btch, PENDING, now,
+            (x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt, btch, REQUEST_CREATED, now,
              now)).fetchone()
         logger.batch_event("BATCH_CREATED", req_id=row["req_id"], btch_id=btch, intake_id=intake_id,
                            detail=f"run_date={req_dt} period={rpt_start}..{rpt_end}")

@@ -12,7 +12,7 @@ from . import config as cfgmod
 from . import db
 from .audit import EventLogger
 from .batches import get_batch, promoted_load
-from .common import CARRIED_FORWARD, OPEN_STATUSES, PENDING, Clock, check_transition, code
+from .common import CARRIED_FORWARD, OPEN_STATUSES, REQUEST_CREATED, Clock, check_transition, code
 from .settings import Settings
 
 
@@ -82,7 +82,7 @@ class DecisionProcessor:
                 s.applied.append(o["ovrd_id"])
 
     def _expire(self, s: DecisionSummary, today: date, project_cd: Optional[str]) -> None:
-        """A batch still carrying data whose override has run out (or was rejected) goes back to PENDING."""
+        """A batch still carrying data whose override has run out (or was rejected) goes back to REQUEST_CREATED."""
         rows = self.conn.execute(
             """SELECT c.Req_ID, o.Ovrd_ID FROM ComplianceRequestControl c
                  LEFT JOIN ComplianceBatchOverride o
@@ -97,7 +97,7 @@ class DecisionProcessor:
                 if (b["resolution_ty"] != "CARRY_FORWARD" or b["batch_close_ind"] == 1
                         or b["req_stat"] not in OPEN_STATUSES):
                     continue
-                to_stat = PENDING if b["req_stat"] == CARRIED_FORWARD else b["req_stat"]
+                to_stat = REQUEST_CREATED if b["req_stat"] == CARRIED_FORWARD else b["req_stat"]
                 check_transition(b["req_stat"], to_stat)
                 self.conn.execute(
                     """UPDATE ComplianceRequestControl SET Resolution_Ty=NULL, Reuse_Btch_ID=NULL, Req_Stat=%s,

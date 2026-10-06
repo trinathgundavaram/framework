@@ -1,6 +1,6 @@
 # CMS Compliance Framework: Module Reference
 
-What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.7 (design v5).
+What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.8 (design v5).
 
 - **Design:** [`design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md). `D-nn` = decision, `Q-nn` = open question, `§n` = design section.
 - **Setup, configuration, commands:** [`framework-package.md`](framework-package.md).
@@ -157,7 +157,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 ### `overrides.py`
 - `DecisionProcessor.run` (P7, D-74): handles `REUSE` only — `LATE_ARRIVAL` and `CORRECTION` are read by the ingest pipeline.
   - **apply:** an approved, still-valid `REUSE` on an open batch without data → checks `Carry_Fwd_Ind`, that the batch has no promoted load, and that a source batch exists (the requested `Reuse_Btch_ID`, else the latest earlier closed batch with data; a carried batch resolves to its own source). Sets CRC `Resolution_Ty='CARRY_FORWARD'`, `Reuse_Btch_ID`, `Req_Stat='CARRIED_FORWARD'`; logs `OVERRIDE_APPROVED` + `CARRY_FORWARD_APPLIED`. An invalid row → `OVERRIDE_INVALID_DETECTED`, batch unchanged.
-  - **expire:** an open carried batch whose override ran out (`Valid_Thru_Dt_Key < today`), was rejected or is gone → back to `PENDING`, `OVERRIDE_EXPIRED` + `CARRY_FORWARD_REMOVED`.
+  - **expire:** an open carried batch whose override ran out (`Valid_Thru_Dt_Key < today`), was rejected or is gone → back to `REQUEST_CREATED`, `OVERRIDE_EXPIRED` + `CARRY_FORWARD_REMOVED`.
 - `run(project_cd)` scopes both passes to one project. An invalid override is audited (`OVERRIDE_INVALID_DETECTED`) once, not on every run.
 - There is no revoke and no promotion state: stopping an override is a date change (`sql/approvals.sql` template 6).
 - `health()`: pending reviews and approved overrides expiring within 7 days, across all three override types — `overrides.py` owns `ComplianceBatchOverride` (§7), so its health queries live here rather than in `app.py`.
