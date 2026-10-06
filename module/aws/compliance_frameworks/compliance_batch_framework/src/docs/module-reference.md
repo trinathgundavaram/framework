@@ -1,6 +1,6 @@
 # CMS Compliance Framework: Module Reference
 
-What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.9 (design v5).
+What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.10 (design v5).
 
 - **Design:** [`design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md). `D-nn` = decision, `Q-nn` = open question, `§n` = design section.
 - **Setup, configuration, commands:** [`framework-package.md`](framework-package.md).
@@ -119,7 +119,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 ### `config.py`
 - Typed rows: `RunType` (incl. `sla_days`, `carry_fwd`), `XwalkRow`, `FileConfig` (`src_file_ty` is the template's extension; the core table is `Core_Schema_Nm.Table_Nm`), `RuleBinding`.
 - Read access: `run_type(s)`, `xwalk_rows`, `effective_xwalk`, `effective_sources`, `active_file_configs`, `file_config`, `file_config_by_id`, `rule_bindings(project, table, source, run type, scope)` — every active binding whose `Table_Nm`, `Src_ID` and `Run_Ty` equal the given value or `'*'` (additive; a group/variant bound at several levels is returned once).
-- Filename templates (§9): project, table and source are literal text; `{RUNTY}`, `{RPTSTART}`, `{RPTEND}`, `{TS}` once each. `parse_template`, `compile_template`, `render`, `TemplateMatcher` (unique match or `MatchError` with the quarantine code).
+- Filename templates (§9, D-82): literal text plus `{RUNTY}`, `{RPTSTART}` / `{RPTEND}` or `{RPTMONTH}`, optional `{TS}`, `{ANY}`, the row tokens `{PROJECT}`, `{TABLE}`, `{SRC}`, `{VERSION}` (`File_Vrsn_Cd`), and a date format after a token. `parse_template`, `compile_template`, `render`, `TemplateMatcher` (unique match or `MatchError` with the quarantine code).
 - `validate_all` (P1): the value rules the schema no longer enforces (run type code, category and `SLA_Days`; overlapping crosswalk windows; rule bindings that match no crosswalk row), crosswalk ↔ file config coverage, inactive run types and projects (warnings), template grammar and extension, S3 paths, staging/core tables and their framework columns, template overlap.
 - **Out of scope:** schedules, periods, time zones — these are job settings now.
 

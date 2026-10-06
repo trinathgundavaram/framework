@@ -61,7 +61,7 @@ src/
 ### Changing the framework
 
 1. Edit the files under `framework/`.
-2. Bump `version` in `pyproject.toml` and `__version__` in `framework/__init__.py` (e.g. 0.3.9 → 0.3.10),
+2. Bump `version` in `pyproject.toml` and `__version__` in `framework/__init__.py` (e.g. 0.3.10 → 0.3.11),
    so every deployed build is identifiable. The Terraform picks up any wheel name.
 3. Rebuild the wheel, with GitHub Actions or locally (below).
 4. Deploy the `glue` submodule. The next Glue run installs the new wheel.

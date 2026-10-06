@@ -5,9 +5,9 @@ import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from itertools import combinations
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Mapping, Optional, Sequence
 
 from . import db
 from .adapters import parse_uri
@@ -78,6 +78,12 @@ class FileConfig:
     email_subjct_txt: Optional[str] = None
     active: bool = True
     file_check_txt: Optional[str] = None
+    file_vrsn_cd: Optional[str] = None
+
+    @property
+    def name_parts(self) -> dict:
+        """The values of the row tokens of a file name template."""
+        return {"PROJECT": self.project_cd, "TABLE": self.table_nm, "SRC": self.src_id, "VERSION": self.file_vrsn_cd}
 
     @property
     def src_file_ty(self) -> str:
@@ -94,7 +100,7 @@ class FileConfig:
                    name(r["src_file_path"], False),
                    name(r["stg_schema_nm"]), r["stg_table_nm"], name(r["core_schema_nm"]),
                    r["sucs_email_notfn_id"], r["failr_email_notfn_id"], r["email_subjct_txt"], r["active_ind"] == 1,
-                   _text(r.get("file_check_txt")))
+                   _text(r.get("file_check_txt")), _text(r.get("file_vrsn_cd")))
 
 
 @dataclass(frozen=True)
@@ -171,10 +177,14 @@ def rule_bindings(conn, project_cd: str, table_nm: str, src_id: str, run_ty: str
     return list(out.values())
 
 
-PLACEHOLDERS = ("RUNTY", "RPTSTART", "RPTEND", "TS")
+NAME_TOKENS = ("RUNTY", "RPTSTART", "RPTEND", "RPTMONTH", "TS", "ANY")
+ROW_TOKENS = ("PROJECT", "TABLE", "SRC", "VERSION")
 _TOKEN = re.compile(r"\{([^{}]*)\}")
-_PATTERNS = {"RUNTY": r"(?P<runty>[A-Za-z0-9]+)", "RPTSTART": r"(?P<rptstart>\d{8})",
-             "RPTEND": r"(?P<rptend>\d{8})", "TS": r"(?P<ts>\d{12}(?:\d{2})?)"}
+_DEFAULT_FORMAT = {"RPTSTART": "YYYYMMDD", "RPTEND": "YYYYMMDD", "RPTMONTH": "YYYYMM"}
+_FORMAT_CODES = (("YYYY", "%Y", r"\d{4}"), ("YY", "%y", r"\d{2}"), ("DD", "%d", r"\d{2}"), ("HH", "%H", r"\d{2}"),
+                 ("MI", "%M", r"\d{2}"), ("SS", "%S", r"\d{2}"))
+_TS_DEFAULT = r"\d{12}(?:\d{2})?"
+_VERSION_ANY = r"[A-Za-z0-9.]+"
 
 
 class TemplateError(ValueError):
@@ -187,7 +197,7 @@ class MatchResult:
     run_ty: str
     rpt_start: date
     rpt_end: date
-    file_ts: datetime
+    file_ts: Optional[datetime] = None
 
 
 class MatchError(Exception):
@@ -197,85 +207,197 @@ class MatchError(Exception):
         self.cfg = cfg
 
 
-def parse_template(template: str) -> list[tuple[str, str]]:
-    """Split into [('lit', text) | ('ph', NAME)] and validate the grammar."""
-    parts: list[tuple[str, str]] = []
+def date_format(fmt: str) -> tuple[str, str]:
+    """A token format such as YYYYMMDD or MM-DD-YYYY -> (strptime format, regex); MM after HH is minutes."""
+    out, rx, i, hours = "", "", 0, False
+    text = fmt.upper()
+    while i < len(text):
+        if text.startswith("MM", i):
+            out, rx, i = out + ("%M" if hours else "%m"), rx + r"\d{2}", i + 2
+            continue
+        for name, directive, pattern in _FORMAT_CODES:
+            if text.startswith(name, i):
+                out, rx, i, hours = out + directive, rx + pattern, i + len(name), hours or name == "HH"
+                break
+        else:
+            if text[i].isalnum() or text[i] in "%/":
+                raise TemplateError(f"date format {fmt!r} is not understood; use YYYY, YY, MM, DD, HH, MI, SS "
+                                    "and separators such as - or .")
+            out, rx, i = out + text[i], rx + re.escape(text[i]), i + 1
+    return out, rx
+
+
+def _parse(template: str, parts: Optional[Mapping[str, Optional[str]]] = None, wild: bool = False) -> list[tuple]:
+    """[('lit', text, None) | ('ph', NAME, format)]: row tokens become literals (or a wildcard version)."""
+    out: list[tuple] = []
     pos = 0
+    unknown = []
     for m in _TOKEN.finditer(template):
         if m.start() > pos:
-            parts.append(("lit", template[pos:m.start()]))
-        parts.append(("ph", m.group(1).upper()))
+            out.append(("lit", template[pos:m.start()], None))
+        name, _, fmt = m.group(1).partition(":")
+        name, fmt = name.strip().upper(), fmt.strip() or None
+        if name in NAME_TOKENS:
+            if fmt and name in ("RUNTY", "ANY"):
+                raise TemplateError(f"{{{name}}} takes no format in {template!r}")
+            out.append(("ph", name, fmt or _DEFAULT_FORMAT.get(name)))
+        elif name in ROW_TOKENS:
+            if fmt:
+                raise TemplateError(f"{{{name}}} takes no format in {template!r}")
+            value = (parts or {}).get(name)
+            if wild and name == "VERSION":
+                out.append(("ph", "VERSION", None))
+            elif value in (None, ""):
+                hint = "set File_Vrsn_Cd on the file config" if name == "VERSION" else "it is filled from the file config"
+                raise TemplateError(f"{{{name}}} in {template!r} has no value: {hint}")
+            else:
+                out.append(("lit", str(value), None))
+        else:
+            unknown.append(name)
         pos = m.end()
     if pos < len(template):
-        parts.append(("lit", template[pos:]))
-    literal = "".join(t for k, t in parts if k == "lit")
-    if "{" in literal or "}" in literal:
+        out.append(("lit", template[pos:], None))
+    if "{" in _TOKEN.sub("", template) or "}" in _TOKEN.sub("", template):
         raise TemplateError(f"unbalanced braces in template {template!r}")
-    names = [t for k, t in parts if k == "ph"]
-    unknown = sorted(set(names) - set(PLACEHOLDERS))
     if unknown:
-        raise TemplateError(f"unknown placeholder(s) {unknown} in {template!r}")
-    for p in PLACEHOLDERS:
+        raise TemplateError(f"unknown placeholder(s) {sorted(set(unknown))} in {template!r}")
+    names = [t for k, t, _ in out if k == "ph"]
+    month = names.count("RPTMONTH")
+    if month and (month > 1 or "RPTSTART" in names or "RPTEND" in names):
+        raise TemplateError(f"{{RPTMONTH}} stands for both report dates: use it once, without {{RPTSTART}} / {{RPTEND}}, "
+                            f"in {template!r}")
+    for p in ("RUNTY",) if month else ("RUNTY", "RPTSTART", "RPTEND"):
         n = names.count(p)
         if n != 1:
             raise TemplateError(f"placeholder {{{p}}} must appear exactly once in {template!r} (found {n})")
-    for a, b in zip(parts, parts[1:]):
+    if names.count("TS") > 1:
+        raise TemplateError(f"placeholder {{TS}} must appear at most once in {template!r}")
+    for kind, name, fmt in out:
+        if kind != "ph" or not fmt:
+            continue
+        directives = date_format(fmt)[0]
+        year = "%Y" in directives or "%y" in directives
+        if name == "RPTMONTH":
+            ok, need = year and "%m" in directives and "%d" not in directives, "a year and a month, no day"
+        elif name == "TS":
+            ok, need = year and "%m" in directives and "%d" in directives, "at least a year, a month and a day"
+        else:
+            ok, need = year and "%m" in directives and "%d" in directives, "a year, a month and a day"
+        if not ok:
+            raise TemplateError(f"format {fmt!r} of {{{name}}} in {template!r} must have {need}")
+    for a, b in zip(out, out[1:]):
         if a[0] == "ph" and b[0] == "ph":
             raise TemplateError(f"placeholders {{{a[1]}}}{{{b[1]}}} must be separated by literal text in {template!r}")
-    if "/" in template:
+    if "/" in "".join(t for k, t, _ in out if k == "lit"):
         raise TemplateError(f"template must describe a file name only (no '/'): {template!r}")
-    return parts
+    return out
 
 
-def compile_template(template: str, case_sensitive: bool = True) -> re.Pattern:
-    out = "".join(re.escape(text) if kind == "lit" else _PATTERNS[text] for kind, text in parse_template(template))
-    return re.compile(out, 0 if case_sensitive else re.IGNORECASE)
+def parse_template(template: str, parts: Optional[Mapping[str, Optional[str]]] = None) -> list[tuple[str, str]]:
+    """Split into [('lit', text) | ('ph', NAME)] and validate the grammar."""
+    return [(kind, text) for kind, text, _ in _parse(template, parts)]
 
 
-def render(template: str, *, runty: str, rpt_start: date, rpt_end: date, ts: datetime) -> str:
+def _pattern(parsed: list[tuple]) -> str:
+    out = ""
+    for kind, text, fmt in parsed:
+        if kind == "lit":
+            out += re.escape(text)
+        elif text == "RUNTY":
+            out += r"(?P<runty>[A-Za-z0-9]+)"
+        elif text == "ANY":
+            out += r".+?"
+        elif text == "VERSION":
+            out += f"(?P<version>{_VERSION_ANY})"
+        else:
+            out += f"(?P<{text.lower()}>{date_format(fmt)[1] if fmt else _TS_DEFAULT})"
+    return out
+
+
+def compile_template(template: str, case_sensitive: bool = True,
+                     parts: Optional[Mapping[str, Optional[str]]] = None) -> re.Pattern:
+    return re.compile(_pattern(_parse(template, parts)), 0 if case_sensitive else re.IGNORECASE)
+
+
+def render(template: str, *, runty: str, rpt_start: date, rpt_end: date, ts: datetime,
+           parts: Optional[Mapping[str, Optional[str]]] = None) -> str:
     """Build a file name from a template (used by validator overlap tests and by tests)."""
-    values = {"RUNTY": runty, "RPTSTART": f"{rpt_start:%Y%m%d}", "RPTEND": f"{rpt_end:%Y%m%d}",
-              "TS": f"{ts:%Y%m%d%H%M%S}"}
-    return "".join(values[t] if k == "ph" else t for k, t in parse_template(template))
+    values = {"RUNTY": lambda f: runty, "RPTSTART": lambda f: rpt_start.strftime(date_format(f)[0]),
+              "RPTEND": lambda f: rpt_end.strftime(date_format(f)[0]),
+              "RPTMONTH": lambda f: rpt_start.strftime(date_format(f)[0]),
+              "TS": lambda f: ts.strftime(date_format(f)[0] if f else "%Y%m%d%H%M%S"), "ANY": lambda f: "X"}
+    return "".join(values[t](f) if k == "ph" else t for k, t, f in _parse(template, parts))
 
 
 class TemplateMatcher:
     def __init__(self, configs: Iterable[FileConfig], case_sensitive: bool = True):
-        self._compiled: list[tuple[FileConfig, re.Pattern]] = []
+        self._compiled: list[tuple[FileConfig, re.Pattern, dict]] = []
+        self._any_version: list[tuple[FileConfig, re.Pattern]] = []
         self.invalid: list[tuple[FileConfig, str]] = []
+        flags = 0 if case_sensitive else re.IGNORECASE
         for c in configs:
             try:
-                self._compiled.append((c, compile_template(c.src_file_nm_tmplt, case_sensitive)))
+                parsed = _parse(c.src_file_nm_tmplt, c.name_parts)
+                self._compiled.append((c, re.compile(_pattern(parsed), flags),
+                                       {name: fmt for kind, name, fmt in parsed if kind == "ph"}))
             except TemplateError as e:
                 self.invalid.append((c, str(e)))
+                continue
+            if "{VERSION" in c.src_file_nm_tmplt.upper():
+                try:
+                    self._any_version.append((c, re.compile(_pattern(_parse(c.src_file_nm_tmplt, c.name_parts, True)), flags)))
+                except TemplateError:
+                    pass
 
     @property
     def configs(self) -> Sequence[FileConfig]:
-        return [c for c, _ in self._compiled]
+        return [c for c, _, _ in self._compiled]
 
     def candidates(self, name: str) -> list[tuple[FileConfig, re.Match]]:
-        return [(c, m) for c, rx in self._compiled if (m := rx.fullmatch(name))]
+        return [(c, m) for c, rx, _ in self._compiled if (m := rx.fullmatch(name))]
+
+    def _wrong_version(self, name: str) -> Optional[MatchError]:
+        near = [(c, m.group("version")) for c, rx in self._any_version if (m := rx.fullmatch(name))]
+        if not near:
+            return None
+        expected = sorted({c.file_vrsn_cd for c, _ in near})
+        return MatchError("FILE_REJECTED_INVALID_TOKEN",
+                          f"{name}: version {near[0][1]!r} in the file name is not the configured version "
+                          f"({', '.join(expected)})", near[0][0] if len(near) == 1 else None)
 
     def match(self, name: str) -> MatchResult:
         found = self.candidates(name)
         if not found:
-            raise MatchError("FILE_REJECTED_UNPARSEABLE", f"{name} matches no active filename template")
+            raise self._wrong_version(name) or MatchError("FILE_REJECTED_UNPARSEABLE",
+                                                          f"{name} matches no active filename template")
         if len(found) > 1:
             ids = [c.cfg_id for c, _ in found]
             raise MatchError("FILE_REJECTED_AMBIGUOUS_TEMPLATE", f"{name} matches several templates (Cfg_ID {ids})")
         cfg, m = found[0]
+        formats = next(f for c, _, f in self._compiled if c is cfg)
+        got = m.groupdict()
         try:
-            start = datetime.strptime(m.group("rptstart"), "%Y%m%d").date()
-            end = datetime.strptime(m.group("rptend"), "%Y%m%d").date()
+            if "rptmonth" in got:
+                start = datetime.strptime(got["rptmonth"], date_format(formats["RPTMONTH"])[0]).date().replace(day=1)
+                end = (start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+            else:
+                start = datetime.strptime(got["rptstart"], date_format(formats["RPTSTART"])[0]).date()
+                end = datetime.strptime(got["rptend"], date_format(formats["RPTEND"])[0]).date()
         except ValueError:
-            raise MatchError("FILE_REJECTED_INVALID_TOKEN", f"{name}: report dates are not valid YYYYMMDD", cfg)
+            used = sorted({formats[n] for n in ("RPTMONTH", "RPTSTART", "RPTEND") if n in formats})
+            raise MatchError("FILE_REJECTED_INVALID_TOKEN", f"{name}: report dates are not valid {' / '.join(used)}", cfg)
         if end < start:
             raise MatchError("FILE_REJECTED_INVALID_TOKEN", f"{name}: report end date is before start date", cfg)
-        try:
-            ts = datetime.strptime(m.group("ts"), "%Y%m%d%H%M%S" if len(m.group("ts")) == 14 else "%Y%m%d%H%M")
-        except ValueError:
-            raise MatchError("FILE_REJECTED_INVALID_TOKEN", f"{name}: {{TS}} is not a valid YYYYMMDDHHMM or YYYYMMDDHHMMSS", cfg)
-        return MatchResult(cfg, m.group("runty"), start, end, ts)
+        ts = None
+        if "ts" in got:
+            fmt = formats["TS"]
+            try:
+                ts = datetime.strptime(got["ts"], date_format(fmt)[0] if fmt else
+                                       "%Y%m%d%H%M%S" if len(got["ts"]) == 14 else "%Y%m%d%H%M")
+            except ValueError:
+                raise MatchError("FILE_REJECTED_INVALID_TOKEN",
+                                 f"{name}: {{TS}} is not a valid {fmt or 'YYYYMMDDHHMM or YYYYMMDDHHMMSS'}", cfg)
+        return MatchResult(cfg, got["runty"], start, end, ts)
 
 
 @dataclass(frozen=True)
@@ -378,7 +500,7 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
     for c in cfgs:
         label = f"file config {c.cfg_id} ({c.project_cd}/{c.table_nm}/{c.src_id})"
         try:
-            compile_template(c.src_file_nm_tmplt, case_sensitive)
+            compile_template(c.src_file_nm_tmplt, case_sensitive, c.name_parts)
         except TemplateError as e:
             add("TEMPLATE", f"{label}: {e}")
         if not c.src_file_ty:
@@ -411,7 +533,7 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
     for c in matcher.configs:
         for rt in sorted({x.run_ty for x in xw_by_source.get((c.project_cd, c.table_nm, c.src_id), ())}) or ["X1"]:
             name = render(c.src_file_nm_tmplt, runty=rt, rpt_start=date(2026, 1, 1), rpt_end=date(2026, 1, 31),
-                          ts=datetime(2026, 2, 1, 9, 30, 0))
+                          ts=datetime(2026, 2, 1, 9, 30, 0), parts=c.name_parts)
             others = [o.cfg_id for o, _ in matcher.candidates(name) if o.cfg_id != c.cfg_id]
             if others:
                 add("TEMPLATE_OVERLAP", f"file config {c.cfg_id}: sample name {name} also matches {others}")

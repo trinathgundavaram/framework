@@ -149,7 +149,7 @@ framework validate-config
    A missed `BATCH_CREATION` run is recreated with `--as-of <missed date>`: the period follows that date; `Btch_ID` carries the actual creation date.
 
 Filename template example (project, table and source as literal text, plus exactly one of each
-placeholder `{RUNTY}`, `{RPTSTART}`, `{RPTEND}`, `{TS}`, separated by literals; the extension is the file type):
+placeholder `{RUNTY}`, `{RPTSTART}`, `{RPTEND}`, `{TS}`, separated by literals; the extension is the file type; the module README lists the other tokens - `{RPTMONTH}`, `{VERSION}`, `{ANY}`, date formats):
 
 ```
 PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt

@@ -220,6 +220,41 @@ A path with its own server uses that server with the NAS Connection's login. `$e
 - There is no S3 in this version: no bucket, key or object-version columns and no AWS file store.
   `FILE_STORE` = `local` (a folder on the worker) exists for development only.
 
+## File names (`Src_File_Nm_Tmplt`)
+
+How a project's files are named is not in the code: each `ComplianceSourceFileConfig` row describes its
+file name in `Src_File_Nm_Tmplt`, as fixed text plus tokens. `FILE_LOAD` and `FILE_CHECK` use the same rule.
+
+| Token | Meaning |
+|---|---|
+| `{RUNTY}` | The run type of the file; must be a run type configured for the table and source. Required, once |
+| `{RPTSTART}`, `{RPTEND}` | The report dates, `YYYYMMDD` unless a format is given. Required, once each |
+| `{RPTMONTH}` | Instead of the two dates: one report month (`YYYYMM`), meaning its first to its last day |
+| `{TS}` | The file's timestamp, 12 or 14 digits (`YYYYMMDDHHMM[SS]`) unless a format is given. Optional |
+| `{VERSION}` | Must equal the row's `File_Vrsn_Cd` (the version code as it is written in file names) |
+| `{PROJECT}`, `{TABLE}`, `{SRC}` | The row's `Project_Cd`, `Table_Nm`, `Src_ID` |
+| `{ANY}` | Any text, ignored (a sequence number, a vendor reference) |
+
+- **Other date formats:** write the format after the token: `{RPTSTART:MMDDYYYY}`, `{RPTEND:YYYY-MM-DD}`,
+  `{RPTMONTH:MMYYYY}`, `{TS:YYYYMMDD}`. Formats are built from `YYYY`, `YY`, `MM`, `DD`, `HH`, `MI`, `SS`
+  and separators such as `-` or `.` (`MM` after `HH` means minutes).
+- Two tokens that are read from the name must have fixed text between them, and the template ends with
+  the file extension, which is the file type.
+- Report dates and the run type are always required; a file is matched to its batch by them.
+- A name that fits a row except for the version is rejected with
+  `version '17' in the file name is not the configured version (19)`.
+
+Examples:
+
+| File name | `Src_File_Nm_Tmplt` | `File_Vrsn_Cd` |
+|---|---|---|
+| `CMSAuth_MedHOK_CD_19_MNT_20181226_20190124_201901171024.txt` | `CMSAuth_MedHOK_CD_{VERSION}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt` | `19` |
+| `CLAIMS_WKL_01052026_01112026.csv` | `CLAIMS_{RUNTY}_{RPTSTART:MMDDYYYY}_{RPTEND:MMDDYYYY}.csv` | |
+| `ENR_MNT_202602_batch-7.txt` | `ENR_{RUNTY}_{RPTMONTH}_{ANY}.txt` | |
+
+`validate-config` reports a template that is not valid (`TEMPLATE`) and two rows whose templates can
+match the same name (`TEMPLATE_OVERLAP`).
+
 ## Optional file check before the load (`FILE_CHECK`)
 
 `FILE_CHECK` looks at the files that are waiting in the inbound NAS folders and reports **every** problem of
@@ -230,7 +265,7 @@ wants to hold the load until the files are clean.
 
 | Check | Finding | What is checked |
 |---|---|---|
-| File name | `FILE_NAME` | Matches exactly one `Src_File_Nm_Tmplt`; report dates and `{TS}` are valid; the file is in that config's inbound folder |
+| File name | `FILE_NAME` | Matches exactly one `Src_File_Nm_Tmplt`; version, report dates and `{TS}` are valid; the file is in that config's inbound folder |
 | Run type | `RUN_TYPE` | `{RUNTY}` is a run type with an effective crosswalk row for the table and source |
 | Batch | `BATCH` | A batch exists for the table, source, run type and report dates, and is open (or has an approved override) |
 | Duplicate | `DUPLICATE` | The same file name was not loaded before (skipped with `load_duplicate = yes`) |
