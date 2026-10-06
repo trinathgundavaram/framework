@@ -1,0 +1,30 @@
+{
+  "td_conn_var": "DEV",
+  "meta_db": "HSABC_dev",
+  "load_env": "DEV",
+  "email_recipient": "compliance-dev@example.com",
+  "owner": "oss",
+  "snow_assignment_group": "D&AE - EDE Govt Compliance",
+  "tags": [
+    "Compliance",
+    "Compliance_Batch_Framework"
+  ],
+  "schedule_timezone": "America/Chicago",
+  "log_level": "INFO",
+  "schedule_interval": null,
+  "wdc_comp_oper_nas_var": "wdc_comp_oper_nas_dev",
+  "project": "CMS_UNIVERSE",
+  "settings": {
+    "BUSINESS_TZ": "America/Chicago",
+    "LOCK_TTL_MINUTES": 240,
+    "FILE_STORE": "nas",
+    "ARCHIVE_FOLDER": "Archive",
+    "ERROR_FOLDER": "Error",
+    "NAS_MIN_AGE_SECONDS": 120,
+    "CHECK_RECORD_TYPES": "",
+    "CHECK_TRAILER_FIELDS": ""
+  },
+  "trigger_dags": [
+    "OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD"
+  ]
+}

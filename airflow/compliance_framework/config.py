@@ -77,6 +77,7 @@ class FileConfig:
     failr_email_notfn_id: Optional[str] = None
     email_subjct_txt: Optional[str] = None
     active: bool = True
+    file_check_txt: Optional[str] = None
 
     @property
     def src_file_ty(self) -> str:
@@ -92,7 +93,8 @@ class FileConfig:
                    r["src_file_has_hdr_ind"] == 1, r["src_file_has_trlr_ind"] == 1, r["allow_zero_rcd_ind"] == 1,
                    name(r["src_file_path"], False),
                    name(r["stg_schema_nm"]), r["stg_table_nm"], name(r["core_schema_nm"]),
-                   r["sucs_email_notfn_id"], r["failr_email_notfn_id"], r["email_subjct_txt"], r["active_ind"] == 1)
+                   r["sucs_email_notfn_id"], r["failr_email_notfn_id"], r["email_subjct_txt"], r["active_ind"] == 1,
+                   _text(r.get("file_check_txt")))
 
 
 @dataclass(frozen=True)
@@ -172,7 +174,7 @@ def rule_bindings(conn, project_cd: str, table_nm: str, src_id: str, run_ty: str
 PLACEHOLDERS = ("RUNTY", "RPTSTART", "RPTEND", "TS")
 _TOKEN = re.compile(r"\{([^{}]*)\}")
 _PATTERNS = {"RUNTY": r"(?P<runty>[A-Za-z0-9]+)", "RPTSTART": r"(?P<rptstart>\d{8})",
-             "RPTEND": r"(?P<rptend>\d{8})", "TS": r"(?P<ts>\d{14})"}
+             "RPTEND": r"(?P<rptend>\d{8})", "TS": r"(?P<ts>\d{12}(?:\d{2})?)"}
 
 
 class TemplateError(ValueError):
@@ -270,9 +272,9 @@ class TemplateMatcher:
         if end < start:
             raise MatchError("FILE_REJECTED_INVALID_TOKEN", f"{name}: report end date is before start date", cfg)
         try:
-            ts = datetime.strptime(m.group("ts"), "%Y%m%d%H%M%S")
+            ts = datetime.strptime(m.group("ts"), "%Y%m%d%H%M%S" if len(m.group("ts")) == 14 else "%Y%m%d%H%M")
         except ValueError:
-            raise MatchError("FILE_REJECTED_INVALID_TOKEN", f"{name}: {{TS}} is not a valid YYYYMMDDHHMMSS", cfg)
+            raise MatchError("FILE_REJECTED_INVALID_TOKEN", f"{name}: {{TS}} is not a valid YYYYMMDDHHMM or YYYYMMDDHHMMSS", cfg)
         return MatchResult(cfg, m.group("runty"), start, end, ts)
 
 
@@ -329,6 +331,14 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             add("RPT_DT_SQL", f"Rpt_Dt_Sql_Txt of {x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty} must be a single "
                               "SELECT statement")
     cfgs = active_file_configs(conn, settings)
+    if settings is not None:
+        from .filecheck import check_options
+
+        for c in cfgs:
+            try:
+                check_options(c, settings)
+            except ConfigError as e:
+                add("FILE_CHECK_CONFIG", str(e))
     seen_cfg: dict[tuple, int] = {}
     for c in cfgs:
         key = (c.project_cd, c.table_nm, c.src_id)

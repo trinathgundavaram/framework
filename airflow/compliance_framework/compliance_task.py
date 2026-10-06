@@ -9,8 +9,8 @@ DEFAULT_CONNECTION_ID = "compliance_teradata"
 TD_CONN_KEY = "td_conn_var"
 NAS_CONN_KEY = "wdc_comp_oper_nas_var"
 DEFAULT_TIMEZONE = "America/Chicago"
-STEPS = ("BATCH_CREATION", "FILE_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY")
-FAIL_ON_PROBLEMS = {"BATCH_CREATION": True, "FILE_LOAD": False, "FILE_RULES": True, "OVERRIDE_DECISIONS": False,
+STEPS = ("BATCH_CREATION", "FILE_CHECK", "FILE_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY")
+FAIL_ON_PROBLEMS = {"BATCH_CREATION": True, "FILE_CHECK": True, "FILE_LOAD": False, "FILE_RULES": True, "OVERRIDE_DECISIONS": False,
                     "BATCH_CLOSE": True, "NOTIFY": True}
 SCOPE_KEYS = ("project", "run_type", "period", "table", "period_file", "lookback_days", "lookback_weeks",
               "share", "file", "folder")
@@ -130,7 +130,7 @@ def run_compliance_step(step: str, variable_key: str, overrides: dict = None, sc
     """Run one framework step; raises RuntimeError when it fails, returns its outcome otherwise."""
     step = step.strip().upper()
     config, settings = resolve_config(variable_key, overrides, scope_index)
-    if step == "FILE_LOAD" and str(settings.get("FILE_STORE") or "nas").lower() == "nas" and not config.get(NAS_CONN_KEY):
+    if step in ("FILE_LOAD", "FILE_CHECK") and str(settings.get("FILE_STORE") or "nas").lower() == "nas" and not config.get(NAS_CONN_KEY):
         raise ValueError(f"'{NAS_CONN_KEY}' (the Airflow Connection of the NAS file server) is required in "
                          f"Airflow Variable '{variable_key}'")
     _connect_environment(config, connection_id)

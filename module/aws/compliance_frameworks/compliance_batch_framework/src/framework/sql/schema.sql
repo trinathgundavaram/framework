@@ -75,6 +75,7 @@ CREATE TABLE ComplianceSourceFileConfig (
   Sucs_Email_Notfn_Id    TEXT,
   Failr_Email_Notfn_Id   TEXT,
   Email_Subjct_Txt       VARCHAR(200),
+  File_Check_Txt         TEXT,
   Active_Ind             SMALLINT     NOT NULL DEFAULT 1,
   Created_Dtts           TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Created_By             VARCHAR(100) NOT NULL DEFAULT current_user,

@@ -45,6 +45,9 @@ class Settings:
     empty_as_null: bool = True
     trailer_count_check: bool = False
     trailer_count_regex: str = r"(\d+)"
+    check_content: bool = True
+    check_record_types: str = ""
+    check_trailer_fields: str = ""
     xlsx_sheet: str = "0"
     xlsx_header_row: int = 0
 

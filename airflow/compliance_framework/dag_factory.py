@@ -14,11 +14,12 @@ from .compliance_task import (DEFAULT_TIMEZONE, STEPS, load_dag_config, run_comp
 
 logger = logging.getLogger(__name__)
 
-STEP_TIMEOUT = {"BATCH_CREATION": timedelta(hours=1), "FILE_LOAD": timedelta(hours=2), "FILE_RULES": timedelta(hours=2),
+STEP_TIMEOUT = {"BATCH_CREATION": timedelta(hours=1), "FILE_CHECK": timedelta(hours=1), "FILE_LOAD": timedelta(hours=2), "FILE_RULES": timedelta(hours=2),
                 "OVERRIDE_DECISIONS": timedelta(minutes=30), "BATCH_CLOSE": timedelta(minutes=30),
                 "NOTIFY": timedelta(minutes=30)}
 STEP_PARAMS = {
     "BATCH_CREATION": ("project", "run_type", "period", "table", "lookback_days", "lookback_weeks", "as_of"),
+    "FILE_CHECK": ("project", "load_duplicate", "as_of"),
     "FILE_LOAD": ("project", "load_duplicate", "as_of"),
     "FILE_RULES": ("project", "as_of"),
     "OVERRIDE_DECISIONS": ("project", "as_of"),

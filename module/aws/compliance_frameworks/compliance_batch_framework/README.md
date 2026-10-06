@@ -38,6 +38,7 @@ every resource carries the `required_common_tags` of `common.tfvars` plus `Envir
 | Step | Framework module | Default Glue size / timeout | A "completed with problems" result… |
 |---|---|---|---|
 | `BATCH_CREATION` | the scheduled batches due today (`Batch_Schedule_Sql_Txt` of the run type, dates from the crosswalk's `Rpt_Dt_Sql_Txt`), and the project's ad-hoc intake requests | 0.0625 DPU / 60 min | stops the workflow (configuration problem) |
+| `FILE_CHECK` (optional, in no default schedule) | read-only check of the files waiting in the project's inbound folders | 1 DPU / 60 min | stops the workflow: a waiting file has a problem |
 | `FILE_LOAD` | every file waiting in the project's inbound folders | 1 DPU / 120 min | continues: a bad file is audited, retried next sweep and emailed once |
 | `FILE_RULES` | the rules of every loaded file that has not had them yet (separate execution, after the load) | 0.0625 DPU / 120 min | a failed rule is audited and emailed; stops only when the rules engine cannot run |
 | `OVERRIDE_DECISIONS` | apply / expire approved REUSE overrides | 0.0625 DPU / 30 min | continues: an invalid override is audited and emailed once |
@@ -125,6 +126,62 @@ Every file leaves the inbound folder once it has been processed, into a subfolde
   the two subfolders are never picked up again.
 - The folder names are the `ARCHIVE_FOLDER` and `ERROR_FOLDER` settings (defaults `Archive`, `Error`).
 - The reason for a rejection is in `ComplianceFileLoad.Quarantine_Rsn_Cd` / `Error_Txt` and in the email.
+
+## Optional file check before the load (`FILE_CHECK`)
+
+`FILE_CHECK` looks at the files that are waiting in the inbound S3 locations and reports **every** problem of
+each file in one pass, before anything is loaded. It reads each file where it is: no table is loaded, no
+file is moved, no load is registered and no batch changes. `FILE_LOAD` does not depend on it and makes
+its own checks; a project uses `FILE_CHECK` only when it wants the full list of problems up front, or
+wants to hold the load until the files are clean.
+
+| Check | Finding | What is checked |
+|---|---|---|
+| File name | `FILE_NAME` | Matches exactly one `Src_File_Nm_Tmplt`; report dates and `{TS}` are valid; the file is in that config's inbound folder |
+| Run type | `RUN_TYPE` | `{RUNTY}` is a run type with an effective crosswalk row for the table and source |
+| Batch | `BATCH` | A batch exists for the table, source, run type and report dates, and is open (or has an approved override) |
+| Duplicate | `DUPLICATE` | The same file name was not loaded before (skipped with `load_duplicate = yes`) |
+| Encoding | `ENCODING` | The file is valid `FILE_ENCODING`; the first bad line is named |
+| Structure | `MALFORMED`, `BLANK_LINE` | Quoting is well formed; no blank lines inside the file (blank lines at the end are ignored) |
+| Header | `HEADER` | Present when `Src_File_Has_Hdr_Ind = 1`; same number of columns as the staging table; the names, when `header` is configured |
+| Record types | `RECORD_TYPE` | With `record_types` (for example `H,D,T`): the first field of the header, of every data row and of the trailer |
+| Columns | `COLUMN_COUNT` | Every data row has as many fields as the staging table has business columns; the first lines are named |
+| Trailer | `TRAILER` | Present when `Src_File_Has_Trlr_Ind = 1`; with `trailer_fields`: field count, file name, row count, timestamp |
+| Rows | `ZERO_RECORDS` | At least one data row, unless `Allow_Zero_Rcd_Ind = 1` |
+| Setup | `CONFIG` | The staging table exists and `File_Check_Txt` is valid |
+
+**Options per file** are optional JSON in `ComplianceSourceFileConfig.File_Check_Txt`; a key that is left
+out takes the run's setting, and `""` switches that check off for the file:
+
+```json
+{"record_types": "H,D,T",
+ "trailer_fields": "RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP",
+ "header": "H|Member Id|Paid Amount|Member Name"}
+```
+
+| Key | Setting for every file of the run | Meaning |
+|---|---|---|
+| `record_types` | `CHECK_RECORD_TYPES` | Three codes: header, detail, trailer. The first field of each line must be the code of its position |
+| `trailer_fields` | `CHECK_TRAILER_FIELDS` | What each trailer field holds, in order: `RECORD_TYPE`, `FILE_NAME` (must equal the file's name), `DATA_ROW_COUNT` (data rows) or `TOTAL_ROW_COUNT` (every line, header and trailer included), `TIMESTAMP` (`YYYYMMDD`, `YYYYMMDDHHMM` or `YYYYMMDDHHMMSS`), `SKIP` |
+| `header` | — | The expected header line (with the file's delimiter, or comma separated). Names are compared in order, ignoring upper / lower case and surrounding spaces |
+
+Without `trailer_fields`, `TRAILER_COUNT_CHECK` / `TRAILER_COUNT_REGEX` apply as in the load.
+`CHECK_CONTENT = false` checks names and batches only and does not open the files. `validate-config`
+reports a `File_Check_Txt` that is not valid (`FILE_CHECK_CONFIG`).
+
+**Result.** The step's outcome lists every file with `result` (`PASSED` / `FAILED`), its `findings`, and
+what the name resolved to: `config` (project / table / source), `run_type`, `version`, `rpt_start`,
+`rpt_end`, `batch` and `req_id`. `notes` holds remarks that are not failures, such as a batch that already
+has data and would be replaced by the file. The step ends with exit code 1 when a file failed or a folder
+could not be read. Each file also gets one row in the framework's audit table,
+`CMS_ComplianceExceptionsAudit`: `FILE_CHECK_FAILED` (with the findings; emailed by `NOTIFY` to the
+file config's failure recipients) or `FILE_CHECK_PASSED`. A run that finds the same result for the same
+file again adds no new row.
+
+- **Glue:** `FILE_CHECK` is a step of the workflow like the others (`step_settings`), in no schedule by
+  default. A project that wants it puts it in front of `FILE_LOAD` in its schedule's `steps`
+  (`["FILE_CHECK", "FILE_LOAD", ...]`): the workflow stops when the check fails, unless
+  `step_settings.FILE_CHECK.fail_on_problems` is `false`. One run by hand: `src/run_workflow.sh dev ODR FILE_CHECK`.
 
 ## File rules run after the load
 

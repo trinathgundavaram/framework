@@ -1,6 +1,6 @@
 # CMS Compliance Framework: Module Reference
 
-What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.8 (design v5).
+What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.9 (design v5).
 
 - **Design:** [`design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md). `D-nn` = decision, `Q-nn` = open question, `§n` = design section.
 - **Setup, configuration, commands:** [`framework-package.md`](framework-package.md).
@@ -127,6 +127,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 - The dispatcher behind `framework run --module NAME`: `MODULES` (name → `ModuleSpec` with required/optional `Param`s and a handler), `resolve_module` (case-insensitive, `-`/`_` interchangeable - no other name variants), `run_module(app, name, params)` → `ModuleOutcome(module, result, exit_code)`, `describe_modules`.
 - Validates before anything runs: unknown module, missing required parameter, parameter the module does not take, wrong type (`ConfigError`, exit 2). Handlers only map a name to the service that owns the work (`batches`, `ingest`) - no SQL, no business rules; a new module is one handler plus one `MODULES` entry.
 - `BATCH_CREATION` (the merged module, `BatchCreationSummary(scheduled, adhoc)`) → `App.create_batches` for the project's SCHEDULED run types (`scheduled`; `None` only when `--run-type` names an ADHOC run type), and always `IntakeProcessor.run(project_cd=..., run_ty=...)` for that project (`adhoc`) - one call covers both scheduled and ad-hoc batch creation for a project, so a project needs only one trigger. `FILE_LOAD` → `process_file` (`--key`) or `process_path` (`--prefix`, or every configured location).
+- `FILE_CHECK` → `filecheck.FileChecker.run(project_cd)`: the optional, read-only check of the files waiting in the inbound locations (name, run type, batch, duplicate, encoding, header, record types, column counts, trailer). It uses the load's own template matcher and batch selection, downloads each file to a temporary folder and parses it once; it writes only `FILE_CHECK_PASSED` / `FILE_CHECK_FAILED` audit rows.
 - `FILE_RULES` → `rules.RulesRunner.run(project_cd)`: the bound rules of every promoted load with `Rules_Stat` `NOT_RUN` / `ERROR`, under the batch lock; it records `Rules_Stat` and events and never touches the load.
 - `FILE_LOAD --project` → `process_path(project_cd=...)`; `OVERRIDE_DECISIONS` → `DecisionProcessor.run(project)`; `BATCH_CLOSE` → `BatchCloser.run(project, table, run type)` (exit 0: waiting / deferred batches are normal); `NOTIFY` → `NotificationDispatcher.run(project_cd=...)` (exit 1 when an email failed; the event is retried next run). These are the Step Functions steps of the AWS deployment; the matching CLI commands keep working.
 

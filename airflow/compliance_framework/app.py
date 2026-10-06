@@ -11,6 +11,7 @@ from .batches import IntakeProcessor, ScheduleSummary, create_batches
 from .closing import BatchCloser
 from .common import Clock, ConfigError
 from .db import Connection, held_locks, schema_exists
+from .filecheck import FileChecker
 from .ingest import IngestPipeline
 from .modules import ModuleOutcome, run_module
 from .overrides import DecisionProcessor
@@ -55,6 +56,10 @@ class App:
     @cached_property
     def pipeline(self) -> IngestPipeline:
         return IngestPipeline(self.conn, self.clock, self.settings, self.store)
+
+    @cached_property
+    def file_checker(self) -> FileChecker:
+        return FileChecker(self.conn, self.clock, self.settings, self.store, self.pipeline)
 
     @cached_property
     def rules_runner(self) -> RulesRunner:

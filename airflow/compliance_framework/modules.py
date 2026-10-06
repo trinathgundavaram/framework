@@ -93,6 +93,12 @@ def _file_load(app, p: dict) -> ModuleOutcome:
     return ModuleOutcome("FILE_LOAD", s, 1 if s.errors else 0)
 
 
+def _file_check(app, p: dict) -> ModuleOutcome:
+    """Read-only: exit 1 when a waiting file has a problem or a folder could not be read."""
+    s = app.file_checker.run(p.get("project"))
+    return ModuleOutcome("FILE_CHECK", s, 1 if s.failed or s.errors else 0)
+
+
 def _file_rules(app, p: dict) -> ModuleOutcome:
     """A file that fails its rules is audited and emailed (exit 0); exit 1 = the rules engine could not run."""
     s = app.rules_runner.run(p.get("project"))
@@ -132,6 +138,11 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
                      "one project's configured folders (--project) or every configured folder (no arguments)",
         required=(), optional=(Param("share"), Param("file"), Param("folder"), Param("project")),
         handler=_file_load),
+    ModuleSpec(
+        "FILE_CHECK", "optional check of the files waiting in the inbound folders, before FILE_LOAD: name, batch, "
+                      "header, trailer, record types and column counts. It loads nothing, moves no file and changes "
+                      "no batch; one project (--project) or every project",
+        required=(), optional=(Param("project"),), handler=_file_check),
     ModuleSpec(
         "FILE_RULES", "run the bound rules on the files already loaded to core that have not had them yet; "
                       "one project (--project) or every project. It never blocks or undoes a load",

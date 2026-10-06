@@ -40,6 +40,7 @@ airflow/
    | Step | DAG id | Variable |
    |---|---|---|
    | `BATCH_CREATION` | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CREATION` | `compliance_batch_creation_config_var` |
+   | `FILE_CHECK` (optional) | `OSSTD_CORE_CMS_COMPLIANCE_FILE_CHECK` | `compliance_file_check_config_var` |
    | `FILE_LOAD` | `OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD` | `compliance_file_load_config_var` |
    | `FILE_RULES` | `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` | `compliance_file_rules_config_var` |
    | `OVERRIDE_DECISIONS` | `OSSTD_CORE_CMS_COMPLIANCE_OVERRIDE_DECISIONS` | `compliance_override_decisions_config_var` |
@@ -146,6 +147,7 @@ Keys by step:
 | Step | Scope keys | Settings worth setting |
 |---|---|---|
 | `BATCH_CREATION` | `project` (required). When batches are due and their report dates come from the metadata (`Batch_Schedule_Sql_Txt`, `Rpt_Dt_Sql_Txt`; below). Optional for one run: `run_type`, `table`, `period`, `lookback_days`, `lookback_weeks` | — |
+| `FILE_CHECK` | `project` (leave out for every project), `load_duplicate`, the NAS connection as for `FILE_LOAD` | `CHECK_RECORD_TYPES`, `CHECK_TRAILER_FIELDS`, `CHECK_CONTENT` and the file settings of `FILE_LOAD` |
 | `FILE_LOAD` | `project` (leave out for every project), `load_duplicate` (`yes` / `no`, default `no`) | `FILE_STORE` (`nas`), `ARCHIVE_FOLDER`, `ERROR_FOLDER`, `NAS_MIN_AGE_SECONDS` |
 | `FILE_RULES` | `project`; `gre` (the GRE's own Airflow Variable, as it is: `connection_type`, `connection_id`, `environment`, `meta_db`, `meta_connection`, `project_name`, `run_params`, `text_params`, `extra_filters`, `log_level`, `max_parallel_rules`; plus `package_dir`, the folder holding the GRE's `run_rules.py`, default `<dags>/rules_engine`) | `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `FILE_RULES_MODE` |
 | `OVERRIDE_DECISIONS` | `project` | — |
@@ -217,6 +219,65 @@ A path with its own server uses that server with the NAS Connection's login. `$e
   rows show the file as `//server/share/path`.
 - There is no S3 in this version: no bucket, key or object-version columns and no AWS file store.
   `FILE_STORE` = `local` (a folder on the worker) exists for development only.
+
+## Optional file check before the load (`FILE_CHECK`)
+
+`FILE_CHECK` looks at the files that are waiting in the inbound NAS folders and reports **every** problem of
+each file in one pass, before anything is loaded. It reads each file where it is: no table is loaded, no
+file is moved, no load is registered and no batch changes. `FILE_LOAD` does not depend on it and makes
+its own checks; a project uses `FILE_CHECK` only when it wants the full list of problems up front, or
+wants to hold the load until the files are clean.
+
+| Check | Finding | What is checked |
+|---|---|---|
+| File name | `FILE_NAME` | Matches exactly one `Src_File_Nm_Tmplt`; report dates and `{TS}` are valid; the file is in that config's inbound folder |
+| Run type | `RUN_TYPE` | `{RUNTY}` is a run type with an effective crosswalk row for the table and source |
+| Batch | `BATCH` | A batch exists for the table, source, run type and report dates, and is open (or has an approved override) |
+| Duplicate | `DUPLICATE` | The same file name was not loaded before (skipped with `load_duplicate = yes`) |
+| Encoding | `ENCODING` | The file is valid `FILE_ENCODING`; the first bad line is named |
+| Structure | `MALFORMED`, `BLANK_LINE` | Quoting is well formed; no blank lines inside the file (blank lines at the end are ignored) |
+| Header | `HEADER` | Present when `Src_File_Has_Hdr_Ind = 1`; same number of columns as the staging table; the names, when `header` is configured |
+| Record types | `RECORD_TYPE` | With `record_types` (for example `H,D,T`): the first field of the header, of every data row and of the trailer |
+| Columns | `COLUMN_COUNT` | Every data row has as many fields as the staging table has business columns; the first lines are named |
+| Trailer | `TRAILER` | Present when `Src_File_Has_Trlr_Ind = 1`; with `trailer_fields`: field count, file name, row count, timestamp |
+| Rows | `ZERO_RECORDS` | At least one data row, unless `Allow_Zero_Rcd_Ind = 1` |
+| Setup | `CONFIG` | The staging table exists and `File_Check_Txt` is valid |
+
+**Options per file** are optional JSON in `ComplianceSourceFileConfig.File_Check_Txt`; a key that is left
+out takes the run's setting, and `""` switches that check off for the file:
+
+```json
+{"record_types": "H,D,T",
+ "trailer_fields": "RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP",
+ "header": "H|Member Id|Paid Amount|Member Name"}
+```
+
+| Key | Setting for every file of the run | Meaning |
+|---|---|---|
+| `record_types` | `CHECK_RECORD_TYPES` | Three codes: header, detail, trailer. The first field of each line must be the code of its position |
+| `trailer_fields` | `CHECK_TRAILER_FIELDS` | What each trailer field holds, in order: `RECORD_TYPE`, `FILE_NAME` (must equal the file's name), `DATA_ROW_COUNT` (data rows) or `TOTAL_ROW_COUNT` (every line, header and trailer included), `TIMESTAMP` (`YYYYMMDD`, `YYYYMMDDHHMM` or `YYYYMMDDHHMMSS`), `SKIP` |
+| `header` | — | The expected header line (with the file's delimiter, or comma separated). Names are compared in order, ignoring upper / lower case and surrounding spaces |
+
+Without `trailer_fields`, `TRAILER_COUNT_CHECK` / `TRAILER_COUNT_REGEX` apply as in the load.
+`CHECK_CONTENT = false` checks names and batches only and does not open the files. `validate-config`
+reports a `File_Check_Txt` that is not valid (`FILE_CHECK_CONFIG`).
+
+**Result.** The step's outcome lists every file with `result` (`PASSED` / `FAILED`), its `findings`, and
+what the name resolved to: `config` (project / table / source), `run_type`, `version`, `rpt_start`,
+`rpt_end`, `batch` and `req_id`. `notes` holds remarks that are not failures, such as a batch that already
+has data and would be replaced by the file. The step ends with exit code 1 when a file failed or a folder
+could not be read. Each file also gets one row in the framework's audit table,
+`CMS_ComplianceExceptionsAudit`: `FILE_CHECK_FAILED` (with the findings; emailed by `NOTIFY` to the
+file config's failure recipients) or `FILE_CHECK_PASSED`. A run that finds the same result for the same
+file again adds no new row.
+
+- **Airflow:** its own DAG, `OSSTD_CORE_CMS_COMPLIANCE_FILE_CHECK`, with its own Variable
+  `compliance_file_check_config_var` (the same keys as the file load Variable). It is unscheduled in the
+  examples. A project that wants the check gives it the schedule and lists
+  `OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD` in its `trigger_dags`, so the load starts only when the check
+  succeeded; `"fail_on_problems": false` in the Variable starts the load anyway and keeps the check as a
+  report. A project that does not want it leaves the DAG unscheduled and schedules the file load DAG.
+  One run by hand: trigger the DAG, or `OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE` with `{"module": "FILE_CHECK", "project": "..."}`.
 
 ## File rules run after the load
 

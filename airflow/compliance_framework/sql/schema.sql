@@ -72,6 +72,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceFileConfig (
   Sucs_Email_Notfn_Id    VARCHAR(2000),
   Failr_Email_Notfn_Id   VARCHAR(2000),
   Email_Subjct_Txt       VARCHAR(200),
+  File_Check_Txt         VARCHAR(8000),
   Active_Ind             SMALLINT     DEFAULT 1 NOT NULL,
   Created_Dtts           TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Created_By             VARCHAR(100) DEFAULT USER NOT NULL,

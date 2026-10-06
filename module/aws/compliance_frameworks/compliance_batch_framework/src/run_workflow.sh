@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: $0 <env> <PROJECT|all_projects> STEP[,STEP...] [--run-type R] [--period P] [--table T] [--as-of D] [--metadata-schema S] [--metadata-db DB] [--load-duplicate yes|no] [--dry-run]" >&2
-  echo "steps: BATCH_CREATION FILE_LOAD FILE_RULES OVERRIDE_DECISIONS BATCH_CLOSE NOTIFY" >&2
+  echo "steps: BATCH_CREATION FILE_CHECK FILE_LOAD FILE_RULES OVERRIDE_DECISIONS BATCH_CLOSE NOTIFY" >&2
   exit 2
 }
 [[ $# -ge 3 ]] || usage
