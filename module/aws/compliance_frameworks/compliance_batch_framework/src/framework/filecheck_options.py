@@ -1,13 +1,14 @@
 """Which content checks a file gets (ComplianceFileCheckConfig); read by FILE_CHECK and by the load."""
 from __future__ import annotations
 
+import codecs
 from dataclasses import dataclass
 from typing import Optional
 
 from .common import ConfigError
 
 TRAILER_FIELDS = ("RECORD_TYPE", "FILE_NAME", "DATA_ROW_COUNT", "TOTAL_ROW_COUNT", "TIMESTAMP", "SKIP")
-CHECKS = ("RECORD_TYPE", "HEADER_NAMES", "TRAILER")
+CHECKS = ("RECORD_TYPE", "HEADER_NAMES", "TRAILER", "CHARACTER_SET")
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,7 @@ class CheckOptions:
     record_types: Optional[tuple[str, str, str]] = None
     trailer_fields: tuple[str, ...] = ()
     header: Optional[str] = None
+    charset: Optional[str] = None
 
 
 def _names(value) -> list[str]:
@@ -54,4 +56,11 @@ def check_options(cfg, checks) -> CheckOptions:
         raise ConfigError(f"{values['TRAILER'].label}: Check_Val_Txt has unknown value {bad[0]!r}; "
                           f"accepted: {', '.join(TRAILER_FIELDS)}")
     header = values["HEADER_NAMES"].check_val_txt.strip() if "HEADER_NAMES" in values else None
-    return CheckOptions(tuple(types) if types else None, fields, header)
+    charset = values["CHARACTER_SET"].check_val_txt.strip() if "CHARACTER_SET" in values else None
+    if charset:
+        try:
+            codecs.lookup(charset)
+        except LookupError:
+            raise ConfigError(f"{values['CHARACTER_SET'].label}: Check_Val_Txt {charset!r} is not a character set "
+                              "(for example latin-1, ascii, cp1252)") from None
+    return CheckOptions(tuple(types) if types else None, fields, header, charset)

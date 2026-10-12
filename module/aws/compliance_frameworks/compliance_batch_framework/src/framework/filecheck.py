@@ -20,7 +20,7 @@ from .common import Clock, ConfigError, FileRejected, code
 from .config import FileConfig, MatchError
 from .filecheck_options import CheckOptions, check_options
 from .load import (DELIMITED_FILE_TYPES, _file_lines, _lf_lines, _undecodable_line, delimiter_for, file_layout,
-                   read_file)
+                   raw_line, read_file)
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: int, set
 
     def note(check: str, line_no: Optional[int], message: str, rec: Optional[list] = None) -> None:
         if len(details) < MAX_DETAILS:
-            details.append((check, line_no, message, None if rec is None else delim.join(rec)))
+            details.append((check, line_no, message, rec if rec is None or isinstance(rec, str) else delim.join(rec)))
     if cfg.src_file_ty not in DELIMITED_FILE_TYPES or cfg.src_file_ty not in settings.supported_file_types:
         try:
             rows = sum(1 for _ in read_file(path, cfg, expected_cols, settings))
@@ -98,7 +98,15 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: int, set
         return out
 
     header_code, detail_code, trailer_code = opts.record_types or (None, None, None)
-    blank, wrong_type, wrong_cols = _Lines(), _Lines(), _Lines()
+    blank, wrong_type, wrong_cols, wrong_chars = _Lines(), _Lines(), _Lines(), _Lines()
+
+    def characters(line_no: int, rec: list[str]) -> None:
+        try:
+            delim.join(rec).encode(opts.charset)
+        except UnicodeEncodeError as e:
+            ch = e.object[e.start]
+            wrong_chars.add(line_no, repr(ch))
+            note("CHARACTER_SET", line_no, f"character {ch!r} (U+{ord(ch):04X}) is not in {opts.charset}", rec)
     counts = {"content": 0, "data": 0}
 
     def detail(line_no: int, rec: list[str]) -> None:
@@ -124,6 +132,8 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: int, set
                 note("BLANK_LINE", line_no, "blank line inside the file")
             pending_blank = []
             counts["content"] += 1
+            if opts.charset:
+                characters(reader.line_num, rec)
             if counts["content"] == 1 and cfg.has_header:
                 header = (reader.line_num, rec)
                 continue
@@ -132,6 +142,7 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: int, set
             held = (reader.line_num, rec)
     except UnicodeDecodeError as e:
         line = _undecodable_line(path, settings.file_encoding)
+        note("ENCODING", line, f"not valid {settings.file_encoding}: {e.reason}", raw_line(path, line, settings.file_encoding) or "")
         return [("ENCODING", f"file is not valid {settings.file_encoding}{f' at line {line}' if line else ''}: {e.reason}")]
     except csv.Error as e:
         return [("MALFORMED", f"line {reader.line_num}: {e}")]
@@ -163,6 +174,9 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: int, set
     if wrong_type.count:
         out.append(("RECORD_TYPE", f"{wrong_type.count} row(s) whose record type is not {detail_code!r}: "
                                    f"{wrong_type.text()}"))
+    if wrong_chars.count:
+        out.append(("CHARACTER_SET", f"{wrong_chars.count} row(s) with a character that is not in {opts.charset}: "
+                                     f"{wrong_chars.text()}"))
     if wrong_cols.count:
         out.append(("COLUMN_COUNT", f"{wrong_cols.count} row(s) without {expected_cols} columns: {wrong_cols.text()}"))
     if cfg.has_trailer and trailer is None:
@@ -329,7 +343,7 @@ class FileChecker:
     def _after_failure(self, info, name: str, result: dict, findings: list, details: list) -> None:
         """Write <folder>/Error/<file name>.errors.txt (one line per problem, with the record) and move the file."""
         error_folder = self.settings.error_folder
-        if self.settings.check_error_file:
+        if self.settings.write_error_file:
             covered = {d[0] for d in details}
             rows = [(c, None, text, None) for c, text in findings if c not in covered] + details
             lines = ["File_Name|Check_Cd|Line_No|Message|Record"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -22,7 +23,7 @@ from .common import (COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected
 from .config import FileConfig, MatchError, TemplateMatcher
 from .filecheck_options import check_options
 from .layout import LoadContext
-from .load import file_layout, sanitize_db_error, stage, swap
+from .load import file_layout, raw_line, sanitize_db_error, stage, swap
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -389,7 +390,7 @@ class IngestPipeline:
                 staged_rows = stage(self.conn, self.settings, file_path=path, cfg=cfg, layout=layout, ctx=ctx,
                                     drop_first=drop_first, spark=self.spark)
             except FileRejected as e:
-                return self._quarantine(load_id, info, e.event_ty, str(e), cfg, batch)
+                return self._quarantine(load_id, info, e.event_ty, str(e), cfg, batch, local_path=path)
         with self.conn.transaction():
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, Updated_Dtts=%s "
                               "WHERE Load_ID=%s", (staged_rows, self.clock.now(), load_id))
@@ -495,7 +496,11 @@ class IngestPipeline:
             (rules_stat, detail, now, load_id))
 
     def _quarantine(self, load_id: int, info: ObjectInfo, event_ty: str, message: str,
-                    cfg: Optional[FileConfig] = None, batch: Optional[dict] = None) -> IngestOutcome:
+                    cfg: Optional[FileConfig] = None, batch: Optional[dict] = None,
+                    local_path: Optional[str] = None) -> IngestOutcome:
+        error_file = self._error_file(info, event_ty, message, local_path)
+        if error_file:
+            message = f"{message}; details in {error_file}"
         with self.conn.transaction():
             self.conn.execute(
                 """UPDATE ComplianceFileLoad SET Load_Stat='QUARANTINED', Quarantine_Rsn_Cd=%s, Error_Txt=%s,
@@ -511,6 +516,24 @@ class IngestPipeline:
         self._archive(info, load_id, rejected=True)
         return IngestOutcome(load_id, "QUARANTINED", event_ty=event_ty, message=message,
                              req_id=batch["req_id"] if batch else None)
+
+    def _error_file(self, info: ObjectInfo, event_ty: str, message: str, local_path: Optional[str]) -> Optional[str]:
+        """Write <folder>/Error/<file name>.errors.txt for a rejected file: the reason, the line and the record."""
+        if not self.settings.write_error_file:
+            return None
+        name = basename(info.key)
+        found = re.search(r"\bline (\d+)\b", message)
+        line_no = int(found.group(1)) if found else None
+        record = raw_line(local_path, line_no, self.settings.file_encoding) if local_path else None
+        target = f"{dirname(info.key)}{self.settings.error_folder}/{name}.errors.txt"
+        row = "|".join("" if v is None else str(v) for v in (name, event_ty, line_no, message, record))
+        try:
+            self.store.put(info.bucket, target, ("File_Name|Check_Cd|Line_No|Message|Record\n" + row + "\n").encode(
+                self.settings.file_encoding, "replace"))
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not write the error file of %s: %s", name, e)
+            return None
+        return self.store.uri(info.bucket, target)
 
     def _archive(self, info: ObjectInfo, load_id: int, rejected: bool = False) -> None:
         """A loaded file moves to <its folder>/Archive/, one that was not loaded to <its folder>/Error/."""

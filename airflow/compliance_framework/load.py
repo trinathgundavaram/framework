@@ -111,6 +111,17 @@ def _undecodable_line(path: str, encoding: str) -> Optional[int]:
                 return None
 
 
+def raw_line(path: str, line_no: Optional[int], encoding: str) -> Optional[str]:
+    """Line `line_no` (1-based) of a file as text; bytes that are not valid in `encoding` show as U+FFFD."""
+    if not line_no:
+        return None
+    with open(path, "rb") as f:
+        for n, line in enumerate(f, 1):
+            if n == line_no:
+                return line.rstrip(b"\r\n").decode(encoding, "replace")
+    return None
+
+
 def _not_decodable(path: str, encoding: str, e: UnicodeDecodeError) -> FileRejected:
     line = _undecodable_line(path, encoding)
     where = f" at line {line}" if line else ""

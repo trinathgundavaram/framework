@@ -194,7 +194,7 @@ wants to hold the load until the files are clean.
 |---|---|
 | `Project_Cd` | The project of the files |
 | `Table_Nm`, `Src_ID` | The file the row applies to; `*` = every table / every source of the project |
-| `Check_Cd` | `RECORD_TYPE`, `HEADER_NAMES` or `TRAILER` |
+| `Check_Cd` | `RECORD_TYPE`, `HEADER_NAMES`, `TRAILER` or `CHARACTER_SET` |
 | `Check_Val_Txt` | The value of the check (below) |
 | `Active_Ind` | 1 = the check is on, 0 = it is switched off for the files the row covers |
 
@@ -203,6 +203,7 @@ wants to hold the load until the files are clean.
 | `RECORD_TYPE` | `H,D,T` | Three codes: header, detail, trailer. The first field of each line must be the code of its position. Without this check the first line is the header and the last line the trailer by position (`Src_File_Has_Hdr_Ind`, `Src_File_Has_Trlr_Ind`) |
 | `HEADER_NAMES` | `Member Id\|Paid Amount\|Member Name` | The expected header line (with the file's delimiter, or comma separated). Names are compared in order, ignoring upper / lower case and surrounding spaces. Without this check only the number of header columns is compared with the staging table |
 | `TRAILER` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | What each trailer field holds, in order: `RECORD_TYPE`, `FILE_NAME` (must equal the file's name), `DATA_ROW_COUNT` (data rows) or `TOTAL_ROW_COUNT` (every line, header and trailer included), `TIMESTAMP` (`YYYYMMDD`, `YYYYMMDDHHMM` or `YYYYMMDDHHMMSS`), `SKIP` |
+| `CHARACTER_SET` | `latin-1` | Every line must only contain characters of that character set (`latin-1`, `ascii`, `cp1252`, ...). Use it when the target columns cannot hold every character: each offending line is reported with the character and the record |
 
 - **The most specific row wins** for each check: the file's table and source, then its table, then `*`.
   A `*` row is the project's default; a row for one table or source overrides it.
@@ -225,11 +226,15 @@ Without a `TRAILER` row, `TRAILER_COUNT_CHECK` / `TRAILER_COUNT_REGEX` apply as 
 reports a row that is not valid (`FILE_CHECK_CONFIG`) and a row that matches no file (`FILE_CHECK_NO_FILE`).
 
 **Error file and failed files.** For every file that fails, `FILE_CHECK` writes
-`<inbound folder>/Error/<file name>.errors.txt` (setting `CHECK_ERROR_FILE`, on by default): pipe-delimited,
+`<inbound folder>/Error/<file name>.errors.txt` (setting `WRITE_ERROR_FILE`, on by default): pipe-delimited,
 one line per problem, with the check, the line number, the message and **the record itself**
 (`File_Name|Check_Cd|Line_No|Message|Record`). With `CHECK_MOVE_FAILED = true` the failed file is also moved
 to `Error/`, so the files that passed can be loaded. The audit row and the email only carry the number of
 problems, the first one and the path of the error file.
+
+`FILE_LOAD` writes the same file when it rejects a file, for example for bytes that are not valid in
+`FILE_ENCODING` or a value the database refuses (a character the column cannot hold, a value that is too
+long, a bad number or date): one line with the reason, the line number and the record.
 
 **Result.** The step's outcome lists every file with `result` (`PASSED` / `FAILED`), its `findings`, and
 what the name resolved to: `config` (project / table / source), `run_type`, `version`, `rpt_start`,

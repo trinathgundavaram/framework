@@ -46,7 +46,7 @@ class Settings:
     trailer_count_check: bool = False
     trailer_count_regex: str = r"(\d+)"
     check_content: bool = True
-    check_error_file: bool = True
+    write_error_file: bool = True
     check_move_failed: bool = False
     archive_by_year: bool = False
     xlsx_sheet: str = "0"
