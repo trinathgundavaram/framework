@@ -5,7 +5,6 @@ import codecs
 import csv
 import re
 from dataclasses import dataclass
-from datetime import datetime
 from itertools import islice
 from typing import TYPE_CHECKING, Iterable, Iterator, Optional
 
@@ -13,50 +12,29 @@ import psycopg
 from psycopg import sql
 
 from .common import ConfigError, FileRejected, RowCountMismatch
+from .layout import BATCH_COLUMN, Column, Layout, LoadContext, build_layout, column_mapping
 
 if TYPE_CHECKING:
     from .config import FileConfig
     from .settings import Settings
 
-STAGING_FRAMEWORK_COLS = ("btch_id", "load_id", "src_file_nm", "stg_load_dtts")
-CORE_FRAMEWORK_COLS = ("btch_id", "load_id", "current_ind", "load_dtts", "end_dtts")
-
-
-@dataclass(frozen=True)
-class Column:
-    name: str
-    auto: bool
-
-
 def columns(conn: psycopg.Connection, schema: str, table: str) -> list[Column]:
+    """Columns of a table in definition order; auto = identity / generated / serial, text = character column."""
     rows = conn.execute(
-        """SELECT column_name, is_identity, is_generated, column_default FROM information_schema.columns
+        """SELECT column_name, is_identity, is_generated, column_default, data_type FROM information_schema.columns
             WHERE table_schema = lower(%s) AND table_name = lower(%s) ORDER BY ordinal_position""",
         (schema, table)).fetchall()
     return [Column(r["column_name"], r["is_identity"] == "YES" or r["is_generated"] == "ALWAYS"
-                   or "nextval(" in (r["column_default"] or "")) for r in rows]
+                   or "nextval(" in (r["column_default"] or ""),
+                   r["data_type"] in ("character varying", "character", "text")) for r in rows]
 
 
-def _table_columns(conn, schema: str, table: str, required: tuple[str, ...], kind: str) -> list[Column]:
-    cols = columns(conn, schema, table)
-    if not cols:
-        raise LookupError(f"{kind} table {schema}.{table} not found")
-    missing = [c for c in required if c not in {x.name for x in cols}]
-    if missing:
-        raise LookupError(f"{kind} table {schema}.{table} lacks framework columns {missing}")
-    return cols
-
-
-def staging_business_columns(conn, schema: str, table: str) -> list[str]:
-    return [c.name for c in _table_columns(conn, schema, table, STAGING_FRAMEWORK_COLS, "staging")
-            if c.name not in STAGING_FRAMEWORK_COLS]
-
-
-def core_insert_columns(conn, cfg: "FileConfig") -> list[str]:
-    """Staging business columns that exist in core, minus identity/generated/serial columns (D-61)."""
-    core = _table_columns(conn, cfg.core_schema_nm, cfg.core_table_nm, CORE_FRAMEWORK_COLS, "core")
-    usable = {c.name for c in core if not c.auto and c.name not in CORE_FRAMEWORK_COLS}
-    return [c for c in staging_business_columns(conn, cfg.stg_schema_nm, cfg.stg_table_nm) if c in usable]
+def file_layout(conn, cfg: "FileConfig", target_columns) -> Layout:
+    """The staging / core layout of a file config; LookupError when a table or a required column is missing."""
+    return build_layout(f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}",
+                        columns(conn, cfg.stg_schema_nm, cfg.stg_table_nm),
+                        columns(conn, cfg.core_schema_nm, cfg.core_table_nm), column_mapping(cfg, target_columns),
+                        f"{cfg.stg_schema_nm}.{cfg.stg_table_nm}", f"{cfg.core_schema_nm}.{cfg.core_table_nm}")
 
 
 def _ident(schema: str, table: str) -> sql.Identifier:
@@ -152,7 +130,8 @@ def row_position(path: str, cfg: "FileConfig", settings: "Settings", row_no: Opt
     return f"data row {row_no}"
 
 
-def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> Iterator[list]:
+def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings",
+                   drop_first: bool = False) -> Iterator[list]:
     """Rows yielded one at a time; LF and CRLF line endings are both accepted, trailing blank lines ignored."""
     delim = delimiter_for(cfg)
     content_cnt, last = 0, ""
@@ -181,11 +160,11 @@ def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "
             if i == 0 and cfg.has_header:
                 seen_header = True
                 continue
-            if len(rec) != expected_cols:
+            if len(rec) != expected_cols + drop_first:
                 raise FileRejected("FILE_COLUMN_COUNT_MISMATCH",
-                                   f"line {reader.line_num}: {len(rec)} columns, expected {expected_cols}")
+                                   f"line {reader.line_num}: {len(rec)} columns, expected {expected_cols + drop_first}")
             data_rows += 1
-            yield _normalise(rec, settings.empty_as_null)
+            yield _normalise(rec[1:] if drop_first else rec, settings.empty_as_null)
     except csv.Error as e:
         raise FileRejected("FILE_PARSE_ERROR", f"malformed delimited file at line {reader.line_num}: {e}")
     if cfg.has_header and not seen_header:
@@ -217,7 +196,8 @@ def scan_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "
     return count
 
 
-def read_with_pandas(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> list[list]:
+def read_with_pandas(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings",
+                     drop_first: bool = False) -> list[list]:
     import pandas as pd
 
     try:
@@ -232,40 +212,66 @@ def read_with_pandas(path: str, cfg: "FileConfig", expected_cols: int, settings:
         raise FileRejected("FILE_PARSE_ERROR", f"cannot read {cfg.src_file_ty}: {type(e).__name__}")
     if cfg.has_trailer and len(df):
         df = df.iloc[:-1]
-    if df.shape[1] != expected_cols and len(df):
-        raise FileRejected("FILE_COLUMN_COUNT_MISMATCH", f"{df.shape[1]} columns, expected {expected_cols}")
+    if df.shape[1] != expected_cols + drop_first and len(df):
+        raise FileRejected("FILE_COLUMN_COUNT_MISMATCH", f"{df.shape[1]} columns, expected {expected_cols + drop_first}")
+    if drop_first:
+        df = df.iloc[:, 1:]
     return [_normalise([str(v) for v in rec], settings.empty_as_null) for rec in df.itertuples(index=False)]
 
 
-def read_file(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> Rows:
+def read_file(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings", drop_first: bool = False) -> Rows:
+    """The data rows of a file; `drop_first` = every line starts with a record type field that is not loaded."""
     ft = cfg.src_file_ty
     if ft not in settings.supported_file_types:
         raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} is not enabled (Q-02)")
     if ft in DELIMITED_FILE_TYPES:
-        return read_delimited(path, cfg, expected_cols, settings)
+        return read_delimited(path, cfg, expected_cols, settings, drop_first)
     if ft in (".xlsx", ".xls", ".parquet"):
-        return read_with_pandas(path, cfg, expected_cols, settings)
+        return read_with_pandas(path, cfg, expected_cols, settings, drop_first)
     raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} has no reader")
 
 
-def stage(conn: psycopg.Connection, settings: "Settings", *, file_path: str, cfg: "FileConfig", btch_id: str,
-          load_id: int, src_file_nm: str, loaded_at: datetime, spark=None) -> int:
-    """Replace the staging rows of btch_id with the file, streamed into COPY; returns the row count."""
-    stg_columns = staging_business_columns(conn, cfg.stg_schema_nm, cfg.stg_table_nm)
+def next_sequence(conn, cfg: "FileConfig", layout: Layout) -> int:
+    """The next value of the ROW_SEQUENCE column: one above the highest in the staging and core tables."""
+    highest = 0
+    for kind, table in (("stage", _ident(cfg.stg_schema_nm, cfg.stg_table_nm)),
+                        ("core", _ident(cfg.core_schema_nm, cfg.core_table_nm))):
+        col = layout.column("ROW_SEQUENCE", kind)
+        if col:
+            row = conn.execute(sql.SQL("SELECT MAX(CAST({} AS BIGINT)) AS m FROM {}").format(
+                sql.Identifier(col.name), table)).fetchone()
+            highest = max(highest, int(row["m"] or 0))
+    return highest + 1
+
+
+def _clean_stage(conn, table, cfg: "FileConfig", layout: Layout, ctx: LoadContext) -> None:
+    if cfg.stg_cleanup_cd == "RUN_TYPE":
+        col = layout.column("RUN_TYPE")
+        if col is None:
+            raise ConfigError(f"{layout.label}: Stg_Cleanup_Cd RUN_TYPE needs a staging column filled with RUN_TYPE")
+        conn.execute(sql.SQL("DELETE FROM {} WHERE {} = %s").format(table, sql.Identifier(col.name)),
+                     (ctx.value("RUN_TYPE", col.text),))
+    else:
+        conn.execute(sql.SQL("DELETE FROM {} WHERE {} = %s").format(table, sql.Identifier(BATCH_COLUMN)), (ctx.btch_id,))
+
+
+def stage(conn: psycopg.Connection, settings: "Settings", *, file_path: str, cfg: "FileConfig", layout: Layout,
+          ctx: LoadContext, drop_first: bool = False, spark=None) -> int:
+    """Clear the staging rows (of the batch, or of its run type) and stream the file into COPY; returns the row count."""
     table = _ident(cfg.stg_schema_nm, cfg.stg_table_nm)
     if settings.load_engine == "SPARK":
-        return _stage_spark(conn, settings, spark, file_path, cfg, stg_columns, btch_id, load_id, src_file_nm,
-                            loaded_at)
-    rows = read_file(file_path, cfg, len(stg_columns), settings)
-    cols = [*stg_columns, *STAGING_FRAMEWORK_COLS]
+        return _stage_spark(conn, settings, spark, file_path, cfg, layout, ctx, drop_first)
+    records = read_file(file_path, cfg, len(layout.file_cols), settings, drop_first)
+    cols = [c.name for c in layout.stage]
     count = 0
     copy_sql = sql.SQL("COPY {} ({}) FROM STDIN").format(table, sql.SQL(", ").join(map(sql.Identifier, cols)))
     try:
         with conn.transaction():
-            conn.execute(sql.SQL("DELETE FROM {} WHERE btch_id = %s").format(table), (btch_id,))
+            start = next_sequence(conn, cfg, layout)
+            _clean_stage(conn, table, cfg, layout, ctx)
             with conn.cursor() as cur, cur.copy(copy_sql) as cp:
-                for rec in rows:
-                    cp.write_row([*rec, btch_id, load_id, src_file_nm, loaded_at])
+                for row in layout.stage_rows(records, ctx, start):
+                    cp.write_row(row)
                     count += 1
     except (psycopg.errors.DataError, psycopg.errors.IntegrityError) as e:
         where = _rejected_at(e, count, file_path, cfg, settings)
@@ -287,7 +293,7 @@ def _rejected_at(e: psycopg.Error, written: int, file_path: str, cfg: "FileConfi
     return f" at {where}" + (f" (column {m.group(2)})" if m and m.group(2) else "")
 
 
-def _stage_spark(conn, settings, spark, file_path, cfg, stg_columns, btch_id, load_id, src_file_nm, loaded_at):
+def _stage_spark(conn, settings, spark, file_path, cfg, layout, ctx, drop_first):
     """Spark engine: streaming scan, then JDBC append."""
     from pyspark.sql import SparkSession, functions as F
     from pyspark.sql.types import StringType, StructField, StructType
@@ -296,6 +302,10 @@ def _stage_spark(conn, settings, spark, file_path, cfg, stg_columns, btch_id, lo
         raise FileRejected("FILE_TYPE_NOT_SUPPORTED", "Spark engine reads delimited files without trailer only")
     if not settings.spark_jdbc_url:
         raise ConfigError("LOAD_ENGINE=SPARK requires SPARK_JDBC_URL")
+    if drop_first or layout.column("ROW_SEQUENCE"):
+        raise FileRejected("FILE_TYPE_NOT_SUPPORTED", "Spark engine does not load files with record types or a "
+                                                      "ROW_SEQUENCE column")
+    stg_columns = layout.file_cols
     rows = scan_delimited(file_path, cfg, len(stg_columns), settings)
     spark = spark or SparkSession.builder.appName("cms-compliance-framework").getOrCreate()
     df = (spark.read.option("header", str(cfg.has_header).lower()).option("sep", delimiter_for(cfg))
@@ -303,11 +313,12 @@ def _stage_spark(conn, settings, spark, file_path, cfg, stg_columns, btch_id, lo
           .schema(StructType([StructField(c, StringType(), True) for c in stg_columns])).csv(file_path))
     if settings.empty_as_null:
         df = df.select([F.when(F.col(c) == "", None).otherwise(F.col(c)).alias(c) for c in stg_columns])
-    df = (df.withColumn("btch_id", F.lit(btch_id)).withColumn("load_id", F.lit(load_id))
-          .withColumn("src_file_nm", F.lit(src_file_nm)).withColumn("stg_load_dtts", F.lit(loaded_at)))
+    for c in layout.stage:
+        if c.name not in stg_columns:
+            df = df.withColumn(c.name, F.lit(ctx.value("BATCH_ID" if c.name == BATCH_COLUMN else layout.mapping[c.name],
+                                                       c.text)))
     with conn.transaction():
-        conn.execute(sql.SQL("DELETE FROM {} WHERE btch_id = %s").format(_ident(cfg.stg_schema_nm, cfg.stg_table_nm)),
-                     (btch_id,))
+        _clean_stage(conn, _ident(cfg.stg_schema_nm, cfg.stg_table_nm), cfg, layout, ctx)
     info = conn.info
     props = {"driver": "org.postgresql.Driver", "stringtype": "unspecified", "user": info.user or "",
              "password": info.password or ""}
@@ -327,17 +338,34 @@ class PromotionResult:
     appended_cnt: int
 
 
-def swap(conn, cfg: "FileConfig", btch_id: str, load_id: int, expected_rows: int, now: datetime) -> PromotionResult:
-    """Must run inside the caller's open transaction; the caller holds the batch advisory lock."""
-    cols = core_insert_columns(conn, cfg)
+def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_rows: int) -> PromotionResult:
+    """Disable the batch's current core rows and append the staged ones; runs inside the caller's transaction."""
     core, stg = _ident(cfg.core_schema_nm, cfg.core_table_nm), _ident(cfg.stg_schema_nm, cfg.stg_table_nm)
-    col_sql = sql.SQL("").join(sql.SQL("{}, ").format(sql.Identifier(c)) for c in cols)
-    disabled = conn.execute(sql.SQL("UPDATE {} SET current_ind = 0, end_dtts = %s WHERE btch_id = %s "
-                                    "AND current_ind = 1").format(core), (now, btch_id)).rowcount
-    appended = conn.execute(sql.SQL(
-        "INSERT INTO {core} ({cols}btch_id, load_id, current_ind, load_dtts) "
-        "SELECT {cols}btch_id, load_id, 1, %s FROM {stg} WHERE btch_id = %s AND load_id = %s").format(
-            core=core, cols=col_sql, stg=stg), (now, btch_id, load_id)).rowcount
+    flag, end = layout.column("CURRENT_FLAG", "core"), layout.column("END_TIMESTAMP", "core")
+    on, off = (sql.Literal("1"), sql.Literal("0")) if flag.text else (sql.Literal(1), sql.Literal(0))
+    batch_col, flag_col = sql.Identifier(BATCH_COLUMN), sql.Identifier(flag.name)
+    set_end, params = (sql.SQL(", {} = %s").format(sql.Identifier(end.name)),
+                       [ctx.value("LOAD_TIMESTAMP", end.text)]) if end else (sql.SQL(""), [])
+    disabled = conn.execute(sql.SQL("UPDATE {} SET {} = {}{} WHERE {} = %s AND {} = {}").format(
+        core, flag_col, off, set_end, batch_col, flag_col, on), (*params, ctx.btch_id)).rowcount
+    names, exprs, values = [], [], []
+    for c, kind, _ in layout.core_plan():
+        names.append(sql.Identifier(c.name))
+        if kind == "copy":
+            exprs.append(sql.Identifier(c.name))
+        elif kind == "flag":
+            exprs.append(on)
+        else:
+            exprs.append(sql.SQL("%s"))
+            values.append(ctx.value("LOAD_TIMESTAMP", c.text))
+    where = sql.SQL("{} = %s").format(batch_col)
+    values.append(ctx.btch_id)
+    load_col = layout.column("LOAD_ID", "stage")
+    if load_col:
+        where += sql.SQL(" AND {} = %s").format(sql.Identifier(load_col.name))
+        values.append(ctx.value("LOAD_ID", load_col.text))
+    appended = conn.execute(sql.SQL("INSERT INTO {} ({}) SELECT {} FROM {} WHERE {}").format(
+        core, sql.SQL(", ").join(names), sql.SQL(", ").join(exprs), stg, where), values).rowcount
     if appended != expected_rows:
-        raise RowCountMismatch(f"appended {appended} rows for load {load_id}, staged {expected_rows}")
+        raise RowCountMismatch(f"appended {appended} rows for load {ctx.load_id}, staged {expected_rows}")
     return PromotionResult(disabled, appended)

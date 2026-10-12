@@ -13,7 +13,7 @@ from . import db
 from .adapters import parse_uri
 from .db import Connection
 from .common import ADHOC, SCHEDULED, ConfigError, code
-from .load import CORE_FRAMEWORK_COLS, STAGING_FRAMEWORK_COLS, columns
+from .layout import CLEANUP_SCOPES, VALUE_CODES
 
 
 
@@ -75,10 +75,8 @@ class FileConfig:
     core_schema_nm: str
     core_table_nm: str
     active: bool = True
-    file_rcd_ty_txt: Optional[str] = None
-    file_trlr_fld_txt: Optional[str] = None
-    file_hdr_txt: Optional[str] = None
     file_vrsn_cd: Optional[str] = None
+    stg_cleanup_cd: str = "BATCH"
 
     @property
     def name_parts(self) -> dict:
@@ -100,8 +98,46 @@ class FileConfig:
                    name(r["src_file_path"], False),
                    name(r["stg_schema_nm"]), r["stg_table_nm"], name(r["core_schema_nm"]), r["core_table_nm"],
                    r["active_ind"] == 1,
-                   _text(r.get("file_rcd_ty_txt")), _text(r.get("file_trlr_fld_txt")), _text(r.get("file_hdr_txt")),
-                   _text(r.get("file_vrsn_cd")))
+                   _text(r.get("file_vrsn_cd")), code(_text(r.get("stg_cleanup_cd")) or "BATCH"))
+
+
+@dataclass(frozen=True)
+class TargetColumn:
+    """One ComplianceTargetColumnConfig row: a staging / core column the framework fills ('*' = every table)."""
+    project_cd: str
+    table_nm: str
+    column_nm: str
+    value_cd: str
+    active: bool
+
+    @classmethod
+    def from_row(cls, r: dict) -> "TargetColumn":
+        return cls(code(r["project_cd"]), code(r["table_nm"]), r["column_nm"].strip().lower(), code(r["value_cd"]),
+                   r["active_ind"] == 1)
+
+    @property
+    def label(self) -> str:
+        return f"ComplianceTargetColumnConfig {self.project_cd}/{self.table_nm}/{self.column_nm}"
+
+
+@dataclass(frozen=True)
+class FileCheck:
+    """One ComplianceFileCheckConfig row: a check of FILE_CHECK for a project's files ('*' = every table / source)."""
+    project_cd: str
+    table_nm: str
+    src_id: str
+    check_cd: str
+    check_val_txt: Optional[str]
+    active: bool
+
+    @classmethod
+    def from_row(cls, r: dict) -> "FileCheck":
+        return cls(code(r["project_cd"]), code(r["table_nm"]), code(r["src_id"]), code(r["check_cd"]),
+                   _text(r["check_val_txt"]), r["active_ind"] == 1)
+
+    @property
+    def label(self) -> str:
+        return f"ComplianceFileCheckConfig {self.project_cd}/{self.table_nm}/{self.src_id}/{self.check_cd}"
 
 
 @dataclass(frozen=True)
@@ -159,6 +195,18 @@ def file_config(conn, project_cd: str, table_nm: str, src_id: Optional[str] = No
         where, params = where + " AND UPPER(Src_ID)=%s", params + [code(src_id)]
     rows = conn.execute(f"SELECT * FROM ComplianceSourceFileConfig WHERE {where} ORDER BY Cfg_ID", params).fetchall()
     return FileConfig.from_row(rows[0], settings) if rows else None
+
+
+def target_columns(conn) -> list[TargetColumn]:
+    """Every ComplianceTargetColumnConfig row, active or not."""
+    rows = conn.execute("SELECT * FROM ComplianceTargetColumnConfig ORDER BY Project_Cd, Table_Nm, Column_Nm").fetchall()
+    return [TargetColumn.from_row(r) for r in rows]
+
+
+def file_checks(conn) -> list[FileCheck]:
+    """Every ComplianceFileCheckConfig row, active or not (an inactive row switches a check off)."""
+    rows = conn.execute("SELECT * FROM ComplianceFileCheckConfig ORDER BY Project_Cd, Table_Nm, Src_ID, Check_Cd").fetchall()
+    return [FileCheck.from_row(r) for r in rows]
 
 
 def rule_bindings(conn, project_cd: str, table_nm: str, src_id: str, run_ty: str) -> list[RuleBinding]:
@@ -454,14 +502,22 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             add("RPT_DT_SQL", f"Rpt_Dt_Sql_Txt of {x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty} must be a single "
                               "SELECT statement")
     cfgs = active_file_configs(conn, settings)
-    if settings is not None:
-        from .filecheck import check_options
+    from .filecheck_options import CHECKS, check_options
 
-        for c in cfgs:
-            try:
-                check_options(c, settings)
-            except ConfigError as e:
-                add("FILE_CHECK_CONFIG", str(e))
+    checks = file_checks(conn)
+    for c in cfgs:
+        try:
+            check_options(c, checks)
+        except ConfigError as e:
+            add("FILE_CHECK_CONFIG", str(e))
+    for k in checks:
+        if k.check_cd not in CHECKS:
+            add("FILE_CHECK_CONFIG", f"{k.label}: unknown Check_Cd; accepted: {', '.join(CHECKS)}")
+        if k.project_cd not in projects:
+            add("FILE_CHECK_CONFIG", f"{k.label}: project {k.project_cd} is not in ComplianceProject")
+        elif not any(c.project_cd == k.project_cd and k.table_nm in ("*", c.table_nm) and k.src_id in ("*", c.src_id)
+                     for c in cfgs):
+            add("FILE_CHECK_NO_FILE", f"{k.label}: matches no active file config", "WARNING")
     seen_cfg: dict[tuple, int] = {}
     for c in cfgs:
         key = (c.project_cd, c.table_nm, c.src_id)
@@ -498,7 +554,14 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
                 add("XWALK_OVERLAP", f"xwalk {a.project_cd}/{a.table_nm}/{a.src_id}/{a.run_ty}: effective windows "
                                      f"starting {a.effective_start_dt} and {b.effective_start_dt} overlap")
 
-    from .load import delimiter_for
+    from .load import delimiter_for, file_layout
+
+    targets = target_columns(conn)
+    for t in targets:
+        if t.value_cd not in VALUE_CODES:
+            add("TARGET_COLUMN", f"{t.label}: unknown Value_Cd {t.value_cd!r}; accepted: {', '.join(VALUE_CODES)}")
+        if t.project_cd not in projects:
+            add("TARGET_COLUMN", f"{t.label}: project {t.project_cd} is not in ComplianceProject")
 
     for c in cfgs:
         label = f"file config {c.cfg_id} ({c.project_cd}/{c.table_nm}/{c.src_id})"
@@ -518,13 +581,14 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             parse_uri(c.src_file_path)
         except ValueError as e:
             add("PATH", f"{label}: {e}")
-        for kind, schema, table, required in (("staging", c.stg_schema_nm, c.stg_table_nm, STAGING_FRAMEWORK_COLS),
-                                              ("core", c.core_schema_nm, c.core_table_nm, CORE_FRAMEWORK_COLS)):
-            found = {col.name for col in columns(conn, schema, table)}
-            if not found:
-                add("TARGET_TABLE", f"{label}: {kind} table {schema}.{table} not found")
-            elif missing := [x for x in required if x not in found]:
-                add("TARGET_TABLE", f"{label}: {kind} table {schema}.{table} lacks {missing}")
+        if c.stg_cleanup_cd not in CLEANUP_SCOPES:
+            add("STG_CLEANUP", f"{label}: Stg_Cleanup_Cd must be one of {', '.join(CLEANUP_SCOPES)}")
+        try:
+            layout = file_layout(conn, c, targets)
+            if c.stg_cleanup_cd == "RUN_TYPE" and layout.column("RUN_TYPE") is None:
+                add("STG_CLEANUP", f"{label}: Stg_Cleanup_Cd RUN_TYPE needs a staging column filled with RUN_TYPE")
+        except (LookupError, ConfigError) as e:
+            add("TARGET_TABLE", f"{label}: {e}")
 
     for r in conn.execute("SELECT * FROM ComplianceRuleBinding WHERE Active_Ind = 1 "
                           "ORDER BY Project_Cd, Table_Nm, Src_ID, Run_Ty").fetchall():

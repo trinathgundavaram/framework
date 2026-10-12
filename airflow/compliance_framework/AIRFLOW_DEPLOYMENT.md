@@ -147,7 +147,7 @@ Keys by step:
 | Step | Scope keys | Settings worth setting |
 |---|---|---|
 | `BATCH_CREATION` | `project` (required). When batches are due and their report dates come from the metadata (`Batch_Schedule_Sql_Txt`, `Rpt_Dt_Sql_Txt`; below). Optional for one run: `run_type`, `table`, `period`, `lookback_days`, `lookback_weeks` | — |
-| `FILE_CHECK` | `project` (leave out for every project), `load_duplicate`, the NAS connection as for `FILE_LOAD` | `CHECK_RECORD_TYPES`, `CHECK_TRAILER_FIELDS`, `CHECK_CONTENT` and the file settings of `FILE_LOAD` |
+| `FILE_CHECK` | `project` (leave out for every project), `load_duplicate`, the NAS connection as for `FILE_LOAD` | `CHECK_CONTENT` and the file settings of `FILE_LOAD`; which checks a file gets is in `ComplianceFileCheckConfig` |
 | `FILE_LOAD` | `project` (leave out for every project), `load_duplicate` (`yes` / `no`, default `no`) | `FILE_STORE` (`nas`), `ARCHIVE_FOLDER`, `ERROR_FOLDER`, `NAS_MIN_AGE_SECONDS` |
 | `FILE_RULES` | `project`; `gre` (the GRE's own Airflow Variable, as it is: `connection_type`, `connection_id`, `environment`, `meta_db`, `meta_connection`, `project_name`, `run_params`, `text_params`, `extra_filters`, `log_level`, `max_parallel_rules`; plus `package_dir`, the folder holding the GRE's `run_rules.py`, default `<dags>/rules_engine`) | `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `FILE_RULES_MODE` |
 | `OVERRIDE_DECISIONS` | `project` | — |
@@ -207,7 +207,8 @@ A path with its own server uses that server with the NAS Connection's login. `$e
   Set it in `compliance_file_load_config_var` (`"load_duplicate": "yes"`), or for one trigger of the
   file-load or the generic DAG with `{"load_duplicate": "yes"}`.
 - There is no quarantine path and no archive path to configure. The subfolders are created when first
-  needed and are never swept. Their names are the `ARCHIVE_FOLDER` / `ERROR_FOLDER` settings.
+  needed and are never swept. Their names are the `ARCHIVE_FOLDER` / `ERROR_FOLDER` settings; with
+  `ARCHIVE_BY_YEAR = true` a loaded file goes to `Archive/<year>/`.
 - A file moved into `Archive` / `Error` replaces one of the same name already there.
 - **Files still being copied:** a file changed in the last `NAS_MIN_AGE_SECONDS` (default 120) is left
   for the next sweep, so a half-written file is not loaded. The check compares the file's modified time
@@ -259,7 +260,7 @@ match the same name (`TEMPLATE_OVERLAP`).
 
 `FILE_CHECK` looks at the files that are waiting in the inbound NAS folders and reports **every** problem of
 each file in one pass, before anything is loaded. It reads each file where it is: no table is loaded, no
-file is moved, no load is registered and no batch changes. `FILE_LOAD` does not depend on it and makes
+load is registered and no batch changes (a failed file is moved only with `CHECK_MOVE_FAILED`). `FILE_LOAD` does not depend on it and makes
 its own checks; a project uses `FILE_CHECK` only when it wants the full list of problems up front, or
 wants to hold the load until the files are clean.
 
@@ -271,34 +272,65 @@ wants to hold the load until the files are clean.
 | Duplicate | `DUPLICATE` | The same file name was not loaded before (skipped with `load_duplicate = yes`) |
 | Encoding | `ENCODING` | The file is valid `FILE_ENCODING`; the first bad line is named |
 | Structure | `MALFORMED`, `BLANK_LINE` | Quoting is well formed; no blank lines inside the file (blank lines at the end are ignored) |
-| Header | `HEADER` | Present when `Src_File_Has_Hdr_Ind = 1`; same number of columns as the staging table; the names, when `File_Hdr_Txt` is set |
-| Record types | `RECORD_TYPE` | With record types (for example `H,D,T`): the first field of the header, of every data row and of the trailer |
+| Header | `HEADER` | Present when `Src_File_Has_Hdr_Ind = 1`; same number of columns as the staging table; the names, with a `HEADER_NAMES` row |
+| Record types | `RECORD_TYPE` | With a `RECORD_TYPE` row (for example `H,D,T`): the first field of the header, of every data row and of the trailer |
 | Columns | `COLUMN_COUNT` | Every data row has as many fields as the staging table has business columns; the first lines are named |
-| Trailer | `TRAILER` | Present when `Src_File_Has_Trlr_Ind = 1`; with trailer fields: field count, file name, row count, timestamp |
+| Trailer | `TRAILER` | Present when `Src_File_Has_Trlr_Ind = 1`; with a `TRAILER` row: field count, file name, row count, timestamp |
 | Rows | `ZERO_RECORDS` | At least one data row, unless `Allow_Zero_Rcd_Ind = 1` |
 | Source | `SOURCE` | The file's source is in `ComplianceSourceSystem` and active |
-| Setup | `CONFIG` | The staging table exists and the check columns are valid |
+| Setup | `CONFIG` | The staging table exists, the delimiter and the file's `ComplianceFileCheckConfig` rows are valid |
 
-**Options per file** are three optional columns of `ComplianceSourceFileConfig`, each a plain value. An empty
-column takes the run's setting, and `NONE` switches that check off for the file:
+**Which content checks a file gets** is in its own table, `ComplianceFileCheckConfig`, one row per check.
+`ComplianceSourceFileConfig` only describes the file and where it loads.
 
-| Column | Example | Setting for every file of the run | Meaning |
-|---|---|---|---|
-| `File_Rcd_Ty_Txt` | `H,D,T` | `CHECK_RECORD_TYPES` | Three codes: header, detail, trailer. The first field of each line must be the code of its position |
-| `File_Trlr_Fld_Txt` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | `CHECK_TRAILER_FIELDS` | What each trailer field holds, in order: `RECORD_TYPE`, `FILE_NAME` (must equal the file's name), `DATA_ROW_COUNT` (data rows) or `TOTAL_ROW_COUNT` (every line, header and trailer included), `TIMESTAMP` (`YYYYMMDD`, `YYYYMMDDHHMM` or `YYYYMMDDHHMMSS`), `SKIP` |
-| `File_Hdr_Txt` | `H\|Member Id\|Paid Amount\|Member Name` | — | The expected header line (with the file's delimiter, or comma separated). Names are compared in order, ignoring upper / lower case and surrounding spaces |
+| Column | Meaning |
+|---|---|
+| `Project_Cd` | The project of the files |
+| `Table_Nm`, `Src_ID` | The file the row applies to; `*` = every table / every source of the project |
+| `Check_Cd` | `RECORD_TYPE`, `HEADER_NAMES` or `TRAILER` |
+| `Check_Val_Txt` | The value of the check (below) |
+| `Active_Ind` | 1 = the check is on, 0 = it is switched off for the files the row covers |
 
-Without trailer fields, `TRAILER_COUNT_CHECK` / `TRAILER_COUNT_REGEX` apply as in the load.
+| `Check_Cd` | `Check_Val_Txt` | What is checked |
+|---|---|---|
+| `RECORD_TYPE` | `H,D,T` | Three codes: header, detail, trailer. The first field of each line must be the code of its position. Without this check the first line is the header and the last line the trailer by position (`Src_File_Has_Hdr_Ind`, `Src_File_Has_Trlr_Ind`) |
+| `HEADER_NAMES` | `Member Id\|Paid Amount\|Member Name` | The expected header line (with the file's delimiter, or comma separated). Names are compared in order, ignoring upper / lower case and surrounding spaces. Without this check only the number of header columns is compared with the staging table |
+| `TRAILER` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | What each trailer field holds, in order: `RECORD_TYPE`, `FILE_NAME` (must equal the file's name), `DATA_ROW_COUNT` (data rows) or `TOTAL_ROW_COUNT` (every line, header and trailer included), `TIMESTAMP` (`YYYYMMDD`, `YYYYMMDDHHMM` or `YYYYMMDDHHMMSS`), `SKIP` |
+
+- **The most specific row wins** for each check: the file's table and source, then its table, then `*`.
+  A `*` row is the project's default; a row for one table or source overrides it.
+- **To switch a check off for one file**, add a row for that table and source with `Active_Ind = 0`.
+- A file with no row for a check does not get that check. The name, batch, source, encoding, blank-line,
+  column-count and zero-row checks always run and need no row.
+
+Example: every file of the project must have the standard header; only the FDR source `51` has record
+types and a trailer; source `20` has a different layout, so its header check is off.
+
+| `Project_Cd` | `Table_Nm` | `Src_ID` | `Check_Cd` | `Check_Val_Txt` | `Active_Ind` |
+|---|---|---|---|---|---|
+| `CMSUNIV` | `*` | `*` | `HEADER_NAMES` | `Enrollee ID\|Contract ID\|Plan ID` | 1 |
+| `CMSUNIV` | `ODAG3` | `51` | `RECORD_TYPE` | `H,D,T` | 1 |
+| `CMSUNIV` | `ODAG3` | `51` | `TRAILER` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | 1 |
+| `CMSUNIV` | `ODAG3` | `20` | `HEADER_NAMES` | | 0 |
+
+Without a `TRAILER` row, `TRAILER_COUNT_CHECK` / `TRAILER_COUNT_REGEX` apply as in the load.
 `CHECK_CONTENT = false` checks names and batches only and does not open the files. `validate-config`
-reports a value that is not valid (`FILE_CHECK_CONFIG`).
+reports a row that is not valid (`FILE_CHECK_CONFIG`) and a row that matches no file (`FILE_CHECK_NO_FILE`).
+
+**Error file and failed files.** For every file that fails, `FILE_CHECK` writes
+`<inbound folder>/Error/<file name>.errors.txt` (setting `CHECK_ERROR_FILE`, on by default): pipe-delimited,
+one line per problem, with the check, the line number, the message and **the record itself**
+(`File_Name|Check_Cd|Line_No|Message|Record`). With `CHECK_MOVE_FAILED = true` the failed file is also moved
+to `Error/`, so the files that passed can be loaded. The audit row and the email only carry the number of
+problems, the first one and the path of the error file.
 
 **Result.** The step's outcome lists every file with `result` (`PASSED` / `FAILED`), its `findings`, and
 what the name resolved to: `config` (project / table / source), `run_type`, `version`, `rpt_start`,
 `rpt_end`, `batch` and `req_id`. `notes` holds remarks that are not failures, such as a batch that already
 has data and would be replaced by the file. The step ends with exit code 1 when a file failed or a folder
 could not be read. Each file also gets one row in the framework's audit table,
-`CMS_ComplianceExceptionsAudit`: `FILE_CHECK_FAILED` (with the findings; emailed by `NOTIFY` to
-`DEFAULT_NOTIFY_EMAILS`) or `FILE_CHECK_PASSED`. A run that finds the same result for the same
+`CMS_ComplianceExceptionsAudit`: `FILE_CHECK_FAILED` (emailed by `NOTIFY` to `DEFAULT_NOTIFY_EMAILS`) or
+`FILE_CHECK_PASSED`. A run that finds the same result for the same
 file again adds no new row.
 
 - **Airflow:** its own DAG, `OSSTD_CORE_CMS_COMPLIANCE_FILE_CHECK`, with its own Variable
@@ -461,6 +493,64 @@ finds them on 2026-10-19 to 2026-10-22, and creates nothing on 2026-10-23 and 20
 year on the third date, by default the day after the window ends). Example, one batch by hand:
 `BATCH_CREATION` with `run_type`, `table` and `period = PREV_CALENDAR_MONTH`.
 
+## Stage and core table layout (`ComplianceTargetColumnConfig`)
+
+The staging and core tables of a file can have any layout. Which of their columns the framework fills,
+and with what, is in `ComplianceTargetColumnConfig`; **every other column of the staging table is a column
+of the file, in table order.**
+
+| Column | Meaning |
+|---|---|
+| `Project_Cd` | The project |
+| `Table_Nm` | The dataset (`Table_Nm` of the file config); `*` = every table of the project |
+| `Column_Nm` | The column in the staging and / or core table |
+| `Value_Cd` | What fills it (below) |
+| `Active_Ind` | 1 = the framework fills it; 0 = it is an ordinary file column for the tables the row covers |
+
+| `Value_Cd` | Value |
+|---|---|
+| `RUN_TYPE`, `VERSION`, `SOURCE_ID` | The batch's run type, the crosswalk's `Cmplnc_Vrsn`, the batch's `Src_ID` |
+| `FILE_NAME` | The name of the file |
+| `LOAD_TIMESTAMP` | When the file was loaded: a timestamp, or text `YYYY-MM-DD HH:MM:SS` (business time zone) in a character column |
+| `ROW_SEQUENCE` | A running row number, continuing from the highest value in the staging and core tables |
+| `CURRENT_FLAG` | Core only: 1 on the rows of the batch's latest load, 0 on the rows of its earlier loads |
+| `END_TIMESTAMP` | Core only: when a row stopped being current |
+| `LOAD_ID`, `REQ_ID`, `PROJECT`, `TABLE`, `RPT_START`, `RPT_END` | The framework's load number, the batch's request ID, project, dataset and report dates |
+
+Rules:
+
+- The batch column is always named `Btch_ID` and is in both tables; it needs no row.
+- A row for one table wins over the project's `*` row for the same column.
+- **Core always holds the data.** When a file is loaded for a batch that already has rows, those rows get
+  `CURRENT_FLAG` = 0 (and `END_TIMESTAMP`) and the new rows are added as current, in one transaction. The
+  core table therefore needs a `CURRENT_FLAG` column.
+- **Staging is cleared before a load**, by `ComplianceSourceFileConfig.Stg_Cleanup_Cd`: `BATCH` (default)
+  removes the batch's rows; `RUN_TYPE` removes every staging row of the file's run type (it needs a
+  `RUN_TYPE` column in the staging table).
+- A derived column of the core table must also be in the staging table (it is copied), except
+  `CURRENT_FLAG`, `END_TIMESTAMP` and `LOAD_TIMESTAMP`.
+- A file with record types (a `RECORD_TYPE` row in `ComplianceFileCheckConfig`) has that first field
+  dropped at load: it is not a column of the tables.
+- **A project with no rows for a table** uses the framework's own column names: staging `btch_id`,
+  `load_id`, `src_file_nm`, `stg_load_dtts`; core `btch_id`, `load_id`, `current_ind`, `load_dtts`, `end_dtts`.
+
+Example: tables that end with `StagingCreateDate, Btch_ID, Universe_Vrsn, Run_Ty, FileName, Src_Data_Key,
+Load_Dtts`, start with a row ID, and (core) carry `Current_Ind`:
+
+| `Project_Cd` | `Table_Nm` | `Column_Nm` | `Value_Cd` |
+|---|---|---|---|
+| `CMSUNIV` | `*` | `StagingCreateDate` | `LOAD_TIMESTAMP` |
+| `CMSUNIV` | `*` | `Universe_Vrsn` | `VERSION` |
+| `CMSUNIV` | `*` | `Run_Ty` | `RUN_TYPE` |
+| `CMSUNIV` | `*` | `FileName` | `FILE_NAME` |
+| `CMSUNIV` | `*` | `Src_Data_Key` | `SOURCE_ID` |
+| `CMSUNIV` | `*` | `Load_Dtts` | `LOAD_TIMESTAMP` |
+| `CMSUNIV` | `*` | `Current_Ind` | `CURRENT_FLAG` |
+| `CMSUNIV` | `ODAG3` | `ODAG_DE_Table3_2022_ID` | `ROW_SEQUENCE` |
+
+`validate-config` reports a row that is not valid (`TARGET_COLUMN`), a table that does not fit its rows
+(`TARGET_TABLE`) and a cleanup scope that cannot work (`STG_CLEANUP`).
+
 ## The core table and the delimiter
 
 `ComplianceSourceFileConfig.Delmtr_Cd` holds the delimiter character itself: `|`, `,`, `*`, `;` ... and `\t` for a
@@ -511,12 +601,15 @@ a `$env` token, so one set of configuration rows works in every environment (the
 
 ## Teradata specifics
 
-**Tables.** `sql/schema.sql` defines 13 MULTISET tables for `meta_db`, created separately: the 12 framework tables plus
+**Tables.** `sql/schema.sql` defines 15 MULTISET tables for `meta_db`, created separately: the 14 framework tables plus
 `ComplianceLock`. Identity columns are `GENERATED ALWAYS AS IDENTITY`; there are no foreign keys or
 CHECK constraints (the validator checks references).
 
 **Staging and core tables** are created by each project, in the databases named in
 `ComplianceSourceFileConfig` (`Stg_Schema_Nm` / `Core_Schema_Nm` are Teradata database names):
+
+Their layout is free when it is described in `ComplianceTargetColumnConfig` (above). Without rows there, they
+follow the framework's own column names:
 
 - Staging: the business columns in file order, then `btch_id VARCHAR(250)`, `load_id BIGINT`,
   `src_file_nm VARCHAR(1024)`, `stg_load_dtts TIMESTAMP(6) WITH TIME ZONE`. File values arrive as

@@ -107,7 +107,7 @@ framework validate-config
 ## Onboarding a project
 
 1. **Create the target tables** in the framework database (own schemas):
-   - Staging: business columns in file order, plus `btch_id`, `load_id`, `src_file_nm`, `stg_load_dtts`.
+   - Staging: business columns in file order, plus `btch_id`, `load_id`, `src_file_nm`, `stg_load_dtts` (or any layout described in `ComplianceTargetColumnConfig`; see the module README).
    - Core: business columns plus `btch_id`, `load_id`, `current_ind`, `load_dtts`, `end_dtts`. Index `btch_id` on staging and `btch_id WHERE current_ind = 1` on core.
 2. **Insert configuration rows** (SQL or the Glue metadata-load job), in this order:
    1. `ComplianceProject` — the project code and its description.

@@ -73,10 +73,8 @@ CREATE TABLE ComplianceSourceFileConfig (
   Stg_Table_Nm           VARCHAR(63)  NOT NULL,
   Core_Schema_Nm         VARCHAR(63)  NOT NULL,
   Core_Table_Nm          VARCHAR(63)  NOT NULL,
-  File_Rcd_Ty_Txt        VARCHAR(30),
-  File_Trlr_Fld_Txt      VARCHAR(500),
-  File_Hdr_Txt           TEXT,
   File_Vrsn_Cd           VARCHAR(30),
+  Stg_Cleanup_Cd         VARCHAR(10)  NOT NULL DEFAULT 'BATCH',
   Active_Ind             SMALLINT     NOT NULL DEFAULT 1,
   Created_Dtts           TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Created_By             VARCHAR(100) NOT NULL DEFAULT current_user,
@@ -86,6 +84,33 @@ CREATE TABLE ComplianceSourceFileConfig (
 );
 CREATE UNIQUE INDEX uq_compliancesourcefileconfig_active
   ON ComplianceSourceFileConfig (UPPER(Project_Cd), UPPER(Table_Nm), UPPER(Src_ID)) WHERE Active_Ind = 1;
+
+CREATE TABLE ComplianceFileCheckConfig (
+  Project_Cd       VARCHAR(30)  NOT NULL,
+  Table_Nm         VARCHAR(63)  NOT NULL DEFAULT '*',
+  Src_ID           VARCHAR(30)  NOT NULL DEFAULT '*',
+  Check_Cd         VARCHAR(30)  NOT NULL,
+  Check_Val_Txt    TEXT,
+  Active_Ind       SMALLINT     NOT NULL DEFAULT 1,
+  Created_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Created_By       VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Updated_By       VARCHAR(100) NOT NULL DEFAULT current_user,
+  CONSTRAINT pk_compliancefilecheckconfig PRIMARY KEY (Project_Cd, Table_Nm, Src_ID, Check_Cd)
+);
+
+CREATE TABLE ComplianceTargetColumnConfig (
+  Project_Cd       VARCHAR(30)  NOT NULL,
+  Table_Nm         VARCHAR(63)  NOT NULL DEFAULT '*',
+  Column_Nm        VARCHAR(128) NOT NULL,
+  Value_Cd         VARCHAR(30)  NOT NULL,
+  Active_Ind       SMALLINT     NOT NULL DEFAULT 1,
+  Created_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Created_By       VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Updated_By       VARCHAR(100) NOT NULL DEFAULT current_user,
+  CONSTRAINT pk_compliancetargetcolumnconfig PRIMARY KEY (Project_Cd, Table_Nm, Column_Nm)
+);
 
 CREATE TABLE ComplianceRuleBinding (
   Project_Cd       VARCHAR(30)  NOT NULL,

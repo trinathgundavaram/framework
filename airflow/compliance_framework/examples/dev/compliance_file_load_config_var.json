@@ -21,7 +21,8 @@
     "FILE_STORE": "nas",
     "ARCHIVE_FOLDER": "Archive",
     "ERROR_FOLDER": "Error",
-    "NAS_MIN_AGE_SECONDS": 120
+    "NAS_MIN_AGE_SECONDS": 120,
+    "ARCHIVE_BY_YEAR": false
   },
   "trigger_dags": [
     "OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES",

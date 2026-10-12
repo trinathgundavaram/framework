@@ -83,6 +83,9 @@ class ObjectStore(ABC):
     def uri(self, bucket: str, key: str) -> str:
         return f"s3://{bucket}/{key}"
 
+    def put(self, bucket: str, key: str, data: bytes) -> None:
+        raise NotImplementedError
+
     def archive(self, bucket: str, key: str, folder: str, version_id: Optional[str] = None) -> str:
         """Move a file into <its own folder>/<folder>/; returns the new key."""
         dst_key = f"{dirname(key)}{folder}/{basename(key)}"
@@ -188,6 +191,9 @@ class S3ObjectStore(ObjectStore):
 
     def delete(self, bucket, key):
         self.s3.delete_object(Bucket=bucket, Key=key)
+
+    def put(self, bucket, key, data):
+        self.s3.put_object(Bucket=bucket, Key=key, Body=data, ServerSideEncryption="aws:kms")
 
 
 def build_object_store(settings: Settings) -> ObjectStore:

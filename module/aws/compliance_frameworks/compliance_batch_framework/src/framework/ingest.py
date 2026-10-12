@@ -20,7 +20,9 @@ from .batches import get_batch, promoted_load
 from .common import (COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch, check_transition,
                      code)
 from .config import FileConfig, MatchError, TemplateMatcher
-from .load import sanitize_db_error, stage, swap
+from .filecheck_options import check_options
+from .layout import LoadContext
+from .load import file_layout, sanitize_db_error, stage, swap
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -117,6 +119,10 @@ class PathIngestSummary:
             self.other += 1
 
 
+def _as_date(value):
+    return value.date() if hasattr(value, "hour") else value
+
+
 class IngestPipeline:
     def __init__(self, conn: psycopg.Connection, clock: Clock, settings: Settings, store: ObjectStore, spark=None):
         self.conn = conn
@@ -127,6 +133,7 @@ class IngestPipeline:
         self.logger = EventLogger(conn, clock)
         self._sweep_config: Optional[tuple[TemplateMatcher, tuple[str, ...]]] = None
         self._scope_project: Optional[str] = None
+        self._load: tuple = ()
 
     def process_file(self, bucket: str, key: str, version_id: Optional[str] = None, *,
                      listed: bool = False) -> IngestOutcome:
@@ -313,8 +320,10 @@ class IngestPipeline:
         if info.size == 0 and cfg.has_header:
             return self._quarantine(load_id, info, "FILE_PARSE_ERROR", "zero-byte file but a header is expected",
                                     cfg, batch)
-        with db.held(self.conn, db.batch_key(batch["btch_id"]), self.settings.lock_timeout_seconds):
-            return self._process_locked(load_id, info, cfg, batch["req_id"])
+        stage_table = db.batch_key(f"STAGE {cfg.stg_schema_nm}.{cfg.stg_table_nm}".upper())
+        with db.held(self.conn, db.batch_key(batch["btch_id"]), self.settings.lock_timeout_seconds), \
+                db.held(self.conn, stage_table, self.settings.lock_timeout_seconds):
+            return self._process_locked(load_id, info, cfg, batch["req_id"], x.cmplnc_vrsn)
 
     @staticmethod
     def _resolve_run_type(token: str, codes: tuple[str, ...]) -> Optional[str]:
@@ -349,8 +358,16 @@ class IngestPipeline:
     def _has_data(self, batch: dict) -> bool:
         return batch["resolution_ty"] == "CARRY_FORWARD" or promoted_load(self.conn, batch["btch_id"]) is not None
 
-    def _process_locked(self, load_id: int, info: ObjectInfo, cfg: FileConfig, req_id: int) -> IngestOutcome:
+    def _process_locked(self, load_id: int, info: ObjectInfo, cfg: FileConfig, req_id: int,
+                        version: Optional[str] = None) -> IngestOutcome:
+        """The caller holds the batch lock and the lock of the staging table (stage and core load are one unit)."""
         batch = get_batch(self.conn, req_id)
+        layout = file_layout(self.conn, cfg, cfgmod.target_columns(self.conn))
+        drop_first = check_options(cfg, cfgmod.file_checks(self.conn)).record_types is not None
+        ctx = LoadContext(batch["btch_id"], load_id, batch["run_ty"], version, cfg.src_id, basename(info.key),
+                          self.clock.now(), cfg.project_cd, cfg.table_nm, _as_date(batch["rpt_start_dt_key"]),
+                          _as_date(batch["rpt_end_dt_key"]), req_id, self.settings.business_tz)
+        self._load = (layout, ctx)
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, basename(info.key))
             self.store.download(info.bucket, info.key, path, info.version_id)
@@ -369,9 +386,8 @@ class IngestPipeline:
                                       run_ty=batch["run_ty"],
                                       description=f"same content as load {other['load_id']} ({other['btch_id']})")
             try:
-                staged_rows = stage(self.conn, self.settings, file_path=path, cfg=cfg, btch_id=batch["btch_id"],
-                               load_id=load_id, src_file_nm=basename(info.key), loaded_at=self.clock.now(),
-                               spark=self.spark)
+                staged_rows = stage(self.conn, self.settings, file_path=path, cfg=cfg, layout=layout, ctx=ctx,
+                                    drop_first=drop_first, spark=self.spark)
             except FileRejected as e:
                 return self._quarantine(load_id, info, e.event_ty, str(e), cfg, batch)
         with self.conn.transaction():
@@ -414,7 +430,7 @@ class IngestPipeline:
                 prior = promoted_load(self.conn, b["btch_id"])
                 if prior and prior["load_id"] != load_id:
                     self._supersede(prior["load_id"])
-                res = swap(self.conn, cfg, b["btch_id"], load_id, staged_cnt, now)
+                res = swap(self.conn, cfg, *self._load, staged_cnt)
                 self.conn.execute(
                     """UPDATE ComplianceRequestControl SET Resolution_Ty='NEW_FILE', Req_Stat=%s, Reuse_Btch_ID=NULL,
                               Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, now, req_id))
@@ -499,6 +515,8 @@ class IngestPipeline:
     def _archive(self, info: ObjectInfo, load_id: int, rejected: bool = False) -> None:
         """A loaded file moves to <its folder>/Archive/, one that was not loaded to <its folder>/Error/."""
         folder = self.settings.error_folder if rejected else self.settings.archive_folder
+        if not rejected and self.settings.archive_by_year:
+            folder = f"{folder}/{self.clock.today(self.settings.business_tz):%Y}"
         try:
             self.store.archive(info.bucket, info.key, folder, info.version_id)
         except Exception as e:  # noqa: BLE001

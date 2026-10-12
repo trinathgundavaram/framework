@@ -40,8 +40,9 @@ class Settings:
     trailer_count_check: bool = False
     trailer_count_regex: str = r"(\d+)"
     check_content: bool = True
-    check_record_types: str = ""
-    check_trailer_fields: str = ""
+    check_error_file: bool = True
+    check_move_failed: bool = False
+    archive_by_year: bool = False
     xlsx_sheet: str = "0"
     xlsx_header_row: int = 0
 

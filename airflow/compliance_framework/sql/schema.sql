@@ -70,10 +70,8 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceFileConfig (
   Stg_Table_Nm           VARCHAR(63)  NOT NULL,
   Core_Schema_Nm         VARCHAR(63)  NOT NULL,
   Core_Table_Nm          VARCHAR(63)  NOT NULL,
-  File_Rcd_Ty_Txt        VARCHAR(30),
-  File_Trlr_Fld_Txt      VARCHAR(500),
-  File_Hdr_Txt           VARCHAR(8000),
   File_Vrsn_Cd           VARCHAR(30),
+  Stg_Cleanup_Cd         VARCHAR(10)  DEFAULT 'BATCH' NOT NULL,
   Active_Ind             SMALLINT     DEFAULT 1 NOT NULL,
   Created_Dtts           TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Created_By             VARCHAR(100) DEFAULT USER NOT NULL,
@@ -84,6 +82,33 @@ UNIQUE PRIMARY INDEX (Cfg_ID);
 
 CREATE INDEX ix_fileconfig_source (Project_Cd, Table_Nm, Src_ID)
 ON {{META_DB}}.ComplianceSourceFileConfig;
+
+CREATE MULTISET TABLE {{META_DB}}.ComplianceFileCheckConfig (
+  Project_Cd       VARCHAR(30)  NOT NULL,
+  Table_Nm         VARCHAR(63)  DEFAULT '*' NOT NULL,
+  Src_ID           VARCHAR(30)  DEFAULT '*' NOT NULL,
+  Check_Cd         VARCHAR(30)  NOT NULL,
+  Check_Val_Txt    VARCHAR(8000),
+  Active_Ind       SMALLINT     DEFAULT 1 NOT NULL,
+  Created_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Created_By       VARCHAR(100) DEFAULT USER NOT NULL,
+  Updated_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Updated_By       VARCHAR(100) DEFAULT USER NOT NULL
+)
+UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Src_ID, Check_Cd);
+
+CREATE MULTISET TABLE {{META_DB}}.ComplianceTargetColumnConfig (
+  Project_Cd       VARCHAR(30)  NOT NULL,
+  Table_Nm         VARCHAR(63)  DEFAULT '*' NOT NULL,
+  Column_Nm        VARCHAR(128) NOT NULL,
+  Value_Cd         VARCHAR(30)  NOT NULL,
+  Active_Ind       SMALLINT     DEFAULT 1 NOT NULL,
+  Created_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Created_By       VARCHAR(100) DEFAULT USER NOT NULL,
+  Updated_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Updated_By       VARCHAR(100) DEFAULT USER NOT NULL
+)
+UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Column_Nm);
 
 CREATE MULTISET TABLE {{META_DB}}.ComplianceRuleBinding (
   Project_Cd       VARCHAR(30)  NOT NULL,

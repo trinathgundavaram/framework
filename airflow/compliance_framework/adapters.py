@@ -98,6 +98,9 @@ class FileStore(ABC):
     def uri(self, share: str, path: str) -> str:
         return f"//{share}/{path}"
 
+    def put(self, share: str, path: str, data: bytes) -> None:
+        raise NotImplementedError
+
     def archive(self, share: str, path: str, folder: str) -> str:
         """Move a file into <its own folder>/<folder>/; returns the new path."""
         dst_path = f"{dirname(path)}{folder}/{basename(path)}"
@@ -230,6 +233,11 @@ class NasFileStore(FileStore):
 
     def delete(self, share, path):
         self.smb.remove(self._path(share, path), **self.nas)
+
+    def put(self, share, path, data):
+        self.smb.makedirs(self._path(share, dirname(path)), exist_ok=True, **self.nas)
+        with self.smb.open_file(self._path(share, path), mode="wb", **self.nas) as dst:
+            dst.write(data)
 
     def archive(self, share, path, folder):
         dst_path = f"{dirname(path)}{folder}/{basename(path)}"

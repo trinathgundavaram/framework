@@ -21,8 +21,8 @@
     "ARCHIVE_FOLDER": "Archive",
     "ERROR_FOLDER": "Error",
     "NAS_MIN_AGE_SECONDS": 120,
-    "CHECK_RECORD_TYPES": "",
-    "CHECK_TRAILER_FIELDS": ""
+    "CHECK_ERROR_FILE": true,
+    "CHECK_MOVE_FAILED": true
   },
   "trigger_dags": [
     "OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD"
