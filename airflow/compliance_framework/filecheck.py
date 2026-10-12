@@ -16,7 +16,7 @@ from typing import Optional
 from . import config as cfgmod
 from .adapters import FileStore, basename, dirname, parse_uri
 from .audit import EventLogger
-from .common import Clock, ConfigError, FileRejected, code, yes
+from .common import Clock, ConfigError, FileRejected, code
 from .config import FileConfig, MatchError
 from .load import (DELIMITED_FILE_TYPES, _file_lines, _lf_lines, _undecodable_line, delimiter_for, read_file,
                    staging_business_columns)
@@ -343,7 +343,7 @@ class FileChecker:
 
     def _source(self, cfg: FileConfig) -> list[Finding]:
         if self._sources is None:
-            self._sources = {code(r["src_id"]): yes(r["active_ind"]) for r in self.conn.execute(
+            self._sources = {code(r["src_id"]): r["active_ind"] == 1 for r in self.conn.execute(
                 "SELECT Src_ID, Active_Ind FROM ComplianceSourceSystem").fetchall()}
         active = self._sources.get(cfg.src_id)
         if active is None:

@@ -16,7 +16,7 @@ from .adapters import FileInfo, FileStore, basename, dirname, parse_uri, sha256_
 from .audit import EventLogger
 from .batches import get_batch, promoted_load
 from .common import (COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch, check_transition,
-                     code, yes)
+                     code)
 from .config import FileConfig, MatchError, TemplateMatcher
 from .db import Connection
 from .load import sanitize_db_error, stage, swap
@@ -330,7 +330,7 @@ class IngestPipeline:
         if not rows:
             return None, None
         today = self.clock.today(self.settings.business_tz)
-        open_rows = [r for r in rows if not yes(r["batch_close_ind"])]
+        open_rows = [r for r in rows if r["batch_close_ind"] == 0]
         if open_rows:
             return next((r for r in open_rows if db.as_date(r["req_dt_key"]) <= today), open_rows[-1]), None
         for r in rows:
@@ -393,7 +393,7 @@ class IngestPipeline:
         today = self.clock.today(self.settings.business_tz)
         with self.conn.transaction():
             b = get_batch(self.conn, req_id)
-            closed = yes(b["batch_close_ind"])
+            closed = b["batch_close_ind"] == 1
             has_data = self._has_data(b)
             ovrd = self.active_override(b, required_override_ty(has_data), today) if closed else None
             d = decide(ResolutionInput(batch_closed=closed, has_data=has_data, file_passed=passed,

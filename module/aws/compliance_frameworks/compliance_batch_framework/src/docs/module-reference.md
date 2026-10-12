@@ -1,6 +1,6 @@
 # CMS Compliance Framework: Module Reference
 
-What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.12 (design v5).
+What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.13 (design v5).
 
 - **Design:** [`design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md). `D-nn` = decision, `Q-nn` = open question, `§n` = design section.
 - **Setup, configuration, commands:** [`framework-package.md`](framework-package.md).
@@ -180,8 +180,8 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 
 ### `audit.py`
 - Event vocabulary (replaces the `ComplianceEventType` table): `BATCH_EVENTS` (batch timeline) and `AUDIT_EVENTS` (event → category, default severity, emailed or not).
-- `EventLogger`: `batch_event` → `ComplianceRequestFileDetail`, `audit` → `CMS_ComplianceExceptionsAudit`; rejects an event code outside its vocabulary. Events that are not emailed are written with `Notified_Ind = Y`.
-- `NotificationDispatcher` (P13): `run(limit, project_cd)` claims one `Notified_Ind = N` row at a time with `FOR UPDATE SKIP LOCKED`, sends it and marks it in the same transaction (concurrent runs never send twice; a failed send stays for the next run). Without `project_cd` it also sends events of no project. It emails every such row; recipients are `DEFAULT_NOTIFY_EMAILS`; marks `Notified_Ind`.
+- `EventLogger`: `batch_event` → `ComplianceRequestFileDetail`, `audit` → `CMS_ComplianceExceptionsAudit`; rejects an event code outside its vocabulary. Events that are not emailed are written with `Notified_Ind = 1`.
+- `NotificationDispatcher` (P13): `run(limit, project_cd)` claims one `Notified_Ind = 0` row at a time with `FOR UPDATE SKIP LOCKED`, sends it and marks it in the same transaction (concurrent runs never send twice; a failed send stays for the next run). Without `project_cd` it also sends events of no project. It emails every such row; recipients are `DEFAULT_NOTIFY_EMAILS`; marks `Notified_Ind`.
 
 ---
 

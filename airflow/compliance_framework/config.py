@@ -12,7 +12,7 @@ from typing import Iterable, Mapping, Optional, Sequence
 from . import db
 from .adapters import parse_uri
 from .db import Connection
-from .common import ADHOC, SCHEDULED, ConfigError, code, yes
+from .common import ADHOC, SCHEDULED, ConfigError, code
 from .load import CORE_FRAMEWORK_COLS, STAGING_FRAMEWORK_COLS, columns
 
 
@@ -32,7 +32,7 @@ class RunType:
 
     @classmethod
     def from_row(cls, r: dict) -> "RunType":
-        return cls(code(r["run_ty"]), code(r["run_category_cd"]), r["sla_days"], yes(r["carry_fwd_ind"]), yes(r["active_ind"]),
+        return cls(code(r["run_ty"]), code(r["run_category_cd"]), r["sla_days"], r["carry_fwd_ind"] == 1, r["active_ind"] == 1,
                    _text(r.get("batch_schedule_sql_txt")))
 
 
@@ -51,7 +51,7 @@ class XwalkRow:
     @classmethod
     def from_row(cls, r: dict) -> "XwalkRow":
         return cls(code(r["project_cd"]), code(r["table_nm"]), code(r["src_id"]), code(r["run_ty"]), db.as_date(r["effective_start_dt_key"]),
-                   db.as_date(r["effective_end_dt_key"]), code(r["cmplnc_vrsn"]), yes(r["active_ind"]),
+                   db.as_date(r["effective_end_dt_key"]), code(r["cmplnc_vrsn"]), r["active_ind"] == 1,
                    _text(r.get("rpt_dt_sql_txt")))
 
     def effective_on(self, d: date) -> bool:
@@ -96,10 +96,10 @@ class FileConfig:
         name = settings.resolve_env if settings else (lambda text, identifier=True: text)
         return cls(r["cfg_id"], code(r["project_cd"]), code(r["table_nm"]), code(r["src_id"]), r["src_file_nm_tmplt"],
                    r["delmtr_cd"],
-                   yes(r["src_file_has_hdr_ind"]), yes(r["src_file_has_trlr_ind"]), yes(r["allow_zero_rcd_ind"]),
+                   r["src_file_has_hdr_ind"] == 1, r["src_file_has_trlr_ind"] == 1, r["allow_zero_rcd_ind"] == 1,
                    name(r["src_file_path"], False),
                    name(r["stg_schema_nm"]), r["stg_table_nm"], name(r["core_schema_nm"]), r["core_table_nm"],
-                   yes(r["active_ind"]),
+                   r["active_ind"] == 1,
                    _text(r.get("file_rcd_ty_txt")), _text(r.get("file_trlr_fld_txt")), _text(r.get("file_hdr_txt")),
                    _text(r.get("file_vrsn_cd")))
 
@@ -126,7 +126,7 @@ def run_types(conn: Connection) -> dict[str, RunType]:
 def xwalk_rows(conn: Connection, *, project_cd: Optional[str] = None, table_nm: Optional[str] = None,
                src_id: Optional[str] = None, run_ty: Optional[str] = None) -> list[XwalkRow]:
     """Active crosswalk rows, optionally filtered."""
-    where, params = ["UPPER(Active_Ind) = 'Y'"], []
+    where, params = ["Active_Ind = 1"], []
     for col, val in (("Project_Cd", project_cd), ("Table_Nm", table_nm), ("Src_ID", src_id), ("Run_Ty", run_ty)):
         if val is not None:
             where.append(f"UPPER({col}) = %s")
@@ -147,14 +147,14 @@ def effective_sources(conn, project_cd, table_nm, run_ty, on_date: date) -> list
 
 
 def active_file_configs(conn: Connection, settings=None) -> list[FileConfig]:
-    rows = conn.execute("SELECT * FROM ComplianceSourceFileConfig WHERE UPPER(Active_Ind) = 'Y' ORDER BY Cfg_ID").fetchall()
+    rows = conn.execute("SELECT * FROM ComplianceSourceFileConfig WHERE Active_Ind = 1 ORDER BY Cfg_ID").fetchall()
     return [FileConfig.from_row(r, settings) for r in rows]
 
 
 def file_config(conn, project_cd: str, table_nm: str, src_id: Optional[str] = None,
                 settings=None) -> Optional[FileConfig]:
     """Active file config of a source; with src_id=None any source of the table (all share the core table)."""
-    where, params = "UPPER(Project_Cd)=%s AND UPPER(Table_Nm)=%s AND UPPER(Active_Ind) = 'Y'", [code(project_cd), code(table_nm)]
+    where, params = "UPPER(Project_Cd)=%s AND UPPER(Table_Nm)=%s AND Active_Ind = 1", [code(project_cd), code(table_nm)]
     if src_id is not None:
         where, params = where + " AND UPPER(Src_ID)=%s", params + [code(src_id)]
     rows = conn.execute(f"SELECT * FROM ComplianceSourceFileConfig WHERE {where} ORDER BY Cfg_ID", params).fetchall()
@@ -166,7 +166,7 @@ def rule_bindings(conn, project_cd: str, table_nm: str, src_id: str, run_ty: str
     rows = conn.execute(
         """SELECT * FROM ComplianceRuleBinding
             WHERE UPPER(Project_Cd) = %(p)s AND UPPER(Table_Nm) IN (%(t)s, '*') AND UPPER(Src_ID) IN (%(s)s, '*')
-              AND UPPER(Run_Ty) IN (%(r)s, '*') AND UPPER(Active_Ind) = 'Y'""",
+              AND UPPER(Run_Ty) IN (%(r)s, '*') AND Active_Ind = 1""",
         {"p": code(project_cd), "t": code(table_nm), "s": code(src_id), "r": code(run_ty)}).fetchall()
     rows.sort(key=lambda r: (r["gre_rule_group"], r["gre_rule_variant"],
                              (r["table_nm"] == "*") + (r["src_id"] == "*") + (r["run_ty"] == "*")))
@@ -427,7 +427,7 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             add("RUN_TYPE", f"run type {rt.run_ty!r} must be letters and digits only (it is the {{RUNTY}} token)")
         if rt.run_category_cd not in (SCHEDULED, ADHOC) or rt.sla_days < 1:
             add("RUN_TYPE", f"run type {rt.run_ty}: category must be SCHEDULED/ADHOC and SLA_Days >= 1")
-    projects = {code(r["project_cd"]): yes(r["active_ind"])
+    projects = {code(r["project_cd"]): r["active_ind"] == 1
                 for r in conn.execute("SELECT Project_Cd, Active_Ind FROM ComplianceProject").fetchall()}
     sources = {code(r["src_id"]) for r in conn.execute("SELECT Src_ID FROM ComplianceSourceSystem").fetchall()}
     xw = xwalk_rows(conn)
@@ -520,7 +520,7 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             elif missing := [x for x in required if x not in found]:
                 add("TARGET_TABLE", f"{label}: {kind} table {schema}.{table} lacks {missing}")
 
-    for r in conn.execute("SELECT * FROM ComplianceRuleBinding WHERE UPPER(Active_Ind) = 'Y' "
+    for r in conn.execute("SELECT * FROM ComplianceRuleBinding WHERE Active_Ind = 1 "
                           "ORDER BY Project_Cd, Table_Nm, Src_ID, Run_Ty").fetchall():
         if code(r["project_cd"]) not in projects:
             add("RULE_BINDING_PROJECT", f"rule binding project {r['project_cd']} is not in ComplianceProject")

@@ -178,11 +178,11 @@ wants to hold the load until the files are clean.
 | Duplicate | `DUPLICATE` | The same file name was not loaded before (skipped with `load_duplicate = yes`) |
 | Encoding | `ENCODING` | The file is valid `FILE_ENCODING`; the first bad line is named |
 | Structure | `MALFORMED`, `BLANK_LINE` | Quoting is well formed; no blank lines inside the file (blank lines at the end are ignored) |
-| Header | `HEADER` | Present when `Src_File_Has_Hdr_Ind = Y`; same number of columns as the staging table; the names, when `File_Hdr_Txt` is set |
+| Header | `HEADER` | Present when `Src_File_Has_Hdr_Ind = 1`; same number of columns as the staging table; the names, when `File_Hdr_Txt` is set |
 | Record types | `RECORD_TYPE` | With record types (for example `H,D,T`): the first field of the header, of every data row and of the trailer |
 | Columns | `COLUMN_COUNT` | Every data row has as many fields as the staging table has business columns; the first lines are named |
-| Trailer | `TRAILER` | Present when `Src_File_Has_Trlr_Ind = Y`; with trailer fields: field count, file name, row count, timestamp |
-| Rows | `ZERO_RECORDS` | At least one data row, unless `Allow_Zero_Rcd_Ind = Y` |
+| Trailer | `TRAILER` | Present when `Src_File_Has_Trlr_Ind = 1`; with trailer fields: field count, file name, row count, timestamp |
+| Rows | `ZERO_RECORDS` | At least one data row, unless `Allow_Zero_Rcd_Ind = 1` |
 | Source | `SOURCE` | The file's source is in `ComplianceSourceSystem` and active |
 | Setup | `CONFIG` | The staging table exists and the check columns are valid |
 
@@ -352,14 +352,10 @@ finds them on 2026-10-19 to 2026-10-22, and creates nothing on 2026-10-23 and 20
 year on the third date, by default the day after the window ends). Example, one batch by hand:
 `BATCH_CREATION` with `run_type`, `table` and `period = PREV_CALENDAR_MONTH`.
 
-## Yes / no columns and the core table
+## The core table
 
-- Every yes / no column of the framework's tables is `CHAR(1)` holding `Y` or `N` (upper or lower case):
-  `Active_Ind`, `Carry_Fwd_Ind`, `Src_File_Has_Hdr_Ind`, `Src_File_Has_Trlr_Ind`, `Allow_Zero_Rcd_Ind`,
-  `Batch_Close_Ind`, `Notified_Ind`. Anything other than `Y` counts as no. The framework columns in the
-  staging and core data tables are unchanged (`current_ind` stays 1 / 0).
-- `ComplianceSourceFileConfig.Core_Table_Nm` (required) names the core table in `Core_Schema_Nm`, the way
-  `Stg_Table_Nm` names the staging table. It can differ from `Table_Nm`.
+`ComplianceSourceFileConfig.Core_Table_Nm` (required) names the core table in `Core_Schema_Nm`, the way
+`Stg_Table_Nm` names the staging table. It can differ from `Table_Nm`.
 
 ## Upper and lower case
 

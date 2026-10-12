@@ -12,7 +12,7 @@ from . import config as cfgmod
 from . import db
 from .audit import EventLogger
 from .batches import get_batch, promoted_load
-from .common import CARRIED_FORWARD, OPEN_STATUSES, REQUEST_CREATED, Clock, check_transition, code, yes
+from .common import CARRIED_FORWARD, OPEN_STATUSES, REQUEST_CREATED, Clock, check_transition, code
 from .settings import Settings
 
 
@@ -43,7 +43,7 @@ class DecisionProcessor:
             """SELECT o.Ovrd_ID FROM ComplianceBatchOverride o
                  JOIN ComplianceRequestControl c ON c.Req_ID = o.Req_ID
                 WHERE UPPER(o.Override_Ty) = 'REUSE' AND UPPER(o.Apprvl_Stat) = 'APPROVED' AND o.Valid_Thru_Dt_Key >= %s
-                  AND c.Batch_Close_Ind = 'N' AND c.Resolution_Ty IS DISTINCT FROM 'CARRY_FORWARD'
+                  AND c.Batch_Close_Ind = 0 AND c.Resolution_Ty IS DISTINCT FROM 'CARRY_FORWARD'
                   AND (%s::text IS NULL OR c.Project_Cd = %s)
                 ORDER BY o.Ovrd_ID""", (today, project_cd, project_cd)).fetchall()
         run_types = cfgmod.run_types(self.conn) if rows else {}
@@ -87,14 +87,14 @@ class DecisionProcessor:
             """SELECT c.Req_ID, o.Ovrd_ID FROM ComplianceRequestControl c
                  LEFT JOIN ComplianceBatchOverride o
                         ON o.Req_ID = c.Req_ID AND UPPER(o.Override_Ty) = 'REUSE' AND UPPER(o.Apprvl_Stat) = 'APPROVED'
-                WHERE c.Resolution_Ty = 'CARRY_FORWARD' AND c.Batch_Close_Ind = 'N'
+                WHERE c.Resolution_Ty = 'CARRY_FORWARD' AND c.Batch_Close_Ind = 0
                   AND (o.Ovrd_ID IS NULL OR o.Valid_Thru_Dt_Key < %s)
                   AND (%s::text IS NULL OR c.Project_Cd = %s)
                 ORDER BY c.Req_ID""", (today, project_cd, project_cd)).fetchall()
         for r in rows:
             with self.conn.transaction():
                 b = get_batch(self.conn, r["req_id"], for_update=True)
-                if (b["resolution_ty"] != "CARRY_FORWARD" or yes(b["batch_close_ind"])
+                if (b["resolution_ty"] != "CARRY_FORWARD" or b["batch_close_ind"] == 1
                         or b["req_stat"] not in OPEN_STATUSES):
                     continue
                 to_stat = REQUEST_CREATED if b["req_stat"] == CARRIED_FORWARD else b["req_stat"]
@@ -126,8 +126,8 @@ class DecisionProcessor:
 
     def _reuse_problem(self, o: dict, b: dict, src: Optional[dict], rt: Optional[cfgmod.RunType]) -> Optional[str]:
         if rt is None or not rt.carry_fwd:
-            return f"run type {b['run_ty']} does not allow carry-forward (Carry_Fwd_Ind = N)"
-        if yes(b["batch_close_ind"]):
+            return f"run type {b['run_ty']} does not allow carry-forward (Carry_Fwd_Ind = 0)"
+        if b["batch_close_ind"] == 1:
             return "batch is closed"
         if promoted_load(self.conn, b["btch_id"]) is not None:
             return "batch already has promoted data"
@@ -141,7 +141,7 @@ class DecisionProcessor:
         row = self.conn.execute(
             """SELECT * FROM ComplianceRequestControl
                 WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s AND Run_Ty=%s AND Req_ID <> %s
-                  AND Batch_Close_Ind = 'Y' AND Resolution_Ty IN ('NEW_FILE','CARRY_FORWARD')
+                  AND Batch_Close_Ind = 1 AND Resolution_Ty IN ('NEW_FILE','CARRY_FORWARD')
                   AND (Rpt_Start_Dt_Key, Req_Dt_Key) <= (%s, %s)
                   AND (%s::text IS NULL OR Btch_ID = %s)
                 ORDER BY Rpt_Start_Dt_Key DESC, Req_Dt_Key DESC, Req_ID DESC LIMIT 1""",

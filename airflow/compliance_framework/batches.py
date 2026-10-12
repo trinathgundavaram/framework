@@ -69,7 +69,7 @@ def _create_batch(conn, clock, logger, x: XwalkRow, rpt_start, rpt_end, req_dt, 
     conn.execute(
         """INSERT INTO ComplianceRequestControl (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key,
              Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Req_Stat, Batch_Close_Ind, Created_Dtts, Updated_Dtts)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'N',%s,%s)""",
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s)""",
         (x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt, btch, REQUEST_CREATED, now, now))
     req_id = conn.execute("SELECT Req_ID FROM ComplianceRequestControl WHERE Btch_ID=%s", (btch,)).fetchone()["req_id"]
     logger.batch_event("BATCH_CREATED", req_id=req_id, btch_id=btch, intake_id=intake_id,

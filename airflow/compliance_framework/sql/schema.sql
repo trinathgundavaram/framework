@@ -3,7 +3,7 @@
 CREATE MULTISET TABLE {{META_DB}}.ComplianceProject (
   Project_Cd    VARCHAR(30)  NOT NULL,
   Project_Desc  VARCHAR(200) NOT NULL,
-  Active_Ind    CHAR(1)      DEFAULT 'Y' NOT NULL,
+  Active_Ind    SMALLINT     DEFAULT 1 NOT NULL,
   Created_Dtts  TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Created_By    VARCHAR(100) DEFAULT USER NOT NULL,
   Updated_Dtts  TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
@@ -15,7 +15,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceSystem (
   Src_ID        VARCHAR(30)  NOT NULL,
   Src_Nm        VARCHAR(100) NOT NULL,
   Src_Ty        VARCHAR(20)  NOT NULL,
-  Active_Ind    CHAR(1)      DEFAULT 'Y' NOT NULL,
+  Active_Ind    SMALLINT     DEFAULT 1 NOT NULL,
   Created_Dtts  TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Created_By    VARCHAR(100) DEFAULT USER NOT NULL,
   Updated_Dtts  TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
@@ -28,9 +28,9 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceRunType (
   Run_Ty_Desc     VARCHAR(200) NOT NULL,
   Run_Category_Cd VARCHAR(10)  NOT NULL,
   SLA_Days        INTEGER      NOT NULL,
-  Carry_Fwd_Ind   CHAR(1)      DEFAULT 'N' NOT NULL,
+  Carry_Fwd_Ind   SMALLINT     DEFAULT 0 NOT NULL,
   Batch_Schedule_Sql_Txt VARCHAR(8000),
-  Active_Ind      CHAR(1)      DEFAULT 'Y' NOT NULL,
+  Active_Ind      SMALLINT     DEFAULT 1 NOT NULL,
   Created_Dtts    TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Created_By      VARCHAR(100) DEFAULT USER NOT NULL,
   Updated_Dtts    TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
@@ -47,7 +47,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceDataSetSourceXwalk (
   Effective_End_Dt_Key   DATE,
   Cmplnc_Vrsn            VARCHAR(10)  NOT NULL,
   Rpt_Dt_Sql_Txt         VARCHAR(8000),
-  Active_Ind             CHAR(1)      DEFAULT 'Y' NOT NULL,
+  Active_Ind             SMALLINT     DEFAULT 1 NOT NULL,
   Created_Dtts           TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Created_By             VARCHAR(100) DEFAULT USER NOT NULL,
   Updated_Dtts           TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
@@ -62,9 +62,9 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceFileConfig (
   Src_ID                 VARCHAR(30)  NOT NULL,
   Src_File_Nm_Tmplt      VARCHAR(255) NOT NULL,
   Delmtr_Cd              VARCHAR(10),
-  Src_File_Has_Hdr_Ind   CHAR(1)      NOT NULL,
-  Src_File_Has_Trlr_Ind  CHAR(1)      NOT NULL,
-  Allow_Zero_Rcd_Ind     CHAR(1)      NOT NULL,
+  Src_File_Has_Hdr_Ind   SMALLINT     NOT NULL,
+  Src_File_Has_Trlr_Ind  SMALLINT     NOT NULL,
+  Allow_Zero_Rcd_Ind     SMALLINT     NOT NULL,
   Src_File_Path          VARCHAR(500) NOT NULL,
   Stg_Schema_Nm          VARCHAR(63)  NOT NULL,
   Stg_Table_Nm           VARCHAR(63)  NOT NULL,
@@ -74,7 +74,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceFileConfig (
   File_Trlr_Fld_Txt      VARCHAR(500),
   File_Hdr_Txt           VARCHAR(8000),
   File_Vrsn_Cd           VARCHAR(30),
-  Active_Ind             CHAR(1)      DEFAULT 'Y' NOT NULL,
+  Active_Ind             SMALLINT     DEFAULT 1 NOT NULL,
   Created_Dtts           TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Created_By             VARCHAR(100) DEFAULT USER NOT NULL,
   Updated_Dtts           TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
@@ -92,7 +92,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceRuleBinding (
   Run_Ty           VARCHAR(20)  DEFAULT '*' NOT NULL,
   Gre_Rule_Group   VARCHAR(100) NOT NULL,
   Gre_Rule_Variant VARCHAR(100) NOT NULL,
-  Active_Ind       CHAR(1)      DEFAULT 'Y' NOT NULL,
+  Active_Ind       SMALLINT     DEFAULT 1 NOT NULL,
   Created_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Created_By       VARCHAR(100) DEFAULT USER NOT NULL,
   Updated_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
@@ -131,7 +131,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceRequestControl (
   Req_Stat         VARCHAR(30)  NOT NULL,
   Resolution_Ty    VARCHAR(15),
   Reuse_Btch_ID    VARCHAR(250),
-  Batch_Close_Ind  CHAR(1)      DEFAULT 'N' NOT NULL,
+  Batch_Close_Ind  SMALLINT     DEFAULT 0 NOT NULL,
   Created_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Updated_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL
 )
@@ -228,7 +228,7 @@ CREATE MULTISET TABLE {{META_DB}}.CMS_ComplianceExceptionsAudit (
   Actor        VARCHAR(100)  NOT NULL,
   Event_Txt    VARCHAR(4000),
   Event_Dtts   TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
-  Notified_Ind CHAR(1)       DEFAULT 'N' NOT NULL
+  Notified_Ind SMALLINT      DEFAULT 0 NOT NULL
 )
 UNIQUE PRIMARY INDEX (Event_ID);
 
