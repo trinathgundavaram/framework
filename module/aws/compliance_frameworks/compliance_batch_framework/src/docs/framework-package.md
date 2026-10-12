@@ -114,7 +114,7 @@ framework validate-config
    2. `ComplianceSourceSystem` — `Src_ID`, name, type.
    3. `ComplianceRunType` — `SLA_Days` ≥ 1 (the hold is `Req_Dt_Key + SLA_Days − 1`); `Carry_Fwd_Ind = 1` if batches of this run type may reuse the previous batch's data after approval; code letters/digits only.
    4. `ComplianceDataSetSourceXwalk` — one effective-dated row per project / table / source / run type. Nothing else.
-   5. `ComplianceSourceFileConfig` — one active row per project / table / source: filename template (project, table and source written literally, e.g. `PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt`; its extension is the file type), delimiter, header/trailer flags, inbound path (files then move to its `Archive/` or `Error/` subfolder), staging table, core schema (the core table is `Table_Nm`), email recipients.
+   5. `ComplianceSourceFileConfig` — one active row per project / table / source: filename template (project, table and source written literally, e.g. `PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt`; its extension is the file type), delimiter, header/trailer flags, inbound path (files then move to its `Archive/` or `Error/` subfolder), staging table, core schema (the core table is `Table_Nm`).
    6. `ComplianceRuleBinding` — rules run by the `FILE_RULES` step on each file after it is loaded to core, bound at any level: `'*'` in `Table_Nm`, `Src_ID` or `Run_Ty` means all. Every matching binding runs (additive); a rule bound at two levels runs once. Optional: a file with no matching binding skips the rules.
 
       | Level | `Table_Nm` | `Src_ID` | `Run_Ty` |

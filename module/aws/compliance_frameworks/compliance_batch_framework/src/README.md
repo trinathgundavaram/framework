@@ -16,7 +16,7 @@ the batches. PostgreSQL + Python; runs locally or as AWS Glue jobs.
 
 | In tables (6 reference / configuration) | Outside tables |
 |---|---|
-| `ComplianceProject`, `ComplianceSourceSystem`, `ComplianceRunType` (incl. `SLA_Days`, `Carry_Fwd_Ind`), `ComplianceDataSetSourceXwalk` (which project/table/source/run type apply, and when), `ComplianceSourceFileConfig` (file contract, paths, targets, recipients), `ComplianceRuleBinding` (file rules at project / table / run type / source level) | Database connection: `.env` locally, Secrets Manager in AWS · Settings: `--set` job arguments > environment > `.env` · Report period: `run --module BATCH_CREATION --period <NAME>` (`period_sql.py`) · Event vocabulary: `audit.py` |
+| `ComplianceProject`, `ComplianceSourceSystem`, `ComplianceRunType` (incl. `SLA_Days`, `Carry_Fwd_Ind`), `ComplianceDataSetSourceXwalk` (which project/table/source/run type apply, and when), `ComplianceSourceFileConfig` (file contract, paths, targets), `ComplianceRuleBinding` (file rules at project / table / run type / source level) | Database connection: `.env` locally, Secrets Manager in AWS · Settings: `--set` job arguments > environment > `.env` · Report period: `run --module BATCH_CREATION --period <NAME>` (`period_sql.py`) · Event vocabulary: `audit.py` |
 
 ```bash
 pip install .                             # Python 3.9+
@@ -61,7 +61,7 @@ src/
 ### Changing the framework
 
 1. Edit the files under `framework/`.
-2. Bump `version` in `pyproject.toml` and `__version__` in `framework/__init__.py` (e.g. 0.3.10 → 0.3.11),
+2. Bump `version` in `pyproject.toml` and `__version__` in `framework/__init__.py` (e.g. 0.3.11 → 0.3.12),
    so every deployed build is identifiable. The Terraform picks up any wheel name.
 3. Rebuild the wheel, with GitHub Actions or locally (below).
 4. Deploy the `glue` submodule. The next Glue run installs the new wheel.

@@ -209,8 +209,8 @@ what the name resolved to: `config` (project / table / source), `run_type`, `ver
 `rpt_end`, `batch` and `req_id`. `notes` holds remarks that are not failures, such as a batch that already
 has data and would be replaced by the file. The step ends with exit code 1 when a file failed or a folder
 could not be read. Each file also gets one row in the framework's audit table,
-`CMS_ComplianceExceptionsAudit`: `FILE_CHECK_FAILED` (with the findings; emailed by `NOTIFY` to the
-file config's failure recipients) or `FILE_CHECK_PASSED`. A run that finds the same result for the same
+`CMS_ComplianceExceptionsAudit`: `FILE_CHECK_FAILED` (with the findings; emailed by `NOTIFY` to
+`DEFAULT_NOTIFY_EMAILS`) or `FILE_CHECK_PASSED`. A run that finds the same result for the same
 file again adds no new row.
 
 - **Glue:** `FILE_CHECK` is a step of the workflow like the others (`step_settings`), in no schedule by
@@ -437,7 +437,7 @@ run names the module and project.
 | An execution times out (`workflow_timeout_hours`) or is aborted | same | EventBridge rule on the workflow's `TIMED_OUT` / `ABORTED` events |
 | A schedule cannot start its workflow (after 1 hour of retries) | `alert_email` | a CloudWatch alarm on the rule's `FailedInvocations` emails |
 | A Glue run fails, times out or errors (also runs started by hand: `validate-config`, `metadata_load`) | glue `alert_emails` | EventBridge rule `..._glue_failed_<env>` → SNS `..._glue_alerts_<env>` |
-| Business events: quarantined file, missing source, invalid override, technical failure of a file | the file config's recipients / `DEFAULT_NOTIFY_EMAILS` | the framework's `NOTIFY` step (SES) |
+| Business events: quarantined file, missing source, invalid override, technical failure of a file | `DEFAULT_NOTIFY_EMAILS` (the file config holds no recipients or subjects) | the framework's `NOTIFY` step (SES) |
 
 SNS email subscriptions must be confirmed once from the email SNS sends.
 

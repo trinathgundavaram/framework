@@ -73,9 +73,6 @@ class FileConfig:
     stg_schema_nm: str
     stg_table_nm: str
     core_schema_nm: str
-    sucs_email_notfn_id: Optional[str] = None
-    failr_email_notfn_id: Optional[str] = None
-    email_subjct_txt: Optional[str] = None
     active: bool = True
     file_check_txt: Optional[str] = None
     file_vrsn_cd: Optional[str] = None
@@ -99,7 +96,7 @@ class FileConfig:
                    r["src_file_has_hdr_ind"] == 1, r["src_file_has_trlr_ind"] == 1, r["allow_zero_rcd_ind"] == 1,
                    name(r["src_file_path"], False),
                    name(r["stg_schema_nm"]), r["stg_table_nm"], name(r["core_schema_nm"]),
-                   r["sucs_email_notfn_id"], r["failr_email_notfn_id"], r["email_subjct_txt"], r["active_ind"] == 1,
+                   r["active_ind"] == 1,
                    _text(r.get("file_check_txt")), _text(r.get("file_vrsn_cd")))
 
 

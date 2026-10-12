@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 from typing import NamedTuple, Optional
 
-from . import config as cfgmod
 from . import db
 from .adapters import Channel, Message
 from .common import Clock, ConfigError, code
@@ -111,7 +110,6 @@ class NotificationDispatcher:
     def run(self, limit: int = 500, project_cd: Optional[str] = None) -> int:
         """Send up to `limit` events - of one project, or of every project (and none) when project_cd is None."""
         sent, self.failed = 0, []
-        configs: dict[tuple, Optional[cfgmod.FileConfig]] = {}
         where, params = "Notified_Ind = 0", []
         if project_cd is not None:
             where, params = where + " AND Project_Cd = %s", [code(project_cd)]
@@ -126,7 +124,7 @@ class NotificationDispatcher:
                                       "AND Notified_Ind = 0", (p["event_id"],)).fetchone()
                 if r is None:
                     continue
-                if self._send(r, configs):
+                if self._send(r):
                     self.conn.execute("UPDATE CMS_ComplianceExceptionsAudit SET Notified_Ind=1 WHERE Event_ID=%s",
                                       (r["event_id"],))
                     sent += 1
@@ -136,20 +134,10 @@ class NotificationDispatcher:
                 db.unlock(self.conn, key)
         return sent
 
-    def _send(self, r: dict, configs: dict) -> bool:
-        key = (r["project_cd"], r["table_nm"], r["src_id"])
-        if key not in configs:
-            configs[key] = cfgmod.file_config(self.conn, *key, settings=self.settings) if all(key) else None
-        cfg = configs[key]
-        if cfg:
-            failure = AUDIT_EVENTS.get(r["event_ty"], _EXC_ERROR).category == "EXCEPTION"
-            raw = cfg.failr_email_notfn_id if failure else cfg.sucs_email_notfn_id
-            recipients = [x.strip() for x in (raw or "").split(",") if x.strip()]
-        else:
-            recipients = list(self.settings.default_notify_emails)
-        prefix = f"{cfg.email_subjct_txt} - " if cfg and cfg.email_subjct_txt else ""
-        msg = Message(f"{prefix}[{r['sevrty']}] {r['event_ty']}",
-                      "\n".join(f"{k}: {r[k]}" for k in _BODY_KEYS if r.get(k) is not None), recipients)
+    def _send(self, r: dict) -> bool:
+        msg = Message(f"[{r['sevrty']}] {r['event_ty']}",
+                      "\n".join(f"{k}: {r[k]}" for k in _BODY_KEYS if r.get(k) is not None),
+                      list(self.settings.default_notify_emails))
         try:
             self.channel.send(msg)
         except Exception:  # noqa: BLE001

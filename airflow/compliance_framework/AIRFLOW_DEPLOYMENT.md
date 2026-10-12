@@ -302,8 +302,8 @@ what the name resolved to: `config` (project / table / source), `run_type`, `ver
 `rpt_end`, `batch` and `req_id`. `notes` holds remarks that are not failures, such as a batch that already
 has data and would be replaced by the file. The step ends with exit code 1 when a file failed or a folder
 could not be read. Each file also gets one row in the framework's audit table,
-`CMS_ComplianceExceptionsAudit`: `FILE_CHECK_FAILED` (with the findings; emailed by `NOTIFY` to the
-file config's failure recipients) or `FILE_CHECK_PASSED`. A run that finds the same result for the same
+`CMS_ComplianceExceptionsAudit`: `FILE_CHECK_FAILED` (with the findings; emailed by `NOTIFY` to
+`DEFAULT_NOTIFY_EMAILS`) or `FILE_CHECK_PASSED`. A run that finds the same result for the same
 file again adds no new row.
 
 - **Airflow:** its own DAG, `OSSTD_CORE_CMS_COMPLIANCE_FILE_CHECK`, with its own Variable
@@ -352,7 +352,8 @@ yet (`ComplianceFileLoad.Load_Stat = PROMOTED`, `Rules_Stat = NOT_RUN`), runs th
   step failed), subjects `Airflow EDEG-Compliance <load_env> Success|Failure: <dag id> DAG`. They use
   Airflow's own email settings.
 - These are about the DAG run. Business events (a rejected file, a missing source, an override) are
-  emailed by the `NOTIFY` step to the file config's recipients.
+  emailed by the `NOTIFY` step to the addresses in its `DEFAULT_NOTIFY_EMAILS` setting. The file
+  config holds no recipients or subjects; a project that sends its own notifications leaves `NOTIFY` unscheduled.
 
 ## Scheduled batches: when they are created and for which dates (metadata)
 
