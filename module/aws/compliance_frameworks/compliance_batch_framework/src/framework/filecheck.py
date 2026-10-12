@@ -353,6 +353,7 @@ class FileChecker:
     def _content(self, info, name: str, cfg: FileConfig) -> list[Finding]:
         try:
             opts = check_options(cfg, self.settings)
+            delimiter_for(cfg)
             expected_cols = len(staging_business_columns(self.conn, cfg.stg_schema_nm, cfg.stg_table_nm))
         except (ConfigError, LookupError) as e:
             return [("CONFIG", str(e))]

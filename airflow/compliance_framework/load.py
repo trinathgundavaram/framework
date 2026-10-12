@@ -11,7 +11,7 @@ from itertools import islice
 from typing import TYPE_CHECKING, Iterable, Iterator, Optional
 
 from . import db
-from .common import FileRejected, RowCountMismatch
+from .common import ConfigError, FileRejected, RowCountMismatch
 from .db import Connection
 
 if TYPE_CHECKING:
@@ -66,13 +66,21 @@ def _table(schema: str, table: str) -> str:
 
 
 DELIMITED_FILE_TYPES = (".txt", ".csv", ".dat", ".psv", ".tsv")
-_DELIMS = {"TAB": "\t", "\\T": "\t", "PIPE": "|", "COMMA": ",", "SEMICOLON": ";"}
 Rows = Iterable[list[Optional[str]]]
 
 
 def delimiter_for(cfg: "FileConfig") -> str:
+    """The column delimiter of a file config: the character itself in Delmtr_Cd (\\t for a tab); a comma when empty."""
     d = cfg.delmtr_cd
-    return _DELIMS.get(d.upper(), d) if d else ","
+    if d is None or d == "":
+        return ","
+    if d == "\t" or d.strip().lower() in ("\\t", "/t"):
+        return "\t"
+    d = d.strip() or d[:1]
+    if len(d) != 1:
+        raise ConfigError(f"Delmtr_Cd {cfg.delmtr_cd!r} of Cfg_ID {cfg.cfg_id} must be the delimiter character itself, "
+                          "for example | or , or * (\\t for a tab)")
+    return d
 
 
 def sanitize_db_error(msg: str) -> str:

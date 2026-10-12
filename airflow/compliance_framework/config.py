@@ -498,12 +498,18 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
                 add("XWALK_OVERLAP", f"xwalk {a.project_cd}/{a.table_nm}/{a.src_id}/{a.run_ty}: effective windows "
                                      f"starting {a.effective_start_dt} and {b.effective_start_dt} overlap")
 
+    from .load import delimiter_for
+
     for c in cfgs:
         label = f"file config {c.cfg_id} ({c.project_cd}/{c.table_nm}/{c.src_id})"
         try:
             compile_template(c.src_file_nm_tmplt, case_sensitive, c.name_parts)
         except TemplateError as e:
             add("TEMPLATE", f"{label}: {e}")
+        try:
+            delimiter_for(c)
+        except ConfigError as e:
+            add("DELIMITER", str(e))
         if not c.src_file_ty:
             add("TEMPLATE_EXTENSION", f"{label}: template must end with a file extension such as .txt")
         if (c.project_cd, c.table_nm, c.src_id) not in xw_by_source:

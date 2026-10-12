@@ -461,7 +461,11 @@ finds them on 2026-10-19 to 2026-10-22, and creates nothing on 2026-10-23 and 20
 year on the third date, by default the day after the window ends). Example, one batch by hand:
 `BATCH_CREATION` with `run_type`, `table` and `period = PREV_CALENDAR_MONTH`.
 
-## The core table
+## The core table and the delimiter
+
+`ComplianceSourceFileConfig.Delmtr_Cd` holds the delimiter character itself: `|`, `,`, `*`, `;` ... and `\t` for a
+tab. It is one character; empty means a comma. Words such as `PIPE` or `COMMA` are not accepted, and
+`validate-config` reports them (`DELIMITER`).
 
 `ComplianceSourceFileConfig.Core_Table_Nm` (required) names the core table in `Core_Schema_Nm`, the way
 `Stg_Table_Nm` names the staging table. It can differ from `Table_Nm`.
