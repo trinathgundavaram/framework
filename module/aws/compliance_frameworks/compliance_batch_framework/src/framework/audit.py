@@ -83,7 +83,7 @@ class EventLogger:
                  Req_ID, Load_ID, Ovrd_ID, Intake_ID, Btch_ID, File_Ref, Actor, Event_Txt, Event_Dtts, Notified_Ind)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (event_ty, sev, project_cd, table_nm, src_id, run_ty, req_id, load_id, ovrd_id, intake_id,
-             btch_id, file_ref, actor, description, self.clock.now(), 0 if et.notify else 1))
+             btch_id, file_ref, actor, description, self.clock.now(), "N" if et.notify else "Y"))
         level = logging.ERROR if sev == "ERROR" else logging.WARNING if sev == "WARNING" else logging.INFO
         log.log(level, "audit %s req=%s load=%s %s", event_ty, req_id, load_id, description or "")
 
@@ -106,14 +106,14 @@ class NotificationDispatcher:
             with self.conn.transaction():
                 r = self.conn.execute(
                     """SELECT * FROM CMS_ComplianceExceptionsAudit
-                        WHERE Notified_Ind = 0 AND (%(p)s::text IS NULL OR Project_Cd = %(p)s)
+                        WHERE Notified_Ind = 'N' AND (%(p)s::text IS NULL OR Project_Cd = %(p)s)
                           AND NOT (Event_ID = ANY(%(failed)s))
                         ORDER BY Event_ID LIMIT 1 FOR UPDATE SKIP LOCKED""",
                     {"p": code(project_cd), "failed": self.failed}).fetchone()
                 if r is None:
                     break
                 if self._send(r):
-                    self.conn.execute("UPDATE CMS_ComplianceExceptionsAudit SET Notified_Ind=1 WHERE Event_ID=%s",
+                    self.conn.execute("UPDATE CMS_ComplianceExceptionsAudit SET Notified_Ind = 'Y' WHERE Event_ID=%s",
                                       (r["event_id"],))
                     sent += 1
                 else:

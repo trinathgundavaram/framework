@@ -3,7 +3,7 @@
 CREATE TABLE ComplianceProject (
   Project_Cd    VARCHAR(30)  NOT NULL,
   Project_Desc  VARCHAR(200) NOT NULL,
-  Active_Ind    SMALLINT     NOT NULL DEFAULT 1,
+  Active_Ind    CHAR(1)      NOT NULL DEFAULT 'Y',
   Created_Dtts  TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Created_By    VARCHAR(100) NOT NULL DEFAULT current_user,
   Updated_Dtts  TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -16,7 +16,7 @@ CREATE TABLE ComplianceSourceSystem (
   Src_ID        VARCHAR(30)  NOT NULL,
   Src_Nm        VARCHAR(100) NOT NULL,
   Src_Ty        VARCHAR(20)  NOT NULL,
-  Active_Ind    SMALLINT     NOT NULL DEFAULT 1,
+  Active_Ind    CHAR(1)      NOT NULL DEFAULT 'Y',
   Created_Dtts  TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Created_By    VARCHAR(100) NOT NULL DEFAULT current_user,
   Updated_Dtts  TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -30,9 +30,9 @@ CREATE TABLE ComplianceRunType (
   Run_Ty_Desc     VARCHAR(200) NOT NULL,
   Run_Category_Cd VARCHAR(10)  NOT NULL,
   SLA_Days        INT          NOT NULL,
-  Carry_Fwd_Ind   SMALLINT     NOT NULL DEFAULT 0,
+  Carry_Fwd_Ind   CHAR(1)      NOT NULL DEFAULT 'N',
   Batch_Schedule_Sql_Txt TEXT,
-  Active_Ind      SMALLINT     NOT NULL DEFAULT 1,
+  Active_Ind      CHAR(1)      NOT NULL DEFAULT 'Y',
   Created_Dtts    TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Created_By      VARCHAR(100) NOT NULL DEFAULT current_user,
   Updated_Dtts    TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -50,7 +50,7 @@ CREATE TABLE ComplianceDataSetSourceXwalk (
   Effective_End_Dt_Key   DATE,
   Cmplnc_Vrsn            VARCHAR(10)  NOT NULL,
   Rpt_Dt_Sql_Txt         TEXT,
-  Active_Ind             SMALLINT     NOT NULL DEFAULT 1,
+  Active_Ind             CHAR(1)      NOT NULL DEFAULT 'Y',
   Created_Dtts           TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Created_By             VARCHAR(100) NOT NULL DEFAULT current_user,
   Updated_Dtts           TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -65,16 +65,19 @@ CREATE TABLE ComplianceSourceFileConfig (
   Src_ID                 VARCHAR(30)  NOT NULL,
   Src_File_Nm_Tmplt      VARCHAR(255) NOT NULL,
   Delmtr_Cd              VARCHAR(10),
-  Src_File_Has_Hdr_Ind   SMALLINT     NOT NULL,
-  Src_File_Has_Trlr_Ind  SMALLINT     NOT NULL,
-  Allow_Zero_Rcd_Ind     SMALLINT     NOT NULL,
+  Src_File_Has_Hdr_Ind   CHAR(1)      NOT NULL,
+  Src_File_Has_Trlr_Ind  CHAR(1)      NOT NULL,
+  Allow_Zero_Rcd_Ind     CHAR(1)      NOT NULL,
   S3_Src_File_Path       VARCHAR(500) NOT NULL,
   Stg_Schema_Nm          VARCHAR(63)  NOT NULL,
   Stg_Table_Nm           VARCHAR(63)  NOT NULL,
   Core_Schema_Nm         VARCHAR(63)  NOT NULL,
-  File_Check_Txt         TEXT,
+  Core_Table_Nm          VARCHAR(63)  NOT NULL,
+  File_Rcd_Ty_Txt        VARCHAR(30),
+  File_Trlr_Fld_Txt      VARCHAR(500),
+  File_Hdr_Txt           TEXT,
   File_Vrsn_Cd           VARCHAR(30),
-  Active_Ind             SMALLINT     NOT NULL DEFAULT 1,
+  Active_Ind             CHAR(1)      NOT NULL DEFAULT 'Y',
   Created_Dtts           TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Created_By             VARCHAR(100) NOT NULL DEFAULT current_user,
   Updated_Dtts           TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -82,7 +85,7 @@ CREATE TABLE ComplianceSourceFileConfig (
   CONSTRAINT pk_compliancesourcefileconfig PRIMARY KEY (Cfg_ID)
 );
 CREATE UNIQUE INDEX uq_compliancesourcefileconfig_active
-  ON ComplianceSourceFileConfig (UPPER(Project_Cd), UPPER(Table_Nm), UPPER(Src_ID)) WHERE Active_Ind = 1;
+  ON ComplianceSourceFileConfig (UPPER(Project_Cd), UPPER(Table_Nm), UPPER(Src_ID)) WHERE UPPER(Active_Ind) = 'Y';
 
 CREATE TABLE ComplianceRuleBinding (
   Project_Cd       VARCHAR(30)  NOT NULL,
@@ -91,7 +94,7 @@ CREATE TABLE ComplianceRuleBinding (
   Run_Ty           VARCHAR(20)  NOT NULL DEFAULT '*',
   Gre_Rule_Group   VARCHAR(100) NOT NULL,
   Gre_Rule_Variant VARCHAR(100) NOT NULL,
-  Active_Ind       SMALLINT     NOT NULL DEFAULT 1,
+  Active_Ind       CHAR(1)      NOT NULL DEFAULT 'Y',
   Created_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Created_By       VARCHAR(100) NOT NULL DEFAULT current_user,
   Updated_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -130,14 +133,14 @@ CREATE TABLE ComplianceRequestControl (
   Req_Stat         VARCHAR(30)  NOT NULL,
   Resolution_Ty    VARCHAR(15),
   Reuse_Btch_ID    VARCHAR(250),
-  Batch_Close_Ind  SMALLINT     NOT NULL DEFAULT 0,
+  Batch_Close_Ind  CHAR(1)      NOT NULL DEFAULT 'N',
   Created_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Updated_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   CONSTRAINT pk_compliancerequestcontrol PRIMARY KEY (Req_ID),
   CONSTRAINT uq_compliancerequestcontrol_btch UNIQUE (Btch_ID),
   CONSTRAINT uq_compliancerequestcontrol UNIQUE (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key)
 );
-CREATE INDEX ix_compliancerequestcontrol_open ON ComplianceRequestControl (Req_ID) WHERE Batch_Close_Ind = 0;
+CREATE INDEX ix_compliancerequestcontrol_open ON ComplianceRequestControl (Req_ID) WHERE Batch_Close_Ind = 'N';
 
 CREATE TABLE ComplianceFileLoad (
   Load_ID           BIGINT        GENERATED ALWAYS AS IDENTITY,
@@ -221,13 +224,13 @@ CREATE TABLE CMS_ComplianceExceptionsAudit (
   Actor        VARCHAR(100)  NOT NULL,
   Event_Txt    TEXT,
   Event_Dtts   TIMESTAMPTZ   NOT NULL DEFAULT now(),
-  Notified_Ind SMALLINT      NOT NULL DEFAULT 0,
+  Notified_Ind CHAR(1)       NOT NULL DEFAULT 'N',
   CONSTRAINT pk_cms_complianceexceptionsaudit PRIMARY KEY (Event_ID),
   CONSTRAINT fk_cms_complianceexceptionsaudit_batch    FOREIGN KEY (Req_ID) REFERENCES ComplianceRequestControl,
   CONSTRAINT fk_cms_complianceexceptionsaudit_load     FOREIGN KEY (Load_ID) REFERENCES ComplianceFileLoad,
   CONSTRAINT fk_cms_complianceexceptionsaudit_override FOREIGN KEY (Ovrd_ID) REFERENCES ComplianceBatchOverride,
   CONSTRAINT fk_cms_complianceexceptionsaudit_intake   FOREIGN KEY (Intake_ID) REFERENCES ComplianceRequestInTake
 );
-CREATE INDEX ix_cms_complianceexceptionsaudit_unsent ON CMS_ComplianceExceptionsAudit (Event_ID) WHERE Notified_Ind = 0;
+CREATE INDEX ix_cms_complianceexceptionsaudit_unsent ON CMS_ComplianceExceptionsAudit (Event_ID) WHERE Notified_Ind = 'N';
 CREATE INDEX ix_cms_complianceexceptionsaudit_once ON CMS_ComplianceExceptionsAudit (Event_Ty, Load_ID, Ovrd_ID)
   WHERE Event_Ty IN ('FILE_TECHNICAL_FAILURE', 'OVERRIDE_INVALID_DETECTED');

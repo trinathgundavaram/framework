@@ -81,7 +81,7 @@ class RulesRunner:
             "project_cd": b["project_cd"], "table_nm": b["table_nm"], "src_id": b["src_id"], "run_ty": b["run_ty"],
             "rpt_start_dt_key": b["rpt_start_dt_key"], "rpt_end_dt_key": b["rpt_end_dt_key"],
             "req_dt_key": b["req_dt_key"], "stg_schema_nm": cfg.stg_schema_nm, "stg_table_nm": cfg.stg_table_nm,
-            "core_schema_nm": cfg.core_schema_nm, "core_table_nm": cfg.table_nm}, self.settings.file_rules_mode)
+            "core_schema_nm": cfg.core_schema_nm, "core_table_nm": cfg.core_table_nm}, self.settings.file_rules_mode)
         with self.conn.transaction():
             self._set(load_id, outcome.status)
             if outcome.status == ERROR:

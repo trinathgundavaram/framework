@@ -5,7 +5,6 @@ It registers no load, moves no file and changes no batch; the result is the step
 from __future__ import annotations
 
 import csv
-import json
 import logging
 import os
 import re
@@ -17,7 +16,7 @@ from typing import Optional
 from . import config as cfgmod
 from .adapters import ObjectStore, basename, dirname, parse_uri
 from .audit import EventLogger
-from .common import Clock, ConfigError, FileRejected, code
+from .common import Clock, ConfigError, FileRejected, code, yes
 from .config import FileConfig, MatchError
 from .load import (DELIMITED_FILE_TYPES, _file_lines, _lf_lines, _undecodable_line, delimiter_for, read_file,
                    staging_business_columns)
@@ -28,7 +27,6 @@ log = logging.getLogger(__name__)
 MAX_LISTED = 5
 TEXT_MAX = 4000
 TRAILER_FIELDS = ("RECORD_TYPE", "FILE_NAME", "DATA_ROW_COUNT", "TOTAL_ROW_COUNT", "TIMESTAMP", "SKIP")
-OPTION_KEYS = ("record_types", "trailer_fields", "header")
 _TIMESTAMP_FORMATS = {8: "%Y%m%d", 12: "%Y%m%d%H%M", 14: "%Y%m%d%H%M%S"}
 Finding = tuple[str, str]
 
@@ -48,31 +46,26 @@ def _names(value) -> list[str]:
 
 
 def check_options(cfg: FileConfig, settings: Settings) -> CheckOptions:
-    """The content checks of a file config: its File_Check_Txt (JSON) over the CHECK_* settings of the run."""
-    raw = {"record_types": settings.check_record_types, "trailer_fields": settings.check_trailer_fields, "header": None}
-    if cfg.file_check_txt:
-        what = f"File_Check_Txt of Cfg_ID {cfg.cfg_id}"
-        try:
-            own = json.loads(cfg.file_check_txt)
-        except ValueError as e:
-            raise ConfigError(f"{what} is not valid JSON: {e}") from None
-        if not isinstance(own, dict):
-            raise ConfigError(f"{what} must be a JSON object")
-        unknown = sorted(k for k in own if str(k).lower() not in OPTION_KEYS)
-        if unknown:
-            raise ConfigError(f"{what} has unknown key {unknown[0]!r}; accepted: {', '.join(OPTION_KEYS)}")
-        raw.update({str(k).lower(): v for k, v in own.items()})
-    types = _names(raw["record_types"])
+    """The content checks of a file config: its File_Rcd_Ty_Txt / File_Trlr_Fld_Txt / File_Hdr_Txt columns.
+
+    An empty column takes the CHECK_* setting of the run; NONE switches that check off for the file.
+    """
+    def own(value: Optional[str], default: str) -> str:
+        if value is None:
+            return default
+        return "" if value.strip().upper() == "NONE" else value
+
+    where = f"Cfg_ID {cfg.cfg_id}"
+    types = _names(own(cfg.file_rcd_ty_txt, settings.check_record_types))
     if types and len(types) != 3:
-        raise ConfigError("record_types must be three values: header, detail, trailer (for example H,D,T)")
-    fields = tuple(f.upper() for f in _names(raw["trailer_fields"]))
+        raise ConfigError(f"{where}: record types (File_Rcd_Ty_Txt / CHECK_RECORD_TYPES) must be three values: "
+                          "header, detail, trailer (for example H,D,T)")
+    fields = tuple(f.upper() for f in _names(own(cfg.file_trlr_fld_txt, settings.check_trailer_fields)))
     bad = [f for f in fields if f not in TRAILER_FIELDS]
     if bad:
-        raise ConfigError(f"trailer_fields has unknown value {bad[0]!r}; accepted: {', '.join(TRAILER_FIELDS)}")
-    header = raw["header"]
-    if header is not None and not isinstance(header, str):
-        raise ConfigError("header must be text: the expected header line")
-    return CheckOptions(tuple(types) if types else None, fields, header.strip() if header and header.strip() else None)
+        raise ConfigError(f"{where}: trailer fields (File_Trlr_Fld_Txt / CHECK_TRAILER_FIELDS) has unknown value "
+                          f"{bad[0]!r}; accepted: {', '.join(TRAILER_FIELDS)}")
+    return CheckOptions(tuple(types) if types else None, fields, own(cfg.file_hdr_txt, "").strip() or None)
 
 
 class _Lines:
@@ -255,10 +248,12 @@ class FileChecker:
         self.store = store
         self.pipeline = pipeline
         self.logger = EventLogger(conn, clock)
+        self._sources: Optional[dict] = None
 
     def run(self, project_cd: Optional[str] = None) -> FileCheckSummary:
         """Check the files waiting in one project's inbound folders, or in every configured folder."""
         project_cd = code(project_cd)
+        self._sources = None
         summary = FileCheckSummary(run_date=self.clock.today(self.settings.business_tz))
         own, shared = None, set()
         if project_cd:
@@ -332,6 +327,8 @@ class FileChecker:
                     (info.bucket, info.key)).fetchone()
                 if loaded:
                     findings.append(("DUPLICATE", f"{name} was already loaded (load {loaded['load_id']})"))
+        if cfg is not None:
+            findings.extend(self._source(cfg))
         if cfg is not None and self.settings.check_content:
             findings.extend(self._content(info, name, cfg))
         result = {"file": self.store.uri(info.bucket, info.key),
@@ -343,6 +340,15 @@ class FileChecker:
                   "findings": [f"{c}: {text}" for c, text in findings], "notes": notes}
         self._record(result, cfg, batch, run_ty)
         return result
+
+    def _source(self, cfg: FileConfig) -> list[Finding]:
+        if self._sources is None:
+            self._sources = {code(r["src_id"]): yes(r["active_ind"]) for r in self.conn.execute(
+                "SELECT Src_ID, Active_Ind FROM ComplianceSourceSystem").fetchall()}
+        active = self._sources.get(cfg.src_id)
+        if active is None:
+            return [("SOURCE", f"source {cfg.src_id} of {cfg.project_cd}/{cfg.table_nm} is not in ComplianceSourceSystem")]
+        return [] if active else [("SOURCE", f"source {cfg.src_id} of {cfg.project_cd}/{cfg.table_nm} is inactive")]
 
     def _content(self, info, name: str, cfg: FileConfig) -> list[Finding]:
         try:

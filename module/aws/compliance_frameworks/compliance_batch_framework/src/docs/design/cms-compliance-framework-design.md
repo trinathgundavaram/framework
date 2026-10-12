@@ -60,7 +60,7 @@ A single, **project-agnostic** framework for compliance source files. It does th
 | D-01 | **Promotion (core load).** In one transaction, set `Current_Ind = 0` on the current core rows with the same `Btch_ID`, then append the newly staged rows. |
 | D-02 | **Override keys (v5).** At most one active (`PENDING_REVIEW` or `APPROVED`) override per (`Req_ID`, `Override_Ty`). A batch may therefore hold a `REUSE` and a later `CORRECTION` row, but never two of a kind. |
 | D-03 | **Batch and load identity.** `Btch_ID` is fixed at batch creation and never changes. Every physical file gets its own `Load_ID`, which is stamped everywhere its data or events appear. |
-| D-04 | **Closed batches stay closed.** A closed batch that receives a file under an approved override stays closed (`Batch_Close_Ind = 1`); the promotion runs under that approval (D-74). |
+| D-04 | **Closed batches stay closed.** A closed batch that receives a file under an approved override stays closed (`Batch_Close_Ind = Y`); the promotion runs under that approval (D-74). |
 | D-05 | **Staging.** Staging is never truncated. Before loading, the framework deletes only `WHERE Btch_ID = :btch_id`. |
 | D-08 | **Rules engine (v6).** File validation uses UMcM GRE. Rules are bound at any level — project, table, run type or source (`'*'` = all); every matching binding runs (additive). Period-level (cross-source) rules are not part of the framework. |
 | ~~D-09~~ | *Withdrawn in v6 (D-76).* There is no extract grain in the framework. |
@@ -118,7 +118,7 @@ A single, **project-agnostic** framework for compliance source files. It does th
 | D-67 | **Settings are not stored in tables (v4).** Precedence: job argument (`--set NAME=VALUE`) > environment (`FRAMEWORK_<NAME>`) > `.env` > built-in default. `ComplianceFrameworkSetting` is removed. |
 | D-68 | **Promotion is one transaction (v4).** Because staging, core and control share one database, the core swap, the CRC update and the audit rows commit or roll back together. *(Replaces v3.2's cross-database replay rule.)* |
 | D-69 | **Fixed `Req_Stat` list (v4, answers Q-01 for now).** `REQUEST_CREATED`, `PROMOTED`, `CARRIED_FORWARD`, `EXCEPTION_PENDING` (open); `COMPLETED`, `COMPLETED_WITH_EXCEPTION`, `DATA_NOT_PROVIDED` (closed). The values and the legal transitions are in code (`common.TRANSITIONS`; no CHECK constraint since v6). The status and transition tables are removed. |
-| D-70 | **Carry-forward by approval (v4, `REUSE` in v5).** `ComplianceRunType.Carry_Fwd_Ind = 1` allows an **open batch without data** to reuse the data of the latest earlier **closed batch with data** of the same (project, table, source, run type), after a manual `REUSE` override is approved (optionally naming `Reuse_Btch_ID`). The batch becomes `CARRIED_FORWARD` / `Resolution_Ty = CARRY_FORWARD` and closes like a batch with data; the extract process reads the reused batch's current core rows (no data is copied). A file arriving before close replaces it; when the approval runs out (`Valid_Thru_Dt_Key`), `process-decisions` returns the open batch to `REQUEST_CREATED`; a file after close needs a `LATE_ARRIVAL` override. |
+| D-70 | **Carry-forward by approval (v4, `REUSE` in v5).** `ComplianceRunType.Carry_Fwd_Ind = Y` allows an **open batch without data** to reuse the data of the latest earlier **closed batch with data** of the same (project, table, source, run type), after a manual `REUSE` override is approved (optionally naming `Reuse_Btch_ID`). The batch becomes `CARRIED_FORWARD` / `Resolution_Ty = CARRY_FORWARD` and closes like a batch with data; the extract process reads the reused batch's current core rows (no data is copied). A file arriving before close replaces it; when the approval runs out (`Valid_Thru_Dt_Key`), `process-decisions` returns the open batch to `REQUEST_CREATED`; a file after close needs a `LATE_ARRIVAL` override. |
 | D-71 | **Report period is a job parameter (v4).** The crosswalk no longer holds period strategy, lookback, cron or time zone. The project's scheduled job runs `run --module BATCH_CREATION --project --run-type --period <NAME>`; `<NAME>` is a statement in `period_sql.py` (or in a project `.py` file passed with `--period-file`). The run date is today in `BUSINESS_TZ` or `--as-of`. `CompliancePeriodStrategy`, cron expansion and the `catchup` command are removed. |
 | ~~D-72~~ | *Withdrawn in v6 (D-76).* `ComplianceExtractPolicy`, `ComplianceExtractJobParam` (v4) and the gating settings (v6) are gone; the run type's `SLA_Days` is the only close setting. |
 | D-74 | **One override shape, three types (v5).** `ComplianceBatchOverride` holds `REUSE`, `LATE_ARRIVAL` and `CORRECTION` rows with the same columns: the batch grain, an optional `Reuse_Btch_ID`, a reason, the approval fields and `Valid_Thru_Dt_Key`. Rows are written and approved by hand (D-12). **There is no revoke:** to stop an override, move its validity date into the past. `LATE_ARRIVAL` (closed batch with no data) and `CORRECTION` (closed batch with data) are read by the ingest pipeline; `REUSE` is applied and expired by `process-decisions`. Candidate/reviewed loads, promotion status and the decision watermark are gone: a decision is made on the batch, not on a particular file. |
@@ -126,9 +126,10 @@ A single, **project-agnostic** framework for compliance source files. It does th
 | D-76 | **The extract is a separate process (v6).** The framework does not generate, call, combine or track the extract: `ComplianceExtractTrigger` (v5) and `ComplianceExtractControl` (v6) are removed. The extract process reads the batches (`ComplianceRequestControl`), their current core rows and the batch timeline. |
 | D-77 | **Run date in the grain, SLA computed (v5).** The CRC grain includes `Req_Dt_Key`, so the same report period run daily for ten days gets ten batches, one per run date, each with its own hold. The SLA hold is `Req_Dt_Key + (SLA_Days − 1)`, computed from the run type whenever it is needed and **never stored** (`Earliest_Close_Dt` and `Earliest_Trigger_Dt` are removed). |
 | D-80 | **Scheduled batch creation is two SQL statements in the metadata (0.3.7).** `ComplianceRunType.Batch_Schedule_Sql_Txt` says *when*: a single `SELECT` with `{run_date}` / `{project_cd}` / `{run_ty}` that returns one row on a day batches are due and no row otherwise; its columns are parameters of the date statements. `ComplianceDataSetSourceXwalk.Rpt_Dt_Sql_Txt` says *which dates*: a single `SELECT` returning `rpt_start`, `rpt_end` for that project / table / source / run type (no row = no batch for that table; no statement = `rpt_start` / `rpt_end` of the schedule row when it returns them). `BATCH_CREATION --project` evaluates both for every effective crosswalk row, whoever starts the run. A stretch of consecutive due days with the same dates gets one batch (first run creates it); the next stretch gets a new one. `--period` replaces both for one run. Supersedes the period being a parameter of each schedule and the single `Batch_Sql_Txt` of 0.3.6; D-77 applies only to runs that pass `--period`. |
-| D-81 | **Optional file check before the load (0.3.9).** `FILE_CHECK` reads the files waiting in the inbound folders where they are and reports every problem of each: file name, run type, batch, duplicate, encoding, blank lines, header (count and, when configured, names), record types, column counts, trailer fields, zero records. It registers no load, moves no file and changes no batch; its result is the step outcome (exit 1 when a file fails) and one `FILE_CHECK_PASSED` / `FILE_CHECK_FAILED` row per file and outcome in `CMS_ComplianceExceptionsAudit`. Per-file options are JSON in `ComplianceSourceFileConfig.File_Check_Txt` (`record_types`, `trailer_fields`, `header`) over the `CHECK_RECORD_TYPES` / `CHECK_TRAILER_FIELDS` settings. It is not part of any default schedule; a project that wants it schedules it and lets it start `FILE_LOAD`. `FILE_LOAD` does not depend on it. |
+| D-81 | **Optional file check before the load (0.3.9).** `FILE_CHECK` reads the files waiting in the inbound folders where they are and reports every problem of each: file name, run type, batch, duplicate, encoding, blank lines, header (count and, when configured, names), record types, column counts, trailer fields, zero records. It registers no load, moves no file and changes no batch; its result is the step outcome (exit 1 when a file fails) and one `FILE_CHECK_PASSED` / `FILE_CHECK_FAILED` row per file and outcome in `CMS_ComplianceExceptionsAudit`. Per-file options were JSON in `File_Check_Txt` (plain columns since D-84) over the `CHECK_RECORD_TYPES` / `CHECK_TRAILER_FIELDS` settings. It is not part of any default schedule; a project that wants it schedules it and lets it start `FILE_LOAD`. `FILE_LOAD` does not depend on it. |
 | D-82 | **File name tokens (0.3.10).** `Src_File_Nm_Tmplt` stays the one place a file's name is described. Beside `{RUNTY}`, `{RPTSTART}`, `{RPTEND}`, `{TS}` it takes `{RPTMONTH}` (one month instead of the two dates), `{ANY}` (ignored text), the row tokens `{PROJECT}`, `{TABLE}`, `{SRC}`, `{VERSION}` (`{VERSION}` = the new optional `ComplianceSourceFileConfig.File_Vrsn_Cd`), and a date format after a token (`{RPTSTART:MMDDYYYY}`). `{TS}` is optional; the run type and the report dates stay required. A name that fits except for its version is rejected as `FILE_REJECTED_INVALID_TOKEN` naming both versions. Extends D-28, D-31 and D-36. |
 | D-83 | **No email details in the file config (0.3.11).** `Sucs_Email_Notfn_Id`, `Failr_Email_Notfn_Id` and `Email_Subjct_Txt` are removed from `ComplianceSourceFileConfig`: who is notified about a file, and with which subject, is handled outside the framework. The `NOTIFY` step still exists and sends every pending event to `DEFAULT_NOTIFY_EMAILS` with the subject `[severity] event`; a project that notifies by its own means leaves it unscheduled. |
+| D-84 | **Y / N indicators, core table name, plain check columns (0.3.12).** The yes / no columns of the framework's tables are `CHAR(1)` `Y` / `N` instead of `SMALLINT` 1 / 0 (`Active_Ind`, `Carry_Fwd_Ind`, `Src_File_Has_Hdr_Ind`, `Src_File_Has_Trlr_Ind`, `Allow_Zero_Rcd_Ind`, `Batch_Close_Ind`, `Notified_Ind`); `Current_Ind` of the staging / core data tables stays 1 / 0. `ComplianceSourceFileConfig.Core_Table_Nm` is required and names the core table (it no longer has to equal `Table_Nm`). `File_Check_Txt` (JSON) is replaced by three plain optional columns: `File_Rcd_Ty_Txt`, `File_Trlr_Fld_Txt`, `File_Hdr_Txt` (`NONE` switches a check off for the file). `FILE_CHECK` also reports a file whose source is missing from `ComplianceSourceSystem` or inactive (`SOURCE`). |
 | D-78 | **Batch selection for an arriving file (v5).** A filename carries the report period but not the run date, so a file is matched to the **open** batch of its grain with the **latest run date ≤ today**. If every batch of that grain is closed, the most recent one is used and the file is promoted only under an approved, still-valid override; otherwise it is quarantined with `FILE_REJECTED_BATCH_CLOSED`, which is a **retryable** quarantine: re-delivering the same object after the override exists reprocesses the same `Load_ID`. |
 | D-79 | **Intake is ad-hoc only, with a request window (v5).** `ComplianceRequestInTake` is used by ADHOC run types. `Req_Start_Dt_Key` / `Req_End_Dt_Key` say how long batches must be created for the same report period: one batch per run date from the start date through the end date (equal dates = a one-off). v6: no status, request type, reason or error columns — a request is due while its window is open, `Last_Run_Dt_Key` records the last run date handled, and outcomes are audit events under the `Intake_ID`. Whether a batch was scheduled or requested follows from its run type's category. |
 | D-73 | **Leaner configuration rows (v4).** The crosswalk only says which (project, table, source, run type) apply and when (plus `Cmplnc_Vrsn`). The file config keeps the file contract, locations, targets and notification recipients; `Target_Connection_Nm`, `Engine_Cd`, `Rules_Vld_Md`, `Is_Rules_Engine_Required`, `Load_Exclude_Col_List` and `Sns_Topic_Arn` are removed. |
@@ -189,7 +190,7 @@ Every command takes `--set NAME=VALUE` job arguments, so one job definition per 
 | **Extract** | Produced by a separate process from the batches and their current core rows (D-76). |
 | **Override** | A manual, approved decision on one batch, valid through `Valid_Thru_Dt_Key`: `REUSE`, `LATE_ARRIVAL` or `CORRECTION` (D-74). |
 | **Late arrival / correction** | A file for a closed batch: `LATE_ARRIVAL` when the batch has no data, `CORRECTION` when it has. Both need an approved override (D-04, D-74). |
-| **Carry-forward (`REUSE`)** | An approved override that lets an open batch without data reuse an earlier batch's data; only for run types with `Carry_Fwd_Ind = 1` (D-70). |
+| **Carry-forward (`REUSE`)** | An approved override that lets an open batch without data reuse an earlier batch's data; only for run types with `Carry_Fwd_Ind = Y` (D-70). |
 | **Job setting** | A value passed to a scheduled job (`--set`), or read from the environment / `.env` (D-67). |
 
 ---
@@ -380,7 +381,7 @@ APPROVED  --(today > Valid_Thru_Dt_Key)-->  no longer usable
 - A rejected row frees the (`Req_ID`, `Override_Ty`) slot, so a new row of that type can be requested.
 
 ### 6.3 Batch close
-- **Closure:** `Batch_Close_Ind = 1` from the close (automatic or manual, §11). It never goes back to 0; a later promotion into the batch needs an approved override (D-04, D-74) and is logged on the batch timeline (D-41).
+- **Closure:** `Batch_Close_Ind = Y` from the close (automatic or manual, §11). It never goes back to N; a later promotion into the batch needs an approved override (D-04, D-74) and is logged on the batch timeline (D-41).
 
 ---
 
@@ -414,7 +415,7 @@ A correction is **not** an intake row: it is a `CORRECTION` override on the batc
 1. **Lock** the batch (session advisory lock on `Btch_ID`).
 2. **Duplicate check (C11)** and **read / structural check (C12–C14)**.
 3. **Stage** (D-05): delete staging rows by `Btch_ID`, load with `Load_ID`, record counts.
-4. **Zero-record check (D-60):** if the data row count is 0 and `Allow_Zero_Rcd_Ind = 0` → `FILE_ZERO_RECORDS_REJECTED`, `Load_Stat = RULES_FAILED`, treated like a GATE failure in §8.
+4. **Zero-record check (D-60):** if the data row count is 0 and `Allow_Zero_Rcd_Ind = N` → `FILE_ZERO_RECORDS_REJECTED`, `Load_Stat = RULES_FAILED`, treated like a GATE failure in §8.
 5. **File-level rules** (when the source has FILE_LEVEL bindings): GRE with `{btch_id, load_id}`.
    - GATE failure (mode `FILE_RULES_MODE`, D-44) → whole-file failure (D-19).
    - ANNOTATE-only failures → passed with warnings.
@@ -434,7 +435,7 @@ A correction is **not** an intake row: it is a `CORRECTION` override on the batc
 
 | Detected | Action |
 |---|---|
-| `REUSE` `APPROVED`, `Valid_Thru_Dt_Key ≥ today`, batch open and not yet carried | Validate: the run type has `Carry_Fwd_Ind = 1`, the batch is open with no promoted load, and a source batch exists (the requested `Reuse_Btch_ID`, else the latest earlier **closed** batch of the same project/table/source/run type that has data; a carried batch resolves to its own source). Invalid → `OVERRIDE_INVALID_DETECTED`, batch unchanged. Valid → CRC `Resolution_Ty = CARRY_FORWARD`, `Reuse_Btch_ID`, `Req_Stat = CARRIED_FORWARD`; log `OVERRIDE_APPROVED` + `CARRY_FORWARD_APPLIED`. |
+| `REUSE` `APPROVED`, `Valid_Thru_Dt_Key ≥ today`, batch open and not yet carried | Validate: the run type has `Carry_Fwd_Ind = Y`, the batch is open with no promoted load, and a source batch exists (the requested `Reuse_Btch_ID`, else the latest earlier **closed** batch of the same project/table/source/run type that has data; a carried batch resolves to its own source). Invalid → `OVERRIDE_INVALID_DETECTED`, batch unchanged. Valid → CRC `Resolution_Ty = CARRY_FORWARD`, `Reuse_Btch_ID`, `Req_Stat = CARRIED_FORWARD`; log `OVERRIDE_APPROVED` + `CARRY_FORWARD_APPLIED`. |
 | Carried batch whose override ran out, was rejected or is gone | CRC back to `REQUEST_CREATED`, `Resolution_Ty` and `Reuse_Btch_ID` cleared; log `OVERRIDE_EXPIRED` + `CARRY_FORWARD_REMOVED`. Closed batches are never touched. |
 
 The job is idempotent: an already-applied override is skipped, and an already-expired one has nothing left to remove.
@@ -446,7 +447,7 @@ The job is idempotent: an already-applied override is skipped, and an already-ex
 **P12. Extract (outside the framework, D-76).** A separate process reads the batches, their current core rows and the batch timeline, and generates the submission.
 
 **P13. Notifications.**
-- Every notification is an email (D-54). Which events are emailed is fixed in `audit.AUDIT_EVENTS`; the others are written with `Notified_Ind = 1`.
+- Every notification is an email (D-54). Which events are emailed is fixed in `audit.AUDIT_EVENTS`; the others are written with `Notified_Ind = Y`.
 - Recipients are `DEFAULT_NOTIFY_EMAILS` (D-83).
 - Set `Notified_Ind` after sending. A failed notification never rolls back pipeline state.
 
@@ -456,7 +457,7 @@ The job is idempotent: an already-applied override is skipped, and an already-ex
 
 These apply after C0–C14 pass, with the batch lock held, to the batch chosen by D-78. A batch with an applied carry-forward counts as "has data" (so O-2 / O-4 apply). **PASS** = file-level rules passed (with or without warnings) and the zero-record rule is satisfied. **FAIL** = GATE failure or a disallowed zero-record file.
 
-### 8.1 Batch OPEN (`Batch_Close_Ind = 0`)
+### 8.1 Batch OPEN (`Batch_Close_Ind = N`)
 
 | # | Batch has data? | File | CRC | Core | Load_Stat | Events |
 |---|---|---|---|---|---|---|
@@ -466,7 +467,7 @@ These apply after C0–C14 pass, with the batch lock held, to the batch chosen b
 | O-4 | yes | FAIL | keeps the prior data (or the carry-forward), `EXCEPTION_PENDING` (D-46) | none | `RULES_FAILED` | same as O-3 |
 | O-5 | any | technical error | unchanged | rolled back | `FAILED_TECHNICAL` | `RULES_ENGINE_TECHNICAL_FAILURE`; retry |
 
-### 8.2 Batch CLOSED (`Batch_Close_Ind = 1`, D-74)
+### 8.2 Batch CLOSED (`Batch_Close_Ind = Y`, D-74)
 
 The pipeline reads the batch's approved, still-valid override (`Valid_Thru_Dt_Key ≥ today`) of the type its state requires: `LATE_ARRIVAL` when it has no data, `CORRECTION` when it has.
 
@@ -533,7 +534,7 @@ Every failure except C0 quarantines the file, sets `Load_Stat = QUARANTINED` wit
 | C11 | SHA-256 equals a load of a **different** batch → **continue** (D-52) | `FILE_SAME_CONTENT_OTHER_BATCH` (warning) |
 | C12 | Read failure (delimiter, encoding, structure); the message names the line | `FILE_PARSE_ERROR` |
 | C13 | Data column count ≠ staging business-column count (D-59) | `FILE_COLUMN_COUNT_MISMATCH` |
-| C14 | Trailer count mismatch (when `Src_File_Has_Trlr_Ind = 1`, ⚠ Q-02) | `FILE_TRAILER_COUNT_MISMATCH` |
+| C14 | Trailer count mismatch (when `Src_File_Has_Trlr_Ind = Y`, ⚠ Q-02) | `FILE_TRAILER_COUNT_MISMATCH` |
 
 - **Zero-byte file with no header expected:** it has zero records and is handled by the D-60 rule in P5 step 4.
 - **Retries:** C12–C14 are retried only for transient I/O errors, then quarantined.
@@ -593,7 +594,7 @@ COMMIT;
 | In exception (`EXCEPTION_PENDING`) | closes | closes | `COMPLETED_WITH_EXCEPTION` (resolution kept, or `MISSING`) |
 | No data (`REQUEST_CREATED`) | listed as `waiting` | closes | `DATA_NOT_PROVIDED` / `MISSING` (+ `SOURCE_MISSING_AT_CLOSE`) |
 
-Every close: try-lock the batch (busy → `BATCH_CLOSE_DEFERRED_LOCKED`; the sweep retries, a manual close exits non-zero), re-read the row `FOR UPDATE`, check the transition (D-69), set `Batch_Close_Ind = 1` and log `BATCH_CLOSED` with the actor (`SYSTEM` for the sweep). A manual close inside the hold or of a closed batch is refused (`BATCH_CLOSE_BLOCKED`).
+Every close: try-lock the batch (busy → `BATCH_CLOSE_DEFERRED_LOCKED`; the sweep retries, a manual close exits non-zero), re-read the row `FOR UPDATE`, check the transition (D-69), set `Batch_Close_Ind = Y` and log `BATCH_CLOSED` with the actor (`SYSTEM` for the sweep). A manual close inside the hold or of a closed batch is refused (`BATCH_CLOSE_BLOCKED`).
 
 ### 11.3 After a late arrival or correction (D-41)
 The file is promoted into the closed batch under an approved override (§8.2); the batch stays closed (`COMPLETED`) and the timeline records `LATE_ARRIVAL_PROMOTED` / `CORRECTION_PROMOTED`. Whether to regenerate a submitted extract is the extract process's decision (⚠ Q-16).
@@ -615,7 +616,7 @@ The file is promoted into the closed batch under an approved override (§8.2); t
 | Promotion | One transaction with the CRC update; `Load_Stat = PROMOTED` short-circuit on replay |
 | Decisions | State of the batch (already carried / already expired) + `SKIP LOCKED` |
 | Intake | `Last_Run_Dt_Key` and the existing batch of that run date + `SKIP LOCKED` |
-| Close | `Batch_Close_Ind = 1` short-circuits a second close (checked under the batch lock) |
+| Close | `Batch_Close_Ind = Y` short-circuits a second close (checked under the batch lock) |
 
 ### 12.2 Locks
 Session advisory locks (`pg_try_advisory_lock` / `pg_advisory_lock` with a timeout), keyed by hashed strings:
@@ -719,7 +720,7 @@ Session advisory locks (`pg_try_advisory_lock` / `pg_advisory_lock` with a timeo
 | E-65 | Replacement file arrives while the batch is open | Re-promote (O-2); nothing was closed yet | ✔ |
 | E-66 | Batch never closed (no data, nobody runs the manual close) | Listed as `waiting` by `close-batches` and by the health query `batches_past_hold_not_closed` | ⚠ Q-17 |
 | E-67 | Illegal status move | `InvalidStatusTransition` (D-69) | ✔ |
-| E-68 | `REUSE` requested for a run type with `Carry_Fwd_Ind = 0`, a batch with data, a closed batch, or with no earlier batch with data | `OVERRIDE_INVALID_DETECTED`; batch unchanged (D-70) | ✔ |
+| E-68 | `REUSE` requested for a run type with `Carry_Fwd_Ind = N`, a batch with data, a closed batch, or with no earlier batch with data | `OVERRIDE_INVALID_DETECTED`; batch unchanged (D-70) | ✔ |
 | E-69 | File arrives for an open carried-forward batch | O-2: the file wins; `CARRY_FORWARD_REMOVED` | ✔ |
 | E-70 | File arrives after a carried-forward batch closed | The batch counts as having data, so it needs a `CORRECTION` override | ✔ |
 | E-71 | `REUSE` and a later `CORRECTION` on one batch | Allowed: the index is per (batch, type) (D-02) | ✔ |
@@ -964,7 +965,7 @@ The templates are maintained in [`framework/sql/approvals.sql`](../../framework/
 All names are placeholders.
 
 **Config**
-- Project `PRJA`, table `tbl_x`, run type `MONTHLY` (`SLA_Days = 2`, `Carry_Fwd_Ind = 1`).
+- Project `PRJA`, table `tbl_x`, run type `MONTHLY` (`SLA_Days = 2`, `Carry_Fwd_Ind = Y`).
 - Scheduled jobs: `run --module BATCH_CREATION --project PRJA --run-type MONTHLY --period PREV_CALENDAR_MONTH` at 06:00 on the 1st; `close-batches --project PRJA` every 15 minutes.
 - Sources `S1` and `S2`, with templates `PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt` and `PRJA_TBLX_S2_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt`.
 

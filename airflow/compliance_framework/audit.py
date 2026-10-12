@@ -91,7 +91,7 @@ class EventLogger:
                  Req_ID, Load_ID, Ovrd_ID, Intake_ID, Btch_ID, File_Ref, Actor, Event_Txt, Event_Dtts, Notified_Ind)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (event_ty, sev, project_cd, table_nm, src_id, run_ty, req_id, load_id, ovrd_id, intake_id,
-             btch_id, file_ref, actor, _text(description), self.clock.now(), 0 if et.notify else 1))
+             btch_id, file_ref, actor, _text(description), self.clock.now(), "N" if et.notify else "Y"))
         level = logging.ERROR if sev == "ERROR" else logging.WARNING if sev == "WARNING" else logging.INFO
         log.log(level, "audit %s req=%s load=%s %s", event_ty, req_id, load_id, description or "")
 
@@ -110,7 +110,7 @@ class NotificationDispatcher:
     def run(self, limit: int = 500, project_cd: Optional[str] = None) -> int:
         """Send up to `limit` events - of one project, or of every project (and none) when project_cd is None."""
         sent, self.failed = 0, []
-        where, params = "Notified_Ind = 0", []
+        where, params = "Notified_Ind = 'N'", []
         if project_cd is not None:
             where, params = where + " AND Project_Cd = %s", [code(project_cd)]
         pending = self.conn.execute(f"SELECT TOP {int(limit)} Event_ID FROM CMS_ComplianceExceptionsAudit "
@@ -121,11 +121,11 @@ class NotificationDispatcher:
                 continue
             try:
                 r = self.conn.execute("SELECT * FROM CMS_ComplianceExceptionsAudit WHERE Event_ID=%s "
-                                      "AND Notified_Ind = 0", (p["event_id"],)).fetchone()
+                                      "AND Notified_Ind = 'N'", (p["event_id"],)).fetchone()
                 if r is None:
                     continue
                 if self._send(r):
-                    self.conn.execute("UPDATE CMS_ComplianceExceptionsAudit SET Notified_Ind=1 WHERE Event_ID=%s",
+                    self.conn.execute("UPDATE CMS_ComplianceExceptionsAudit SET Notified_Ind = 'Y' WHERE Event_ID=%s",
                                       (r["event_id"],))
                     sent += 1
                 else:

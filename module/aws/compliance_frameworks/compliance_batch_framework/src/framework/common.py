@@ -166,6 +166,11 @@ def parse_as_of(value: str | None, business_tz: str = "UTC") -> Clock:
 BTCH_ID_MAX_LEN = 250
 
 
+def yes(value) -> bool:
+    """A Y / N indicator column as a bool."""
+    return isinstance(value, str) and value.strip().upper() == "Y"
+
+
 def build_btch_id(req_dt: date, project_cd: str, table_nm: str, src_id: str, run_ty: str,
                   cmplnc_vrsn: str, seq: int) -> str:
     """{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Src}_{Run_Ty}_{Vrsn}_{Seq}."""

@@ -54,7 +54,7 @@ def staging_business_columns(conn, schema: str, table: str) -> list[str]:
 
 def core_insert_columns(conn, cfg: "FileConfig") -> list[str]:
     """Staging business columns that exist in core, minus identity/generated/serial columns (D-61)."""
-    core = _table_columns(conn, cfg.core_schema_nm, cfg.table_nm, CORE_FRAMEWORK_COLS, "core")
+    core = _table_columns(conn, cfg.core_schema_nm, cfg.core_table_nm, CORE_FRAMEWORK_COLS, "core")
     usable = {c.name for c in core if not c.auto and c.name not in CORE_FRAMEWORK_COLS}
     return [c for c in staging_business_columns(conn, cfg.stg_schema_nm, cfg.stg_table_nm) if c in usable]
 
@@ -322,7 +322,7 @@ class PromotionResult:
 def swap(conn, cfg: "FileConfig", btch_id: str, load_id: int, expected_rows: int, now: datetime) -> PromotionResult:
     """Must run inside the caller's open transaction; the caller holds the batch advisory lock."""
     cols = core_insert_columns(conn, cfg)
-    core, stg = _ident(cfg.core_schema_nm, cfg.table_nm), _ident(cfg.stg_schema_nm, cfg.stg_table_nm)
+    core, stg = _ident(cfg.core_schema_nm, cfg.core_table_nm), _ident(cfg.stg_schema_nm, cfg.stg_table_nm)
     col_sql = sql.SQL("").join(sql.SQL("{}, ").format(sql.Identifier(c)) for c in cols)
     disabled = conn.execute(sql.SQL("UPDATE {} SET current_ind = 0, end_dtts = %s WHERE btch_id = %s "
                                     "AND current_ind = 1").format(core), (now, btch_id)).rowcount

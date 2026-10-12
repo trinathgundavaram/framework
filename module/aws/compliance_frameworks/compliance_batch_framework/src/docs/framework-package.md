@@ -112,9 +112,9 @@ framework validate-config
 2. **Insert configuration rows** (SQL or the Glue metadata-load job), in this order:
    1. `ComplianceProject` — the project code and its description.
    2. `ComplianceSourceSystem` — `Src_ID`, name, type.
-   3. `ComplianceRunType` — `SLA_Days` ≥ 1 (the hold is `Req_Dt_Key + SLA_Days − 1`); `Carry_Fwd_Ind = 1` if batches of this run type may reuse the previous batch's data after approval; code letters/digits only.
+   3. `ComplianceRunType` — `SLA_Days` ≥ 1 (the hold is `Req_Dt_Key + SLA_Days − 1`); `Carry_Fwd_Ind = Y` if batches of this run type may reuse the previous batch's data after approval; code letters/digits only.
    4. `ComplianceDataSetSourceXwalk` — one effective-dated row per project / table / source / run type. Nothing else.
-   5. `ComplianceSourceFileConfig` — one active row per project / table / source: filename template (project, table and source written literally, e.g. `PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt`; its extension is the file type), delimiter, header/trailer flags, inbound path (files then move to its `Archive/` or `Error/` subfolder), staging table, core schema (the core table is `Table_Nm`).
+   5. `ComplianceSourceFileConfig` — one active row per project / table / source: filename template (project, table and source written literally, e.g. `PRJA_TBLX_S1_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt`; its extension is the file type), delimiter, header/trailer flags, inbound path (files then move to its `Archive/` or `Error/` subfolder), staging table, core schema and core table (`Core_Table_Nm`).
    6. `ComplianceRuleBinding` — rules run by the `FILE_RULES` step on each file after it is loaded to core, bound at any level: `'*'` in `Table_Nm`, `Src_ID` or `Run_Ty` means all. Every matching binding runs (additive); a rule bound at two levels runs once. Optional: a file with no matching binding skips the rules.
 
       | Level | `Table_Nm` | `Src_ID` | `Run_Ty` |
@@ -208,7 +208,7 @@ In Glue, keep one job definition and pass the module and its parameters as job a
 
 Use the templates in `framework/sql/approvals.sql`. Every statement must report **1 row**. One shape covers three decisions, each approved with a `Valid_Thru_Dt_Key` — the last date it may be used. **There is no revoke:** template 6 moves that date into the past.
 
-- **`REUSE` (D-70):** for an open batch with no data, when the run type has `Carry_Fwd_Ind = 1`. Optionally name `Reuse_Btch_ID`; otherwise the latest earlier closed batch with data is used. `process-decisions` applies it (the batch becomes `CARRIED_FORWARD` and counts as received, combining the reused batch's current core rows) and removes it again when it runs out. A file that arrives later for the open batch replaces the carried data.
+- **`REUSE` (D-70):** for an open batch with no data, when the run type has `Carry_Fwd_Ind = Y`. Optionally name `Reuse_Btch_ID`; otherwise the latest earlier closed batch with data is used. `process-decisions` applies it (the batch becomes `CARRIED_FORWARD` and counts as received, combining the reused batch's current core rows) and removes it again when it runs out. A file that arrives later for the open batch replaces the carried data.
 - **`LATE_ARRIVAL`:** lets a file be promoted into a **closed** batch that has no data.
 - **`CORRECTION`:** lets a file replace the data of a **closed** batch that has data.
 - Both of the last two are read by the ingest pipeline: with a valid override the file is promoted (logged as `LATE_ARRIVAL_PROMOTED` / `CORRECTION_PROMOTED` on the batch timeline, which the extract process can watch); without one it is quarantined as `FILE_REJECTED_BATCH_CLOSED`, and re-delivering the same object after the approval reprocesses it.

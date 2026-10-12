@@ -10,7 +10,7 @@ import psycopg
 from . import db
 from .audit import EventLogger
 from .common import (COMPLETED, COMPLETED_WITH_EXCEPTION, DATA_NOT_PROVIDED, EXCEPTION_PENDING, Clock,
-                     CloseBlocked, CloseDeferred, check_transition, earliest_close_date, code)
+                     CloseBlocked, CloseDeferred, check_transition, earliest_close_date, code, yes)
 from .settings import Settings
 
 HAS_DATA = ("NEW_FILE", "CARRY_FORWARD")
@@ -54,7 +54,7 @@ class BatchCloser:
         b = self._batch(btch_id)
         if b is None:
             raise LookupError(f"batch {btch_id} not found")
-        reason = ("batch is already closed" if b["batch_close_ind"] == 1
+        reason = ("batch is already closed" if yes(b["batch_close_ind"])
                   else f"SLA hold until {b['hold_dt']}" if self._today() < b["hold_dt"] else None)
         if reason:
             self._blocked(b, closed_by, reason)
@@ -102,7 +102,7 @@ class BatchCloser:
         """Open batches in scope whose hold ends on or before `last_hold` (default today)."""
         sql, params = _scope_sql(
             """SELECT c.* FROM ComplianceRequestControl c JOIN ComplianceRunType r ON UPPER(r.Run_Ty) = c.Run_Ty
-                WHERE c.Batch_Close_Ind = 0 AND c.Req_Dt_Key + (r.SLA_Days - 1) <= %(last_hold)s""",
+                WHERE c.Batch_Close_Ind = 'N' AND c.Req_Dt_Key + (r.SLA_Days - 1) <= %(last_hold)s""",
             "ORDER BY c.Req_ID", project_cd, table_nm, run_ty, last_hold=last_hold or self._today())
         return self.conn.execute(sql, params).fetchall()
 
@@ -122,12 +122,12 @@ class BatchCloser:
             with self.conn.transaction():
                 cur = self.conn.execute("SELECT * FROM ComplianceRequestControl WHERE Req_ID=%s FOR UPDATE",
                                         (b["req_id"],)).fetchone()
-                if cur["batch_close_ind"] == 1 or (automatic and not closes_automatically(cur)):
+                if yes(cur["batch_close_ind"]) or (automatic and not closes_automatically(cur)):
                     return None
                 to_stat, resolution = close_resolution(cur)
                 check_transition(cur["req_stat"], to_stat)
                 self.conn.execute(
-                    """UPDATE ComplianceRequestControl SET Batch_Close_Ind=1, Req_Stat=%s, Resolution_Ty=%s,
+                    """UPDATE ComplianceRequestControl SET Batch_Close_Ind = 'Y', Req_Stat=%s, Resolution_Ty=%s,
                               Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, resolution, self.clock.now(), cur["req_id"]))
                 self.logger.batch_event("BATCH_CLOSED", req_id=cur["req_id"], btch_id=cur["btch_id"], actor=closed_by,
                                         detail=f"{to_stat} / {resolution}")

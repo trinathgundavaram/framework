@@ -178,31 +178,26 @@ wants to hold the load until the files are clean.
 | Duplicate | `DUPLICATE` | The same file name was not loaded before (skipped with `load_duplicate = yes`) |
 | Encoding | `ENCODING` | The file is valid `FILE_ENCODING`; the first bad line is named |
 | Structure | `MALFORMED`, `BLANK_LINE` | Quoting is well formed; no blank lines inside the file (blank lines at the end are ignored) |
-| Header | `HEADER` | Present when `Src_File_Has_Hdr_Ind = 1`; same number of columns as the staging table; the names, when `header` is configured |
-| Record types | `RECORD_TYPE` | With `record_types` (for example `H,D,T`): the first field of the header, of every data row and of the trailer |
+| Header | `HEADER` | Present when `Src_File_Has_Hdr_Ind = Y`; same number of columns as the staging table; the names, when `File_Hdr_Txt` is set |
+| Record types | `RECORD_TYPE` | With record types (for example `H,D,T`): the first field of the header, of every data row and of the trailer |
 | Columns | `COLUMN_COUNT` | Every data row has as many fields as the staging table has business columns; the first lines are named |
-| Trailer | `TRAILER` | Present when `Src_File_Has_Trlr_Ind = 1`; with `trailer_fields`: field count, file name, row count, timestamp |
-| Rows | `ZERO_RECORDS` | At least one data row, unless `Allow_Zero_Rcd_Ind = 1` |
-| Setup | `CONFIG` | The staging table exists and `File_Check_Txt` is valid |
+| Trailer | `TRAILER` | Present when `Src_File_Has_Trlr_Ind = Y`; with trailer fields: field count, file name, row count, timestamp |
+| Rows | `ZERO_RECORDS` | At least one data row, unless `Allow_Zero_Rcd_Ind = Y` |
+| Source | `SOURCE` | The file's source is in `ComplianceSourceSystem` and active |
+| Setup | `CONFIG` | The staging table exists and the check columns are valid |
 
-**Options per file** are optional JSON in `ComplianceSourceFileConfig.File_Check_Txt`; a key that is left
-out takes the run's setting, and `""` switches that check off for the file:
+**Options per file** are three optional columns of `ComplianceSourceFileConfig`, each a plain value. An empty
+column takes the run's setting, and `NONE` switches that check off for the file:
 
-```json
-{"record_types": "H,D,T",
- "trailer_fields": "RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP",
- "header": "H|Member Id|Paid Amount|Member Name"}
-```
+| Column | Example | Setting for every file of the run | Meaning |
+|---|---|---|---|
+| `File_Rcd_Ty_Txt` | `H,D,T` | `CHECK_RECORD_TYPES` | Three codes: header, detail, trailer. The first field of each line must be the code of its position |
+| `File_Trlr_Fld_Txt` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | `CHECK_TRAILER_FIELDS` | What each trailer field holds, in order: `RECORD_TYPE`, `FILE_NAME` (must equal the file's name), `DATA_ROW_COUNT` (data rows) or `TOTAL_ROW_COUNT` (every line, header and trailer included), `TIMESTAMP` (`YYYYMMDD`, `YYYYMMDDHHMM` or `YYYYMMDDHHMMSS`), `SKIP` |
+| `File_Hdr_Txt` | `H\|Member Id\|Paid Amount\|Member Name` | — | The expected header line (with the file's delimiter, or comma separated). Names are compared in order, ignoring upper / lower case and surrounding spaces |
 
-| Key | Setting for every file of the run | Meaning |
-|---|---|---|
-| `record_types` | `CHECK_RECORD_TYPES` | Three codes: header, detail, trailer. The first field of each line must be the code of its position |
-| `trailer_fields` | `CHECK_TRAILER_FIELDS` | What each trailer field holds, in order: `RECORD_TYPE`, `FILE_NAME` (must equal the file's name), `DATA_ROW_COUNT` (data rows) or `TOTAL_ROW_COUNT` (every line, header and trailer included), `TIMESTAMP` (`YYYYMMDD`, `YYYYMMDDHHMM` or `YYYYMMDDHHMMSS`), `SKIP` |
-| `header` | — | The expected header line (with the file's delimiter, or comma separated). Names are compared in order, ignoring upper / lower case and surrounding spaces |
-
-Without `trailer_fields`, `TRAILER_COUNT_CHECK` / `TRAILER_COUNT_REGEX` apply as in the load.
+Without trailer fields, `TRAILER_COUNT_CHECK` / `TRAILER_COUNT_REGEX` apply as in the load.
 `CHECK_CONTENT = false` checks names and batches only and does not open the files. `validate-config`
-reports a `File_Check_Txt` that is not valid (`FILE_CHECK_CONFIG`).
+reports a value that is not valid (`FILE_CHECK_CONFIG`).
 
 **Result.** The step's outcome lists every file with `result` (`PASSED` / `FAILED`), its `findings`, and
 what the name resolved to: `config` (project / table / source), `run_type`, `version`, `rpt_start`,
@@ -356,6 +351,15 @@ finds them on 2026-10-19 to 2026-10-22, and creates nothing on 2026-10-23 and 20
 `PREV_CALENDAR_YEAR`, `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])` (the same dates every year; moves to the next
 year on the third date, by default the day after the window ends). Example, one batch by hand:
 `BATCH_CREATION` with `run_type`, `table` and `period = PREV_CALENDAR_MONTH`.
+
+## Yes / no columns and the core table
+
+- Every yes / no column of the framework's tables is `CHAR(1)` holding `Y` or `N` (upper or lower case):
+  `Active_Ind`, `Carry_Fwd_Ind`, `Src_File_Has_Hdr_Ind`, `Src_File_Has_Trlr_Ind`, `Allow_Zero_Rcd_Ind`,
+  `Batch_Close_Ind`, `Notified_Ind`. Anything other than `Y` counts as no. The framework columns in the
+  staging and core data tables are unchanged (`current_ind` stays 1 / 0).
+- `ComplianceSourceFileConfig.Core_Table_Nm` (required) names the core table in `Core_Schema_Nm`, the way
+  `Stg_Table_Nm` names the staging table. It can differ from `Table_Nm`.
 
 ## Upper and lower case
 
