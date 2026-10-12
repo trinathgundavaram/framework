@@ -25,6 +25,9 @@ class Column:
     name: str
     auto: bool = False
     text: bool = False
+    length: Optional[int] = None
+    numeric: bool = False
+    nullable: bool = True
 
 
 @dataclass(frozen=True)

@@ -8,7 +8,8 @@ from typing import Optional
 from .common import ConfigError
 
 TRAILER_FIELDS = ("RECORD_TYPE", "FILE_NAME", "DATA_ROW_COUNT", "TOTAL_ROW_COUNT", "TIMESTAMP", "SKIP")
-CHECKS = ("RECORD_TYPE", "HEADER_NAMES", "TRAILER", "CHARACTER_SET")
+CHECKS = ("RECORD_TYPE", "HEADER_NAMES", "TRAILER", "CHARACTER_SET", "COLUMN_VALUES")
+VALUE_RULES = ("LENGTH", "NUMBER", "REQUIRED")
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class CheckOptions:
     trailer_fields: tuple[str, ...] = ()
     header: Optional[str] = None
     charset: Optional[str] = None
+    value_rules: tuple = ()
 
 
 def _names(value) -> list[str]:
@@ -63,4 +65,11 @@ def check_options(cfg, checks) -> CheckOptions:
         except LookupError:
             raise ConfigError(f"{values['CHARACTER_SET'].label}: Check_Val_Txt {charset!r} is not a character set "
                               "(for example latin-1, ascii, cp1252)") from None
-    return CheckOptions(tuple(types) if types else None, fields, header, charset)
+    rules = tuple(r.upper() for r in _names(values["COLUMN_VALUES"].check_val_txt)) if "COLUMN_VALUES" in values else ()
+    if rules == ("ALL",):
+        rules = VALUE_RULES
+    bad = [r for r in rules if r not in VALUE_RULES]
+    if bad:
+        raise ConfigError(f"{values['COLUMN_VALUES'].label}: Check_Val_Txt has unknown value {bad[0]!r}; "
+                          f"accepted: ALL, {', '.join(VALUE_RULES)}")
+    return CheckOptions(tuple(types) if types else None, fields, header, charset, rules)

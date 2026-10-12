@@ -21,12 +21,15 @@ if TYPE_CHECKING:
 def columns(conn: psycopg.Connection, schema: str, table: str) -> list[Column]:
     """Columns of a table in definition order; auto = identity / generated / serial, text = character column."""
     rows = conn.execute(
-        """SELECT column_name, is_identity, is_generated, column_default, data_type FROM information_schema.columns
+        """SELECT column_name, is_identity, is_generated, column_default, data_type, character_maximum_length,
+                  is_nullable FROM information_schema.columns
             WHERE table_schema = lower(%s) AND table_name = lower(%s) ORDER BY ordinal_position""",
         (schema, table)).fetchall()
     return [Column(r["column_name"], r["is_identity"] == "YES" or r["is_generated"] == "ALWAYS"
                    or "nextval(" in (r["column_default"] or ""),
-                   r["data_type"] in ("character varying", "character", "text")) for r in rows]
+                   r["data_type"] in ("character varying", "character", "text"), r["character_maximum_length"],
+                   r["data_type"] in ("smallint", "integer", "bigint", "numeric", "real", "double precision"),
+                   r["is_nullable"] == "YES") for r in rows]
 
 
 def file_layout(conn, cfg: "FileConfig", target_columns) -> Layout:

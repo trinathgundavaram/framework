@@ -287,7 +287,7 @@ wants to hold the load until the files are clean.
 |---|---|
 | `Project_Cd` | The project of the files |
 | `Table_Nm`, `Src_ID` | The file the row applies to; `*` = every table / every source of the project |
-| `Check_Cd` | `RECORD_TYPE`, `HEADER_NAMES`, `TRAILER` or `CHARACTER_SET` |
+| `Check_Cd` | `RECORD_TYPE`, `HEADER_NAMES`, `TRAILER`, `CHARACTER_SET` or `COLUMN_VALUES` |
 | `Check_Val_Txt` | The value of the check (below) |
 | `Active_Ind` | 1 = the check is on, 0 = it is switched off for the files the row covers |
 
@@ -296,7 +296,8 @@ wants to hold the load until the files are clean.
 | `RECORD_TYPE` | `H,D,T` | Three codes: header, detail, trailer. The first field of each line must be the code of its position. Without this check the first line is the header and the last line the trailer by position (`Src_File_Has_Hdr_Ind`, `Src_File_Has_Trlr_Ind`) |
 | `HEADER_NAMES` | `Member Id\|Paid Amount\|Member Name` | The expected header line (with the file's delimiter, or comma separated). Names are compared in order, ignoring upper / lower case and surrounding spaces. Without this check only the number of header columns is compared with the staging table |
 | `TRAILER` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | What each trailer field holds, in order: `RECORD_TYPE`, `FILE_NAME` (must equal the file's name), `DATA_ROW_COUNT` (data rows) or `TOTAL_ROW_COUNT` (every line, header and trailer included), `TIMESTAMP` (`YYYYMMDD`, `YYYYMMDDHHMM` or `YYYYMMDDHHMMSS`), `SKIP` |
-| `CHARACTER_SET` | `latin-1` | Every line must only contain characters of that character set (`latin-1`, `ascii`, `cp1252`, ...). Use it when the target columns cannot hold every character: each offending line is reported with the character and the record |
+| `CHARACTER_SET` | `latin-1` | Every line must only contain characters of that character set (`latin-1`, `ascii`, `cp1252`, ...) and no control characters (tab is allowed). Use it when the target columns cannot hold every character: each offending line is reported with the character and the record |
+| `COLUMN_VALUES` | `ALL`, or any of `LENGTH,NUMBER,REQUIRED` | Every value of every data row against its target staging column: `LENGTH` = not longer than a character column, `NUMBER` = a number for a numeric column, `REQUIRED` = not empty for a `NOT NULL` column. Every offending value is reported with its line, column and record, so all bad records are listed before the load |
 
 - **The most specific row wins** for each check: the file's table and source, then its table, then `*`.
   A `*` row is the project's default; a row for one table or source overrides it.

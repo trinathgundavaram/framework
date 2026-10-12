@@ -23,11 +23,20 @@ log = logging.getLogger(__name__)
 def columns(conn: Connection, schema: str, table: str) -> list[Column]:
     """Columns of a table in definition order (lower-case names); auto = identity, text = character column."""
     rows = conn.execute(
-        """SELECT ColumnName AS column_name, IdColType AS id_col_type, ColumnType AS column_type FROM DBC.ColumnsV
+        """SELECT ColumnName AS column_name, IdColType AS id_col_type, ColumnType AS column_type,
+                  ColumnLength AS column_length, CharType AS char_type, Nullable AS nullable FROM DBC.ColumnsV
             WHERE UPPER(DatabaseName) = UPPER(%s) AND UPPER(TableName) = UPPER(%s) ORDER BY ColumnId""",
         (schema, table)).fetchall()
-    return [Column(r["column_name"].strip().lower(), bool((r["id_col_type"] or "").strip()),
-                   (r["column_type"] or "").strip().upper() in ("CV", "CF", "CO")) for r in rows]
+    out = []
+    for r in rows:
+        kind = (r["column_type"] or "").strip().upper()
+        length = None
+        if kind in ("CV", "CF") and r["column_length"]:
+            length = int(r["column_length"]) // (2 if int(r["char_type"] or 1) == 2 else 1)
+        out.append(Column(r["column_name"].strip().lower(), bool((r["id_col_type"] or "").strip()),
+                          kind in ("CV", "CF", "CO"), length, kind in ("I", "I1", "I2", "I8", "D", "F", "N"),
+                          (r["nullable"] or "Y").strip().upper() != "N"))
+    return out
 
 
 def file_layout(conn, cfg: "FileConfig", target_columns) -> Layout:

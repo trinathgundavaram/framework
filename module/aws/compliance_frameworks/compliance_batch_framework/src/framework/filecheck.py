@@ -5,6 +5,7 @@ It registers no load, moves no file and changes no batch; the result is the step
 from __future__ import annotations
 
 import csv
+from decimal import Decimal, InvalidOperation
 import logging
 import os
 import re
@@ -30,6 +31,7 @@ MAX_DETAILS = 5000
 TEXT_MAX = 4000
 _TIMESTAMP_FORMATS = {8: "%Y%m%d", 12: "%Y%m%d%H%M", 14: "%Y%m%d%H%M%S"}
 Finding = tuple[str, str]
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
 
 class _Lines:
@@ -75,8 +77,22 @@ def _header_diff(rec: list[str], expected: str, delim: str, header_code: Optiona
     return diffs
 
 
+def _value_problem(value: str, col, rules: tuple, empty_is_null: bool) -> Optional[str]:
+    """Why the target column cannot hold a value of the file, or None."""
+    if value == "" and empty_is_null:
+        return f"column {col.name} is empty but the target column is NOT NULL" if "REQUIRED" in rules and not col.nullable else None
+    if "LENGTH" in rules and col.length and len(value) > col.length:
+        return f"column {col.name}: {len(value)} characters, the target column holds {col.length}"
+    if "NUMBER" in rules and col.numeric:
+        try:
+            Decimal(value.strip())
+        except InvalidOperation:
+            return f"column {col.name}: {value!r} is not a number"
+    return None
+
+
 def check_content(path: str, name: str, cfg: FileConfig, expected_cols: int, settings: Settings,
-                  opts: CheckOptions, details: Optional[list] = None) -> list[Finding]:
+                  opts: CheckOptions, details: Optional[list] = None, columns: Optional[list] = None) -> list[Finding]:
     """Every content problem of a downloaded file; nothing is loaded anywhere.
 
     `details` collects one (check, line number, message, record) per problem line, for the error file.
@@ -98,15 +114,36 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: int, set
         return out
 
     header_code, detail_code, trailer_code = opts.record_types or (None, None, None)
-    blank, wrong_type, wrong_cols, wrong_chars = _Lines(), _Lines(), _Lines(), _Lines()
+    blank, wrong_type, wrong_cols, wrong_chars, wrong_values = _Lines(), _Lines(), _Lines(), _Lines(), _Lines()
 
     def characters(line_no: int, rec: list[str]) -> None:
+        text = delim.join(rec)
+        if text.isascii() and text.isprintable():
+            return
+        control = _CONTROL.search(text)
+        if control:
+            wrong_chars.add(line_no, f"U+{ord(control.group()):04X}")
+            note("CHARACTER_SET", line_no, f"control character U+{ord(control.group()):04X}", rec)
         try:
-            delim.join(rec).encode(opts.charset)
+            text.encode(opts.charset)
         except UnicodeEncodeError as e:
             ch = e.object[e.start]
             wrong_chars.add(line_no, repr(ch))
             note("CHARACTER_SET", line_no, f"character {ch!r} (U+{ord(ch):04X}) is not in {opts.charset}", rec)
+
+    rules = opts.value_rules if columns else ()
+    shortest = min((c.length for c in columns or () if c.length), default=None) if "LENGTH" in rules else None
+    required = "REQUIRED" in rules and settings.empty_as_null and any(not c.nullable for c in columns or ())
+    offset = 1 if opts.record_types else 0
+    numeric = [i + offset for i, c in enumerate(columns or ()) if c.numeric] if "NUMBER" in rules else []
+
+    def suspicious(rec: list[str]) -> bool:
+        """A cheap test of the whole row; only a row that fails it is checked value by value."""
+        if shortest is not None and max(map(len, rec)) > shortest:
+            return True
+        if required and "" in rec:
+            return True
+        return any(_value_problem(rec[i], columns[i - offset], ("NUMBER",), settings.empty_as_null) for i in numeric)
     counts = {"content": 0, "data": 0}
 
     def detail(line_no: int, rec: list[str]) -> None:
@@ -117,6 +154,13 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: int, set
         if len(rec) != expected_cols:
             wrong_cols.add(line_no, f"{len(rec)}")
             note("COLUMN_COUNT", line_no, f"{len(rec)} columns, expected {expected_cols}", rec)
+        elif rules and suspicious(rec):
+            problems = [p for p in (_value_problem(v, c, rules, settings.empty_as_null)
+                                    for v, c in zip(rec[offset:], columns)) if p]
+            if problems:
+                wrong_values.add(line_no, problems[0].split(":")[0].replace("column ", "").split(" ")[0])
+                for problem in problems:
+                    note("COLUMN_VALUES", line_no, problem, rec)
 
     reader = csv.reader(_lf_lines(_file_lines(path, settings.file_encoding)), delimiter=delim,
                         quotechar=settings.quote_char or None, strict=True)
@@ -175,8 +219,11 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: int, set
         out.append(("RECORD_TYPE", f"{wrong_type.count} row(s) whose record type is not {detail_code!r}: "
                                    f"{wrong_type.text()}"))
     if wrong_chars.count:
-        out.append(("CHARACTER_SET", f"{wrong_chars.count} row(s) with a character that is not in {opts.charset}: "
+        out.append(("CHARACTER_SET", f"{wrong_chars.count} row(s) with a control character or a character that is not in {opts.charset}: "
                                      f"{wrong_chars.text()}"))
+    if wrong_values.count:
+        out.append(("COLUMN_VALUES", f"{wrong_values.count} row(s) with a value the target column cannot hold: "
+                                     f"{wrong_values.text()}"))
     if wrong_cols.count:
         out.append(("COLUMN_COUNT", f"{wrong_cols.count} row(s) without {expected_cols} columns: {wrong_cols.text()}"))
     if cfg.has_trailer and trailer is None:
@@ -382,7 +429,9 @@ class FileChecker:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, name)
             self.store.download(info.bucket, info.key, path)
-            return check_content(path, name, cfg, expected_cols, self.settings, opts, details)
+            file_cols = set(layout.file_cols)
+            return check_content(path, name, cfg, expected_cols, self.settings, opts, details,
+                                 [c for c in layout.stage if c.name in file_cols])
 
     def _record(self, result: dict, cfg: Optional[FileConfig], batch: Optional[dict], run_ty: Optional[str]) -> None:
         """One audit row per file and outcome; a repeat of the same outcome for the same file adds nothing."""
