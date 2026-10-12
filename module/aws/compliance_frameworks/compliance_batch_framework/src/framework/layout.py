@@ -16,7 +16,6 @@ VALUE_CODES = ("RUN_TYPE", "VERSION", "SOURCE_ID", "FILE_NAME", "LOAD_TIMESTAMP"
                "CURRENT_FLAG", "END_TIMESTAMP", "PROJECT", "TABLE", "RPT_START", "RPT_END", "REQ_ID")
 DEFAULT_MAPPING = {"load_id": "LOAD_ID", "src_file_nm": "FILE_NAME", "stg_load_dtts": "LOAD_TIMESTAMP",
                    "current_ind": "CURRENT_FLAG", "load_dtts": "LOAD_TIMESTAMP", "end_dtts": "END_TIMESTAMP"}
-CLEANUP_SCOPES = ("BATCH", "RUN_TYPE")
 TIMESTAMP_TEXT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -65,7 +64,7 @@ def column_mapping(cfg, rows: Iterable) -> dict[str, str]:
     """
     chosen: dict = {}
     for r in rows:
-        if r.project_cd != cfg.project_cd or r.table_nm not in ("*", cfg.table_nm):
+        if not r.active or r.project_cd != cfg.project_cd or r.table_nm not in ("*", cfg.table_nm):
             continue
         if r.column_nm not in chosen or r.table_nm != "*":
             chosen[r.column_nm] = r
@@ -73,8 +72,6 @@ def column_mapping(cfg, rows: Iterable) -> dict[str, str]:
         return dict(DEFAULT_MAPPING)
     out = {}
     for name, r in chosen.items():
-        if not r.active:
-            continue
         if r.value_cd not in VALUE_CODES:
             raise ConfigError(f"{r.label}: unknown Value_Cd {r.value_cd!r}; accepted: {', '.join(VALUE_CODES)}")
         if name == BATCH_COLUMN:

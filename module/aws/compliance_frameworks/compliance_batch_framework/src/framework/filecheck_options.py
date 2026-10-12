@@ -31,19 +31,21 @@ def _names(value) -> list[str]:
 def check_options(cfg, checks) -> CheckOptions:
     """The content checks of a file config, from the ComplianceFileCheckConfig rows.
 
-    For each Check_Cd the most specific row of the file's project wins (its table and source, then its table,
-    then '*'); an inactive row switches that check off for the files it covers.
+    Inactive rows are ignored. For each Check_Cd the most specific active row of the file's project wins: its
+    table and source, then its table, then its source, then '*'. Include_Ind of that row says whether the
+    check applies (1) or is excluded (0) for the file.
     """
     chosen: dict = {}
     for k in checks:
-        if k.project_cd != cfg.project_cd or k.table_nm not in ("*", cfg.table_nm) or k.src_id not in ("*", cfg.src_id):
+        if (not k.active or k.project_cd != cfg.project_cd or k.table_nm not in ("*", cfg.table_nm)
+                or k.src_id not in ("*", cfg.src_id)):
             continue
         rank = 2 * (k.table_nm != "*") + (k.src_id != "*")
         if k.check_cd not in chosen or rank > chosen[k.check_cd][0]:
             chosen[k.check_cd] = (rank, k)
     values = {}
     for check_cd, (_, k) in chosen.items():
-        if not k.active or check_cd not in CHECKS:
+        if not k.include or check_cd not in CHECKS:
             continue
         if not k.check_val_txt:
             raise ConfigError(f"{k.label}: Check_Val_Txt is empty")

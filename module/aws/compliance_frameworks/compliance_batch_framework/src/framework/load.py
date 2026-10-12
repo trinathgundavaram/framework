@@ -259,10 +259,9 @@ def next_sequence(conn, cfg: "FileConfig", layout: Layout) -> int:
 
 
 def _clean_stage(conn, table, cfg: "FileConfig", layout: Layout, ctx: LoadContext) -> None:
-    if cfg.stg_cleanup_cd == "RUN_TYPE":
-        col = layout.column("RUN_TYPE")
-        if col is None:
-            raise ConfigError(f"{layout.label}: Stg_Cleanup_Cd RUN_TYPE needs a staging column filled with RUN_TYPE")
+    """Remove the staging rows of the file's run type; of its batch when the table has no run type column."""
+    col = layout.column("RUN_TYPE")
+    if col:
         conn.execute(sql.SQL("DELETE FROM {} WHERE {} = %s").format(table, sql.Identifier(col.name)),
                      (ctx.value("RUN_TYPE", col.text),))
     else:

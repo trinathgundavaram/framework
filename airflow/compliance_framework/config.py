@@ -13,7 +13,7 @@ from . import db
 from .adapters import parse_uri
 from .db import Connection
 from .common import ADHOC, SCHEDULED, ConfigError, code
-from .layout import CLEANUP_SCOPES, VALUE_CODES
+from .layout import VALUE_CODES
 
 
 
@@ -76,7 +76,6 @@ class FileConfig:
     core_table_nm: str
     active: bool = True
     file_vrsn_cd: Optional[str] = None
-    stg_cleanup_cd: str = "BATCH"
 
     @property
     def name_parts(self) -> dict:
@@ -98,7 +97,7 @@ class FileConfig:
                    name(r["src_file_path"], False),
                    name(r["stg_schema_nm"]), r["stg_table_nm"], name(r["core_schema_nm"]), r["core_table_nm"],
                    r["active_ind"] == 1,
-                   _text(r.get("file_vrsn_cd")), code(_text(r.get("stg_cleanup_cd")) or "BATCH"))
+                   _text(r.get("file_vrsn_cd")))
 
 
 @dataclass(frozen=True)
@@ -122,18 +121,19 @@ class TargetColumn:
 
 @dataclass(frozen=True)
 class FileCheck:
-    """One ComplianceFileCheckConfig row: a check of FILE_CHECK for a project's files ('*' = every table / source)."""
+    """One ComplianceFileCheckConfig row: a check included for, or excluded from, a project's files ('*' = all)."""
     project_cd: str
     table_nm: str
     src_id: str
     check_cd: str
     check_val_txt: Optional[str]
     active: bool
+    include: bool = True
 
     @classmethod
     def from_row(cls, r: dict) -> "FileCheck":
         return cls(code(r["project_cd"]), code(r["table_nm"]), code(r["src_id"]), code(r["check_cd"]),
-                   _text(r["check_val_txt"]), r["active_ind"] == 1)
+                   _text(r["check_val_txt"]), r["active_ind"] == 1, r["include_ind"] == 1)
 
     @property
     def label(self) -> str:
@@ -204,7 +204,7 @@ def target_columns(conn) -> list[TargetColumn]:
 
 
 def file_checks(conn) -> list[FileCheck]:
-    """Every ComplianceFileCheckConfig row, active or not (an inactive row switches a check off)."""
+    """Every ComplianceFileCheckConfig row; an inactive row is ignored by the checks."""
     rows = conn.execute("SELECT * FROM ComplianceFileCheckConfig ORDER BY Project_Cd, Table_Nm, Src_ID, Check_Cd").fetchall()
     return [FileCheck.from_row(r) for r in rows]
 
@@ -581,12 +581,8 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             parse_uri(c.src_file_path)
         except ValueError as e:
             add("PATH", f"{label}: {e}")
-        if c.stg_cleanup_cd not in CLEANUP_SCOPES:
-            add("STG_CLEANUP", f"{label}: Stg_Cleanup_Cd must be one of {', '.join(CLEANUP_SCOPES)}")
         try:
-            layout = file_layout(conn, c, targets)
-            if c.stg_cleanup_cd == "RUN_TYPE" and layout.column("RUN_TYPE") is None:
-                add("STG_CLEANUP", f"{label}: Stg_Cleanup_Cd RUN_TYPE needs a staging column filled with RUN_TYPE")
+            file_layout(conn, c, targets)
         except (LookupError, ConfigError) as e:
             add("TARGET_TABLE", f"{label}: {e}")
 

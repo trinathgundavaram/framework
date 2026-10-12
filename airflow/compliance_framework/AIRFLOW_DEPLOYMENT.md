@@ -289,7 +289,8 @@ wants to hold the load until the files are clean.
 | `Table_Nm`, `Src_ID` | The file the row applies to; `*` = every table / every source of the project |
 | `Check_Cd` | `RECORD_TYPE`, `HEADER_NAMES`, `TRAILER`, `CHARACTER_SET` or `COLUMN_VALUES` |
 | `Check_Val_Txt` | The value of the check (below) |
-| `Active_Ind` | 1 = the check is on, 0 = it is switched off for the files the row covers |
+| `Include_Ind` | 1 = the check applies to the files the row covers; 0 = those files are excluded from the check |
+| `Active_Ind` | 1 = the row is in use; 0 = the row is ignored, as if it were not there |
 
 | `Check_Cd` | `Check_Val_Txt` | What is checked |
 |---|---|---|
@@ -299,21 +300,25 @@ wants to hold the load until the files are clean.
 | `CHARACTER_SET` | `latin-1` | Every line must only contain characters of that character set (`latin-1`, `ascii`, `cp1252`, ...) and no control characters (tab is allowed). Use it when the target columns cannot hold every character: each offending line is reported with the character and the record |
 | `COLUMN_VALUES` | `ALL`, or any of `LENGTH,NUMBER,REQUIRED` | Every value of every data row against its target staging column: `LENGTH` = not longer than a character column, `NUMBER` = a number for a numeric column, `REQUIRED` = not empty for a `NOT NULL` column. Every offending value is reported with its line, column and record, so all bad records are listed before the load |
 
-- **The most specific row wins** for each check: the file's table and source, then its table, then `*`.
-  A `*` row is the project's default; a row for one table or source overrides it.
-- **To switch a check off for one file**, add a row for that table and source with `Active_Ind = 0`.
+- **Inactive rows are ignored.** `Active_Ind` only says whether a row is in use.
+- **The most specific active row wins** for each check, whether it includes or excludes: the file's table and
+  source, then its table (any source), then its source (any table), then `*`. So a row for one source always
+  overrides a `*` row, in either direction: exclude one source from a check every other source gets, or include
+  one source in a check the others do not get.
+- Two active rows cannot collide at the same level, because a table, source and check can have only one row.
+- **To exclude one file from a check**, add a row for that table and source with `Include_Ind = 0`.
 - A file with no row for a check does not get that check. The name, batch, source, encoding, blank-line,
   column-count and zero-row checks always run and need no row.
 
 Example: every file of the project must have the standard header; only the FDR source `51` has record
 types and a trailer; source `20` has a different layout, so its header check is off.
 
-| `Project_Cd` | `Table_Nm` | `Src_ID` | `Check_Cd` | `Check_Val_Txt` | `Active_Ind` |
-|---|---|---|---|---|---|
-| `CMSUNIV` | `*` | `*` | `HEADER_NAMES` | `Enrollee ID\|Contract ID\|Plan ID` | 1 |
-| `CMSUNIV` | `ODAG3` | `51` | `RECORD_TYPE` | `H,D,T` | 1 |
-| `CMSUNIV` | `ODAG3` | `51` | `TRAILER` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | 1 |
-| `CMSUNIV` | `ODAG3` | `20` | `HEADER_NAMES` | | 0 |
+| `Project_Cd` | `Table_Nm` | `Src_ID` | `Check_Cd` | `Check_Val_Txt` | `Include_Ind` | `Active_Ind` |
+|---|---|---|---|---|---|---|
+| `CMSUNIV` | `*` | `*` | `HEADER_NAMES` | `Enrollee ID\|Contract ID\|Plan ID` | 1 | 1 |
+| `CMSUNIV` | `ODAG3` | `51` | `RECORD_TYPE` | `H,D,T` | 1 | 1 |
+| `CMSUNIV` | `ODAG3` | `51` | `TRAILER` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | 1 | 1 |
+| `CMSUNIV` | `ODAG3` | `20` | `HEADER_NAMES` | | 0 | 1 |
 
 Without a `TRAILER` row, `TRAILER_COUNT_CHECK` / `TRAILER_COUNT_REGEX` apply as in the load.
 `CHECK_CONTENT = false` checks names and batches only and does not open the files. `validate-config`
@@ -511,7 +516,7 @@ of the file, in table order.**
 | `Table_Nm` | The dataset (`Table_Nm` of the file config); `*` = every table of the project |
 | `Column_Nm` | The column in the staging and / or core table |
 | `Value_Cd` | What fills it (below) |
-| `Active_Ind` | 1 = the framework fills it; 0 = it is an ordinary file column for the tables the row covers |
+| `Active_Ind` | 1 = the row is in use; 0 = the row is ignored, as if it were not there |
 
 | `Value_Cd` | Value |
 |---|---|
@@ -526,13 +531,15 @@ of the file, in table order.**
 Rules:
 
 - The batch column is always named `Btch_ID` and is in both tables; it needs no row.
+- The rows need no order. Where a column sits in the table decides its place: derived columns can be at the
+  start, at the end or between file columns, and the file's values fill the remaining columns left to right.
 - A row for one table wins over the project's `*` row for the same column.
 - **Core always holds the data.** When a file is loaded for a batch that already has rows, those rows get
   `CURRENT_FLAG` = 0 (and `END_TIMESTAMP`) and the new rows are added as current, in one transaction. The
   core table therefore needs a `CURRENT_FLAG` column.
-- **Staging is cleared before a load**, by `ComplianceSourceFileConfig.Stg_Cleanup_Cd`: `BATCH` (default)
-  removes the batch's rows; `RUN_TYPE` removes every staging row of the file's run type (it needs a
-  `RUN_TYPE` column in the staging table).
+- **Staging is cleared before a load by run type**: every staging row of the file's run type is removed,
+  then the file is loaded (the staging table needs a `RUN_TYPE` column for this, as in the example below).
+  Rows of other run types are not touched. A staging table without a run type column is cleared by batch.
 - A derived column of the core table must also be in the staging table (it is copied), except
   `CURRENT_FLAG`, `END_TIMESTAMP` and `LOAD_TIMESTAMP`.
 - A file with record types (a `RECORD_TYPE` row in `ComplianceFileCheckConfig`) has that first field
@@ -555,7 +562,7 @@ Load_Dtts`, start with a row ID, and (core) carry `Current_Ind`:
 | `CMSUNIV` | `ODAG3` | `ODAG_DE_Table3_2022_ID` | `ROW_SEQUENCE` |
 
 `validate-config` reports a row that is not valid (`TARGET_COLUMN`), a table that does not fit its rows
-(`TARGET_TABLE`) and a cleanup scope that cannot work (`STG_CLEANUP`).
+(`TARGET_TABLE`).
 
 ## The core table and the delimiter
 
