@@ -102,6 +102,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceTargetColumnConfig (
   Table_Nm         VARCHAR(63)  DEFAULT '*' NOT NULL,
   Column_Nm        VARCHAR(128) NOT NULL,
   Value_Cd         VARCHAR(30)  NOT NULL,
+  Value_Txt        VARCHAR(8000),
   Active_Ind       SMALLINT     DEFAULT 1 NOT NULL,
   Created_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Created_By       VARCHAR(100) DEFAULT USER NOT NULL,

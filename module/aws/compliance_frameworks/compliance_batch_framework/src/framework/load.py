@@ -12,7 +12,7 @@ import psycopg
 from psycopg import sql
 
 from .common import ConfigError, FileRejected, RowCountMismatch
-from .layout import BATCH_COLUMN, Column, Layout, LoadContext, build_layout, column_mapping
+from .layout import BATCH_COLUMN, PLACEHOLDER, Column, Layout, LoadContext, build_layout, column_mapping, sql_body
 
 if TYPE_CHECKING:
     from .config import FileConfig
@@ -245,6 +245,31 @@ def read_file(path: str, cfg: "FileConfig", expected_cols: int, settings: "Setti
     raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} has no reader")
 
 
+def sql_values(conn, layout: Layout, ctx: LoadContext) -> dict:
+    """{column: value} of the staging columns filled by a statement (Value_Cd SQL); each statement runs once per load."""
+    out, done, params = {}, {}, ctx.sql_params()
+    for c in layout.stage:
+        if layout.mapping.get(c.name) != "SQL":
+            continue
+        text = layout.texts[c.name]
+        if text not in done:
+            what = f"{layout.label}: Value_Txt of column {c.name}"
+            body = sql_body(what, text)
+            names = {n.lower() for n in PLACEHOLDER.findall(body)}
+            query = PLACEHOLDER.sub(lambda m: f"%({m.group(1).lower()})s", body.replace("%", "%%"))
+            try:
+                with conn.transaction():
+                    conn.execute("SET TRANSACTION READ ONLY")
+                    rows = conn.execute(query, {n: params[n] for n in names}).fetchall()
+            except psycopg.Error as e:
+                raise ConfigError(f"{what} failed: {str(e).strip().splitlines()[0]}") from None
+            if len(rows) != 1 or len(rows[0]) != 1:
+                raise ConfigError(f"{what} must return one row with one column (it returned {len(rows)} row(s))")
+            done[text] = next(iter(rows[0].values()))
+        out[c.name] = done[text]
+    return out
+
+
 def next_sequence(conn, cfg: "FileConfig", layout: Layout) -> int:
     """The next value of the ROW_SEQUENCE column: one above the highest in the staging and core tables."""
     highest = 0
@@ -278,12 +303,13 @@ def stage(conn: psycopg.Connection, settings: "Settings", *, file_path: str, cfg
     cols = [c.name for c in layout.stage]
     count = 0
     copy_sql = sql.SQL("COPY {} ({}) FROM STDIN").format(table, sql.SQL(", ").join(map(sql.Identifier, cols)))
+    resolved = sql_values(conn, layout, ctx)
     try:
         with conn.transaction():
             start = next_sequence(conn, cfg, layout)
             _clean_stage(conn, table, cfg, layout, ctx)
             with conn.cursor() as cur, cur.copy(copy_sql) as cp:
-                for row in layout.stage_rows(records, ctx, start):
+                for row in layout.stage_rows(records, ctx, start, resolved):
                     cp.write_row(row)
                     count += 1
     except (psycopg.errors.DataError, psycopg.errors.IntegrityError) as e:
@@ -319,6 +345,7 @@ def _stage_spark(conn, settings, spark, file_path, cfg, layout, ctx, drop_first)
         raise FileRejected("FILE_TYPE_NOT_SUPPORTED", "Spark engine does not load files with record types or a "
                                                       "ROW_SEQUENCE column")
     stg_columns = layout.file_cols
+    resolved = sql_values(conn, layout, ctx)
     rows = scan_delimited(file_path, cfg, len(stg_columns), settings)
     spark = spark or SparkSession.builder.appName("cms-compliance-framework").getOrCreate()
     df = (spark.read.option("header", str(cfg.has_header).lower()).option("sep", delimiter_for(cfg))
@@ -328,8 +355,7 @@ def _stage_spark(conn, settings, spark, file_path, cfg, layout, ctx, drop_first)
         df = df.select([F.when(F.col(c) == "", None).otherwise(F.col(c)).alias(c) for c in stg_columns])
     for c in layout.stage:
         if c.name not in stg_columns:
-            df = df.withColumn(c.name, F.lit(ctx.value("BATCH_ID" if c.name == BATCH_COLUMN else layout.mapping[c.name],
-                                                       c.text)))
+            df = df.withColumn(c.name, F.lit(layout.fixed_value(c, ctx, resolved)))
     with conn.transaction():
         _clean_stage(conn, _ident(cfg.stg_schema_nm, cfg.stg_table_nm), cfg, layout, ctx)
     info = conn.info

@@ -516,6 +516,7 @@ of the file, in table order.**
 | `Table_Nm` | The dataset (`Table_Nm` of the file config); `*` = every table of the project |
 | `Column_Nm` | The column in the staging and / or core table |
 | `Value_Cd` | What fills it (below) |
+| `Value_Txt` | Only for `CONSTANT` (the value) and `SQL` (the statement) |
 | `Active_Ind` | 1 = the row is in use; 0 = the row is ignored, as if it were not there |
 
 | `Value_Cd` | Value |
@@ -527,6 +528,9 @@ of the file, in table order.**
 | `CURRENT_FLAG` | Core only: 1 on the rows of the batch's latest load, 0 on the rows of its earlier loads |
 | `END_TIMESTAMP` | Core only: when a row stopped being current |
 | `LOAD_ID`, `REQ_ID`, `PROJECT`, `TABLE`, `RPT_START`, `RPT_END` | The framework's load number, the batch's request ID, project, dataset and report dates |
+| `LOAD_DATE` | The date of the load (business time zone): a date, or text `YYYY-MM-DD` in a character column |
+| `CONSTANT` | The fixed value in `Value_Txt`, on every row (for example `Y`, `N`, `0`, a label) |
+| `SQL` | The one value returned by the statement in `Value_Txt`, on every row of the load (below) |
 
 Rules:
 
@@ -540,6 +544,14 @@ Rules:
 - **Staging is cleared before a load by run type**: every staging row of the file's run type is removed,
   then the file is loaded (the staging table needs a `RUN_TYPE` column for this, as in the example below).
   Rows of other run types are not touched. A staging table without a run type column is cleared by batch.
+- **`SQL` columns.** `Value_Txt` is a single `SELECT` that returns one row with one column, for example
+  `SELECT CURRENT_DATE` or a lookup such as `SELECT Audit_ID FROM <db>.Audit_Run WHERE Btch_ID = {btch_id}`.
+  It runs once per load, before the file is staged, with the framework's database account; its value goes
+  on every row of that load. It can use `{btch_id}`, `{run_ty}`, `{version}`, `{src_id}`, `{file_name}`,
+  `{project_cd}`, `{table_nm}`, `{load_id}`, `{req_id}`, `{rpt_start}`, `{rpt_end}` and `{load_date}`, bound as
+  parameters (write `CAST({run_ty} AS VARCHAR(20))` where the database needs a type). A statement that fails,
+  or returns no row or more than one, stops that load and leaves the file in place. A `CONSTANT` is always
+  taken literally: `CURRENT_DATE` as a constant is the text, not today's date.
 - A derived column of the core table must also be in the staging table (it is copied), except
   `CURRENT_FLAG`, `END_TIMESTAMP` and `LOAD_TIMESTAMP`.
 - A file with record types (a `RECORD_TYPE` row in `ComplianceFileCheckConfig`) has that first field

@@ -4,7 +4,8 @@ Every other column of the staging table is a column of the file, in table order.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Iterable, Iterator, Optional
 from zoneinfo import ZoneInfo
@@ -13,7 +14,12 @@ from .common import ConfigError
 
 BATCH_COLUMN = "btch_id"
 VALUE_CODES = ("RUN_TYPE", "VERSION", "SOURCE_ID", "FILE_NAME", "LOAD_TIMESTAMP", "ROW_SEQUENCE", "LOAD_ID",
-               "CURRENT_FLAG", "END_TIMESTAMP", "PROJECT", "TABLE", "RPT_START", "RPT_END", "REQ_ID")
+               "CURRENT_FLAG", "END_TIMESTAMP", "PROJECT", "TABLE", "RPT_START", "RPT_END", "REQ_ID", "LOAD_DATE",
+               "CONSTANT", "SQL")
+TEXT_CODES = ("CONSTANT", "SQL")
+SQL_PARAMS = ("btch_id", "run_ty", "version", "src_id", "file_name", "project_cd", "table_nm", "load_id", "req_id",
+              "rpt_start", "rpt_end", "load_date")
+PLACEHOLDER = re.compile(r"\{(\w+)\}")
 DEFAULT_MAPPING = {"load_id": "LOAD_ID", "src_file_nm": "FILE_NAME", "stg_load_dtts": "LOAD_TIMESTAMP",
                    "current_ind": "CURRENT_FLAG", "load_dtts": "LOAD_TIMESTAMP", "end_dtts": "END_TIMESTAMP"}
 TIMESTAMP_TEXT = "%Y-%m-%d %H:%M:%S"
@@ -52,12 +58,40 @@ class LoadContext:
             return self.loaded_at.astimezone(ZoneInfo(self.tz)).strftime(TIMESTAMP_TEXT) if text else self.loaded_at
         v = {"BATCH_ID": self.btch_id, "RUN_TYPE": self.run_ty, "VERSION": self.version, "SOURCE_ID": self.src_id,
              "FILE_NAME": self.file_name, "LOAD_ID": self.load_id, "CURRENT_FLAG": 1, "END_TIMESTAMP": None,
+             "LOAD_DATE": self.loaded_at.astimezone(ZoneInfo(self.tz)).date(),
              "PROJECT": self.project_cd, "TABLE": self.table_nm, "RPT_START": self.rpt_start, "RPT_END": self.rpt_end,
              "REQ_ID": self.req_id}[value_cd]
         return str(v) if text and v is not None and not isinstance(v, str) else v
 
+    def sql_params(self) -> dict:
+        """The values a Value_Txt statement of a SQL column can use as {name}."""
+        return {"btch_id": self.btch_id, "run_ty": self.run_ty, "version": self.version, "src_id": self.src_id,
+                "file_name": self.file_name, "project_cd": self.project_cd, "table_nm": self.table_nm,
+                "load_id": self.load_id, "req_id": self.req_id, "rpt_start": self.rpt_start, "rpt_end": self.rpt_end,
+                "load_date": self.value("LOAD_DATE", False)}
 
-def column_mapping(cfg, rows: Iterable) -> dict[str, str]:
+
+class ColumnMapping(dict):
+    """{column: value code}; `texts` holds the Value_Txt of the CONSTANT and SQL columns."""
+
+    def __init__(self, *args, texts: Optional[dict] = None):
+        super().__init__(*args)
+        self.texts = texts or {}
+
+
+def sql_body(label: str, text: str) -> str:
+    """The statement of a SQL column, checked: a single SELECT that only uses the known {names}."""
+    body = text.strip().rstrip(";").strip()
+    if ";" in body or not re.match(r"^(SELECT|WITH)\b", body, re.IGNORECASE):
+        raise ConfigError(f"{label}: Value_Txt of a SQL column must be a single SELECT statement")
+    unknown = sorted({n.lower() for n in PLACEHOLDER.findall(body)} - set(SQL_PARAMS))
+    if unknown:
+        raise ConfigError(f"{label}: Value_Txt uses {{{unknown[0]}}}; available: "
+                          f"{', '.join('{' + n + '}' for n in SQL_PARAMS)}")
+    return body
+
+
+def column_mapping(cfg, rows: Iterable) -> ColumnMapping:
     """{column: value code} for a file config: its table's rows over the project's '*' rows.
 
     Without any row for the table the framework's own column names apply (DEFAULT_MAPPING).
@@ -69,13 +103,21 @@ def column_mapping(cfg, rows: Iterable) -> dict[str, str]:
         if r.column_nm not in chosen or r.table_nm != "*":
             chosen[r.column_nm] = r
     if not chosen:
-        return dict(DEFAULT_MAPPING)
-    out = {}
+        return ColumnMapping(DEFAULT_MAPPING)
+    out = ColumnMapping()
     for name, r in chosen.items():
         if r.value_cd not in VALUE_CODES:
             raise ConfigError(f"{r.label}: unknown Value_Cd {r.value_cd!r}; accepted: {', '.join(VALUE_CODES)}")
         if name == BATCH_COLUMN:
             raise ConfigError(f"{r.label}: {BATCH_COLUMN} is always the batch ID and needs no row")
+        if r.value_cd in TEXT_CODES:
+            if r.value_txt is None:
+                raise ConfigError(f"{r.label}: {r.value_cd} needs a value in Value_Txt")
+            if r.value_cd == "SQL":
+                sql_body(r.label, r.value_txt)
+            out.texts[name] = r.value_txt
+        elif r.value_txt is not None:
+            raise ConfigError(f"{r.label}: Value_Txt is only used with Value_Cd CONSTANT or SQL")
         out[name] = r.value_cd
     return out
 
@@ -87,6 +129,7 @@ class Layout:
     stage: tuple
     core: tuple
     mapping: dict
+    texts: dict = field(default_factory=dict)
 
     @property
     def file_cols(self) -> list[str]:
@@ -114,8 +157,19 @@ class Layout:
                                   "staging table")
         return plan
 
-    def stage_rows(self, records: Iterable[list], ctx: LoadContext, sequence_start: int = 1) -> Iterator[list]:
-        """Each file record as a full staging row, in staging column order."""
+    def fixed_value(self, c: Column, ctx: LoadContext, resolved: Optional[dict] = None):
+        """The value of a derived staging column that is the same on every row of a load."""
+        value_cd = "BATCH_ID" if c.name == BATCH_COLUMN else self.mapping[c.name]
+        if value_cd == "CONSTANT":
+            return self.texts[c.name]
+        if value_cd == "SQL":
+            v = (resolved or {})[c.name]
+            return str(v) if c.text and v is not None and not isinstance(v, str) else v
+        return ctx.value(value_cd, c.text)
+
+    def stage_rows(self, records: Iterable[list], ctx: LoadContext, sequence_start: int = 1,
+                   resolved: Optional[dict] = None) -> Iterator[list]:
+        """Each file record as a full staging row, in staging column order; `resolved` = the SQL columns' values."""
         slots = []
         for c in self.stage:
             value_cd = "BATCH_ID" if c.name == BATCH_COLUMN else self.mapping.get(c.name)
@@ -124,7 +178,7 @@ class Layout:
             elif value_cd == "ROW_SEQUENCE":
                 slots.append(("seq", None, c.text))
             else:
-                slots.append(("value", ctx.value(value_cd, c.text), False))
+                slots.append(("value", self.fixed_value(c, ctx, resolved), False))
         for n, rec in enumerate(records):
             it = iter(rec)
             yield [next(it) if kind == "file" else value if kind == "value"
@@ -144,7 +198,8 @@ def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], 
         if BATCH_COLUMN not in {c.name for c in cols}:
             raise LookupError(f"table {name} lacks the batch column {BATCH_COLUMN}")
     layout = Layout(label, stage, core, {k: v for k, v in mapping.items()
-                                         if k in {c.name for c in stage} | {c.name for c in core}})
+                                         if k in {c.name for c in stage} | {c.name for c in core}},
+                    dict(getattr(mapping, "texts", {})))
     if mapping is not DEFAULT_MAPPING and mapping != DEFAULT_MAPPING:
         missing = sorted(k for k in mapping if k not in layout.mapping)
         if missing:

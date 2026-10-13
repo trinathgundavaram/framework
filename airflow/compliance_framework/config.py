@@ -108,11 +108,12 @@ class TargetColumn:
     column_nm: str
     value_cd: str
     active: bool
+    value_txt: Optional[str] = None
 
     @classmethod
     def from_row(cls, r: dict) -> "TargetColumn":
         return cls(code(r["project_cd"]), code(r["table_nm"]), r["column_nm"].strip().lower(), code(r["value_cd"]),
-                   r["active_ind"] == 1)
+                   r["active_ind"] == 1, _text(r.get("value_txt")))
 
     @property
     def label(self) -> str:

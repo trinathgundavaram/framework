@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Iterable, Iterator, Optional
 from . import db
 from .common import ConfigError, FileRejected, RowCountMismatch
 from .db import Connection
-from .layout import BATCH_COLUMN, Column, Layout, LoadContext, build_layout, column_mapping
+from .layout import BATCH_COLUMN, PLACEHOLDER, Column, Layout, LoadContext, build_layout, column_mapping, sql_body
 
 if TYPE_CHECKING:
     from .config import FileConfig
@@ -230,6 +230,28 @@ def read_file(path: str, cfg: "FileConfig", expected_cols: int, settings: "Setti
     raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} has no reader")
 
 
+def sql_values(conn, layout: Layout, ctx: LoadContext) -> dict:
+    """{column: value} of the staging columns filled by a statement (Value_Cd SQL); each statement runs once per load."""
+    out, done, params = {}, {}, ctx.sql_params()
+    for c in layout.stage:
+        if layout.mapping.get(c.name) != "SQL":
+            continue
+        text = layout.texts[c.name]
+        if text not in done:
+            what = f"{layout.label}: Value_Txt of column {c.name}"
+            body = sql_body(what, text)
+            names = [n.lower() for n in PLACEHOLDER.findall(body)]
+            try:
+                rows = conn.execute_qmark(PLACEHOLDER.sub("?", body), [params[n] for n in names]).fetchall()
+            except Exception as e:  # noqa: BLE001
+                raise ConfigError(f"{what} failed: {str(e).strip().splitlines()[0]}") from None
+            if len(rows) != 1 or len(rows[0]) != 1:
+                raise ConfigError(f"{what} must return one row with one column (it returned {len(rows)} row(s))")
+            done[text] = next(iter(rows[0].values()))
+        out[c.name] = done[text]
+    return out
+
+
 def next_sequence(conn, cfg: "FileConfig", layout: Layout) -> int:
     """The next value of the ROW_SEQUENCE column: one above the highest in the staging and core tables."""
     highest = 0
@@ -259,11 +281,12 @@ def stage(conn: Connection, settings: "Settings", *, file_path: str, cfg: "FileC
     cols = [c.name for c in layout.stage]
     insert = (f"INSERT INTO {table} ({', '.join(db.ident(c) for c in cols)}) "
               f"VALUES ({', '.join(['%s'] * len(cols))})")
+    resolved = sql_values(conn, layout, ctx)
     try:
         with conn.transaction():
             start = next_sequence(conn, cfg, layout)
             _clean_stage(conn, table, cfg, layout, ctx)
-            count = conn.executemany(insert, layout.stage_rows(records, ctx, start))
+            count = conn.executemany(insert, layout.stage_rows(records, ctx, start, resolved))
     except FileRejected:
         raise
     except Exception as e:  # noqa: BLE001

@@ -104,6 +104,7 @@ CREATE TABLE ComplianceTargetColumnConfig (
   Table_Nm         VARCHAR(63)  NOT NULL DEFAULT '*',
   Column_Nm        VARCHAR(128) NOT NULL,
   Value_Cd         VARCHAR(30)  NOT NULL,
+  Value_Txt        TEXT,
   Active_Ind       SMALLINT     NOT NULL DEFAULT 1,
   Created_Dtts     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   Created_By       VARCHAR(100) NOT NULL DEFAULT current_user,

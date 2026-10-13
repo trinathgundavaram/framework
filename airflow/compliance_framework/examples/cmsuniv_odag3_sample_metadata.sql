@@ -170,49 +170,49 @@ VALUES
 -- ----------------------------------------------------------------------------------------------------
 
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig
-  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES
-  ('CMSUNIV', '*', 'StagingCreateDate', 'LOAD_TIMESTAMP', 1);
+  ('CMSUNIV', '*', 'StagingCreateDate', 'LOAD_TIMESTAMP', NULL, 1);
 
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig
-  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES
-  ('CMSUNIV', '*', 'Universe_Vrsn', 'VERSION', 1);
+  ('CMSUNIV', '*', 'Universe_Vrsn', 'VERSION', NULL, 1);
 
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig
-  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES
-  ('CMSUNIV', '*', 'Run_Ty', 'RUN_TYPE', 1);
+  ('CMSUNIV', '*', 'Run_Ty', 'RUN_TYPE', NULL, 1);
 
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig
-  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES
-  ('CMSUNIV', '*', 'FileName', 'FILE_NAME', 1);
+  ('CMSUNIV', '*', 'FileName', 'FILE_NAME', NULL, 1);
 
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig
-  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES
-  ('CMSUNIV', '*', 'Src_Data_Key', 'SOURCE_ID', 1);
+  ('CMSUNIV', '*', 'Src_Data_Key', 'SOURCE_ID', NULL, 1);
 
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig
-  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES
-  ('CMSUNIV', '*', 'Load_Dtts', 'LOAD_TIMESTAMP', 1);
+  ('CMSUNIV', '*', 'Load_Dtts', 'LOAD_TIMESTAMP', NULL, 1);
 
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig
-  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES
-  ('CMSUNIV', '*', 'Current_Ind', 'CURRENT_FLAG', 1);
+  ('CMSUNIV', '*', 'Current_Ind', 'CURRENT_FLAG', NULL, 1);
 
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig
-  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES
-  ('CMSUNIV', '*', 'End_Dtts', 'END_TIMESTAMP', 1);
+  ('CMSUNIV', '*', 'End_Dtts', 'END_TIMESTAMP', NULL, 1);
 
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig
-  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', 'ODAG_DE_Table3_2022_ID', 'ROW_SEQUENCE', 1);
+  ('CMSUNIV', 'ODAG3', 'ODAG_DE_Table3_2022_ID', 'ROW_SEQUENCE', NULL, 1);
 
 
 -- ----------------------------------------------------------------------------------------------------
