@@ -17,7 +17,7 @@ from typing import Optional
 from . import config as cfgmod
 from .adapters import FileStore, basename, dirname, parse_uri
 from .audit import EventLogger
-from .common import Clock, ConfigError, FileRejected, code
+from .common import Clock, ConfigError, FileRejected, btch_id_version, code
 from .config import FileConfig, MatchError
 from .filecheck_options import CheckOptions, check_options
 from .load import (DELIMITED_FILE_TYPES, _file_lines, _lf_lines, _undecodable_line, delimiter_for, file_layout,
@@ -292,11 +292,13 @@ class FileChecker:
         self.logger = EventLogger(conn, clock)
         self._sources: Optional[dict] = None
         self._checks: Optional[list] = None
+        self._config_errors: dict = {}
 
     def run(self, project_cd: Optional[str] = None) -> FileCheckSummary:
         """Check the files waiting in one project's inbound folders, or in every configured folder."""
         project_cd = code(project_cd)
         self._sources = self._checks = None
+        self._config_errors = {}
         summary = FileCheckSummary(run_date=self.clock.today(self.settings.business_tz))
         own, shared = None, set()
         if project_cd:
@@ -306,7 +308,7 @@ class FileChecker:
         else:
             locations = self.pipeline._configured_locations()
         summary.locations = [f"{s}/{f}" for s, f in locations]
-        matcher, run_type_codes = self.pipeline._load_config()
+        matcher, _ = self.pipeline._load_config()
         for share, folder in locations:
             try:
                 files = self.store.list_files(share, folder)
@@ -318,22 +320,28 @@ class FileChecker:
                     summary.skipped += 1
                     continue
                 try:
-                    result = self.check_file(info, matcher, run_type_codes)
+                    result = self.check_file(info, matcher)
                 except Exception as e:  # noqa: BLE001
                     log.warning("could not check %s/%s", share, info.path, exc_info=True)
                     summary.errors.append(f"{share}/{info.path}: {type(e).__name__}: {e}")
+                    continue
+                if result["result"] == "NOT_CHECKED":
+                    summary.skipped += 1
                     continue
                 summary.checked += 1
                 summary.passed += result["result"] == "PASSED"
                 summary.failed += result["result"] == "FAILED"
                 summary.files.append(result)
+        summary.errors.extend(f"{where} is not set up correctly, its files were not checked: {text}"
+                              for where, text in self._config_errors.items())
         return summary
 
-    def check_file(self, info, matcher, run_type_codes) -> dict:
+    def check_file(self, info, matcher) -> dict:
         name = basename(info.path)
         findings: list[Finding] = []
         details: list = []
-        cfg = batch = run_ty = x = None
+        cfg = batch = run_ty = None
+        checked = True
         notes: list[str] = []
         try:
             m = matcher.match(name)
@@ -345,25 +353,19 @@ class FileChecker:
             share, folder = parse_uri(cfg.src_file_path)
             if info.share != share or dirname(info.path) != folder:
                 findings.append(("FILE_NAME", f"{name} matched Cfg_ID {cfg.cfg_id} but is not in its inbound location"))
-            run_ty = self.pipeline._resolve_run_type(m.run_ty, run_type_codes)
-            ref_date = m.rpt_start if self.settings.file_effective_date_basis == "RPT_START" else m.rpt_end
+            run_ty = code(m.run_ty)
             where = f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}"
-            if run_ty:
-                x = cfgmod.effective_xwalk(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_id, run_ty, ref_date)
-            if x is None:
-                findings.append(("RUN_TYPE", f"run type {m.run_ty!r} is not configured/effective for {where} on {ref_date}"))
-            else:
-                batch, why = self.pipeline._select_batch(cfg, run_ty, m.rpt_start, m.rpt_end)
-                if batch is None:
-                    detail = ("every batch for this period is closed and no approved, valid override exists"
-                              if why == "CLOSED" else "no batch exists for this period")
-                    findings.append(("BATCH", f"{where}/{run_ty} {m.rpt_start}..{m.rpt_end}: {detail}"))
-                elif why:
-                    notes.append(f"batch {batch['btch_id']} is closed ({batch['req_stat']}); the file matches it only "
-                                 f"because an approved {why} override is valid")
-                elif self.pipeline._has_data(batch):
-                    notes.append(f"batch {batch['btch_id']} already has data ({batch['req_stat']}); "
-                                 "loading this file replaces it")
+            batch, why = self.pipeline._select_batch(cfg, run_ty, m.rpt_start, m.rpt_end)
+            if batch is None:
+                detail = ("every batch for this period is closed and no approved, valid override exists"
+                          if why == "CLOSED" else "no batch exists for this period")
+                findings.append(("BATCH", f"{where}/{run_ty} {m.rpt_start}..{m.rpt_end}: {detail}"))
+            elif why:
+                notes.append(f"batch {batch['btch_id']} is closed ({batch['req_stat']}); the file matches it only "
+                             f"because an approved {why} override is valid")
+            elif self.pipeline._has_data(batch):
+                notes.append(f"batch {batch['btch_id']} already has data ({batch['req_stat']}); "
+                             "loading this file replaces it")
             if not self.settings.load_duplicate:
                 loaded = self.conn.execute(
                     """SELECT Load_ID FROM ComplianceFileLoad WHERE File_Share=%s AND File_Path=%s
@@ -374,28 +376,33 @@ class FileChecker:
         if cfg is not None:
             findings.extend(self._source(cfg))
         if cfg is not None and self.settings.check_content:
-            findings.extend(self._content(info, name, cfg, details))
+            found = self._content(info, name, cfg, details)
+            checked = found is not None
+            findings.extend(found or [])
+        version = (btch_id_version(batch["btch_id"], cfg.project_cd, cfg.table_nm, cfg.src_id, run_ty)
+                   if batch else None)
         result = {"file": self.store.uri(info.share, info.path),
                   "config": f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}" if cfg else None,
-                  "run_type": run_ty, "version": x.cmplnc_vrsn if x else None,
+                  "run_type": run_ty, "version": version,
                   "rpt_start": str(m.rpt_start) if m else None, "rpt_end": str(m.rpt_end) if m else None,
                   "batch": batch["btch_id"] if batch else None, "req_id": batch["req_id"] if batch else None,
-                  "result": "FAILED" if findings else "PASSED",
+                  "result": "FAILED" if findings else "PASSED" if checked else "NOT_CHECKED",
                   "findings": [f"{c}: {text}" for c, text in findings], "notes": notes}
         if findings:
             self._after_failure(info, name, result, findings, details)
-        self._record(result, cfg, batch, run_ty)
+        if checked or findings:
+            self._record(result, cfg, batch, run_ty)
         return result
 
     def _after_failure(self, info, name: str, result: dict, findings: list, details: list) -> None:
-        """Write <folder>/Error/<file name>.errors.txt (one line per problem, with the record) and move the file."""
+        """Write <folder>/<ERROR_LOG_FOLDER>/<file name>.errors.txt (one line per problem, with the record); move the file."""
         error_folder = self.settings.error_folder
         if self.settings.write_error_file:
             covered = {d[0] for d in details}
             rows = [(c, None, text, None) for c, text in findings if c not in covered] + details
             lines = ["File_Name|Check_Cd|Line_No|Message|Record"]
             lines += ["|".join("" if v is None else str(v) for v in (name, *row)) for row in rows]
-            target = f"{dirname(info.path)}{error_folder}/{name}.errors.txt"
+            target = f"{dirname(info.path)}{self.settings.error_log_folder}/{name}.errors.txt"
             try:
                 self.store.put(info.share, target, ("\n".join(lines) + "\n").encode(self.settings.file_encoding, "replace"))
                 result["error_file"] = self.store.uri(info.share, target)
@@ -416,7 +423,8 @@ class FileChecker:
             return [("SOURCE", f"source {cfg.src_id} of {cfg.project_cd}/{cfg.table_nm} is not in ComplianceSourceSystem")]
         return [] if active else [("SOURCE", f"source {cfg.src_id} of {cfg.project_cd}/{cfg.table_nm} is inactive")]
 
-    def _content(self, info, name: str, cfg: FileConfig, details: list) -> list[Finding]:
+    def _content(self, info, name: str, cfg: FileConfig, details: list) -> Optional[list[Finding]]:
+        """The problems in the file itself; None = its configuration is wrong, which is not a problem of the file."""
         try:
             if self._checks is None:
                 self._checks = cfgmod.file_checks(self.conn)
@@ -425,7 +433,8 @@ class FileChecker:
             layout = file_layout(self.conn, cfg, cfgmod.target_columns(self.conn))
             expected_cols = len(layout.file_cols) + (1 if opts.record_types else 0)
         except (ConfigError, LookupError) as e:
-            return [("CONFIG", str(e))]
+            self._config_errors.setdefault(f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}", str(e))
+            return None
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, name)
             self.store.download(info.share, info.path, path)

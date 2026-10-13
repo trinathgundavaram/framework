@@ -88,7 +88,10 @@ def _file_load(app, p: dict) -> ModuleOutcome:
             raise ConfigError("FILE_LOAD with --key also needs --bucket")
         if prefix:
             raise ConfigError("FILE_LOAD takes --key (one object) or --prefix (one location), not both")
-        return ModuleOutcome("FILE_LOAD", app.pipeline.process_file(bucket, key, p.get("version_id")), 0)
+        try:
+            return ModuleOutcome("FILE_LOAD", app.pipeline.process_file(bucket, key, p.get("version_id")), 0)
+        finally:
+            app.pipeline.control_report()
     if p.get("version_id"):
         raise ConfigError("--version-id only applies to a single object (--key)")
     s = app.pipeline.process_path(bucket, prefix, project)

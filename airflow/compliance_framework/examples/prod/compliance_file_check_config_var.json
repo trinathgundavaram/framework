@@ -19,6 +19,7 @@
     "FILE_STORE": "nas",
     "ARCHIVE_FOLDER": "Archive",
     "ERROR_FOLDER": "Error",
+    "ERROR_LOG_FOLDER": "ErrorLog",
     "NAS_MIN_AGE_SECONDS": 120,
     "CHECK_MOVE_FAILED": true,
     "WRITE_ERROR_FILE": true

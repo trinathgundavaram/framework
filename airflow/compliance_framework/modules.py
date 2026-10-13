@@ -88,7 +88,10 @@ def _file_load(app, p: dict) -> ModuleOutcome:
             raise ConfigError("FILE_LOAD with --file also needs --share")
         if folder:
             raise ConfigError("FILE_LOAD takes --file (one file) or --folder (one folder), not both")
-        return ModuleOutcome("FILE_LOAD", app.pipeline.process_file(share, file), 0)
+        try:
+            return ModuleOutcome("FILE_LOAD", app.pipeline.process_file(share, file), 0)
+        finally:
+            app.pipeline.control_report()
     s = app.pipeline.process_path(share, folder, project)
     return ModuleOutcome("FILE_LOAD", s, 1 if s.errors else 0)
 

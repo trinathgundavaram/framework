@@ -180,7 +180,6 @@ wants to hold the load until the files are clean.
 | Check | Finding | What is checked |
 |---|---|---|
 | File name | `FILE_NAME` | Matches exactly one `Src_File_Nm_Tmplt`; version, report dates and `{TS}` are valid; the file is in that config's inbound folder |
-| Run type | `RUN_TYPE` | `{RUNTY}` is a run type with an effective crosswalk row for the table and source |
 | Batch | `BATCH` | A batch exists for the table, source, run type and report dates, and is open (or has an approved override) |
 | Duplicate | `DUPLICATE` | The same file name was not loaded before (skipped with `load_duplicate = yes`) |
 | Encoding | `ENCODING` | The file is valid `FILE_ENCODING`; the first bad line is named |
@@ -191,7 +190,10 @@ wants to hold the load until the files are clean.
 | Trailer | `TRAILER` | Present when `Src_File_Has_Trlr_Ind = 1`; with a `TRAILER` row: field count, file name, row count, timestamp |
 | Rows | `ZERO_RECORDS` | At least one data row, unless `Allow_Zero_Rcd_Ind = 1` |
 | Source | `SOURCE` | The file's source is in `ComplianceSourceSystem` and active |
-| Setup | `CONFIG` | The staging table exists, the delimiter and the file's `ComplianceFileCheckConfig` rows are valid |
+
+A file belongs to the batch of its project, table, source, run type and report dates. Nothing else is looked at: not `ComplianceDataSetSourceXwalk`, not its effective dates and not the day the batch was requested, so a file for an ad hoc batch or for a batch requested on another day matches the same way.
+
+Only problems of the file are findings. A setup problem (staging table missing, wrong delimiter, a wrong `ComplianceFileCheckConfig` or `ComplianceTargetColumnConfig` row) is reported as an error of the step: the files of that source are not checked, get no error file and are not moved. `validate-config` lists the same problems.
 
 **Which content checks a file gets** is in its own table, `ComplianceFileCheckConfig`, one row per check.
 `ComplianceSourceFileConfig` only describes the file and where it loads.
@@ -237,8 +239,32 @@ Without a `TRAILER` row, `TRAILER_COUNT_CHECK` / `TRAILER_COUNT_REGEX` apply as 
 `CHECK_CONTENT = false` checks names and batches only and does not open the files. `validate-config`
 reports a row that is not valid (`FILE_CHECK_CONFIG`) and a row that matches no file (`FILE_CHECK_NO_FILE`).
 
+**Control report and error log.** Every `FILE_LOAD` run writes one control report for the files it handled,
+`<inbound folder>/ControlReport/ControlReport_<YYYYMMDD_HHMMSS>.txt`, pipe-delimited, one line per file:
+
+| Column | Value |
+|---|---|
+| `Source_System` | `ComplianceSourceSystem.Src_Nm` of the file's source (MHK, Advocate, WellMed ...) |
+| `File_Name` | The file |
+| `Status` | `ACCEPTED` (loaded), `REJECTED` (not loaded, moved to `Error/`), `FAILED` (a technical failure; the file stays and is tried again) |
+| `Total_Rows_In_File` | Data rows read from the file; empty when the file was rejected before it was read |
+| `Total_Rows_Loaded` | Rows loaded to the core table; `0` unless accepted |
+| `File_Submitted_Date` | The date part of the timestamp in the file name |
+| `File_Processed_Date` | When the load finished, in `BUSINESS_TZ` |
+| `Error_Message` | Why the file was rejected; empty when accepted |
+
+A run that covers several inbound folders writes one report in each. A run that handled no file writes none.
+
+The detail of a rejection (the check, the line number, the message and the record) is in its own file,
+`<inbound folder>/ErrorLog/<file name>.errors.txt`, written by `FILE_LOAD` and by `FILE_CHECK`. The rejected file itself
+still moves to `Error/`.
+
+The two folder names are the settings `CONTROL_REPORT_FOLDER` (default `ControlReport`) and `ERROR_LOG_FOLDER`
+(default `ErrorLog`); `WRITE_CONTROL_REPORT = false` and `WRITE_ERROR_FILE = false` switch them off.
+
 **Error file and failed files.** For every file that fails, `FILE_CHECK` writes
-`<inbound folder>/Error/<file name>.errors.txt` (setting `WRITE_ERROR_FILE`, on by default): pipe-delimited,
+`<inbound folder>/ErrorLog/<file name>.errors.txt` (settings `WRITE_ERROR_FILE`, on by default, and
+`ERROR_LOG_FOLDER`): pipe-delimited,
 one line per problem, with the check, the line number, the message and **the record itself**
 (`File_Name|Check_Cd|Line_No|Message|Record`). With `CHECK_MOVE_FAILED = true` the failed file is also moved
 to `Error/`, so the files that passed can be loaded. The audit row and the email only carry the number of
@@ -418,7 +444,7 @@ of the file, in table order.**
 
 | `Value_Cd` | Value |
 |---|---|
-| `RUN_TYPE`, `VERSION`, `SOURCE_ID` | The batch's run type, the crosswalk's `Cmplnc_Vrsn`, the batch's `Src_ID` |
+| `RUN_TYPE`, `VERSION`, `SOURCE_ID` | The batch's run type, the compliance version the batch was created with (the version part of `Btch_ID`), the batch's `Src_ID` |
 | `FILE_NAME` | The name of the file |
 | `LOAD_TIMESTAMP` | When the file was loaded: a timestamp, or text `YYYY-MM-DD HH:MM:SS` (business time zone) in a character column |
 | `ROW_SEQUENCE` | A running row number, continuing from the highest value in the staging and core tables |

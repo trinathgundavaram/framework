@@ -62,7 +62,8 @@ The environment variable is `FRAMEWORK_<NAME>`; the job argument is `--set <NAME
 | `OBJECT_STORE`, `LOCAL_STORE_ROOT` | `s3`, `./.local_store` | `local` for development. |
 | `LOAD_DUPLICATE` | `false` | `yes` loads a file whose name was already loaded; otherwise it is rejected with `FILE_REJECTED_DUPLICATE`. |
 | `ARCHIVE_FOLDER` / `ERROR_FOLDER` | `Archive` / `Error` | Subfolders of the inbound folder that processed and rejected files move to. (Replaces `QUARANTINE_URI`, the per-config archive path and `S3_Quarantine_Path`.) |
-| `FILENAME_CASE_SENSITIVE`, `FILE_EFFECTIVE_DATE_BASIS` | `true`, `RPT_START` | **Q-03**, **Q-04** |
+| `CONTROL_REPORT_FOLDER` / `ERROR_LOG_FOLDER` | `ControlReport` / `ErrorLog` | Subfolders of the inbound folder for the control report of each FILE_LOAD run and for the error detail file of each rejected file. `WRITE_CONTROL_REPORT` / `WRITE_ERROR_FILE` (`true`) switch them off. |
+| `FILENAME_CASE_SENSITIVE` | `true` | **Q-03** |
 | `SUPPORTED_FILE_TYPES` | `.txt,.csv` | **Q-02**. `.xlsx` / `.parquet` readers exist but are disabled by default. |
 | `FILE_ENCODING`, `QUOTE_CHAR`, `EMPTY_AS_NULL` | `utf-8`, `"`, `true` | **Q-02** |
 | `TRAILER_COUNT_CHECK`, `TRAILER_COUNT_REGEX` | `false`, `(\d+)` | **Q-02** |

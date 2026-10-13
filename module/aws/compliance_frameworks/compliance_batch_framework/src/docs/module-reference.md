@@ -1,6 +1,6 @@
 # CMS Compliance Framework: Module Reference
 
-What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.22 (design v5).
+What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.23 (design v5).
 
 - **Design:** [`design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md). `D-nn` = decision, `Q-nn` = open question, `§n` = design section.
 - **Setup, configuration, commands:** [`framework-package.md`](framework-package.md).
@@ -128,6 +128,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 - Validates before anything runs: unknown module, missing required parameter, parameter the module does not take, wrong type (`ConfigError`, exit 2). Handlers only map a name to the service that owns the work (`batches`, `ingest`) - no SQL, no business rules; a new module is one handler plus one `MODULES` entry.
 - `BATCH_CREATION` (the merged module, `BatchCreationSummary(scheduled, adhoc)`) → `App.create_batches` for the project's SCHEDULED run types (`scheduled`; `None` only when `--run-type` names an ADHOC run type), and always `IntakeProcessor.run(project_cd=..., run_ty=...)` for that project (`adhoc`) - one call covers both scheduled and ad-hoc batch creation for a project, so a project needs only one trigger. `FILE_LOAD` → `process_file` (`--key`) or `process_path` (`--prefix`, or every configured location).
 - `layout.py`: `column_mapping` / `build_layout` turn the `ComplianceTargetColumnConfig` rows and the two tables' columns into a `Layout` (file columns, derived columns, core plan); `LoadContext` holds a load's values. `load.stage` / `load.swap` use it; `filecheck_options.py` holds `check_options` (read by `FILE_CHECK` and by the load, for the record type field).
+- `control_report.py`: `write_reports` writes the control report of a FILE_LOAD run from `ComplianceFileLoad` (one line per file handled, one report per inbound folder); `IngestPipeline.control_report()` calls it at the end of a sweep or a single-file load.
 - `ComplianceFileCheckConfig` → `config.file_checks` / `filecheck_options.check_options(cfg, rows)`: per check the most specific row (table and source, table, `*`) wins; an inactive row switches it off.
 - `FILE_CHECK` → `filecheck.FileChecker.run(project_cd)`: the optional, read-only check of the files waiting in the inbound locations (name, run type, batch, duplicate, encoding, header, record types, column counts, trailer). It uses the load's own template matcher and batch selection, downloads each file to a temporary folder and parses it once; it writes only `FILE_CHECK_PASSED` / `FILE_CHECK_FAILED` audit rows.
 - `FILE_RULES` → `rules.RulesRunner.run(project_cd)`: the bound rules of every promoted load with `Rules_Stat` `NOT_RUN` / `ERROR`, under the batch lock; it records `Rules_Stat` and events and never touches the load.

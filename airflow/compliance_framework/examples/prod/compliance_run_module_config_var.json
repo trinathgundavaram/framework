@@ -18,6 +18,8 @@
     "FILE_STORE": "nas",
     "ARCHIVE_FOLDER": "Archive",
     "ERROR_FOLDER": "Error",
+    "CONTROL_REPORT_FOLDER": "ControlReport",
+    "ERROR_LOG_FOLDER": "ErrorLog",
     "NAS_MIN_AGE_SECONDS": 120,
     "RULE_ENGINE": "gre",
     "GRE_ENTRYPOINT": "compliance_framework.gre_bridge:run_gre",

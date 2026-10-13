@@ -28,11 +28,12 @@ class Settings:
     local_store_root: str = "./.local_store"
     archive_folder: str = "Archive"
     error_folder: str = "Error"
+    control_report_folder: str = "ControlReport"
+    error_log_folder: str = "ErrorLog"
     nas_min_age_seconds: int = 120
 
     filename_case_sensitive: bool = False
     load_duplicate: bool = False
-    file_effective_date_basis: str = "RPT_START"
     supported_file_types: list[str] = field(default_factory=lambda: [".txt", ".csv"])
     file_encoding: str = "utf-8"
     quote_char: str = '"'
@@ -41,6 +42,7 @@ class Settings:
     trailer_count_regex: str = r"(\d+)"
     check_content: bool = True
     write_error_file: bool = True
+    write_control_report: bool = True
     check_move_failed: bool = False
     archive_by_year: bool = False
     xlsx_sheet: str = "0"
@@ -97,7 +99,7 @@ class Settings:
             raise ConfigError(f"ENVIRONMENT {self.environment!r} must be letters, digits or _ (e.g. DEV, TEST, PROD)")
         if self.env_value is not None and not re.match(r"^[A-Za-z0-9_]{0,20}$", self.env_value):
             raise ConfigError(f"ENV_VALUE {self.env_value!r} must be letters, digits or _")
-        for name in ("file_rules_mode", "file_effective_date_basis", "load_engine"):
+        for name in ("file_rules_mode", "load_engine"):
             if isinstance(getattr(self, name, None), str):
                 setattr(self, name, getattr(self, name).strip().upper())
         for name in ("notify_backend", "file_store", "object_store"):
@@ -106,11 +108,10 @@ class Settings:
         if self.rule_engine.strip().lower() in ("gre", "none"):
             self.rule_engine = self.rule_engine.strip().lower()
         for name, allowed in (("file_rules_mode", ("GATE", "ANNOTATE")),
-                              ("file_effective_date_basis", ("RPT_START", "RPT_END")),
                               ("notify_backend", ("log", "ses", "airflow")), ("file_store", ("nas", "local"))):
             if getattr(self, name) not in allowed:
                 raise ConfigError(f"{name.upper()} must be one of {allowed}, got {getattr(self, name)!r}")
-        for name in ("archive_folder", "error_folder"):
+        for name in ("archive_folder", "error_folder", "control_report_folder", "error_log_folder"):
             if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_ .-]{0,99}$", getattr(self, name) or ""):
                 raise ConfigError(f"{name.upper()} {getattr(self, name)!r} must be a plain folder name")
         if self.nas_min_age_seconds < 0:

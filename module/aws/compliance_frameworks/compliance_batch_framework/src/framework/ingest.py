@@ -18,9 +18,10 @@ from . import db
 from .adapters import ObjectInfo, ObjectStore, basename, dirname, parse_uri, sha256_file
 from .audit import EventLogger
 from .batches import get_batch, promoted_load
-from .common import (COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch, check_transition,
+from .common import (COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch, btch_id_version, check_transition,
                      code)
 from .config import FileConfig, MatchError, TemplateMatcher
+from .control_report import write_reports
 from .filecheck_options import check_options
 from .layout import LoadContext
 from .load import file_layout, raw_line, sanitize_db_error, stage, swap
@@ -104,6 +105,7 @@ class PathIngestSummary:
     skipped: int = 0
     locations: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    reports: list[str] = field(default_factory=list)
     outcomes: list[IngestOutcome] = field(default_factory=list)
 
     def tally(self, outcome: IngestOutcome) -> None:
@@ -133,6 +135,7 @@ class IngestPipeline:
         self.spark = spark
         self.logger = EventLogger(conn, clock)
         self._sweep_config: Optional[tuple[TemplateMatcher, tuple[str, ...]]] = None
+        self._handled: list[int] = []
         self._scope_project: Optional[str] = None
         self._load: tuple = ()
 
@@ -160,6 +163,7 @@ class IngestPipeline:
                     return IngestOutcome(load["load_id"], "IN_PROGRESS", message="another process holds the batch lock")
                 db.unlock(self.conn, db.batch_key(load["btch_id"]))
             log.info("restarting non-terminal load %s (%s)", load["load_id"], load["load_stat"])
+        self._handled.append(load["load_id"])
         try:
             return self._process(load["load_id"], info)
         except Exception as e:
@@ -189,8 +193,19 @@ class IngestPipeline:
         try:
             self._sweep(locations, summary, shared, own)
         finally:
+            summary.reports = self.control_report()
             self._sweep_config = self._scope_project = None
         return summary
+
+    def control_report(self) -> list[str]:
+        """Write the control report of the files handled since the last one."""
+        handled, self._handled = self._handled, []
+        try:
+            return write_reports(self.conn, self.store, self.settings, self.clock, handled,
+                                 (self._sweep_config or self._load_config())[0])
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not write the control report: %s", e)
+            return []
 
     def _project_locations(self, project_cd: str) -> tuple[list[tuple[str, str]], set, TemplateMatcher]:
         """(the project's inbound locations, the ones other projects also use, its own templates)."""
@@ -280,7 +295,7 @@ class IngestPipeline:
 
     def _process(self, load_id: int, info: ObjectInfo) -> IngestOutcome:
         name = basename(info.key)
-        matcher, run_type_codes = self._sweep_config or self._load_config()
+        matcher, _ = self._sweep_config or self._load_config()
         try:
             m = matcher.match(name)
         except MatchError as e:
@@ -298,13 +313,7 @@ class IngestPipeline:
                 return self._quarantine(load_id, info, "FILE_REJECTED_DUPLICATE",
                                         f"{name} was already loaded (load {loaded['load_id']}); "
                                         "LOAD_DUPLICATE=yes loads it again", cfg)
-        run_ty = self._resolve_run_type(m.run_ty, run_type_codes)
-        ref_date = m.rpt_start if self.settings.file_effective_date_basis == "RPT_START" else m.rpt_end
-        x = cfgmod.effective_xwalk(self.conn, cfg.project_cd, cfg.table_nm, cfg.src_id, run_ty, ref_date) if run_ty else None
-        if x is None:
-            return self._quarantine(load_id, info, "FILE_REJECTED_RUNTY_NOT_CONFIGURED",
-                                    f"run type {m.run_ty!r} is not configured/effective for "
-                                    f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id} on {ref_date}", cfg)
+        run_ty = code(m.run_ty)
         batch, override = self._select_batch(cfg, run_ty, m.rpt_start, m.rpt_end)
         if batch is None:
             event = "FILE_REJECTED_BATCH_CLOSED" if override == "CLOSED" else "FILE_REJECTED_NO_BATCH"
@@ -324,11 +333,7 @@ class IngestPipeline:
         stage_table = db.batch_key(f"STAGE {cfg.stg_schema_nm}.{cfg.stg_table_nm}".upper())
         with db.held(self.conn, db.batch_key(batch["btch_id"]), self.settings.lock_timeout_seconds), \
                 db.held(self.conn, stage_table, self.settings.lock_timeout_seconds):
-            return self._process_locked(load_id, info, cfg, batch["req_id"], x.cmplnc_vrsn)
-
-    @staticmethod
-    def _resolve_run_type(token: str, codes: tuple[str, ...]) -> Optional[str]:
-        return code(token) if code(token) in codes else None
+            return self._process_locked(load_id, info, cfg, batch["req_id"])
 
     def _select_batch(self, cfg: FileConfig, run_ty: str, rpt_start, rpt_end) -> tuple[Optional[dict], Optional[str]]:
         """The batch a file belongs to (D-78)."""
@@ -359,12 +364,12 @@ class IngestPipeline:
     def _has_data(self, batch: dict) -> bool:
         return batch["resolution_ty"] == "CARRY_FORWARD" or promoted_load(self.conn, batch["btch_id"]) is not None
 
-    def _process_locked(self, load_id: int, info: ObjectInfo, cfg: FileConfig, req_id: int,
-                        version: Optional[str] = None) -> IngestOutcome:
+    def _process_locked(self, load_id: int, info: ObjectInfo, cfg: FileConfig, req_id: int) -> IngestOutcome:
         """The caller holds the batch lock and the lock of the staging table (stage and core load are one unit)."""
         batch = get_batch(self.conn, req_id)
         layout = file_layout(self.conn, cfg, cfgmod.target_columns(self.conn))
         drop_first = check_options(cfg, cfgmod.file_checks(self.conn)).record_types is not None
+        version = btch_id_version(batch["btch_id"], cfg.project_cd, cfg.table_nm, cfg.src_id, batch["run_ty"])
         ctx = LoadContext(batch["btch_id"], load_id, batch["run_ty"], version, cfg.src_id, basename(info.key),
                           self.clock.now(), cfg.project_cd, cfg.table_nm, _as_date(batch["rpt_start_dt_key"]),
                           _as_date(batch["rpt_end_dt_key"]), req_id, self.settings.business_tz)
@@ -518,14 +523,14 @@ class IngestPipeline:
                              req_id=batch["req_id"] if batch else None)
 
     def _error_file(self, info: ObjectInfo, event_ty: str, message: str, local_path: Optional[str]) -> Optional[str]:
-        """Write <folder>/Error/<file name>.errors.txt for a rejected file: the reason, the line and the record."""
+        """Write <folder>/<ERROR_LOG_FOLDER>/<file name>.errors.txt for a rejected file: the reason, line and record."""
         if not self.settings.write_error_file:
             return None
         name = basename(info.key)
         found = re.search(r"\bline (\d+)\b", message)
         line_no = int(found.group(1)) if found else None
         record = raw_line(local_path, line_no, self.settings.file_encoding) if local_path else None
-        target = f"{dirname(info.key)}{self.settings.error_folder}/{name}.errors.txt"
+        target = f"{dirname(info.key)}{self.settings.error_log_folder}/{name}.errors.txt"
         row = "|".join("" if v is None else str(v) for v in (name, event_ty, line_no, message, record))
         try:
             self.store.put(info.bucket, target, ("File_Name|Check_Cd|Line_No|Message|Record\n" + row + "\n").encode(

@@ -177,6 +177,13 @@ def build_btch_id(req_dt: date, project_cd: str, table_nm: str, src_id: str, run
     return value
 
 
+def btch_id_version(btch_id: str, project_cd: str, table_nm: str, src_id: str, run_ty: str) -> Optional[str]:
+    """The compliance version a batch was created with: the part of its Btch_ID before the sequence."""
+    head = "_".join(map(code, (project_cd, table_nm, src_id, run_ty))) + "_"
+    body = str(btch_id).partition("_")[2]
+    return body[len(head):].rpartition("_")[0] or None if body.upper().startswith(head) else None
+
+
 def earliest_close_date(req_dt: date, sla_days: int) -> date:
     """Earliest close date: Req_Dt_Key + SLA_Days - 1."""
     if sla_days < 1:
