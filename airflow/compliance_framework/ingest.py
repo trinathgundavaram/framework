@@ -366,8 +366,9 @@ class IngestPipeline:
     def _process_locked(self, load_id: int, info: FileInfo, cfg: FileConfig, req_id: int) -> IngestOutcome:
         """The caller holds the batch lock and the lock of the staging table (stage and core load are one unit)."""
         batch = get_batch(self.conn, req_id)
-        layout = file_layout(self.conn, cfg, cfgmod.target_columns(self.conn))
-        drop_first = check_options(cfg, cfgmod.file_checks(self.conn)).record_types is not None
+        opts = check_options(cfg, cfgmod.file_checks(self.conn))
+        layout = file_layout(self.conn, cfg, cfgmod.target_columns(self.conn), opts)
+        drop_first = opts.record_types is not None
         version = btch_id_version(batch["btch_id"], cfg.project_cd, cfg.table_nm, cfg.src_id, batch["run_ty"])
         ctx = LoadContext(batch["btch_id"], load_id, batch["run_ty"], version, cfg.src_id, basename(info.path),
                           self.clock.now(), cfg.project_cd, cfg.table_nm, _as_date(batch["rpt_start_dt_key"]),

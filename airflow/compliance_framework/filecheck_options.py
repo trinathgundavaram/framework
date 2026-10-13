@@ -8,7 +8,7 @@ from typing import Optional
 from .common import ConfigError
 
 TRAILER_FIELDS = ("RECORD_TYPE", "FILE_NAME", "DATA_ROW_COUNT", "TOTAL_ROW_COUNT", "TIMESTAMP", "SKIP")
-CHECKS = ("RECORD_TYPE", "HEADER_NAMES", "TRAILER", "CHARACTER_SET", "COLUMN_VALUES")
+CHECKS = ("RECORD_TYPE", "HEADER_NAMES", "COLUMN_COUNT", "TRAILER", "CHARACTER_SET", "COLUMN_VALUES")
 VALUE_RULES = ("LENGTH", "NUMBER", "REQUIRED")
 
 
@@ -19,6 +19,7 @@ class CheckOptions:
     header: Optional[str] = None
     charset: Optional[str] = None
     value_rules: tuple = ()
+    column_count: Optional[int] = None
 
 
 def _names(value) -> list[str]:
@@ -74,4 +75,11 @@ def check_options(cfg, checks) -> CheckOptions:
     if bad:
         raise ConfigError(f"{values['COLUMN_VALUES'].label}: Check_Val_Txt has unknown value {bad[0]!r}; "
                           f"accepted: ALL, {', '.join(VALUE_RULES)}")
-    return CheckOptions(tuple(types) if types else None, fields, header, charset, rules)
+    count = None
+    if "COLUMN_COUNT" in values:
+        text = values["COLUMN_COUNT"].check_val_txt.strip()
+        if not text.isdigit() or int(text) < 1:
+            raise ConfigError(f"{values['COLUMN_COUNT'].label}: Check_Val_Txt must be the number of fields in a row "
+                              "(for example 23)")
+        count = int(text)
+    return CheckOptions(tuple(types) if types else None, fields, header, charset, rules, count)

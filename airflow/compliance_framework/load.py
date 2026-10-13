@@ -39,12 +39,30 @@ def columns(conn: Connection, schema: str, table: str) -> list[Column]:
     return out
 
 
-def file_layout(conn, cfg: "FileConfig", target_columns) -> Layout:
-    """The staging / core layout of a file config; LookupError when a table or a required column is missing."""
+def header_columns(cfg: "FileConfig", opts) -> tuple:
+    """The file's column names from its HEADER_NAMES check row; () when it has none."""
+    if opts is None or not opts.header:
+        return ()
+    try:
+        delim = delimiter_for(cfg)
+    except ConfigError:
+        delim = ","
+    names = [v.strip() for v in opts.header.split(delim if delim in opts.header else ",")]
+    if opts.record_types and names[0] == opts.record_types[0]:
+        names = names[1:]
+    return tuple(names)
+
+
+def file_layout(conn, cfg: "FileConfig", target_columns, opts=None) -> Layout:
+    """The staging / core layout of a file config; LookupError when a table or a required column is missing.
+
+    `opts` = the file's check options: a HEADER_NAMES row is the list of columns the file has.
+    """
     return build_layout(f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}",
                         columns(conn, cfg.stg_schema_nm, cfg.stg_table_nm),
                         columns(conn, cfg.core_schema_nm, cfg.core_table_nm), column_mapping(cfg, target_columns),
-                        f"{cfg.stg_schema_nm}.{cfg.stg_table_nm}", f"{cfg.core_schema_nm}.{cfg.core_table_nm}")
+                        f"{cfg.stg_schema_nm}.{cfg.stg_table_nm}", f"{cfg.core_schema_nm}.{cfg.core_table_nm}",
+                        header_columns(cfg, opts))
 
 
 def _table(schema: str, table: str) -> str:

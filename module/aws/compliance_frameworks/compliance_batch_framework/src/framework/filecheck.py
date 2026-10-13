@@ -21,7 +21,7 @@ from .common import Clock, ConfigError, FileRejected, btch_id_version, code
 from .config import FileConfig, MatchError
 from .filecheck_options import CheckOptions, check_options
 from .load import (DELIMITED_FILE_TYPES, _file_lines, _lf_lines, _undecodable_line, delimiter_for, file_layout,
-                   raw_line, read_file)
+                   header_columns, raw_line, read_file)
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -91,7 +91,7 @@ def _value_problem(value: str, col, rules: tuple, empty_is_null: bool) -> Option
     return None
 
 
-def check_content(path: str, name: str, cfg: FileConfig, expected_cols: int, settings: Settings,
+def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional[int], settings: Settings,
                   opts: CheckOptions, details: Optional[list] = None, columns: Optional[list] = None) -> list[Finding]:
     """Every content problem of a downloaded file; nothing is loaded anywhere.
 
@@ -151,10 +151,10 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: int, set
         if detail_code and rec[0] != detail_code:
             wrong_type.add(line_no, repr(rec[0]))
             note("RECORD_TYPE", line_no, f"record type {rec[0]!r}, expected {detail_code!r}", rec)
-        if len(rec) != expected_cols:
+        if expected_cols is not None and len(rec) != expected_cols:
             wrong_cols.add(line_no, f"{len(rec)}")
             note("COLUMN_COUNT", line_no, f"{len(rec)} columns, expected {expected_cols}", rec)
-        elif rules and suspicious(rec):
+        elif rules and len(rec) == len(columns) + offset and suspicious(rec):
             problems = [p for p in (_value_problem(v, c, rules, settings.empty_as_null)
                                     for v, c in zip(rec[offset:], columns)) if p]
             if problems:
@@ -203,7 +203,7 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: int, set
         before = len(out)
         if header_code and rec[0] != header_code:
             out.append(("RECORD_TYPE", f"line {line_no}: header record type {rec[0]!r}, expected {header_code!r}"))
-        if len(rec) != expected_cols:
+        if expected_cols is not None and len(rec) != expected_cols:
             out.append(("HEADER", f"line {line_no}: header has {len(rec)} columns, expected {expected_cols}"))
         if opts.header:
             diffs = _header_diff(rec, opts.header, delim, header_code)
@@ -430,17 +430,22 @@ class FileChecker:
                 self._checks = cfgmod.file_checks(self.conn)
             opts = check_options(cfg, self._checks)
             delimiter_for(cfg)
-            layout = file_layout(self.conn, cfg, cfgmod.target_columns(self.conn))
-            expected_cols = len(layout.file_cols) + (1 if opts.record_types else 0)
+            names = header_columns(cfg, opts)
+            extra = 1 if opts.record_types else 0
+            expected_cols = opts.column_count or (len(names) + extra if names else None)
+            columns = None
+            if opts.value_rules or cfg.src_file_ty not in DELIMITED_FILE_TYPES:
+                layout = file_layout(self.conn, cfg, cfgmod.target_columns(self.conn), opts)
+                by_name = {c.name: c for c in layout.stage}
+                columns = [by_name[n] for n in layout.file_cols]
+                expected_cols = expected_cols or len(columns) + extra
         except (ConfigError, LookupError) as e:
             self._config_errors.setdefault(f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}", str(e))
             return None
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, name)
             self.store.download(info.bucket, info.key, path)
-            file_cols = set(layout.file_cols)
-            return check_content(path, name, cfg, expected_cols, self.settings, opts, details,
-                                 [c for c in layout.stage if c.name in file_cols])
+            return check_content(path, name, cfg, expected_cols, self.settings, opts, details, columns)
 
     def _record(self, result: dict, cfg: Optional[FileConfig], batch: Optional[dict], run_ty: Optional[str]) -> None:
         """One audit row per file and outcome; a repeat of the same outcome for the same file adds nothing."""

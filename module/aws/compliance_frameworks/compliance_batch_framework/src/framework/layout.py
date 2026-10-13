@@ -130,10 +130,29 @@ class Layout:
     core: tuple
     mapping: dict
     texts: dict = field(default_factory=dict)
+    names: tuple = ()
+
+    @property
+    def free_cols(self) -> list[str]:
+        """The staging columns the framework does not fill itself, in table order."""
+        return [c.name for c in self.stage if c.name != BATCH_COLUMN and c.name not in self.mapping]
 
     @property
     def file_cols(self) -> list[str]:
-        return [c.name for c in self.stage if c.name != BATCH_COLUMN and c.name not in self.mapping]
+        """The staging column of each field of the file, in file order.
+
+        Without a column list (`names`) every free column is a field of the file. With one, the fields go to the
+        columns of the same name when every name is a column, otherwise to the first free columns in table order;
+        the free columns left over stay NULL.
+        """
+        free = self.free_cols
+        if not self.names:
+            return free
+        by_name = {c.casefold(): c for c in free}
+        wanted = [n.casefold() for n in self.names]
+        if len(set(wanted)) == len(wanted) and all(n in by_name for n in wanted):
+            return [by_name[n] for n in wanted]
+        return free[:len(self.names)]
 
     def column(self, value_cd: str, table: str = "stage") -> Optional[Column]:
         return next((c for c in getattr(self, table) if self.mapping.get(c.name) == value_cd), None)
@@ -171,22 +190,24 @@ class Layout:
                    resolved: Optional[dict] = None) -> Iterator[list]:
         """Each file record as a full staging row, in staging column order; `resolved` = the SQL columns' values."""
         slots = []
+        position = {name: i for i, name in enumerate(self.file_cols)}
         for c in self.stage:
             value_cd = "BATCH_ID" if c.name == BATCH_COLUMN else self.mapping.get(c.name)
-            if value_cd is None:
-                slots.append(("file", None, False))
+            if value_cd is None and c.name in position:
+                slots.append(("file", position[c.name], False))
+            elif value_cd is None:
+                slots.append(("value", None, False))
             elif value_cd == "ROW_SEQUENCE":
                 slots.append(("seq", None, c.text))
             else:
                 slots.append(("value", self.fixed_value(c, ctx, resolved), False))
         for n, rec in enumerate(records):
-            it = iter(rec)
-            yield [next(it) if kind == "file" else value if kind == "value"
+            yield [rec[value] if kind == "file" else value if kind == "value"
                    else (str(sequence_start + n) if text else sequence_start + n) for kind, value, text in slots]
 
 
 def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], mapping: dict, stage_name: str,
-                 core_name: str) -> Layout:
+                 core_name: str, names: tuple = ()) -> Layout:
     """Check the two tables against the mapping; LookupError = a table or a required column is missing."""
     if not stage_cols:
         raise LookupError(f"staging table {stage_name} not found")
@@ -199,7 +220,7 @@ def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], 
             raise LookupError(f"table {name} lacks the batch column {BATCH_COLUMN}")
     layout = Layout(label, stage, core, {k: v for k, v in mapping.items()
                                          if k in {c.name for c in stage} | {c.name for c in core}},
-                    dict(getattr(mapping, "texts", {})))
+                    dict(getattr(mapping, "texts", {})), tuple(names))
     if mapping is not DEFAULT_MAPPING and mapping != DEFAULT_MAPPING:
         missing = sorted(k for k in mapping if k not in layout.mapping)
         if missing:
@@ -207,7 +228,10 @@ def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], 
                               f"nor {core_name}")
     if layout.column("ROW_SEQUENCE", "core") and not layout.column("ROW_SEQUENCE", "stage"):
         raise LookupError(f"{label}: the ROW_SEQUENCE column must also be in the staging table {stage_name}")
-    if not layout.file_cols:
+    if not layout.free_cols:
         raise LookupError(f"staging table {stage_name} has no column left for the file's data")
+    if len(names) > len(layout.free_cols):
+        raise LookupError(f"{label}: HEADER_NAMES lists {len(names)} columns, staging table {stage_name} has "
+                          f"{len(layout.free_cols)} for the file's data")
     layout.core_plan()
     return layout

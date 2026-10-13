@@ -583,7 +583,11 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
         except ValueError as e:
             add("PATH", f"{label}: {e}")
         try:
-            file_layout(conn, c, targets)
+            opts = check_options(c, checks)
+        except ConfigError:
+            opts = None
+        try:
+            file_layout(conn, c, targets, opts)
         except (LookupError, ConfigError) as e:
             add("TARGET_TABLE", f"{label}: {e}")
 

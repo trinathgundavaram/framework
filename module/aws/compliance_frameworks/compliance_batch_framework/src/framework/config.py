@@ -573,7 +573,11 @@ def validate_all(conn: psycopg.Connection, case_sensitive: bool = True, settings
         if not c.s3_src_file_path.startswith(("s3://", "local://")):
             add("PATH", f"{label}: s3_src_file_path must be an s3:// URI")
         try:
-            file_layout(conn, c, targets)
+            opts = check_options(c, checks)
+        except ConfigError:
+            opts = None
+        try:
+            file_layout(conn, c, targets, opts)
         except (LookupError, ConfigError) as e:
             add("TARGET_TABLE", f"{label}: {e}")
 
