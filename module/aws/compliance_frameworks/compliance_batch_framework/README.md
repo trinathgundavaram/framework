@@ -128,6 +128,12 @@ Every file leaves the inbound folder once it has been processed, into a subfolde
   `ARCHIVE_BY_YEAR = true` a loaded file goes to `Archive/<year>/`.
 - The reason for a rejection is in `ComplianceFileLoad.Quarantine_Rsn_Cd` / `Error_Txt` and in the email.
 
+## Sample metadata
+
+A complete worked example - every metadata row for one project (three FDR and two internal sources; daily,
+monthly and ad-hoc run types; file checks; an existing table layout) as PostgreSQL `INSERT` statements - is in
+`src/docs/examples/cmsuniv_odag3_sample_metadata_postgres.sql`.
+
 ## File names (`Src_File_Nm_Tmplt`)
 
 How a project's files are named is not in the code: each `ComplianceSourceFileConfig` row describes its

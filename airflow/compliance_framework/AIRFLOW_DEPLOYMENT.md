@@ -221,6 +221,13 @@ A path with its own server uses that server with the NAS Connection's login. `$e
 - There is no S3 in this version: no bucket, key or object-version columns and no AWS file store.
   `FILE_STORE` = `local` (a folder on the worker) exists for development only.
 
+## Sample metadata
+
+A complete worked example - every metadata row for one project (three FDR and two internal sources; daily,
+monthly and ad-hoc run types; file checks; an existing table layout) - is in `examples/`:
+`cmsuniv_odag3_sample_metadata.xlsx` (one tab per table, in DDL order) and `cmsuniv_odag3_sample_metadata.sql`
+(the same rows as Teradata `INSERT` statements).
+
 ## File names (`Src_File_Nm_Tmplt`)
 
 How a project's files are named is not in the code: each `ComplianceSourceFileConfig` row describes its
