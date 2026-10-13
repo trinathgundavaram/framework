@@ -216,10 +216,29 @@ class NasFileStore(FileStore):
         out = []
         for entry in self.smb.scandir(self._path(share, folder), **self.nas):
             if entry.is_file():
-                size, modified = entry.smb_info.end_of_file, entry.smb_info.last_write_time
+                size, modified = self._entry_info(share, f"{folder}{entry.name}", entry)
                 if modified <= newest:
                     out.append(self._info(share, f"{folder}{entry.name}", size, modified))
         return sorted(out, key=lambda o: o.path)
+
+    def _entry_info(self, share: str, path: str, entry) -> tuple[int, datetime]:
+        """(size, last write time) of a directory entry, whichever way this smbprotocol version exposes it."""
+        size = modified = None
+        info = getattr(entry, "smb_info", None)
+        if info is not None:
+            size, modified = info.end_of_file, info.last_write_time
+        else:
+            try:
+                raw = entry._dir_info
+                size, modified = raw["end_of_file"].get_value(), raw["last_write_time"].get_value()
+            except Exception:  # noqa: BLE001
+                size = modified = None
+        if size is None or not isinstance(modified, datetime):
+            st = self.smb.stat(self._path(share, path), **self.nas)
+            size, modified = st.st_size, datetime.fromtimestamp(st.st_mtime_ns // 1000 / 1e6, timezone.utc)
+        if modified.tzinfo is None:
+            modified = modified.replace(tzinfo=timezone.utc)
+        return int(size), modified
 
     def download(self, share, path, dest):
         with self.smb.open_file(self._path(share, path), mode="rb", **self.nas) as src, open(dest, "wb") as dst:
