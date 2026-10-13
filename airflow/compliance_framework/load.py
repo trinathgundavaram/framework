@@ -313,25 +313,21 @@ def _rejected_row(conn: Connection, insert: str, e: Exception) -> Optional[int]:
 
 @dataclass
 class PromotionResult:
-    disabled_cnt: int
+    deleted_cnt: int
     appended_cnt: int
 
 
 def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_rows: int) -> PromotionResult:
-    """Disable the batch's current core rows and append the staged ones; runs inside the caller's transaction."""
+    """Delete the batch's core rows and insert the staged ones; runs inside the caller's transaction."""
     core, stg = _table(cfg.core_schema_nm, cfg.core_table_nm), _table(cfg.stg_schema_nm, cfg.stg_table_nm)
-    flag, end = layout.column("CURRENT_FLAG", "core"), layout.column("END_TIMESTAMP", "core")
-    on, off = ("'1'", "'0'") if flag.text else ("1", "0")
-    set_end, params = (f", {db.ident(end.name)} = %s", [ctx.value("LOAD_TIMESTAMP", end.text)]) if end else ("", [])
-    disabled = conn.execute(f"UPDATE {core} SET {db.ident(flag.name)} = {off}{set_end} WHERE {db.ident(BATCH_COLUMN)} = %s "
-                            f"AND {db.ident(flag.name)} = {on}", (*params, ctx.btch_id)).rowcount
+    deleted = conn.execute(f"DELETE FROM {core} WHERE {db.ident(BATCH_COLUMN)} = %s", (ctx.btch_id,)).rowcount
     names, exprs, values = [], [], []
     for c, kind, _ in layout.core_plan():
         names.append(db.ident(c.name))
         if kind == "copy":
             exprs.append(db.ident(c.name))
         elif kind == "flag":
-            exprs.append(on)
+            exprs.append("'1'" if c.text else "1")
         else:
             exprs.append("CAST(%s AS VARCHAR(50))" if c.text else "CAST(%s AS TIMESTAMP(6) WITH TIME ZONE)")
             values.append(ctx.value("LOAD_TIMESTAMP", c.text))
@@ -345,4 +341,4 @@ def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_row
                             values).rowcount
     if appended != expected_rows:
         raise RowCountMismatch(f"appended {appended} rows for load {ctx.load_id}, staged {expected_rows}")
-    return PromotionResult(disabled, appended)
+    return PromotionResult(deleted, appended)

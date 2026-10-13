@@ -558,8 +558,8 @@ of the file, in table order.**
 | `FILE_NAME` | The name of the file |
 | `LOAD_TIMESTAMP` | When the file was loaded: a timestamp, or text `YYYY-MM-DD HH:MM:SS` (business time zone) in a character column |
 | `ROW_SEQUENCE` | A running row number, continuing from the highest value in the staging and core tables |
-| `CURRENT_FLAG` | Core only: 1 on the rows of the batch's latest load, 0 on the rows of its earlier loads |
-| `END_TIMESTAMP` | Core only: when a row stopped being current |
+| `CURRENT_FLAG` | Optional, core only: always 1 (the core table holds only the latest load of a batch) |
+| `END_TIMESTAMP` | Optional, core only: always empty |
 | `LOAD_ID`, `REQ_ID`, `PROJECT`, `TABLE`, `RPT_START`, `RPT_END` | The framework's load number, the batch's request ID, project, dataset and report dates |
 | `LOAD_DATE` | The date of the load (business time zone): a date, or text `YYYY-MM-DD` in a character column |
 | `CONSTANT` | The fixed value in `Value_Txt`, on every row (for example `Y`, `N`, `0`, a label) |
@@ -571,9 +571,9 @@ Rules:
 - The rows need no order. Where a column sits in the table decides its place: derived columns can be at the
   start, at the end or between file columns, and the file's values fill the remaining columns left to right.
 - A row for one table wins over the project's `*` row for the same column.
-- **Core always holds the data.** When a file is loaded for a batch that already has rows, those rows get
-  `CURRENT_FLAG` = 0 (and `END_TIMESTAMP`) and the new rows are added as current, in one transaction. The
-  core table therefore needs a `CURRENT_FLAG` column.
+- **Core holds one load per batch.** When a file is loaded for a batch that already has rows in the core
+  table, those rows are deleted by `Btch_ID` and the new rows are inserted, in one transaction. The core table
+  needs no flag or end-date column; rows of other batches are not touched.
 - **Staging is cleared before a load by run type**: every staging row of the file's run type is removed,
   then the file is loaded (the staging table needs a `RUN_TYPE` column for this, as in the example below).
   Rows of other run types are not touched. A staging table without a run type column is cleared by batch.
@@ -593,7 +593,7 @@ Rules:
   `load_id`, `src_file_nm`, `stg_load_dtts`; core `btch_id`, `load_id`, `current_ind`, `load_dtts`, `end_dtts`.
 
 Example: tables that end with `StagingCreateDate, Btch_ID, Universe_Vrsn, Run_Ty, FileName, Src_Data_Key,
-Load_Dtts`, start with a row ID, and (core) carry `Current_Ind`:
+Load_Dtts` and start with a row ID:
 
 | `Project_Cd` | `Table_Nm` | `Column_Nm` | `Value_Cd` |
 |---|---|---|---|
@@ -603,7 +603,6 @@ Load_Dtts`, start with a row ID, and (core) carry `Current_Ind`:
 | `CMSUNIV` | `*` | `FileName` | `FILE_NAME` |
 | `CMSUNIV` | `*` | `Src_Data_Key` | `SOURCE_ID` |
 | `CMSUNIV` | `*` | `Load_Dtts` | `LOAD_TIMESTAMP` |
-| `CMSUNIV` | `*` | `Current_Ind` | `CURRENT_FLAG` |
 | `CMSUNIV` | `ODAG3` | `ODAG_DE_Table3_2022_ID` | `ROW_SEQUENCE` |
 
 `validate-config` reports a row that is not valid (`TARGET_COLUMN`), a table that does not fit its rows

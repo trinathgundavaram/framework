@@ -1,6 +1,6 @@
 # CMS Compliance Framework: Module Reference
 
-What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.23 (design v5).
+What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.24 (design v5).
 
 - **Design:** [`design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md). `D-nn` = decision, `Q-nn` = open question, `§n` = design section.
 - **Setup, configuration, commands:** [`framework-package.md`](framework-package.md).
@@ -156,7 +156,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 - Table introspection: `columns`, `staging_business_columns`, `core_insert_columns` (identity / generated / serial columns are skipped).
 - File reading (§9.4 C12–C14): `read_file`, `read_delimited`, `scan_delimited` (streaming), `read_with_pandas` (xlsx / parquet), `sanitize_db_error`.
 - `stage(conn, settings, ...)`: delete staging rows of the batch (D-05) and load the file; `LOAD_ENGINE=PANDAS` (reader + COPY) or `SPARK` (streaming scan + JDBC append; needs `SPARK_JDBC_URL`).
-- `swap` (D-01) disables the current core rows of the batch and appends the load's rows, checking the row count.
+- `swap` (D-95) deletes the core rows of the batch and inserts the load's rows, checking the row count.
 
 ### `overrides.py`
 - `DecisionProcessor.run` (P7, D-74): handles `REUSE` only — `LATE_ARRIVAL` and `CORRECTION` are read by the ingest pipeline.

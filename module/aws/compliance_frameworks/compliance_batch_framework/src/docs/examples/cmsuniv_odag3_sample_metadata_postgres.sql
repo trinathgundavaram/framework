@@ -202,16 +202,6 @@ VALUES
 INSERT INTO cms_compliance.ComplianceTargetColumnConfig
   (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES
-  ('CMSUNIV', '*', 'Current_Ind', 'CURRENT_FLAG', NULL, 1);
-
-INSERT INTO cms_compliance.ComplianceTargetColumnConfig
-  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
-VALUES
-  ('CMSUNIV', '*', 'End_Dtts', 'END_TIMESTAMP', NULL, 1);
-
-INSERT INTO cms_compliance.ComplianceTargetColumnConfig
-  (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
-VALUES
   ('CMSUNIV', 'ODAG3', 'ODAG_DE_Table3_2022_ID', 'ROW_SEQUENCE', NULL, 1);
 
 

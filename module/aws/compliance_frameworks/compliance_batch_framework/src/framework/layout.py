@@ -205,9 +205,6 @@ def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], 
         if missing:
             raise LookupError(f"{label}: column {missing[0]} of ComplianceTargetColumnConfig is in neither {stage_name} "
                               f"nor {core_name}")
-    if layout.column("CURRENT_FLAG", "core") is None:
-        raise LookupError(f"core table {core_name} has no column for the current flag (CURRENT_FLAG): the earlier "
-                          "load of a batch could not be disabled")
     if layout.column("ROW_SEQUENCE", "core") and not layout.column("ROW_SEQUENCE", "stage"):
         raise LookupError(f"{label}: the ROW_SEQUENCE column must also be in the staging table {stage_name}")
     if not layout.file_cols:

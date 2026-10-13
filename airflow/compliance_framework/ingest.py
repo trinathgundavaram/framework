@@ -451,7 +451,7 @@ class IngestPipeline:
                 promoted_event = {Action.PROMOTE_LATE: "LATE_ARRIVAL_PROMOTED",
                                   Action.PROMOTE_CORRECTION: "CORRECTION_PROMOTED"}.get(d.action, "FILE_PROMOTED")
                 self.logger.batch_event(promoted_event, req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
-                                        ovrd_id=out.ovrd_id, detail=f"appended={res.appended_cnt} disabled={res.disabled_cnt}"
+                                        ovrd_id=out.ovrd_id, detail=f"appended={res.appended_cnt} deleted={res.deleted_cnt}"
                                                + (f"; {detail}" if detail else ""))
                 out.result = {Action.PROMOTE_LATE: "LATE_PROMOTED",
                               Action.PROMOTE_CORRECTION: "CORRECTION_PROMOTED"}.get(d.action, "PROMOTED")

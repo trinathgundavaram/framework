@@ -373,27 +373,22 @@ def _stage_spark(conn, settings, spark, file_path, cfg, layout, ctx, drop_first)
 
 @dataclass
 class PromotionResult:
-    disabled_cnt: int
+    deleted_cnt: int
     appended_cnt: int
 
 
 def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_rows: int) -> PromotionResult:
-    """Disable the batch's current core rows and append the staged ones; runs inside the caller's transaction."""
+    """Delete the batch's core rows and insert the staged ones; runs inside the caller's transaction."""
     core, stg = _ident(cfg.core_schema_nm, cfg.core_table_nm), _ident(cfg.stg_schema_nm, cfg.stg_table_nm)
-    flag, end = layout.column("CURRENT_FLAG", "core"), layout.column("END_TIMESTAMP", "core")
-    on, off = (sql.Literal("1"), sql.Literal("0")) if flag.text else (sql.Literal(1), sql.Literal(0))
-    batch_col, flag_col = sql.Identifier(BATCH_COLUMN), sql.Identifier(flag.name)
-    set_end, params = (sql.SQL(", {} = %s").format(sql.Identifier(end.name)),
-                       [ctx.value("LOAD_TIMESTAMP", end.text)]) if end else (sql.SQL(""), [])
-    disabled = conn.execute(sql.SQL("UPDATE {} SET {} = {}{} WHERE {} = %s AND {} = {}").format(
-        core, flag_col, off, set_end, batch_col, flag_col, on), (*params, ctx.btch_id)).rowcount
+    batch_col = sql.Identifier(BATCH_COLUMN)
+    deleted = conn.execute(sql.SQL("DELETE FROM {} WHERE {} = %s").format(core, batch_col), (ctx.btch_id,)).rowcount
     names, exprs, values = [], [], []
     for c, kind, _ in layout.core_plan():
         names.append(sql.Identifier(c.name))
         if kind == "copy":
             exprs.append(sql.Identifier(c.name))
         elif kind == "flag":
-            exprs.append(on)
+            exprs.append(sql.Literal("1" if c.text else 1))
         else:
             exprs.append(sql.SQL("%s"))
             values.append(ctx.value("LOAD_TIMESTAMP", c.text))
@@ -407,4 +402,4 @@ def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_row
         core, sql.SQL(", ").join(names), sql.SQL(", ").join(exprs), stg, where), values).rowcount
     if appended != expected_rows:
         raise RowCountMismatch(f"appended {appended} rows for load {ctx.load_id}, staged {expected_rows}")
-    return PromotionResult(disabled, appended)
+    return PromotionResult(deleted, appended)
