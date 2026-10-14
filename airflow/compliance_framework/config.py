@@ -506,6 +506,7 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             continue
         extra = 1 if opts.record_types else 0
         counts = {k: v for k, v in (("COLUMN_COUNT", opts.column_count),
+                                    ("TARGET_COLUMNS", len(opts.target_columns) + extra if opts.target_columns else None),
                                     ("HEADER_NAMES", len(header_columns(c, opts)) + extra if opts.header else None)) if v}
         if len(set(counts.values())) > 1:
             add("FILE_CHECK_CONFIG", f"file config {c.cfg_id} ({c.project_cd}/{c.table_nm}/{c.src_id}): the field counts "

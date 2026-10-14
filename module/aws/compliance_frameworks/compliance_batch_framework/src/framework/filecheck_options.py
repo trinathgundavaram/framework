@@ -9,7 +9,7 @@ from typing import Optional
 from .common import ConfigError
 
 TRAILER_FIELDS = ("RECORD_TYPE", "FILE_NAME", "DATA_ROW_COUNT", "TOTAL_ROW_COUNT", "TIMESTAMP", "SKIP")
-CHECKS = ("RECORD_TYPE", "HEADER_NAMES", "COLUMN_COUNT", "TRAILER", "CHARACTER_SET", "COLUMN_VALUES")
+CHECKS = ("RECORD_TYPE", "HEADER_NAMES", "COLUMN_COUNT", "TARGET_COLUMNS", "TRAILER", "CHARACTER_SET", "COLUMN_VALUES")
 VALUE_RULES = ("LENGTH", "NUMBER", "REQUIRED")
 COUNT_FIELDS = ("DATA_ROW_COUNT", "TOTAL_ROW_COUNT")
 _TIMESTAMP_FORMATS = {8: "%Y%m%d", 12: "%Y%m%d%H%M", 14: "%Y%m%d%H%M%S"}
@@ -23,6 +23,7 @@ class CheckOptions:
     charset: Optional[str] = None
     value_rules: tuple = ()
     column_count: Optional[int] = None
+    target_columns: tuple = ()
 
 
 def _names(value) -> list[str]:
@@ -85,14 +86,22 @@ def check_options(cfg, checks) -> CheckOptions:
             raise ConfigError(f"{values['COLUMN_COUNT'].label}: Check_Val_Txt must be the number of fields in a row "
                               "(for example 23)")
         count = int(text)
-    return CheckOptions(tuple(types) if types else None, fields, header, charset, rules, count)
+    targets = ()
+    if "TARGET_COLUMNS" in values:
+        text = values["TARGET_COLUMNS"].check_val_txt
+        targets = tuple(n.strip().lower() for n in text.split("|" if "|" in text else ",") if n.strip())
+        if len(set(targets)) != len(targets):
+            raise ConfigError(f"{values['TARGET_COLUMNS'].label}: Check_Val_Txt names a column twice")
+    return CheckOptions(tuple(types) if types else None, fields, header, charset, rules, count, targets)
 
 
 def data_fields(opts: CheckOptions, names: tuple) -> Optional[int]:
-    """Fields per row the file must have (record type included): COLUMN_COUNT, else HEADER_NAMES; None = not set."""
+    """Fields per row the file must have (record type included): COLUMN_COUNT, else TARGET_COLUMNS, else
+    HEADER_NAMES; None = not set."""
     if opts.column_count:
         return opts.column_count
-    return len(names) + (1 if opts.record_types else 0) if names else None
+    listed = opts.target_columns or names
+    return len(listed) + (1 if opts.record_types else 0) if listed else None
 
 
 def _is_timestamp(value: str) -> bool:

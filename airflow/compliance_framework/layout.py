@@ -142,6 +142,7 @@ class Layout:
     texts: dict = field(default_factory=dict)
     names: tuple = ()
     count: Optional[int] = None
+    targets: tuple = ()
 
     @property
     def free_cols(self) -> list[str]:
@@ -152,12 +153,16 @@ class Layout:
     def file_cols(self) -> list[str]:
         """The staging column of each field of the file, in file order.
 
-        With a column list (`names`, from HEADER_NAMES) the fields go to the columns of the same name when every
+        With a target column list (`targets`, from TARGET_COLUMNS) field n goes to the n-th listed column. Otherwise,
+        with a column list (`names`, from HEADER_NAMES) the fields go to the columns of the same name when every
         name is a column, otherwise to the first free columns in table order. With only a field count (`count`,
         from COLUMN_COUNT) they go to the first `count` free columns. Without either every free column is a field.
         The free columns left over are loaded as NULL.
         """
         free = self.free_cols
+        if self.targets:
+            by_name = {c.casefold(): c for c in free}
+            return [by_name[n.casefold()] for n in self.targets]
         if self.names:
             by_name = {c.casefold(): c for c in free}
             wanted = [n.casefold() for n in self.names]
@@ -219,7 +224,7 @@ class Layout:
 
 
 def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], mapping: dict, stage_name: str,
-                 core_name: str, names: tuple = (), count: Optional[int] = None) -> Layout:
+                 core_name: str, names: tuple = (), count: Optional[int] = None, targets: tuple = ()) -> Layout:
     """Check the two tables against the mapping; LookupError = a table or a required column is missing."""
     if not stage_cols:
         raise LookupError(f"staging table {stage_name} not found")
@@ -232,7 +237,7 @@ def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], 
             raise LookupError(f"table {name} lacks the batch column {BATCH_COLUMN}")
     layout = Layout(label, stage, core, {k: v for k, v in mapping.items()
                                          if k in {c.name for c in stage} | {c.name for c in core}},
-                    dict(getattr(mapping, "texts", {})), tuple(names), count)
+                    dict(getattr(mapping, "texts", {})), tuple(names), count, tuple(targets))
     if mapping is not DEFAULT_MAPPING and mapping != DEFAULT_MAPPING:
         missing = sorted(k for k in mapping if k not in layout.mapping)
         if missing:
@@ -242,7 +247,13 @@ def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], 
         raise LookupError(f"{label}: the ROW_SEQUENCE column must also be in the staging table {stage_name}")
     if not layout.free_cols:
         raise LookupError(f"staging table {stage_name} has no column left for the file's data")
-    wanted, source = (len(names), "HEADER_NAMES lists") if names else (count, "COLUMN_COUNT gives")
+    fillable = {c.casefold() for c in layout.free_cols}
+    unknown = [n for n in targets if n.casefold() not in fillable]
+    if unknown:
+        raise LookupError(f"{label}: TARGET_COLUMNS names {unknown[0]}, which is not a column of {stage_name} the file "
+                          "can fill (a column of ComplianceTargetColumnConfig or Btch_ID cannot be listed)")
+    wanted, source = ((len(targets), "TARGET_COLUMNS lists") if targets else (len(names), "HEADER_NAMES lists") if names
+                      else (count, "COLUMN_COUNT gives"))
     if wanted and wanted > len(layout.free_cols):
         raise LookupError(f"{label}: {source} {wanted} data columns, staging table {stage_name} has "
                           f"{len(layout.free_cols)} for the file's data")

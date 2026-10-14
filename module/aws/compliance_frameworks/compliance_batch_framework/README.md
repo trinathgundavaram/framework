@@ -204,7 +204,7 @@ Only problems of the file are findings. A setup problem (staging table missing, 
 |---|---|
 | `Project_Cd` | The project of the files |
 | `Table_Nm`, `Src_ID` | The file the row applies to; `*` = every table / every source of the project |
-| `Check_Cd` | `RECORD_TYPE`, `HEADER_NAMES`, `COLUMN_COUNT`, `TRAILER`, `CHARACTER_SET` or `COLUMN_VALUES` |
+| `Check_Cd` | `RECORD_TYPE`, `HEADER_NAMES`, `COLUMN_COUNT`, `TARGET_COLUMNS`, `TRAILER`, `CHARACTER_SET` or `COLUMN_VALUES` |
 | `Check_Val_Txt` | The value of the check (below) |
 | `Include_Ind` | 1 = the check applies to the files the row covers; 0 = those files are excluded from the check |
 | `Active_Ind` | 1 = the row is in use; 0 = the row is ignored, as if it were not there |
@@ -214,6 +214,7 @@ Only problems of the file are findings. A setup problem (staging table missing, 
 | `RECORD_TYPE` | `H,D,T` | Three codes: header, detail, trailer. The first field of each line must be the code of its position. Without this check the first line is the header and the last line the trailer by position (`Src_File_Has_Hdr_Ind`, `Src_File_Has_Trlr_Ind`) |
 | `HEADER_NAMES` | `Member Id\|Paid Amount\|Member Name` | The expected header line (with the file's delimiter, or comma separated). Names are compared in order, ignoring upper / lower case and surrounding spaces. Without this check only the number of header columns is compared with the staging table |
 | `COLUMN_COUNT` | `23` | The number of fields in the header and in every data row, counted as delimiters + 1, so a record type field (`H` / `D`) counts. The trailer is not counted here (see `TRAILER`). |
+| `TARGET_COLUMNS` | `MemberFirstName\|MemberID\|SourceUnique_ID` | Not a check: the staging column of each field of the file, in file order (the old `TargetColumnList`, without the derived columns). Use it when a source's file skips table columns or is in a different order. Field n goes to the n-th listed column; columns not listed and not in `ComplianceTargetColumnConfig` are loaded as NULL. A listed column must be a staging column the file can fill (not a column of `ComplianceTargetColumnConfig`, not `Btch_ID`). With `*` and per-source rows each source can have its own layout; `Include_Ind = 0` makes a source use the table order |
 | `TRAILER` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | What each trailer field holds, in order: `RECORD_TYPE`, `FILE_NAME` (must equal the file's name), `DATA_ROW_COUNT` (data rows) or `TOTAL_ROW_COUNT` (every line, header and trailer included), `TIMESTAMP` (`YYYYMMDD`, `YYYYMMDDHHMM` or `YYYYMMDDHHMMSS`), `SKIP` |
 | `CHARACTER_SET` | `latin-1` | Every line must only contain characters of that character set (`latin-1`, `ascii`, `cp1252`, ...) and no control characters (tab is allowed). Use it when the target columns cannot hold every character: each offending line is reported with the character and the record |
 | `COLUMN_VALUES` | `ALL`, or any of `LENGTH,NUMBER,REQUIRED` | Every value of every data row against its target staging column: `LENGTH` = not longer than a character column, `NUMBER` = a number for a numeric column, `REQUIRED` = not empty for a `NOT NULL` column. Every offending value is reported with its line, column and record, so all bad records are listed before the load |
@@ -473,9 +474,20 @@ Rules:
   start, at the end or between file columns, and the file's values fill the remaining columns left to right.
 - A row for one table wins over the project's `*` row for the same column.
 - **How the file's fields reach the table.** The columns in `ComplianceTargetColumnConfig` (and `Btch_ID`) are
-  filled by the framework wherever they are in the table. The file's fields fill the other columns in table order,
-  from the first one on: the file and the table must be in the same order from there. Columns after the file's last
-  field are loaded as NULL.
+  filled by the framework wherever they are in the table. The file's fields fill the other columns, decided by the
+  first of these that applies to the file's source:
+  1. a `TARGET_COLUMNS` row in `ComplianceFileCheckConfig`: field n goes to the n-th listed column;
+  2. a `HEADER_NAMES` row whose names are all column names: by name;
+  3. a `COLUMN_COUNT` row: the first columns in table order;
+  4. otherwise every column in table order, from the first one on.
+
+  Columns not filled from the file are loaded as NULL. Example: one table, two layouts. MHK files send all 25
+  columns in table order; the other sources send 22 and skip `ExRMNumber`, `Filler2` and `Filler3`:
+
+  | Project_Cd | Table_Nm | Src_ID | Check_Cd | Check_Val_Txt | Include_Ind |
+  |---|---|---|---|---|---|
+  | CMSUNIV | ODAG3 | `*` | `TARGET_COLUMNS` | `MemberFirstName\|MemberLastName\|...\|WasTheInitOrgDetReqtDeniedForLackOfMediNecessity\|SourceUnique_ID` | 1 |
+  | CMSUNIV | ODAG3 | `51` (MHK) | `TARGET_COLUMNS` | | 0 |
 - **Columns the file does not have (fillers).** A `HEADER_NAMES` row is the list
   of columns the file has, in file order; the file must have exactly that many fields. When every name in the
   list is a column of the staging table (upper and lower case do not matter), each field goes to the column

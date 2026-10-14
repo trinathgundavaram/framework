@@ -58,8 +58,9 @@ def header_columns(cfg: "FileConfig", opts) -> tuple:
 def file_layout(conn, cfg: "FileConfig", target_columns, opts=None) -> Layout:
     """The staging / core layout of a file config; LookupError when a table or a required column is missing.
 
-    `opts` = the file's check options: a HEADER_NAMES row is the list of columns the file has, a COLUMN_COUNT row
-    the number of its fields; staging columns the file does not have are loaded as NULL.
+    `opts` = the file's check options: a TARGET_COLUMNS row is the staging column of each field in file order, a
+    HEADER_NAMES row the list of columns the file has, a COLUMN_COUNT row the number of its fields; staging columns
+    the file does not fill are loaded as NULL.
     """
     count = None
     if opts is not None and opts.column_count:
@@ -68,7 +69,7 @@ def file_layout(conn, cfg: "FileConfig", target_columns, opts=None) -> Layout:
                         columns(conn, cfg.stg_schema_nm, cfg.stg_table_nm),
                         columns(conn, cfg.core_schema_nm, cfg.core_table_nm), column_mapping(cfg, target_columns),
                         f"{cfg.stg_schema_nm}.{cfg.stg_table_nm}", f"{cfg.core_schema_nm}.{cfg.core_table_nm}",
-                        header_columns(cfg, opts), count)
+                        header_columns(cfg, opts), count, opts.target_columns if opts is not None else ())
 
 
 def _table(schema: str, table: str) -> str:
