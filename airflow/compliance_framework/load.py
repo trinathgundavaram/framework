@@ -35,7 +35,8 @@ def columns(conn: Connection, schema: str, table: str) -> list[Column]:
             length = int(r["column_length"]) // (2 if int(r["char_type"] or 1) == 2 else 1)
         out.append(Column(r["column_name"].strip().lower(), bool((r["id_col_type"] or "").strip()),
                           kind in ("CV", "CF", "CO"), length, kind in ("I", "I1", "I2", "I8", "D", "F", "N"),
-                          (r["nullable"] or "Y").strip().upper() != "N"))
+                          (r["nullable"] or "Y").strip().upper() != "N",
+                          {"DA": "DATE", "TS": "TIMESTAMP", "SZ": "TIMESTAMP_TZ"}.get(kind)))
     return out
 
 
@@ -312,7 +313,7 @@ def stage(conn: Connection, settings: "Settings", *, file_path: str, cfg: "FileC
             raise
         where = row_position(file_path, cfg, settings, _rejected_row(conn, insert, e))
         raise FileRejected("FILE_PARSE_ERROR", f"value does not fit staging column types{' at ' + where if where else ''}: "
-                                               f"{sanitize_db_error(str(e).splitlines()[0])}")
+                                               f"{sanitize_db_error(db.error_line(e))}")
     return count
 
 
@@ -347,8 +348,10 @@ def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_row
         elif kind == "flag":
             exprs.append("'1'" if c.text else "1")
         else:
-            exprs.append("CAST(%s AS VARCHAR(50))" if c.text else "CAST(%s AS TIMESTAMP(6) WITH TIME ZONE)")
-            values.append(ctx.value("LOAD_TIMESTAMP", c.text))
+            exprs.append("CAST(%s AS VARCHAR(50))" if c.text else "CAST(%s AS DATE)" if c.temporal == "DATE"
+                         else "CAST(%s AS TIMESTAMP(0))" if c.temporal == "TIMESTAMP"
+                         else "CAST(%s AS TIMESTAMP(0) WITH TIME ZONE)")
+            values.append(ctx.value("LOAD_TIMESTAMP", c.text, c.temporal or "TIMESTAMP_TZ"))
     where = f"{db.ident(BATCH_COLUMN)} = %s"
     values.append(ctx.btch_id)
     load_col = layout.column("LOAD_ID", "stage")

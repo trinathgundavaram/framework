@@ -33,6 +33,7 @@ class Column:
     length: Optional[int] = None
     numeric: bool = False
     nullable: bool = True
+    temporal: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -52,10 +53,19 @@ class LoadContext:
     req_id: int
     tz: str = "UTC"
 
-    def value(self, value_cd: str, text: bool):
-        """The value of a derived column; `text` = the column is a character column."""
+    def value(self, value_cd: str, text: bool, temporal: Optional[str] = None):
+        """The value of a derived column; `text` = a character column, `temporal` = its date / time type if known.
+
+        A load time for a TIMESTAMP column is sent as text without fractional seconds, so the database converts
+        it to the column's own precision (a TIMESTAMP(6) value does not fit a TIMESTAMP(0) column on Teradata).
+        """
         if value_cd == "LOAD_TIMESTAMP":
-            return self.loaded_at.astimezone(ZoneInfo(self.tz)).strftime(TIMESTAMP_TEXT) if text else self.loaded_at
+            local = self.loaded_at.astimezone(ZoneInfo(self.tz))
+            if text or temporal == "TIMESTAMP":
+                return local.strftime(TIMESTAMP_TEXT)
+            if temporal == "DATE":
+                return local.date()
+            return local.isoformat(sep=" ", timespec="seconds") if temporal == "TIMESTAMP_TZ" else self.loaded_at
         v = {"BATCH_ID": self.btch_id, "RUN_TYPE": self.run_ty, "VERSION": self.version, "SOURCE_ID": self.src_id,
              "FILE_NAME": self.file_name, "LOAD_ID": self.load_id, "CURRENT_FLAG": 1, "END_TIMESTAMP": None,
              "LOAD_DATE": self.loaded_at.astimezone(ZoneInfo(self.tz)).date(),
@@ -184,7 +194,7 @@ class Layout:
         if value_cd == "SQL":
             v = (resolved or {})[c.name]
             return str(v) if c.text and v is not None and not isinstance(v, str) else v
-        return ctx.value(value_cd, c.text)
+        return ctx.value(value_cd, c.text, c.temporal)
 
     def stage_rows(self, records: Iterable[list], ctx: LoadContext, sequence_start: int = 1,
                    resolved: Optional[dict] = None) -> Iterator[list]:

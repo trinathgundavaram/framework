@@ -348,7 +348,7 @@ reports a row that is not valid (`FILE_CHECK_CONFIG`) and a row that matches no 
 | `Total_Rows_Loaded` | Rows loaded to the core table; `0` unless accepted |
 | `File_Submitted_Date` | The date part of the timestamp in the file name |
 | `File_Processed_Date` | When the load finished, in `BUSINESS_TZ` |
-| `Error_Message` | Why the file was rejected; empty when accepted |
+| `Error_Message` | Why the file was not loaded, in plain language for the business (for example "No request exists for this run type and reporting period." or "The file contains data that is not in the expected format (first at line 3)."); empty when accepted. Database and system errors never appear here: they are in the error log, the audit table and the support email |
 
 A run that covers several inbound folders writes one report in each. A run that handled no file writes none.
 

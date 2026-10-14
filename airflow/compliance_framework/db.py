@@ -18,16 +18,23 @@ log = logging.getLogger(__name__)
 _PARAM = re.compile(r"%\((\w+)\)s|%s")
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$")
 _ERROR_CODE = re.compile(r"\[Error (\d+)\]")
+_DATABASE_ERROR = re.compile(r"\[Teradata Database\] \[Error (\d+)\].*")
 DUPLICATE_KEY_CODES = {2801, 2803}
-DATA_ERROR_CODES = {2616, 2617, 2620, 2621, 2665, 2666, 2679, 3520, 3996, 6706, 6760}
+DATA_ERROR_CODES = {2616, 2617, 2620, 2621, 2665, 2666, 2679, 3520, 3996, 6706, 6760, 7454}
 INSERT_CHUNK_ROWS = 2000
 INSERT_CHUNK_BYTES = 500_000
 
 
 def error_code(exc: BaseException) -> Optional[int]:
     """The Teradata error number in a driver exception, if any."""
-    m = _ERROR_CODE.search(str(exc))
+    m = _DATABASE_ERROR.search(str(exc)) or _ERROR_CODE.search(str(exc))
     return int(m.group(1)) if m else None
+
+
+def error_line(exc: BaseException) -> str:
+    """The database's own message in a driver exception (a failed batch reports the driver's error first)."""
+    m = _DATABASE_ERROR.search(str(exc))
+    return m.group(0) if m else (str(exc).splitlines() or [""])[0]
 
 
 def is_duplicate_key(exc: BaseException) -> bool:
