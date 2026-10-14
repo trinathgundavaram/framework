@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from .adapters import basename, dirname
@@ -30,11 +31,13 @@ MESSAGES = {
     "FILE_COLUMN_COUNT_MISMATCH": "Some records do not have the expected number of columns.",
     "FILE_TRAILER_COUNT_MISMATCH": "The record count in the trailer does not match the records in the file.",
     "FILE_PARSE_ERROR": "The file contains data that is not in the expected format.",
+    "FILE_CONTENT_CHECK_FAILED": "The file did not pass the file checks.",
     "RULES_FAILED": "The file did not pass the data quality rules.",
     "FAILED_TECHNICAL": "The file could not be processed because of a system issue. It will be tried again automatically.",
 }
 DEFAULT_MESSAGE = "The file could not be loaded."
-WITH_LINE = ("FILE_PARSE_ERROR", "FILE_COLUMN_COUNT_MISMATCH")
+WITH_LINE = ("FILE_PARSE_ERROR", "FILE_COLUMN_COUNT_MISMATCH", "FILE_CONTENT_CHECK_FAILED")
+ERROR_LOG_HEADER = "File_Name|Check_Cd|Line_No|Message|Record"
 LOCATION = ("s3_bucket", "s3_key")
 
 
@@ -42,6 +45,24 @@ def _local(value, tz: str) -> str:
     if isinstance(value, datetime):
         return (value.astimezone(ZoneInfo(tz)) if value.tzinfo else value).strftime("%Y-%m-%d %H:%M:%S")
     return "" if value is None else str(value)[:19]
+
+
+def write_error_log(store, settings, share: str, path: str, rows: list) -> Optional[str]:
+    """Write <folder>/<ERROR_LOG_FOLDER>/<file name>.errors.txt: one (check, line, message, record) per row.
+
+    Returns where it was written, or None when error logs are off or the file could not be written.
+    """
+    if not settings.write_error_file:
+        return None
+    name = basename(path)
+    target = f"{dirname(path)}{settings.error_log_folder}/{name}.errors.txt"
+    lines = [ERROR_LOG_HEADER, *("|".join("" if v is None else str(v) for v in (name, *row)) for row in rows)]
+    try:
+        store.put(share, target, ("\n".join(lines) + "\n").encode(settings.file_encoding, "replace"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not write the error log of %s: %s", name, e)
+        return None
+    return store.uri(share, target)
 
 
 def business_message(load: dict) -> str:

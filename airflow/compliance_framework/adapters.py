@@ -76,6 +76,15 @@ def sha256_file(path: str) -> str:
     return _hash_file(path, "sha256")
 
 
+def _copy_hashed(src, dst) -> str:
+    """Copy one open file to another in 1 MB pieces; returns the SHA-256 (hex) of what was copied."""
+    h = hashlib.sha256()
+    for chunk in iter(lambda: src.read(1024 * 1024), b""):
+        h.update(chunk)
+        dst.write(chunk)
+    return h.hexdigest()
+
+
 class FileStore(ABC):
     @abstractmethod
     def head(self, share: str, path: str) -> FileInfo: ...
@@ -87,7 +96,8 @@ class FileStore(ABC):
     def list_files(self, share: str, folder: str) -> list[FileInfo]: ...
 
     @abstractmethod
-    def download(self, share: str, path: str, dest: str) -> None: ...
+    def download(self, share: str, path: str, dest: str) -> Optional[str]:
+        """Copy the file to `dest`; returns its SHA-256 (hex) when computed on the way, else None."""
 
     @abstractmethod
     def copy(self, src_share: str, src_path: str, dst_share: str, dst_path: str) -> None: ...
@@ -144,7 +154,8 @@ class LocalFileStore(FileStore):
                 for p in sorted(d.iterdir()) if p.is_file()]
 
     def download(self, share, path, dest):
-        shutil.copyfile(self._path(share, path), dest)
+        with open(self._path(share, path), "rb") as src, open(dest, "wb") as dst:
+            return _copy_hashed(src, dst)
 
     def copy(self, src_share, src_path, dst_share, dst_path):
         dst = self._path(dst_share, dst_path)
@@ -242,7 +253,7 @@ class NasFileStore(FileStore):
 
     def download(self, share, path, dest):
         with self.smb.open_file(self._path(share, path), mode="rb", **self.nas) as src, open(dest, "wb") as dst:
-            shutil.copyfileobj(src, dst, 1024 * 1024)
+            return _copy_hashed(src, dst)
 
     def copy(self, src_share, src_path, dst_share, dst_path):
         self.smb.makedirs(self._path(dst_share, dirname(dst_path)), exist_ok=True, **self.nas)
@@ -372,23 +383,6 @@ class LogChannel(Channel):
         log.warning("EMAIL to=%s | %s | %s", msg.recipients, msg.subject, msg.body.replace("\n", " / "))
 
 
-class SesChannel(Channel):
-    def __init__(self, settings: Settings):
-        import boto3
-
-        if not settings.notify_from_email:
-            raise ConfigError("NOTIFY_FROM_EMAIL is required when NOTIFY_BACKEND=ses")
-        self.sender = settings.notify_from_email
-        self.ses = boto3.client("ses", region_name=settings.aws_region)
-
-    def send(self, msg):
-        if not msg.recipients:
-            log.warning("no recipients for %r; not sent", msg.subject)
-            return
-        self.ses.send_email(Source=self.sender, Destination={"ToAddresses": msg.recipients},
-                            Message={"Subject": {"Data": msg.subject[:200]}, "Body": {"Text": {"Data": msg.body}}})
-
-
 class AirflowEmailChannel(Channel):
     """Sends through Airflow's configured email backend (SMTP / SES)."""
 
@@ -403,8 +397,6 @@ class AirflowEmailChannel(Channel):
 
 
 def build_channel(settings: Settings) -> Channel:
-    if settings.notify_backend == "ses":
-        return SesChannel(settings)
     if settings.notify_backend == "airflow":
         return AirflowEmailChannel()
     return LogChannel()

@@ -57,7 +57,7 @@ class RulesRunner:
                 self._run_load(r["load_id"], s)
             except Exception as e:  # noqa: BLE001
                 log.exception("rules for load %s failed", r["load_id"])
-                s.errors.append(f"load {r['load_id']}: {type(e).__name__}: {e}")
+                s.errors.append(f"load {r['load_id']}: {db.error_text(e)}")
             finally:
                 db.unlock(self.conn, key)
         return s

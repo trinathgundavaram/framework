@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import codecs
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 from .common import ConfigError
@@ -10,6 +11,8 @@ from .common import ConfigError
 TRAILER_FIELDS = ("RECORD_TYPE", "FILE_NAME", "DATA_ROW_COUNT", "TOTAL_ROW_COUNT", "TIMESTAMP", "SKIP")
 CHECKS = ("RECORD_TYPE", "HEADER_NAMES", "COLUMN_COUNT", "TRAILER", "CHARACTER_SET", "COLUMN_VALUES")
 VALUE_RULES = ("LENGTH", "NUMBER", "REQUIRED")
+COUNT_FIELDS = ("DATA_ROW_COUNT", "TOTAL_ROW_COUNT")
+_TIMESTAMP_FORMATS = {8: "%Y%m%d", 12: "%Y%m%d%H%M", 14: "%Y%m%d%H%M%S"}
 
 
 @dataclass(frozen=True)
@@ -83,3 +86,52 @@ def check_options(cfg, checks) -> CheckOptions:
                               "(for example 23)")
         count = int(text)
     return CheckOptions(tuple(types) if types else None, fields, header, charset, rules, count)
+
+
+def data_fields(opts: CheckOptions, names: tuple) -> Optional[int]:
+    """Fields per row the file must have (record type included): COLUMN_COUNT, else HEADER_NAMES; None = not set."""
+    if opts.column_count:
+        return opts.column_count
+    return len(names) + (1 if opts.record_types else 0) if names else None
+
+
+def _is_timestamp(value: str) -> bool:
+    fmt = _TIMESTAMP_FORMATS.get(len(value))
+    if not fmt or not value.isdigit():
+        return False
+    try:
+        datetime.strptime(value, fmt)
+    except ValueError:
+        return False
+    return True
+
+
+def trailer_problems(rec: list, line_no: int, name: str, opts: CheckOptions, case_sensitive: bool, data_rows: int,
+                     lines: int) -> list[tuple[str, str]]:
+    """[(check, message)] of a trailer record against the file's TRAILER and RECORD_TYPE rows.
+
+    `data_rows` = detail records, `lines` = every non-blank line including the header and the trailer.
+    """
+    out = []
+    trailer_code = opts.record_types[2] if opts.record_types else None
+    if trailer_code and rec[0] != trailer_code:
+        out.append(("RECORD_TYPE", f"line {line_no}: trailer record type {rec[0]!r}, expected {trailer_code!r}"))
+    if not opts.trailer_fields:
+        return out
+    if len(rec) != len(opts.trailer_fields):
+        out.append(("TRAILER", f"line {line_no}: trailer has {len(rec)} fields, expected "
+                               f"{len(opts.trailer_fields)} ({', '.join(opts.trailer_fields)})"))
+    for value, kind in zip(rec, opts.trailer_fields):
+        value = value.strip()
+        if kind == "FILE_NAME":
+            same = value == name if case_sensitive else value.casefold() == name.casefold()
+            if not same:
+                out.append(("TRAILER", f"line {line_no}: trailer file name {value!r} is not the name of the file"))
+        elif kind in COUNT_FIELDS:
+            actual, unit = (data_rows, "data rows") if kind == "DATA_ROW_COUNT" else (lines, "lines")
+            if not value.isdigit() or int(value) != actual:
+                out.append(("TRAILER", f"line {line_no}: trailer count {value!r}, the file has {actual} {unit}"))
+        elif kind == "TIMESTAMP" and not _is_timestamp(value):
+            out.append(("TRAILER", f"line {line_no}: trailer timestamp {value!r} is not a valid "
+                                   "YYYYMMDD, YYYYMMDDHHMM or YYYYMMDDHHMMSS"))
+    return out

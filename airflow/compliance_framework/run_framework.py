@@ -11,14 +11,12 @@ from .app import App
 from .cli import _json_default
 from .cli import main as cli_main
 from .common import FrameworkError, parse_as_of
+from .compliance_task import SCOPE_KEYS
 from .modules import resolve_module
 from .settings import Settings
 
 log = logging.getLogger(__name__)
 
-STEPS = ("BATCH_CREATION", "FILE_CHECK", "FILE_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY")
-STEP_PARAMS = ("project", "run_type", "period", "table", "period_file", "lookback_days", "lookback_weeks",
-               "share", "file", "folder")
 COMMANDS = ("test-connection", "show-config", "validate-config", "health", "locks", "release-lock",
             "close-batch", "close-batches", "process-decisions", "notify", "list-modules")
 
@@ -34,7 +32,7 @@ def run_step(step: str, *, as_of: Optional[str] = None, settings: Optional[Mappi
     logging.getLogger(__package__).setLevel(log_level.upper())
     try:
         spec = resolve_module(step)
-        unknown = sorted(set(params) - set(STEP_PARAMS))
+        unknown = sorted(set(params) - set(SCOPE_KEYS))
         if unknown:
             raise FrameworkError(f"unknown run parameter(s): {', '.join(unknown)}")
         accepted = {k: v for k, v in params.items() if k in spec.params and v not in (None, "")}

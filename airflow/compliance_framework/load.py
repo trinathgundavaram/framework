@@ -3,15 +3,16 @@ from __future__ import annotations
 
 import codecs
 import csv
+import os
 import logging
 import re
 from dataclasses import dataclass
-from itertools import islice
 from typing import TYPE_CHECKING, Iterable, Iterator, Optional
 
 from . import db
 from .common import ConfigError, FileRejected, RowCountMismatch
 from .db import Connection
+from .filecheck_options import CheckOptions, trailer_problems
 from .layout import BATCH_COLUMN, PLACEHOLDER, Column, Layout, LoadContext, build_layout, column_mapping, sql_body
 
 if TYPE_CHECKING:
@@ -57,13 +58,17 @@ def header_columns(cfg: "FileConfig", opts) -> tuple:
 def file_layout(conn, cfg: "FileConfig", target_columns, opts=None) -> Layout:
     """The staging / core layout of a file config; LookupError when a table or a required column is missing.
 
-    `opts` = the file's check options: a HEADER_NAMES row is the list of columns the file has.
+    `opts` = the file's check options: a HEADER_NAMES row is the list of columns the file has, a COLUMN_COUNT row
+    the number of its fields; staging columns the file does not have are loaded as NULL.
     """
+    count = None
+    if opts is not None and opts.column_count:
+        count = opts.column_count - (1 if opts.record_types else 0)
     return build_layout(f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}",
                         columns(conn, cfg.stg_schema_nm, cfg.stg_table_nm),
                         columns(conn, cfg.core_schema_nm, cfg.core_table_nm), column_mapping(cfg, target_columns),
                         f"{cfg.stg_schema_nm}.{cfg.stg_table_nm}", f"{cfg.core_schema_nm}.{cfg.core_table_nm}",
-                        header_columns(cfg, opts))
+                        header_columns(cfg, opts), count)
 
 
 def _table(schema: str, table: str) -> str:
@@ -91,10 +96,6 @@ def delimiter_for(cfg: "FileConfig") -> str:
 def sanitize_db_error(msg: str) -> str:
     """Remove quoted values from database error text so no file content reaches audit logs."""
     return re.sub(r'"[^"]*"', '"***"', msg or "")[:500]
-
-
-def _normalise(values: list[str], empty_as_null: bool) -> list[Optional[str]]:
-    return [None if (empty_as_null and v == "") else v for v in values]
 
 
 def _file_lines(path: str, encoding: str) -> Iterator[str]:
@@ -171,82 +172,74 @@ def row_position(path: str, cfg: "FileConfig", settings: "Settings", row_no: Opt
 
 
 def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings",
-                   drop_first: bool = False) -> Iterator[list]:
-    """Rows yielded one at a time; LF and CRLF line endings are both accepted, trailing blank lines ignored."""
-    delim = delimiter_for(cfg)
-    content_cnt, last = 0, ""
+                   opts: Optional[CheckOptions] = None) -> Iterator[list]:
+    """The data rows of a delimited file, in one pass; LF and CRLF line endings are both accepted.
+
+    The header line is skipped (never counted or compared). With a trailer, the last non-blank line is the
+    trailer: it is checked against the file's TRAILER and RECORD_TYPE rows after the last data row. Blank lines
+    at the end are ignored; a blank line between records rejects the file.
+    """
+    opts = opts or CheckOptions()
+    drop_first = opts.record_types is not None
+    width = expected_cols + drop_first
+    empty_as_null = settings.empty_as_null
+    reader = csv.reader(_lf_lines(_file_lines(path, settings.file_encoding)), delimiter=delimiter_for(cfg),
+                        quotechar=settings.quote_char or None, strict=True)
+    skip_header = cfg.has_header
+    held = None
+    blank_at = None
+    data_rows = lines = 0
     try:
-        for n, line in enumerate(_file_lines(path, settings.file_encoding), 1):
-            if line.strip() != "":
-                content_cnt, last = n, line
+        for rec in reader:
+            if not rec or (len(rec) == 1 and not rec[0].strip()):
+                blank_at = blank_at or reader.line_num
+                continue
+            if blank_at:
+                raise FileRejected("FILE_PARSE_ERROR", f"blank line inside the file at line {blank_at}")
+            lines += 1
+            if skip_header:
+                skip_header = False
+                continue
+            if held is not None:
+                line_no, row = held
+                if len(row) != width:
+                    raise FileRejected("FILE_COLUMN_COUNT_MISMATCH",
+                                       f"line {line_no}: {len(row)} columns, expected {width}")
+                if drop_first:
+                    row = row[1:]
+                yield [None if v == "" else v for v in row] if empty_as_null else row
+                data_rows += 1
+            held = (reader.line_num, rec)
     except UnicodeDecodeError as e:
         raise _not_decodable(path, settings.file_encoding, e)
-    trailer_count = None
-    if cfg.has_trailer:
-        if not content_cnt:
-            raise FileRejected("FILE_PARSE_ERROR", "trailer expected but file is empty")
-        content_cnt -= 1
-        if settings.trailer_count_check:
-            m = re.search(settings.trailer_count_regex, last)
-            if not m:
-                raise FileRejected("FILE_TRAILER_COUNT_MISMATCH", "trailer record count not found")
-            trailer_count = int(m.group(1))
-    reader = csv.reader(_lf_lines(islice(_file_lines(path, settings.file_encoding), content_cnt)),
-                        delimiter=delim, quotechar=settings.quote_char or None, strict=True)
-    data_rows = 0
-    seen_header = False
-    try:
-        for i, rec in enumerate(reader):
-            if i == 0 and cfg.has_header:
-                seen_header = True
-                continue
-            if len(rec) != expected_cols + drop_first:
-                raise FileRejected("FILE_COLUMN_COUNT_MISMATCH",
-                                   f"line {reader.line_num}: {len(rec)} columns, expected {expected_cols + drop_first}")
-            data_rows += 1
-            yield _normalise(rec[1:] if drop_first else rec, settings.empty_as_null)
     except csv.Error as e:
         raise FileRejected("FILE_PARSE_ERROR", f"malformed delimited file at line {reader.line_num}: {e}")
-    if cfg.has_header and not seen_header:
+    if cfg.has_header and lines == 0:
         raise FileRejected("FILE_PARSE_ERROR", "header expected but file has no lines")
-    if trailer_count is not None and trailer_count != data_rows:
-        raise FileRejected("FILE_TRAILER_COUNT_MISMATCH",
-                           f"trailer count {trailer_count} != data rows {data_rows}")
+    if cfg.has_trailer:
+        if held is None:
+            raise FileRejected("FILE_PARSE_ERROR", "trailer expected but not found")
+        problems = trailer_problems(held[1], held[0], os.path.basename(path), opts, settings.filename_case_sensitive,
+                                    data_rows, lines)
+        if problems:
+            counts = [m for _, m in problems if "trailer count" in m]
+            raise FileRejected("FILE_TRAILER_COUNT_MISMATCH" if counts else "FILE_PARSE_ERROR", (counts or [problems[0][1]])[0])
+    elif held is not None:
+        line_no, row = held
+        if len(row) != width:
+            raise FileRejected("FILE_COLUMN_COUNT_MISMATCH", f"line {line_no}: {len(row)} columns, expected {width}")
+        if drop_first:
+            row = row[1:]
+        yield [None if v == "" else v for v in row] if empty_as_null else row
 
 
-def read_with_pandas(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings",
-                     drop_first: bool = False) -> list[list]:
-    import pandas as pd
-
-    try:
-        if cfg.src_file_ty in (".xlsx", ".xls"):
-            sheet = int(settings.xlsx_sheet) if settings.xlsx_sheet.isdigit() else settings.xlsx_sheet
-            df = pd.read_excel(path, sheet_name=sheet, header=None, dtype=str, keep_default_na=False,
-                               skiprows=settings.xlsx_header_row + (1 if cfg.has_header else 0))
-        else:
-            df = pd.read_parquet(path)
-            df = df.astype("string").fillna("")
-    except Exception as e:  # noqa: BLE001
-        raise FileRejected("FILE_PARSE_ERROR", f"cannot read {cfg.src_file_ty}: {type(e).__name__}")
-    if cfg.has_trailer and len(df):
-        df = df.iloc[:-1]
-    if df.shape[1] != expected_cols + drop_first and len(df):
-        raise FileRejected("FILE_COLUMN_COUNT_MISMATCH", f"{df.shape[1]} columns, expected {expected_cols + drop_first}")
-    if drop_first:
-        df = df.iloc[:, 1:]
-    return [_normalise([str(v) for v in rec], settings.empty_as_null) for rec in df.itertuples(index=False)]
-
-
-def read_file(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings", drop_first: bool = False) -> Rows:
-    """The data rows of a file; `drop_first` = every line starts with a record type field that is not loaded."""
+def read_file(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings",
+              opts: Optional[CheckOptions] = None) -> Rows:
+    """The data rows of a file; only delimited files are read (SUPPORTED_FILE_TYPES)."""
     ft = cfg.src_file_ty
-    if ft not in settings.supported_file_types:
-        raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} is not enabled (Q-02)")
-    if ft in DELIMITED_FILE_TYPES:
-        return read_delimited(path, cfg, expected_cols, settings, drop_first)
-    if ft in (".xlsx", ".xls", ".parquet"):
-        return read_with_pandas(path, cfg, expected_cols, settings, drop_first)
-    raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} has no reader")
+    if ft not in settings.supported_file_types or ft not in DELIMITED_FILE_TYPES:
+        raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} is not supported")
+    return read_delimited(path, cfg, expected_cols, settings, opts)
 
 
 def sql_values(conn, layout: Layout, ctx: LoadContext) -> dict:
@@ -263,7 +256,7 @@ def sql_values(conn, layout: Layout, ctx: LoadContext) -> dict:
             try:
                 rows = conn.execute_qmark(PLACEHOLDER.sub("?", body), [params[n] for n in names]).fetchall()
             except Exception as e:  # noqa: BLE001
-                raise ConfigError(f"{what} failed: {str(e).strip().splitlines()[0]}") from None
+                raise ConfigError(f"{what} failed: {db.error_line(e)}") from None
             if len(rows) != 1 or len(rows[0]) != 1:
                 raise ConfigError(f"{what} must return one row with one column (it returned {len(rows)} row(s))")
             done[text] = next(iter(rows[0].values()))
@@ -293,19 +286,22 @@ def _clean_stage(conn, table: str, cfg: "FileConfig", layout: Layout, ctx: LoadC
 
 
 def stage(conn: Connection, settings: "Settings", *, file_path: str, cfg: "FileConfig", layout: Layout,
-          ctx: LoadContext, drop_first: bool = False) -> int:
+          ctx: LoadContext, opts: Optional[CheckOptions] = None) -> int:
     """Clear the staging rows (of the batch, or of its run type) and load the file; returns the row count."""
     table = _table(cfg.stg_schema_nm, cfg.stg_table_nm)
-    records = read_file(file_path, cfg, len(layout.file_cols), settings, drop_first)
+    records = read_file(file_path, cfg, len(layout.file_cols), settings, opts)
     cols = [c.name for c in layout.stage]
-    insert = (f"INSERT INTO {table} ({', '.join(db.ident(c) for c in cols)}) "
-              f"VALUES ({', '.join(['%s'] * len(cols))})")
+    names = ", ".join(db.ident(c) for c in cols)
     resolved = sql_values(conn, layout, ctx)
+    if settings.load_engine == "FASTLOAD":
+        return _stage_fastload(conn, settings, cfg, layout, ctx, records, resolved, table, names, len(cols))
+    insert = f"INSERT INTO {table} ({names}) VALUES ({', '.join(['%s'] * len(cols))})"
     try:
         with conn.transaction():
             start = next_sequence(conn, cfg, layout)
             _clean_stage(conn, table, cfg, layout, ctx)
-            count = conn.executemany(insert, layout.stage_rows(records, ctx, start, resolved))
+            count = conn.executemany(insert, layout.stage_rows(records, ctx, start, resolved),
+                                     settings.insert_batch_rows, settings.insert_batch_bytes)
     except FileRejected:
         raise
     except Exception as e:  # noqa: BLE001
@@ -315,6 +311,46 @@ def stage(conn: Connection, settings: "Settings", *, file_path: str, cfg: "FileC
         raise FileRejected("FILE_PARSE_ERROR", f"value does not fit staging column types{' at ' + where if where else ''}: "
                                                f"{sanitize_db_error(db.error_line(e))}")
     return count
+
+
+def _stage_fastload(conn: Connection, settings: "Settings", cfg: "FileConfig", layout: Layout, ctx: LoadContext,
+                    records: Rows, resolved: dict, table: str, names: str, width: int) -> int:
+    """LOAD_ENGINE=FASTLOAD: FastLoad into a work table of this load, then one INSERT ... SELECT into staging.
+
+    The work table (<staging table>_W<Load_ID>, in the staging database) is dropped afterwards.
+    """
+    work = _table(cfg.stg_schema_nm, f"{cfg.stg_table_nm}_W{ctx.load_id}")
+    _drop(conn, work)
+    start = next_sequence(conn, cfg, layout)
+    conn.execute(f"CREATE MULTISET TABLE {work} AS (SELECT {names} FROM {table}) WITH NO DATA NO PRIMARY INDEX")
+    try:
+        try:
+            sent = conn.fastload(f"INSERT INTO {work} ({names}) VALUES ({', '.join(['%s'] * width)})",
+                                 layout.stage_rows(records, ctx, start, resolved),
+                                 settings.insert_batch_rows, settings.insert_batch_bytes)
+        except FileRejected:
+            raise
+        except Exception as e:  # noqa: BLE001
+            if not (isinstance(e, db.FastLoadRejected) or db.is_data_error(e)):
+                raise
+            raise FileRejected("FILE_PARSE_ERROR", "value does not fit staging column types: "
+                                                   f"{sanitize_db_error(db.error_line(e))}")
+        with conn.transaction():
+            _clean_stage(conn, table, cfg, layout, ctx)
+            copied = conn.execute(f"INSERT INTO {table} ({names}) SELECT {names} FROM {work}").rowcount
+        if copied != sent:
+            raise RowCountMismatch(f"staged {copied} of {sent} rows for load {ctx.load_id}")
+        return sent
+    finally:
+        _drop(conn, work)
+
+
+def _drop(conn: Connection, table: str) -> None:
+    try:
+        conn.execute(f"DROP TABLE {table}")
+    except Exception as e:  # noqa: BLE001
+        if db.error_code(e) != 3807:
+            log.warning("could not drop work table %s: %s", table, db.error_line(e))
 
 
 def _rejected_row(conn: Connection, insert: str, e: Exception) -> Optional[int]:

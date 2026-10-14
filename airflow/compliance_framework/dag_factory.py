@@ -62,7 +62,7 @@ def _dag(dag_id: str, dag_config: dict, description: str, params: dict, tag: str
     }
     return DAG(dag_id=dag_id, description=description, default_args=default_args,
                schedule=dag_config.get("schedule_interval"), catchup=False, max_active_runs=1,
-               dagrun_timeout=timedelta(hours=8), params=params,
+               dagrun_timeout=_minutes(dag_config, "dagrun_timeout_minutes", timedelta(hours=8)), params=params,
                tags=[*(dag_config.get("tags") or DEFAULT_TAGS), tag])
 
 
@@ -99,6 +99,16 @@ def _task_id(step: str, scope: dict, index: int, scopes: list) -> str:
     return f"{step.lower()}_{''.join(c if c.isalnum() else '_' for c in name).lower()}"
 
 
+def _minutes(dag_config: dict, key: str, default: timedelta) -> timedelta:
+    """A time limit from the Variable in minutes (`execution_timeout_minutes`, `dagrun_timeout_minutes`), else the default."""
+    try:
+        value = int(dag_config.get(key) or 0)
+    except (TypeError, ValueError):
+        logger.warning("%s must be a whole number of minutes; using %s", key, default)
+        return default
+    return timedelta(minutes=value) if value > 0 else default
+
+
 def build_step_dag(dag_id: str, step: str, variable_key: str) -> DAG:
     """The DAG of one framework step; everything about it comes from its own Variable."""
     step = step.strip().upper()
@@ -119,7 +129,7 @@ def build_step_dag(dag_id: str, step: str, variable_key: str) -> DAG:
         scopes = [{}]
     tasks = [PythonOperator(task_id=_task_id(step, scope, i, scopes), dag=dag, python_callable=run_step,
                             op_kwargs={"scope_index": i if dag_config.get("runs") else None},
-                            execution_timeout=STEP_TIMEOUT[step])
+                            execution_timeout=_minutes(dag_config, "execution_timeout_minutes", STEP_TIMEOUT[step]))
              for i, scope in enumerate(scopes)]
     given = "{{ (dag_run.conf or {}).get('%s') or params.get('%s') or '' }}"
     triggers = [TriggerDagRunOperator(task_id=f"trigger_{str(target).lower()}", dag=dag, trigger_dag_id=str(target),
@@ -151,7 +161,8 @@ def build_module_dag(dag_id: str, variable_key: str) -> DAG:
         return run_compliance_step(module, variable_key, overrides=conf)
 
     task = PythonOperator(task_id="run_module", dag=dag, python_callable=run_module,
-                          execution_timeout=max(STEP_TIMEOUT.values()))
+                          execution_timeout=_minutes(dag_config, "execution_timeout_minutes",
+                                                     max(STEP_TIMEOUT.values())))
     _add_emails(dag, dag_config, [task])
     return dag
 

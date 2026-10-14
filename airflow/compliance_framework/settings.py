@@ -21,7 +21,6 @@ class Settings:
     metadata_schema: str = "cms_compliance"
     environment: str = "DEV"
     env_value: Optional[str] = None
-    aws_region: str = "us-east-1"
     business_tz: str = "America/Chicago"
 
     file_store: str = "nas"
@@ -38,15 +37,16 @@ class Settings:
     file_encoding: str = "utf-8"
     quote_char: str = '"'
     empty_as_null: bool = True
-    trailer_count_check: bool = False
-    trailer_count_regex: str = r"(\d+)"
     check_content: bool = True
     write_error_file: bool = True
     write_control_report: bool = True
     check_move_failed: bool = False
     archive_by_year: bool = False
-    xlsx_sheet: str = "0"
-    xlsx_header_row: int = 0
+    check_on_load: bool = False
+
+    load_engine: str = "BATCH"
+    insert_batch_rows: int = 2000
+    insert_batch_bytes: int = 500000
 
     file_rules_mode: str = "GATE"
     rule_engine: str = "gre"
@@ -102,13 +102,14 @@ class Settings:
         for name in ("file_rules_mode", "load_engine"):
             if isinstance(getattr(self, name, None), str):
                 setattr(self, name, getattr(self, name).strip().upper())
-        for name in ("notify_backend", "file_store", "object_store"):
+        for name in ("notify_backend", "file_store"):
             if isinstance(getattr(self, name, None), str):
                 setattr(self, name, getattr(self, name).strip().lower())
         if self.rule_engine.strip().lower() in ("gre", "none"):
             self.rule_engine = self.rule_engine.strip().lower()
         for name, allowed in (("file_rules_mode", ("GATE", "ANNOTATE")),
-                              ("notify_backend", ("log", "ses", "airflow")), ("file_store", ("nas", "local"))):
+                              ("load_engine", ("BATCH", "FASTLOAD")),
+                              ("notify_backend", ("log", "airflow")), ("file_store", ("nas", "local"))):
             if getattr(self, name) not in allowed:
                 raise ConfigError(f"{name.upper()} must be one of {allowed}, got {getattr(self, name)!r}")
         for name in ("archive_folder", "error_folder", "control_report_folder", "error_log_folder"):
@@ -116,6 +117,8 @@ class Settings:
                 raise ConfigError(f"{name.upper()} {getattr(self, name)!r} must be a plain folder name")
         if self.nas_min_age_seconds < 0:
             raise ConfigError("NAS_MIN_AGE_SECONDS must be >= 0")
+        if self.insert_batch_rows < 1 or self.insert_batch_bytes < 1:
+            raise ConfigError("INSERT_BATCH_ROWS and INSERT_BATCH_BYTES must be >= 1")
         if self.lock_ttl_minutes < 1:
             raise ConfigError("LOCK_TTL_MINUTES must be >= 1")
 
@@ -215,6 +218,6 @@ def _coerce(name: str, raw: Any) -> Any:
         return [i.lower() for i in items] if name == "supported_file_types" else items
     if name == "quote_char":
         return raw
-    if name.endswith(("_mode", "_engine", "_basis")) and name != "rule_engine":
+    if name.endswith(("_mode", "_engine")) and name != "rule_engine":
         return text.upper()
     return text

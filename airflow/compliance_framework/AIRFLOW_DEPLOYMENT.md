@@ -141,6 +141,8 @@ Keys every Variable can have:
 | `fail_on_problems` | `true` / `false`: whether "completed with problems" (exit code 1) fails the task. Default: true, except `FILE_LOAD` and `OVERRIDE_DECISIONS` (a bad file or override is audited and emailed, not a task failure) |
 | `runs` | Optional list of scopes: one task per entry, each with its own `project` / `run_type` / `period` / ... (and `settings`, `gre`). Without it the DAG has one task, scoped by the Variable's own keys |
 | `log_level` | `INFO` (default), `DEBUG`, ... |
+| `execution_timeout_minutes` | Time limit of the step's task. Default: `BATCH_CREATION` and `FILE_CHECK` 60, `FILE_LOAD` and `FILE_RULES` 120, the others 30 |
+| `dagrun_timeout_minutes` | Time limit of a whole DAG run (default 480) |
 
 Keys by step:
 
@@ -148,11 +150,11 @@ Keys by step:
 |---|---|---|
 | `BATCH_CREATION` | `project` (required). When batches are due and their report dates come from the metadata (`Batch_Schedule_Sql_Txt`, `Rpt_Dt_Sql_Txt`; below). Optional for one run: `run_type`, `table`, `period`, `lookback_days`, `lookback_weeks` | — |
 | `FILE_CHECK` | `project` (leave out for every project), `load_duplicate`, the NAS connection as for `FILE_LOAD` | `CHECK_CONTENT` and the file settings of `FILE_LOAD`; which checks a file gets is in `ComplianceFileCheckConfig` |
-| `FILE_LOAD` | `project` (leave out for every project), `load_duplicate` (`yes` / `no`, default `no`) | `FILE_STORE` (`nas`), `ARCHIVE_FOLDER`, `ERROR_FOLDER`, `CONTROL_REPORT_FOLDER`, `ERROR_LOG_FOLDER`, `NAS_MIN_AGE_SECONDS` |
+| `FILE_LOAD` | `project` (leave out for every project), `load_duplicate` (`yes` / `no`, default `no`) | `FILE_STORE` (`nas`), `ARCHIVE_FOLDER`, `ERROR_FOLDER`, `CONTROL_REPORT_FOLDER`, `ERROR_LOG_FOLDER`, `NAS_MIN_AGE_SECONDS`; for large files `INSERT_BATCH_ROWS` (2000), `INSERT_BATCH_BYTES` (500000), `LOAD_ENGINE` (`BATCH`, or `FASTLOAD`), `CHECK_ON_LOAD` (`false`) — see "Large files" |
 | `FILE_RULES` | `project`; `gre` (the GRE's own Airflow Variable, as it is: `connection_type`, `connection_id`, `environment`, `meta_db`, `meta_connection`, `project_name`, `run_params`, `text_params`, `extra_filters`, `log_level`, `max_parallel_rules`; plus `package_dir`, the folder holding the GRE's `run_rules.py`, default `<dags>/rules_engine`) | `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `FILE_RULES_MODE` |
 | `OVERRIDE_DECISIONS` | `project` | — |
 | `BATCH_CLOSE` | `project`, `table`, `run_type` | — |
-| `NOTIFY` | `project` (leave out to send every pending event, including those of no project) | `NOTIFY_BACKEND` (`airflow` = Airflow's email backend, `ses`, `log`), `NOTIFY_FROM_EMAIL` (ses), `DEFAULT_NOTIFY_EMAILS` |
+| `NOTIFY` | `project` (leave out to send every pending event, including those of no project) | `NOTIFY_BACKEND` (`airflow` = Airflow's email backend, `log` = write to the task log), `DEFAULT_NOTIFY_EMAILS` |
 
 A trigger's configuration overrides the Variable for that run: any scope key above, `as_of` (an ISO
 date or timestamp used as "now", for a missed day), `settings` and `gre`.
@@ -332,9 +334,19 @@ types and a trailer; source `20` has a different layout, so its header check is 
 | `CMSUNIV` | `ODAG3` | `51` | `TRAILER` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | 1 | 1 |
 | `CMSUNIV` | `ODAG3` | `20` | `HEADER_NAMES` | | 0 | 1 |
 
-Without a `TRAILER` row, `TRAILER_COUNT_CHECK` / `TRAILER_COUNT_REGEX` apply as in the load.
+The load checks the trailer against the same `TRAILER` row (and the trailer record type of `RECORD_TYPE`); a
+wrong count rejects the file as `FILE_TRAILER_COUNT_MISMATCH`. Without a `TRAILER` row the trailer is not checked.
 `CHECK_CONTENT = false` checks names and batches only and does not open the files. `validate-config`
 reports a row that is not valid (`FILE_CHECK_CONFIG`) and a row that matches no file (`FILE_CHECK_NO_FILE`).
+
+**Large files.** The load streams the file: it is read once (its SHA-256 is computed while it is copied from the
+NAS) and sent to the staging table in batches.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `INSERT_BATCH_ROWS`, `INSERT_BATCH_BYTES` | `2000`, `500000` | Rows sent to Teradata per batch: a batch ends at either limit. Larger batches mean fewer round trips; try e.g. `10000` / `4000000` with your largest file in DEV before raising them in PROD |
+| `LOAD_ENGINE` | `BATCH` | `FASTLOAD` loads the file with Teradata FastLoad into a work table of the load (`<staging table>_W<Load_ID>`, in the staging database), then copies it into the staging table with one `INSERT ... SELECT` and drops the work table. The database account needs CREATE TABLE and DROP TABLE in the staging database. The driver falls back to ordinary batches when FastLoad is not possible. Worth it for files of several hundred thousand rows and more; measure in DEV first. A value that does not fit is reported without its line number |
+| `CHECK_ON_LOAD` | `false` | `true` runs the `FILE_CHECK` content checks inside `FILE_LOAD` on the file the load has already downloaded, so a big file is not downloaded and read twice. A file with a problem is rejected as `FILE_CONTENT_CHECK_FAILED`, every problem goes to its error log, and it moves to `Error/`. The separate `FILE_CHECK` step still works as before |
 
 **Control report and error log.** Every `FILE_LOAD` run writes one control report for the files it handled,
 `<inbound folder>/ControlReport/ControlReport_<YYYYMMDD_HHMMSS>.txt`, pipe-delimited, one line per file:
@@ -577,9 +589,11 @@ Rules:
 - **Columns the file does not have (fillers).** A `HEADER_NAMES` row in `ComplianceFileCheckConfig` is the list
   of columns the file has, in file order; the file must have exactly that many fields. When every name in the
   list is a column of the staging table (upper and lower case do not matter), each field goes to the column
-  of its name. Otherwise the fields fill the staging columns left to right. Every staging or core column that is
-  neither in the list nor in `ComplianceTargetColumnConfig` is loaded as NULL, so it must allow NULL. Without a
-  `HEADER_NAMES` row every such column is expected in the file.
+  of its name. Otherwise the fields fill the staging columns left to right. Without `HEADER_NAMES`, a
+  `COLUMN_COUNT` row gives the number of fields (record type included): they fill the first staging columns in
+  table order. Every staging or core column that is neither filled from the file nor in
+  `ComplianceTargetColumnConfig` is loaded as NULL, so it must allow NULL. With neither row every such column is
+  expected in the file. The load skips the header line; it never counts or compares it (that is `FILE_CHECK`).
 - **Core holds one load per batch.** When a file is loaded for a batch that already has rows in the core
   table, those rows are deleted by `Btch_ID` and the new rows are inserted, in one transaction. The core table
   needs no flag or end-date column; rows of other batches are not touched.

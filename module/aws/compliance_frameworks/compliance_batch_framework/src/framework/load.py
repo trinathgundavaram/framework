@@ -3,15 +3,17 @@ from __future__ import annotations
 
 import codecs
 import csv
+import os
 import re
 from dataclasses import dataclass
-from itertools import islice
 from typing import TYPE_CHECKING, Iterable, Iterator, Optional
 
 import psycopg
 from psycopg import sql
 
+from . import db
 from .common import ConfigError, FileRejected, RowCountMismatch
+from .filecheck_options import CheckOptions, trailer_problems
 from .layout import BATCH_COLUMN, PLACEHOLDER, Column, Layout, LoadContext, build_layout, column_mapping, sql_body
 
 if TYPE_CHECKING:
@@ -49,13 +51,17 @@ def header_columns(cfg: "FileConfig", opts) -> tuple:
 def file_layout(conn, cfg: "FileConfig", target_columns, opts=None) -> Layout:
     """The staging / core layout of a file config; LookupError when a table or a required column is missing.
 
-    `opts` = the file's check options: a HEADER_NAMES row is the list of columns the file has.
+    `opts` = the file's check options: a HEADER_NAMES row is the list of columns the file has, a COLUMN_COUNT row
+    the number of its fields; staging columns the file does not have are loaded as NULL.
     """
+    count = None
+    if opts is not None and opts.column_count:
+        count = opts.column_count - (1 if opts.record_types else 0)
     return build_layout(f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}",
                         columns(conn, cfg.stg_schema_nm, cfg.stg_table_nm),
                         columns(conn, cfg.core_schema_nm, cfg.core_table_nm), column_mapping(cfg, target_columns),
                         f"{cfg.stg_schema_nm}.{cfg.stg_table_nm}", f"{cfg.core_schema_nm}.{cfg.core_table_nm}",
-                        header_columns(cfg, opts))
+                        header_columns(cfg, opts), count)
 
 
 def _ident(schema: str, table: str) -> sql.Identifier:
@@ -83,10 +89,6 @@ def delimiter_for(cfg: "FileConfig") -> str:
 def sanitize_db_error(msg: str) -> str:
     """Remove quoted values from database error text so no file content reaches audit logs."""
     return re.sub(r'"[^"]*"', '"***"', msg or "")[:500]
-
-
-def _normalise(values: list[str], empty_as_null: bool) -> list[Optional[str]]:
-    return [None if (empty_as_null and v == "") else v for v in values]
 
 
 def _file_lines(path: str, encoding: str) -> Iterator[str]:
@@ -163,47 +165,65 @@ def row_position(path: str, cfg: "FileConfig", settings: "Settings", row_no: Opt
 
 
 def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings",
-                   drop_first: bool = False) -> Iterator[list]:
-    """Rows yielded one at a time; LF and CRLF line endings are both accepted, trailing blank lines ignored."""
-    delim = delimiter_for(cfg)
-    content_cnt, last = 0, ""
+                   opts: Optional[CheckOptions] = None) -> Iterator[list]:
+    """The data rows of a delimited file, in one pass; LF and CRLF line endings are both accepted.
+
+    The header line is skipped (never counted or compared). With a trailer, the last non-blank line is the
+    trailer: it is checked against the file's TRAILER and RECORD_TYPE rows after the last data row. Blank lines
+    at the end are ignored; a blank line between records rejects the file.
+    """
+    opts = opts or CheckOptions()
+    drop_first = opts.record_types is not None
+    width = expected_cols + drop_first
+    empty_as_null = settings.empty_as_null
+    reader = csv.reader(_lf_lines(_file_lines(path, settings.file_encoding)), delimiter=delimiter_for(cfg),
+                        quotechar=settings.quote_char or None, strict=True)
+    skip_header = cfg.has_header
+    held = None
+    blank_at = None
+    data_rows = lines = 0
     try:
-        for n, line in enumerate(_file_lines(path, settings.file_encoding), 1):
-            if line.strip() != "":
-                content_cnt, last = n, line
+        for rec in reader:
+            if not rec or (len(rec) == 1 and not rec[0].strip()):
+                blank_at = blank_at or reader.line_num
+                continue
+            if blank_at:
+                raise FileRejected("FILE_PARSE_ERROR", f"blank line inside the file at line {blank_at}")
+            lines += 1
+            if skip_header:
+                skip_header = False
+                continue
+            if held is not None:
+                line_no, row = held
+                if len(row) != width:
+                    raise FileRejected("FILE_COLUMN_COUNT_MISMATCH",
+                                       f"line {line_no}: {len(row)} columns, expected {width}")
+                if drop_first:
+                    row = row[1:]
+                yield [None if v == "" else v for v in row] if empty_as_null else row
+                data_rows += 1
+            held = (reader.line_num, rec)
     except UnicodeDecodeError as e:
         raise _not_decodable(path, settings.file_encoding, e)
-    trailer_count = None
-    if cfg.has_trailer:
-        if not content_cnt:
-            raise FileRejected("FILE_PARSE_ERROR", "trailer expected but file is empty")
-        content_cnt -= 1
-        if settings.trailer_count_check:
-            m = re.search(settings.trailer_count_regex, last)
-            if not m:
-                raise FileRejected("FILE_TRAILER_COUNT_MISMATCH", "trailer record count not found")
-            trailer_count = int(m.group(1))
-    reader = csv.reader(_lf_lines(islice(_file_lines(path, settings.file_encoding), content_cnt)),
-                        delimiter=delim, quotechar=settings.quote_char or None, strict=True)
-    data_rows = 0
-    seen_header = False
-    try:
-        for i, rec in enumerate(reader):
-            if i == 0 and cfg.has_header:
-                seen_header = True
-                continue
-            if len(rec) != expected_cols + drop_first:
-                raise FileRejected("FILE_COLUMN_COUNT_MISMATCH",
-                                   f"line {reader.line_num}: {len(rec)} columns, expected {expected_cols + drop_first}")
-            data_rows += 1
-            yield _normalise(rec[1:] if drop_first else rec, settings.empty_as_null)
     except csv.Error as e:
         raise FileRejected("FILE_PARSE_ERROR", f"malformed delimited file at line {reader.line_num}: {e}")
-    if cfg.has_header and not seen_header:
+    if cfg.has_header and lines == 0:
         raise FileRejected("FILE_PARSE_ERROR", "header expected but file has no lines")
-    if trailer_count is not None and trailer_count != data_rows:
-        raise FileRejected("FILE_TRAILER_COUNT_MISMATCH",
-                           f"trailer count {trailer_count} != data rows {data_rows}")
+    if cfg.has_trailer:
+        if held is None:
+            raise FileRejected("FILE_PARSE_ERROR", "trailer expected but not found")
+        problems = trailer_problems(held[1], held[0], os.path.basename(path), opts, settings.filename_case_sensitive,
+                                    data_rows, lines)
+        if problems:
+            counts = [m for _, m in problems if "trailer count" in m]
+            raise FileRejected("FILE_TRAILER_COUNT_MISMATCH" if counts else "FILE_PARSE_ERROR", (counts or [problems[0][1]])[0])
+    elif held is not None:
+        line_no, row = held
+        if len(row) != width:
+            raise FileRejected("FILE_COLUMN_COUNT_MISMATCH", f"line {line_no}: {len(row)} columns, expected {width}")
+        if drop_first:
+            row = row[1:]
+        yield [None if v == "" else v for v in row] if empty_as_null else row
 
 
 def scan_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings") -> int:
@@ -228,39 +248,13 @@ def scan_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "
     return count
 
 
-def read_with_pandas(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings",
-                     drop_first: bool = False) -> list[list]:
-    import pandas as pd
-
-    try:
-        if cfg.src_file_ty in (".xlsx", ".xls"):
-            sheet = int(settings.xlsx_sheet) if settings.xlsx_sheet.isdigit() else settings.xlsx_sheet
-            df = pd.read_excel(path, sheet_name=sheet, header=None, dtype=str, keep_default_na=False,
-                               skiprows=settings.xlsx_header_row + (1 if cfg.has_header else 0))
-        else:
-            df = pd.read_parquet(path)
-            df = df.astype("string").fillna("")
-    except Exception as e:  # noqa: BLE001 - any reader failure is a structural failure
-        raise FileRejected("FILE_PARSE_ERROR", f"cannot read {cfg.src_file_ty}: {type(e).__name__}")
-    if cfg.has_trailer and len(df):
-        df = df.iloc[:-1]
-    if df.shape[1] != expected_cols + drop_first and len(df):
-        raise FileRejected("FILE_COLUMN_COUNT_MISMATCH", f"{df.shape[1]} columns, expected {expected_cols + drop_first}")
-    if drop_first:
-        df = df.iloc[:, 1:]
-    return [_normalise([str(v) for v in rec], settings.empty_as_null) for rec in df.itertuples(index=False)]
-
-
-def read_file(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings", drop_first: bool = False) -> Rows:
-    """The data rows of a file; `drop_first` = every line starts with a record type field that is not loaded."""
+def read_file(path: str, cfg: "FileConfig", expected_cols: int, settings: "Settings",
+              opts: Optional[CheckOptions] = None) -> Rows:
+    """The data rows of a file; only delimited files are read (SUPPORTED_FILE_TYPES)."""
     ft = cfg.src_file_ty
-    if ft not in settings.supported_file_types:
-        raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} is not enabled (Q-02)")
-    if ft in DELIMITED_FILE_TYPES:
-        return read_delimited(path, cfg, expected_cols, settings, drop_first)
-    if ft in (".xlsx", ".xls", ".parquet"):
-        return read_with_pandas(path, cfg, expected_cols, settings, drop_first)
-    raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} has no reader")
+    if ft not in settings.supported_file_types or ft not in DELIMITED_FILE_TYPES:
+        raise FileRejected("FILE_TYPE_NOT_SUPPORTED", f"file type {ft} is not supported")
+    return read_delimited(path, cfg, expected_cols, settings, opts)
 
 
 def sql_values(conn, layout: Layout, ctx: LoadContext) -> dict:
@@ -280,7 +274,7 @@ def sql_values(conn, layout: Layout, ctx: LoadContext) -> dict:
                     conn.execute("SET TRANSACTION READ ONLY")
                     rows = conn.execute(query, {n: params[n] for n in names}).fetchall()
             except psycopg.Error as e:
-                raise ConfigError(f"{what} failed: {str(e).strip().splitlines()[0]}") from None
+                raise ConfigError(f"{what} failed: {db.error_line(e)}") from None
             if len(rows) != 1 or len(rows[0]) != 1:
                 raise ConfigError(f"{what} must return one row with one column (it returned {len(rows)} row(s))")
             done[text] = next(iter(rows[0].values()))
@@ -312,12 +306,12 @@ def _clean_stage(conn, table, cfg: "FileConfig", layout: Layout, ctx: LoadContex
 
 
 def stage(conn: psycopg.Connection, settings: "Settings", *, file_path: str, cfg: "FileConfig", layout: Layout,
-          ctx: LoadContext, drop_first: bool = False, spark=None) -> int:
+          ctx: LoadContext, opts: Optional[CheckOptions] = None, spark=None) -> int:
     """Clear the staging rows (of the batch, or of its run type) and stream the file into COPY; returns the row count."""
     table = _ident(cfg.stg_schema_nm, cfg.stg_table_nm)
     if settings.load_engine == "SPARK":
-        return _stage_spark(conn, settings, spark, file_path, cfg, layout, ctx, drop_first)
-    records = read_file(file_path, cfg, len(layout.file_cols), settings, drop_first)
+        return _stage_spark(conn, settings, spark, file_path, cfg, layout, ctx, opts)
+    records = read_file(file_path, cfg, len(layout.file_cols), settings, opts)
     cols = [c.name for c in layout.stage]
     count = 0
     copy_sql = sql.SQL("COPY {} ({}) FROM STDIN").format(table, sql.SQL(", ").join(map(sql.Identifier, cols)))
@@ -350,7 +344,7 @@ def _rejected_at(e: psycopg.Error, written: int, file_path: str, cfg: "FileConfi
     return f" at {where}" + (f" (column {m.group(2)})" if m and m.group(2) else "")
 
 
-def _stage_spark(conn, settings, spark, file_path, cfg, layout, ctx, drop_first):
+def _stage_spark(conn, settings, spark, file_path, cfg, layout, ctx, opts):
     """Spark engine: streaming scan, then JDBC append."""
     from pyspark.sql import SparkSession, functions as F
     from pyspark.sql.types import StringType, StructField, StructType
@@ -359,7 +353,7 @@ def _stage_spark(conn, settings, spark, file_path, cfg, layout, ctx, drop_first)
         raise FileRejected("FILE_TYPE_NOT_SUPPORTED", "Spark engine reads delimited files without trailer only")
     if not settings.spark_jdbc_url:
         raise ConfigError("LOAD_ENGINE=SPARK requires SPARK_JDBC_URL")
-    if drop_first or layout.column("ROW_SEQUENCE"):
+    if (opts and opts.record_types) or layout.column("ROW_SEQUENCE"):
         raise FileRejected("FILE_TYPE_NOT_SUPPORTED", "Spark engine does not load files with record types or a "
                                                       "ROW_SEQUENCE column")
     stg_columns = layout.file_cols
@@ -373,7 +367,8 @@ def _stage_spark(conn, settings, spark, file_path, cfg, layout, ctx, drop_first)
         df = df.select([F.when(F.col(c) == "", None).otherwise(F.col(c)).alias(c) for c in stg_columns])
     for c in layout.stage:
         if c.name not in stg_columns:
-            df = df.withColumn(c.name, F.lit(layout.fixed_value(c, ctx, resolved)))
+            derived = c.name == BATCH_COLUMN or c.name in layout.mapping
+            df = df.withColumn(c.name, F.lit(layout.fixed_value(c, ctx, resolved) if derived else None))
     with conn.transaction():
         _clean_stage(conn, _ident(cfg.stg_schema_nm, cfg.stg_table_nm), cfg, layout, ctx)
     info = conn.info

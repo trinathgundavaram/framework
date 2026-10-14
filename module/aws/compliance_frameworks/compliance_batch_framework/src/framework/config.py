@@ -172,11 +172,6 @@ def xwalk_rows(conn: psycopg.Connection, *, project_cd: Optional[str] = None, ta
     return [XwalkRow.from_row(r) for r in rows]
 
 
-def effective_xwalk(conn, project_cd, table_nm, src_id, run_ty, on_date: date) -> Optional[XwalkRow]:
-    return next((x for x in xwalk_rows(conn, project_cd=project_cd, table_nm=table_nm, src_id=src_id, run_ty=run_ty)
-                 if x.effective_on(on_date)), None)
-
-
 def effective_sources(conn, project_cd, table_nm, run_ty, on_date: date) -> list[XwalkRow]:
     return [x for x in xwalk_rows(conn, project_cd=project_cd, table_nm=table_nm, run_ty=run_ty)
             if x.effective_on(on_date)]
@@ -342,11 +337,6 @@ def _parse(template: str, parts: Optional[Mapping[str, Optional[str]]] = None, w
     return out
 
 
-def parse_template(template: str, parts: Optional[Mapping[str, Optional[str]]] = None) -> list[tuple[str, str]]:
-    """Split into [('lit', text) | ('ph', NAME)] and validate the grammar."""
-    return [(kind, text) for kind, text, _ in _parse(template, parts)]
-
-
 def _pattern(parsed: list[tuple]) -> str:
     out = ""
     for kind, text, fmt in parsed:
@@ -505,11 +495,19 @@ def validate_all(conn: psycopg.Connection, case_sensitive: bool = True, settings
     from .filecheck_options import CHECKS, check_options
 
     checks = file_checks(conn)
+    from .load import header_columns
+
     for c in cfgs:
         try:
-            check_options(c, checks)
+            opts = check_options(c, checks)
         except ConfigError as e:
             add("FILE_CHECK_CONFIG", str(e))
+            continue
+        names = header_columns(c, opts)
+        if opts.column_count and names and opts.column_count != len(names) + (1 if opts.record_types else 0):
+            add("FILE_CHECK_CONFIG", f"file config {c.cfg_id} ({c.project_cd}/{c.table_nm}/{c.src_id}): COLUMN_COUNT "
+                                     f"{opts.column_count} does not match the {len(names)} HEADER_NAMES"
+                                     + (" plus the record type" if opts.record_types else ""))
     for k in checks:
         if k.check_cd not in CHECKS:
             add("FILE_CHECK_CONFIG", f"{k.label}: unknown Check_Cd; accepted: {', '.join(CHECKS)}")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cms-compliance-framework"
-version = "0.3.26"
+version = "0.3.27"
 description = "Project-agnostic, filename-driven CMS compliance file ingestion, validation and promotion framework"
 requires-python = ">=3.9"
 dependencies = [
@@ -14,10 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 aws   = ["boto3>=1.28"]
-pandas = ["pandas>=1.5"]
 spark = ["pyspark>=3.3"]
-excel = ["pandas>=1.5", "openpyxl>=3.1"]
-parquet = ["pandas>=1.5", "pyarrow>=12"]
 
 [project.scripts]
 framework = "framework.cli:main"

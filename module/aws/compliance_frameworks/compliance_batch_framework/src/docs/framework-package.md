@@ -24,7 +24,7 @@ framework/
   modules.py              module dispatcher: a name (BATCH_CREATION, FILE_LOAD) selects the service
   batches.py              batch creation (scheduled + ad-hoc), CRC rows
   ingest.py               file pipeline (single object or a path sweep) + resolution decision tables
-  load.py                 file reading, staging (pandas/COPY or Spark), core swap
+  load.py                 file reading, staging (COPY or Spark), core swap
   rules.py                FILE_RULES: rules on loaded files, after the core load
   overrides.py            REUSE decisions: apply and expire
   closing.py              batch close: SLA sweep and manual close
@@ -64,10 +64,9 @@ The environment variable is `FRAMEWORK_<NAME>`; the job argument is `--set <NAME
 | `ARCHIVE_FOLDER` / `ERROR_FOLDER` | `Archive` / `Error` | Subfolders of the inbound folder that processed and rejected files move to. (Replaces `QUARANTINE_URI`, the per-config archive path and `S3_Quarantine_Path`.) |
 | `CONTROL_REPORT_FOLDER` / `ERROR_LOG_FOLDER` | `ControlReport` / `ErrorLog` | Subfolders of the inbound folder for the control report of each FILE_LOAD run and for the error detail file of each rejected file. `WRITE_CONTROL_REPORT` / `WRITE_ERROR_FILE` (`true`) switch them off. |
 | `FILENAME_CASE_SENSITIVE` | `true` | **Q-03** |
-| `SUPPORTED_FILE_TYPES` | `.txt,.csv` | **Q-02**. `.xlsx` / `.parquet` readers exist but are disabled by default. |
+| `CHECK_ON_LOAD` | `false` | Run the FILE_CHECK content checks inside FILE_LOAD on the downloaded copy. |
+| `SUPPORTED_FILE_TYPES` | `.txt,.csv` | **Q-02**. Delimited files only (`.txt`, `.csv`, `.dat`, `.psv`, `.tsv`). |
 | `FILE_ENCODING`, `QUOTE_CHAR`, `EMPTY_AS_NULL` | `utf-8`, `"`, `true` | **Q-02** |
-| `TRAILER_COUNT_CHECK`, `TRAILER_COUNT_REGEX` | `false`, `(\d+)` | **Q-02** |
-| `XLSX_SHEET`, `XLSX_HEADER_ROW` | `0`, `0` | **Q-02** |
 | `LOAD_ENGINE` | `PANDAS` | `SPARK` for large delimited files (needs `SPARK_JDBC_URL`). (Was `Engine_Cd`.) |
 | `SPARK_JDBC_URL`, `SPARK_WRITE_PARTITIONS`, `SPARK_BATCH_SIZE` | —, `4`, `10000` | User and password come from the open connection. |
 | `FILE_RULES_MODE` | `GATE` | How the `FILE_RULES` step records a failed rule: `GATE` = `Rules_Stat` `FAILED`, `ANNOTATE` = `PASSED_WITH_WARNINGS`. Rules run after the core load and never block it. |

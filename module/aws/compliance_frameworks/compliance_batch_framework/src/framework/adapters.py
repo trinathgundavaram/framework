@@ -71,7 +71,8 @@ class ObjectStore(ABC):
     def list_objects(self, bucket: str, prefix: str) -> list[ObjectInfo]: ...
 
     @abstractmethod
-    def download(self, bucket: str, key: str, dest: str, version_id: Optional[str] = None) -> None: ...
+    def download(self, bucket: str, key: str, dest: str, version_id: Optional[str] = None) -> Optional[str]:
+        """Copy the object to `dest`; returns its SHA-256 (hex) when computed on the way, else None."""
 
     @abstractmethod
     def copy(self, src_bucket: str, src_key: str, dst_bucket: str, dst_key: str,
@@ -129,7 +130,12 @@ class LocalObjectStore(ObjectStore):
                 for p in sorted(d.iterdir()) if p.is_file()]
 
     def download(self, bucket, key, dest, version_id=None):
-        shutil.copyfile(self._path(bucket, key), dest)
+        h = hashlib.sha256()
+        with open(self._path(bucket, key), "rb") as src, open(dest, "wb") as dst:
+            for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                h.update(chunk)
+                dst.write(chunk)
+        return h.hexdigest()
 
     def copy(self, src_bucket, src_key, dst_bucket, dst_key, version_id=None):
         dst = self._path(dst_bucket, dst_key)

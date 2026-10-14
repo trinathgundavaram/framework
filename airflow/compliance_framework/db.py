@@ -6,7 +6,7 @@ import logging
 import re
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence
@@ -35,6 +35,11 @@ def error_line(exc: BaseException) -> str:
     """The database's own message in a driver exception (a failed batch reports the driver's error first)."""
     m = _DATABASE_ERROR.search(str(exc))
     return m.group(0) if m else (str(exc).splitlines() or [""])[0]
+
+
+def error_text(exc: BaseException) -> str:
+    """One line for logs, step outcomes and stored error text: the exception type and the database's message."""
+    return f"{type(exc).__name__}: {error_line(exc)}"[:1000]
 
 
 def is_duplicate_key(exc: BaseException) -> bool:
@@ -97,6 +102,39 @@ class _Probe(Exception):
     """Raised to roll a trial insert back."""
 
 
+class FastLoadRejected(Exception):
+    """FastLoad refused rows; the message is the database's first error."""
+
+
+def _plain_types(row: Sequence) -> list[int]:
+    """Positions of the values that need converting before they are sent (not text, a whole number or NULL)."""
+    return [i for i, v in enumerate(row) if not (v is None or type(v) is str or type(v) is int)]
+
+
+def _batches(rows: Iterable[Sequence], batch_rows: int, batch_bytes: int) -> Iterator[list]:
+    """Rows in batches of at most `batch_rows` rows or about `batch_bytes` bytes.
+
+    Only the positions whose first value is not text, a whole number or NULL are converted (a staging row's
+    derived values are the same on every row); everything else is sent as it is.
+    """
+    convert = None
+    chunk, size = [], 0
+    for row in rows:
+        if convert is None:
+            convert = _plain_types(row)
+        if convert:
+            row = list(row)
+            for i in convert:
+                row[i] = _bind(row[i])
+        chunk.append(row)
+        size += sum(len(v) if type(v) is str else 8 for v in row)
+        if len(chunk) >= batch_rows or size >= batch_bytes:
+            yield chunk
+            chunk, size = [], 0
+    if chunk:
+        yield chunk
+
+
 class Result:
     def __init__(self, rows: Optional[list[dict]], rowcount: int):
         self._rows = rows
@@ -143,28 +181,56 @@ class Connection:
         finally:
             cur.close()
 
-    def executemany(self, query: str, rows: Iterable[Sequence]) -> int:
-        """Batched parameterised DML, chunked by row count and size; returns the number of rows sent."""
+    def executemany(self, query: str, rows: Iterable[Sequence], batch_rows: int = INSERT_CHUNK_ROWS,
+                    batch_bytes: int = INSERT_CHUNK_BYTES) -> int:
+        """Batched parameterised DML; returns the number of rows sent."""
         text = _PARAM.sub("?", query)
-        sent, chunk, size = 0, [], 0
+        sent, chunk = 0, []
         cur = self._raw.cursor()
         try:
-            for row in rows:
-                row = [_bind(v) for v in row]
-                chunk.append(row)
-                size += sum(len(v) if isinstance(v, str) else 8 for v in row)
-                if len(chunk) >= INSERT_CHUNK_ROWS or size >= INSERT_CHUNK_BYTES:
-                    cur.executemany(text, chunk)
-                    sent, chunk, size = sent + len(chunk), [], 0
-            if chunk:
+            for batch in _batches(rows, batch_rows, batch_bytes):
+                chunk = batch
                 cur.executemany(text, chunk)
-                sent += len(chunk)
+                sent, chunk = sent + len(chunk), []
         except Exception as e:
             if chunk and not hasattr(e, "failed_rows"):
                 e.failed_rows, e.failed_offset = chunk, sent
             raise
         finally:
             cur.close()
+        return sent
+
+    def fastload(self, query: str, rows: Iterable[Sequence], batch_rows: int = INSERT_CHUNK_ROWS,
+                 batch_bytes: int = INSERT_CHUNK_BYTES) -> int:
+        """Insert with Teradata FastLoad into an empty table, as one unit; returns the number of rows sent.
+
+        The driver falls back to ordinary batched inserts when FastLoad is not possible for the table.
+        FastLoadRejected = the database refused rows (they are not loaded; nothing is committed).
+        """
+        if self.in_transaction:
+            raise RuntimeError("FastLoad runs outside a transaction")
+        text = "{fn teradata_try_fastload}" + _PARAM.sub("?", query)
+        sent = 0
+        self._autocommit(False)
+        cur = self._raw.cursor()
+        try:
+            for chunk in _batches(rows, batch_rows, batch_bytes):
+                cur.executemany(text, chunk)
+                sent += len(chunk)
+            cur.execute("{fn teradata_nativesql}{fn teradata_get_errors}" + text)
+            errors = [str(r[0]) for r in cur.fetchall() if r and r[0]]
+            if errors:
+                raise FastLoadRejected(errors[0])
+            self._raw.commit()
+        except BaseException:
+            try:
+                self._raw.rollback()
+            except Exception:  # noqa: BLE001
+                log.debug("rollback after a failed FastLoad", exc_info=True)
+            raise
+        finally:
+            cur.close()
+            self._autocommit(True)
         return sent
 
     def first_rejected(self, query: str, rows: list) -> Optional[int]:
@@ -345,20 +411,10 @@ def held(conn: Connection, key: str, timeout_seconds: Optional[float], poll: flo
 @contextmanager
 def held_all(conn: Connection, keys: Iterable[str], timeout_seconds: Optional[float]) -> Iterator[None]:
     """Hold several locks, always taken in sorted order."""
-    keys = sorted(set(keys))
-    taken: list[str] = []
-    try:
-        for key in keys:
-            deadline = time.monotonic() + (timeout_seconds or 0)
-            while not try_lock(conn, key):
-                if time.monotonic() >= deadline:
-                    raise LockTimeout(f"could not acquire lock {key} within {timeout_seconds}s")
-                time.sleep(1.0)
-            taken.append(key)
+    with ExitStack() as stack:
+        for key in sorted(set(keys)):
+            stack.enter_context(held(conn, key, timeout_seconds))
         yield
-    finally:
-        for key in reversed(taken):
-            unlock(conn, key)
 
 
 def as_date(value) -> Optional[date]:

@@ -141,6 +141,7 @@ class Layout:
     mapping: dict
     texts: dict = field(default_factory=dict)
     names: tuple = ()
+    count: Optional[int] = None
 
     @property
     def free_cols(self) -> list[str]:
@@ -151,18 +152,19 @@ class Layout:
     def file_cols(self) -> list[str]:
         """The staging column of each field of the file, in file order.
 
-        Without a column list (`names`) every free column is a field of the file. With one, the fields go to the
-        columns of the same name when every name is a column, otherwise to the first free columns in table order;
-        the free columns left over stay NULL.
+        With a column list (`names`, from HEADER_NAMES) the fields go to the columns of the same name when every
+        name is a column, otherwise to the first free columns in table order. With only a field count (`count`,
+        from COLUMN_COUNT) they go to the first `count` free columns. Without either every free column is a field.
+        The free columns left over are loaded as NULL.
         """
         free = self.free_cols
-        if not self.names:
-            return free
-        by_name = {c.casefold(): c for c in free}
-        wanted = [n.casefold() for n in self.names]
-        if len(set(wanted)) == len(wanted) and all(n in by_name for n in wanted):
-            return [by_name[n] for n in wanted]
-        return free[:len(self.names)]
+        if self.names:
+            by_name = {c.casefold(): c for c in free}
+            wanted = [n.casefold() for n in self.names]
+            if len(set(wanted)) == len(wanted) and all(n in by_name for n in wanted):
+                return [by_name[n] for n in wanted]
+            return free[:len(self.names)]
+        return free[:self.count] if self.count else free
 
     def column(self, value_cd: str, table: str = "stage") -> Optional[Column]:
         return next((c for c in getattr(self, table) if self.mapping.get(c.name) == value_cd), None)
@@ -217,7 +219,7 @@ class Layout:
 
 
 def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], mapping: dict, stage_name: str,
-                 core_name: str, names: tuple = ()) -> Layout:
+                 core_name: str, names: tuple = (), count: Optional[int] = None) -> Layout:
     """Check the two tables against the mapping; LookupError = a table or a required column is missing."""
     if not stage_cols:
         raise LookupError(f"staging table {stage_name} not found")
@@ -230,7 +232,7 @@ def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], 
             raise LookupError(f"table {name} lacks the batch column {BATCH_COLUMN}")
     layout = Layout(label, stage, core, {k: v for k, v in mapping.items()
                                          if k in {c.name for c in stage} | {c.name for c in core}},
-                    dict(getattr(mapping, "texts", {})), tuple(names))
+                    dict(getattr(mapping, "texts", {})), tuple(names), count)
     if mapping is not DEFAULT_MAPPING and mapping != DEFAULT_MAPPING:
         missing = sorted(k for k in mapping if k not in layout.mapping)
         if missing:
@@ -240,8 +242,9 @@ def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], 
         raise LookupError(f"{label}: the ROW_SEQUENCE column must also be in the staging table {stage_name}")
     if not layout.free_cols:
         raise LookupError(f"staging table {stage_name} has no column left for the file's data")
-    if len(names) > len(layout.free_cols):
-        raise LookupError(f"{label}: HEADER_NAMES lists {len(names)} columns, staging table {stage_name} has "
+    wanted, source = (len(names), "HEADER_NAMES lists") if names else (count, "COLUMN_COUNT gives")
+    if wanted and wanted > len(layout.free_cols):
+        raise LookupError(f"{label}: {source} {wanted} data columns, staging table {stage_name} has "
                           f"{len(layout.free_cols)} for the file's data")
     layout.core_plan()
     return layout

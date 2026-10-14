@@ -44,15 +44,12 @@ class Settings:
     file_encoding: str = "utf-8"
     quote_char: str = '"'
     empty_as_null: bool = True
-    trailer_count_check: bool = False
-    trailer_count_regex: str = r"(\d+)"
     check_content: bool = True
     write_error_file: bool = True
     write_control_report: bool = True
     check_move_failed: bool = False
     archive_by_year: bool = False
-    xlsx_sheet: str = "0"
-    xlsx_header_row: int = 0
+    check_on_load: bool = False
 
     load_engine: str = "PANDAS"
     file_rules_mode: str = "GATE"
@@ -114,7 +111,7 @@ class Settings:
         for name in ("file_rules_mode", "load_engine"):
             if isinstance(getattr(self, name, None), str):
                 setattr(self, name, getattr(self, name).strip().upper())
-        for name in ("notify_backend", "file_store", "object_store"):
+        for name in ("notify_backend", "object_store"):
             if isinstance(getattr(self, name, None), str):
                 setattr(self, name, getattr(self, name).strip().lower())
         if self.rule_engine.strip().lower() in ("gre", "none"):
@@ -253,6 +250,6 @@ def _coerce(name: str, raw: Any) -> Any:
         return [i.lower() for i in items] if name == "supported_file_types" else items
     if name == "quote_char":
         return raw
-    if name.endswith(("_mode", "_engine", "_basis")) and name != "rule_engine":
+    if name.endswith(("_mode", "_engine")) and name != "rule_engine":
         return text.upper()
     return text

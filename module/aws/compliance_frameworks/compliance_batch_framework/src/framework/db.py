@@ -11,6 +11,16 @@ from psycopg.rows import dict_row
 from .common import LockTimeout
 
 
+def error_line(exc: BaseException) -> str:
+    """The database's message: the first non-empty line of the error."""
+    return next((line.strip() for line in str(exc).splitlines() if line.strip()), "")
+
+
+def error_text(exc: BaseException) -> str:
+    """One line for logs, step outcomes and stored error text: the exception type and the database's message."""
+    return f"{type(exc).__name__}: {error_line(exc)}"[:1000]
+
+
 def connect(dsn: str, schema: Optional[str] = None) -> psycopg.Connection:
     """Open a direct autocommit connection from a DSN (tests / ad-hoc use)."""
     kw = {"options": f"-c search_path={schema},public"} if schema else {}

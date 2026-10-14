@@ -11,17 +11,19 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date
 from typing import Optional
 
 from . import config as cfgmod
+from . import db
 from .adapters import FileStore, basename, dirname, parse_uri
 from .audit import EventLogger
-from .common import Clock, ConfigError, FileRejected, btch_id_version, code
+from .common import Clock, ConfigError, btch_id_version, code
+from .control_report import write_error_log
 from .config import FileConfig, MatchError
-from .filecheck_options import CheckOptions, check_options
+from .filecheck_options import CheckOptions, check_options, data_fields, trailer_problems
 from .load import (DELIMITED_FILE_TYPES, _file_lines, _lf_lines, _undecodable_line, delimiter_for, file_layout,
-                   header_columns, raw_line, read_file)
+                   header_columns, raw_line)
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -29,7 +31,6 @@ log = logging.getLogger(__name__)
 MAX_LISTED = 5
 MAX_DETAILS = 5000
 TEXT_MAX = 4000
-_TIMESTAMP_FORMATS = {8: "%Y%m%d", 12: "%Y%m%d%H%M", 14: "%Y%m%d%H%M%S"}
 Finding = tuple[str, str]
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
@@ -51,29 +52,16 @@ class _Lines:
         return f"line {', '.join(self.first)}{more}"
 
 
-def _is_timestamp(value: str) -> bool:
-    fmt = _TIMESTAMP_FORMATS.get(len(value))
-    if not fmt or not value.isdigit():
-        return False
-    try:
-        datetime.strptime(value, fmt)
-    except ValueError:
-        return False
-    return True
-
-
-def _header_diff(rec: list[str], expected: str, delim: str, header_code: Optional[str]) -> list[str]:
-    want = [v.strip() for v in expected.split(delim if delim in expected else ",")]
+def _header_diff(rec: list[str], names: tuple, header_code: Optional[str]) -> list[str]:
+    """How a header line differs from the HEADER_NAMES list (record type field left out)."""
     got = [v.strip() for v in rec]
     first = 1
     if header_code:
         first, got = 2, got[1:]
-        if want[0] == header_code:
-            want = want[1:]
-    diffs = [f"column {i}: {g!r}, expected {w!r}" for i, (g, w) in enumerate(zip(got, want), first)
+    diffs = [f"column {i}: {g!r}, expected {w!r}" for i, (g, w) in enumerate(zip(got, names), first)
              if g.casefold() != w.casefold()]
-    if len(got) != len(want):
-        diffs.insert(0, f"{len(got)} names, expected {len(want)}")
+    if len(got) != len(names):
+        diffs.insert(0, f"{len(got)} names, expected {len(names)}")
     return diffs
 
 
@@ -91,6 +79,18 @@ def _value_problem(value: str, col, rules: tuple, empty_is_null: bool) -> Option
     return None
 
 
+def error_rows(findings: list, details: list) -> list:
+    """The error log rows of a file: one per problem line, plus the problems that have no line."""
+    covered = {d[0] for d in details}
+    return [(c, None, text, None) for c, text in findings if c not in covered] + details
+
+
+def file_columns(layout) -> list:
+    """The staging column definition of each field of the file, in file order (for COLUMN_VALUES)."""
+    by_name = {c.name: c for c in layout.stage}
+    return [by_name[n] for n in layout.file_cols]
+
+
 def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional[int], settings: Settings,
                   opts: CheckOptions, details: Optional[list] = None, columns: Optional[list] = None) -> list[Finding]:
     """Every content problem of a downloaded file; nothing is loaded anywhere.
@@ -105,15 +105,10 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
         if len(details) < MAX_DETAILS:
             details.append((check, line_no, message, rec if rec is None or isinstance(rec, str) else delim.join(rec)))
     if cfg.src_file_ty not in DELIMITED_FILE_TYPES or cfg.src_file_ty not in settings.supported_file_types:
-        try:
-            rows = sum(1 for _ in read_file(path, cfg, expected_cols, settings))
-        except FileRejected as e:
-            return [(e.event_ty.removeprefix("FILE_"), str(e))]
-        if rows == 0 and not cfg.allow_zero_records:
-            out.append(("ZERO_RECORDS", "file has no data rows"))
-        return out
+        return [("TYPE_NOT_SUPPORTED", f"file type {cfg.src_file_ty} is not supported")]
+    names = header_columns(cfg, opts)
 
-    header_code, detail_code, trailer_code = opts.record_types or (None, None, None)
+    header_code, detail_code, _ = opts.record_types or (None, None, None)
     blank, wrong_type, wrong_cols, wrong_chars, wrong_values = _Lines(), _Lines(), _Lines(), _Lines(), _Lines()
 
     def characters(line_no: int, rec: list[str]) -> None:
@@ -205,8 +200,8 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
             out.append(("RECORD_TYPE", f"line {line_no}: header record type {rec[0]!r}, expected {header_code!r}"))
         if expected_cols is not None and len(rec) != expected_cols:
             out.append(("HEADER", f"line {line_no}: header has {len(rec)} columns, expected {expected_cols}"))
-        if opts.header:
-            diffs = _header_diff(rec, opts.header, delim, header_code)
+        if names:
+            diffs = _header_diff(rec, names, header_code)
             if diffs:
                 more = f" and {len(diffs) - MAX_LISTED} more" if len(diffs) > MAX_LISTED else ""
                 out.append(("HEADER", f"line {line_no}: header is not the expected one: "
@@ -229,44 +224,13 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
     if cfg.has_trailer and trailer is None:
         out.append(("TRAILER", "trailer expected but not found"))
     elif trailer:
-        found = _check_trailer(trailer, name, delim, trailer_code, opts, settings, counts)
+        found = trailer_problems(trailer[1], trailer[0], name, opts, settings.filename_case_sensitive, counts["data"],
+                                 counts["content"])
         for check, text in found:
             note(check, trailer[0], text.split(": ", 1)[1], trailer[1])
         out.extend(found)
     if counts["data"] == 0 and not cfg.allow_zero_records:
         out.append(("ZERO_RECORDS", "file has no data rows"))
-    return out
-
-
-def _check_trailer(trailer, name: str, delim: str, trailer_code, opts: CheckOptions, settings: Settings,
-                   counts: dict) -> list[Finding]:
-    line_no, rec = trailer
-    out: list[Finding] = []
-    if trailer_code and rec[0] != trailer_code:
-        out.append(("RECORD_TYPE", f"line {line_no}: trailer record type {rec[0]!r}, expected {trailer_code!r}"))
-    if opts.trailer_fields:
-        if len(rec) != len(opts.trailer_fields):
-            out.append(("TRAILER", f"line {line_no}: trailer has {len(rec)} fields, expected "
-                                   f"{len(opts.trailer_fields)} ({', '.join(opts.trailer_fields)})"))
-        for value, kind in zip(rec, opts.trailer_fields):
-            value = value.strip()
-            if kind == "FILE_NAME":
-                same = value == name if settings.filename_case_sensitive else value.casefold() == name.casefold()
-                if not same:
-                    out.append(("TRAILER", f"line {line_no}: trailer file name {value!r} is not the name of the file"))
-            elif kind in ("DATA_ROW_COUNT", "TOTAL_ROW_COUNT"):
-                actual, unit = (counts["data"], "data rows") if kind == "DATA_ROW_COUNT" else (counts["content"], "lines")
-                if not value.isdigit() or int(value) != actual:
-                    out.append(("TRAILER", f"line {line_no}: trailer count {value!r}, the file has {actual} {unit}"))
-            elif kind == "TIMESTAMP" and not _is_timestamp(value):
-                out.append(("TRAILER", f"line {line_no}: trailer timestamp {value!r} is not a valid "
-                                       "YYYYMMDD, YYYYMMDDHHMM or YYYYMMDDHHMMSS"))
-    elif settings.trailer_count_check:
-        m = re.search(settings.trailer_count_regex, delim.join(rec))
-        if not m:
-            out.append(("TRAILER", f"line {line_no}: trailer record count not found"))
-        elif int(m.group(1)) != counts["data"]:
-            out.append(("TRAILER", f"line {line_no}: trailer count {m.group(1)}, the file has {counts['data']} data rows"))
     return out
 
 
@@ -308,12 +272,12 @@ class FileChecker:
         else:
             locations = self.pipeline._configured_locations()
         summary.locations = [f"{s}/{f}" for s, f in locations]
-        matcher, _ = self.pipeline._load_config()
+        matcher = self.pipeline._load_config()
         for share, folder in locations:
             try:
                 files = self.store.list_files(share, folder)
             except Exception as e:  # noqa: BLE001
-                summary.errors.append(f"{share}/{folder}: {type(e).__name__}: {e}")
+                summary.errors.append(f"{share}/{folder}: {db.error_text(e)}")
                 continue
             for info in files:
                 if (share, folder) in shared and not own.candidates(basename(info.path)):
@@ -323,7 +287,7 @@ class FileChecker:
                     result = self.check_file(info, matcher)
                 except Exception as e:  # noqa: BLE001
                     log.warning("could not check %s/%s", share, info.path, exc_info=True)
-                    summary.errors.append(f"{share}/{info.path}: {type(e).__name__}: {e}")
+                    summary.errors.append(f"{share}/{info.path}: {db.error_text(e)}")
                     continue
                 if result["result"] == "NOT_CHECKED":
                     summary.skipped += 1
@@ -395,24 +359,15 @@ class FileChecker:
         return result
 
     def _after_failure(self, info, name: str, result: dict, findings: list, details: list) -> None:
-        """Write <folder>/<ERROR_LOG_FOLDER>/<file name>.errors.txt (one line per problem, with the record); move the file."""
-        error_folder = self.settings.error_folder
-        if self.settings.write_error_file:
-            covered = {d[0] for d in details}
-            rows = [(c, None, text, None) for c, text in findings if c not in covered] + details
-            lines = ["File_Name|Check_Cd|Line_No|Message|Record"]
-            lines += ["|".join("" if v is None else str(v) for v in (name, *row)) for row in rows]
-            target = f"{dirname(info.path)}{self.settings.error_log_folder}/{name}.errors.txt"
-            try:
-                self.store.put(info.share, target, ("\n".join(lines) + "\n").encode(self.settings.file_encoding, "replace"))
-                result["error_file"] = self.store.uri(info.share, target)
-            except Exception as e:  # noqa: BLE001
-                log.warning("could not write the error file of %s: %s", name, e)
+        """Write the error log (one line per problem, with the record) and, with CHECK_MOVE_FAILED, move the file."""
+        written = write_error_log(self.store, self.settings, info.share, info.path, error_rows(findings, details))
+        if written:
+            result["error_file"] = written
         if self.settings.check_move_failed:
             try:
-                result["moved_to"] = self.store.uri(info.share, self.store.archive(info.share, info.path, error_folder))
+                result["moved_to"] = self.store.uri(info.share, self.store.archive(info.share, info.path, self.settings.error_folder))
             except Exception as e:  # noqa: BLE001
-                log.warning("could not move %s to %s/: %s", name, error_folder, e)
+                log.warning("could not move %s to %s/: %s", name, self.settings.error_folder, e)
 
     def _source(self, cfg: FileConfig) -> list[Finding]:
         if self._sources is None:
@@ -430,15 +385,12 @@ class FileChecker:
                 self._checks = cfgmod.file_checks(self.conn)
             opts = check_options(cfg, self._checks)
             delimiter_for(cfg)
-            names = header_columns(cfg, opts)
-            extra = 1 if opts.record_types else 0
-            expected_cols = opts.column_count or (len(names) + extra if names else None)
+            expected_cols = data_fields(opts, header_columns(cfg, opts))
             columns = None
-            if opts.value_rules or cfg.src_file_ty not in DELIMITED_FILE_TYPES:
+            if opts.value_rules:
                 layout = file_layout(self.conn, cfg, cfgmod.target_columns(self.conn), opts)
-                by_name = {c.name: c for c in layout.stage}
-                columns = [by_name[n] for n in layout.file_cols]
-                expected_cols = expected_cols or len(columns) + extra
+                columns = file_columns(layout)
+                expected_cols = expected_cols or len(columns) + (1 if opts.record_types else 0)
         except (ConfigError, LookupError) as e:
             self._config_errors.setdefault(f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}", str(e))
             return None

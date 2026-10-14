@@ -238,9 +238,15 @@ types and a trailer; source `20` has a different layout, so its header check is 
 | `CMSUNIV` | `ODAG3` | `51` | `TRAILER` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | 1 | 1 |
 | `CMSUNIV` | `ODAG3` | `20` | `HEADER_NAMES` | | 0 | 1 |
 
-Without a `TRAILER` row, `TRAILER_COUNT_CHECK` / `TRAILER_COUNT_REGEX` apply as in the load.
+The load checks the trailer against the same `TRAILER` row (and the trailer record type of `RECORD_TYPE`); a
+wrong count rejects the file as `FILE_TRAILER_COUNT_MISMATCH`. Without a `TRAILER` row the trailer is not checked.
 `CHECK_CONTENT = false` checks names and batches only and does not open the files. `validate-config`
 reports a row that is not valid (`FILE_CHECK_CONFIG`) and a row that matches no file (`FILE_CHECK_NO_FILE`).
+
+**Large files.** The load streams the file in one pass into PostgreSQL `COPY`. `CHECK_ON_LOAD = true` runs the
+`FILE_CHECK` content checks inside `FILE_LOAD` on the copy the load has already downloaded (a file with a problem is
+rejected as `FILE_CONTENT_CHECK_FAILED`, with every problem in its error log). Each step's time limit is
+`timeout_minutes` in the Step Functions `step_settings`.
 
 **Control report and error log.** Every `FILE_LOAD` run writes one control report for the files it handled,
 `<inbound folder>/ControlReport/ControlReport_<YYYYMMDD_HHMMSS>.txt`, pipe-delimited, one line per file:
@@ -467,9 +473,11 @@ Rules:
 - **Columns the file does not have (fillers).** A `HEADER_NAMES` row in `ComplianceFileCheckConfig` is the list
   of columns the file has, in file order; the file must have exactly that many fields. When every name in the
   list is a column of the staging table (upper and lower case do not matter), each field goes to the column
-  of its name. Otherwise the fields fill the staging columns left to right. Every staging or core column that is
-  neither in the list nor in `ComplianceTargetColumnConfig` is loaded as NULL, so it must allow NULL. Without a
-  `HEADER_NAMES` row every such column is expected in the file.
+  of its name. Otherwise the fields fill the staging columns left to right. Without `HEADER_NAMES`, a
+  `COLUMN_COUNT` row gives the number of fields (record type included): they fill the first staging columns in
+  table order. Every staging or core column that is neither filled from the file nor in
+  `ComplianceTargetColumnConfig` is loaded as NULL, so it must allow NULL. With neither row every such column is
+  expected in the file. The load skips the header line; it never counts or compares it (that is `FILE_CHECK`).
 - **Core holds one load per batch.** When a file is loaded for a batch that already has rows in the core
   table, those rows are deleted by `Btch_ID` and the new rows are inserted, in one transaction. The core table
   needs no flag or end-date column; rows of other batches are not touched.

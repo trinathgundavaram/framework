@@ -19,7 +19,8 @@ from .batches import get_batch, promoted_load
 from .common import (COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch, btch_id_version, check_transition,
                      code)
 from .config import FileConfig, MatchError, TemplateMatcher
-from .control_report import write_reports
+from .control_report import write_error_log, write_reports
+from .filecheck import check_content, error_rows, file_columns
 from .db import Connection
 from .filecheck_options import check_options
 from .layout import LoadContext
@@ -132,7 +133,7 @@ class IngestPipeline:
         self.settings = settings
         self.store = store
         self.logger = EventLogger(conn, clock)
-        self._sweep_config: Optional[tuple[TemplateMatcher, tuple[str, ...]]] = None
+        self._sweep_config: Optional[TemplateMatcher] = None
         self._handled: list[int] = []
         self._scope_project: Optional[str] = None
         self._load: tuple = ()
@@ -199,7 +200,7 @@ class IngestPipeline:
         handled, self._handled = self._handled, []
         try:
             return write_reports(self.conn, self.store, self.settings, self.clock, handled,
-                                 (self._sweep_config or self._load_config())[0])
+                                 self._sweep_config or self._load_config())
         except Exception as e:  # noqa: BLE001
             log.warning("could not write the control report: %s", e)
             return []
@@ -219,7 +220,7 @@ class IngestPipeline:
                 files = self.store.list_files(loc_share, loc_folder)
             except Exception as e:  # noqa: BLE001
                 log.warning("could not list %s/%s: %s", loc_share, loc_folder, e)
-                summary.errors.append(f"{loc_share}/{loc_folder}: {type(e).__name__}: {e}")
+                summary.errors.append(f"{loc_share}/{loc_folder}: {db.error_text(e)}")
                 continue
             for info in files:
                 summary.scanned += 1
@@ -229,17 +230,16 @@ class IngestPipeline:
                 try:
                     out = self.process_file(loc_share, info.path, listed=True)
                 except Exception as e:  # noqa: BLE001
-                    summary.errors.append(f"{loc_share}/{info.path}: {type(e).__name__}: {e}")
+                    summary.errors.append(f"{loc_share}/{info.path}: {db.error_text(e)}")
                     continue
                 if out.result == "GONE":
                     summary.skipped += 1
                     continue
                 summary.tally(out)
 
-    def _load_config(self) -> tuple[TemplateMatcher, tuple[str, ...]]:
-        """The compiled filename templates of every active file config, and the run type codes."""
-        return (TemplateMatcher(cfgmod.active_file_configs(self.conn, self.settings), self.settings.filename_case_sensitive),
-                tuple(cfgmod.run_types(self.conn)))
+    def _load_config(self) -> TemplateMatcher:
+        """The compiled filename templates of every active file config."""
+        return TemplateMatcher(cfgmod.active_file_configs(self.conn, self.settings), self.settings.filename_case_sensitive)
 
     def _configured_locations(self) -> list[tuple[str, str]]:
         """The distinct (share, folder) inbound locations of every active file config."""
@@ -294,7 +294,7 @@ class IngestPipeline:
 
     def _process(self, load_id: int, info: FileInfo) -> IngestOutcome:
         name = basename(info.path)
-        matcher, _ = self._sweep_config or self._load_config()
+        matcher = self._sweep_config or self._load_config()
         try:
             m = matcher.match(name)
         except MatchError as e:
@@ -368,7 +368,6 @@ class IngestPipeline:
         batch = get_batch(self.conn, req_id)
         opts = check_options(cfg, cfgmod.file_checks(self.conn))
         layout = file_layout(self.conn, cfg, cfgmod.target_columns(self.conn), opts)
-        drop_first = opts.record_types is not None
         version = btch_id_version(batch["btch_id"], cfg.project_cd, cfg.table_nm, cfg.src_id, batch["run_ty"])
         ctx = LoadContext(batch["btch_id"], load_id, batch["run_ty"], version, cfg.src_id, basename(info.path),
                           self.clock.now(), cfg.project_cd, cfg.table_nm, _as_date(batch["rpt_start_dt_key"]),
@@ -376,8 +375,7 @@ class IngestPipeline:
         self._load = (layout, ctx)
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, basename(info.path))
-            self.store.download(info.share, info.path, path)
-            sha = sha256_file(path)
+            sha = self.store.download(info.share, info.path, path) or sha256_file(path)
             with self.conn.transaction():
                 self.conn.execute("UPDATE ComplianceFileLoad SET File_Sha256=%s, Updated_Dtts=%s WHERE Load_ID=%s",
                                   (sha, self.clock.now(), load_id))
@@ -391,27 +389,34 @@ class IngestPipeline:
                                       project_cd=cfg.project_cd, table_nm=cfg.table_nm, src_id=cfg.src_id,
                                       run_ty=batch["run_ty"],
                                       description=f"same content as load {other['load_id']} ({other['btch_id']})")
+            if self.settings.check_on_load:
+                details: list = []
+                found = check_content(path, basename(info.path), cfg, len(layout.file_cols) + (1 if opts.record_types else 0),
+                                      self.settings, opts, details, file_columns(layout) if opts.value_rules else None)
+                if found:
+                    return self._quarantine(load_id, info, "FILE_CONTENT_CHECK_FAILED",
+                                            f"{len(found)} problem(s); first: {found[0][0]}: {found[0][1]}", cfg, batch,
+                                            rows=error_rows(found, details))
             try:
                 staged_rows = stage(self.conn, self.settings, file_path=path, cfg=cfg, layout=layout, ctx=ctx,
-                                    drop_first=drop_first)
+                                    opts=opts)
             except FileRejected as e:
                 return self._quarantine(load_id, info, e.event_ty, str(e), cfg, batch, local_path=path)
         with self.conn.transaction():
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, Updated_Dtts=%s "
                               "WHERE Load_ID=%s", (staged_rows, self.clock.now(), load_id))
 
-        failure_event = detail = None
-        rules_stat = "NOT_RUN"
+        failure = None
         if staged_rows == 0 and not cfg.allow_zero_records:
-            passed, failure_event, detail = False, "FILE_ZERO_RECORDS_REJECTED", "file has no data rows"
-        else:
-            passed = True
-
-        result = self._resolve(load_id, info, cfg, req_id, passed, rules_stat, failure_event, detail)
+            failure = ("FILE_ZERO_RECORDS_REJECTED", "file has no data rows")
+        result = self._resolve(load_id, info, cfg, req_id, failure)
         self._archive(info, load_id, rejected=result.result not in PROMOTED_RESULTS)
         return result
 
-    def _resolve(self, load_id, info, cfg, req_id, passed, rules_stat, failure_event, detail) -> IngestOutcome:
+    def _resolve(self, load_id, info, cfg, req_id, failure: Optional[tuple[str, str]]) -> IngestOutcome:
+        """Promote the staged file, or record why it is not promoted; `failure` = (event, detail) of a file that
+        failed after staging (today: an empty file that is not allowed)."""
+        failure_event, detail = failure or (None, None)
         now = self.clock.now()
         ref = self.store.uri(info.share, info.path)
         today = self.clock.today(self.settings.business_tz)
@@ -420,7 +425,7 @@ class IngestPipeline:
             closed = b["batch_close_ind"] == 1
             has_data = self._has_data(b)
             ovrd = self.active_override(b, required_override_ty(has_data), today) if closed else None
-            d = decide(ResolutionInput(batch_closed=closed, has_data=has_data, file_passed=passed,
+            d = decide(ResolutionInput(batch_closed=closed, has_data=has_data, file_passed=failure is None,
                                        override_ty=code(ovrd["override_ty"]) if ovrd else None))
             ctx = dict(project_cd=b["project_cd"], table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"],
                        req_id=req_id, btch_id=b["btch_id"], load_id=load_id, file_ref=ref)
@@ -440,8 +445,8 @@ class IngestPipeline:
                 self.conn.execute(
                     """UPDATE ComplianceRequestControl SET Resolution_Ty='NEW_FILE', Req_Stat=%s, Reuse_Btch_ID=NULL,
                               Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, now, req_id))
-                self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='PROMOTED', Rules_Stat=%s, Updated_Dtts=%s "
-                                  "WHERE Load_ID=%s", (rules_stat, now, load_id))
+                self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='PROMOTED', Rules_Stat='NOT_RUN', Updated_Dtts=%s "
+                                  "WHERE Load_ID=%s", (now, load_id))
                 if d.action == Action.PROMOTE_REPLACE:
                     self.logger.batch_event(
                         "FILE_REPLACED_BEFORE_CLOSE", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
@@ -461,21 +466,21 @@ class IngestPipeline:
                 check_transition(b["req_stat"], EXCEPTION_PENDING)
                 self.conn.execute("UPDATE ComplianceRequestControl SET Req_Stat=%s, Updated_Dtts=%s WHERE Req_ID=%s",
                                   (EXCEPTION_PENDING, now, req_id))
-                self._rules_failed(load_id, rules_stat, detail, now)
+                self._rules_failed(load_id, detail, now)
                 self.logger.batch_event("FILE_RULES_FAILED", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
                                         detail=detail)
                 self.logger.audit(failure_event, description=detail, **ctx)
                 out.result, out.event_ty = "RULES_FAILED", failure_event
 
             elif d.action == Action.REJECT_RULES:
-                self._rules_failed(load_id, rules_stat, detail, now)
+                self._rules_failed(load_id, detail, now)
                 self.logger.batch_event("FILE_RULES_FAILED", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
                                         detail=detail)
                 self.logger.audit(failure_event, description=f"closed batch: {detail}", **ctx)
                 out.result, out.event_ty = "RULES_FAILED", failure_event
 
             else:
-                self._rules_failed(load_id, rules_stat, "batch is closed and has no approved override", now)
+                self._rules_failed(load_id, "batch is closed and has no approved override", now)
                 self.logger.audit("FILE_REJECTED_BATCH_CLOSED", description="no approved, valid override", **ctx)
                 out.result, out.event_ty = "REJECTED_CLOSED", "FILE_REJECTED_BATCH_CLOSED"
         return out
@@ -496,16 +501,16 @@ class IngestPipeline:
         self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='SUPERSEDED', Updated_Dtts=%s "
                           "WHERE Load_ID=%s AND Load_Stat='PROMOTED'", (self.clock.now(), load_id))
 
-    def _rules_failed(self, load_id, rules_stat, detail, now) -> None:
+    def _rules_failed(self, load_id, detail, now) -> None:
         self.conn.execute(
-            """UPDATE ComplianceFileLoad SET Load_Stat='RULES_FAILED', Rules_Stat=%s, Error_Txt=%s, Updated_Dtts=%s
+            """UPDATE ComplianceFileLoad SET Load_Stat='RULES_FAILED', Rules_Stat='NOT_RUN', Error_Txt=%s, Updated_Dtts=%s
                 WHERE Load_ID=%s""",
-            (rules_stat, detail[:4000] if detail else detail, now, load_id))
+            (detail[:4000] if detail else detail, now, load_id))
 
     def _quarantine(self, load_id: int, info: FileInfo, event_ty: str, message: str,
                     cfg: Optional[FileConfig] = None, batch: Optional[dict] = None,
-                    local_path: Optional[str] = None) -> IngestOutcome:
-        error_file = self._error_file(info, event_ty, message, local_path)
+                    local_path: Optional[str] = None, rows: Optional[list] = None) -> IngestOutcome:
+        error_file = self._error_file(info, event_ty, message, local_path, rows)
         if error_file:
             message = f"{message}; details in {error_file}"
         with self.conn.transaction():
@@ -525,23 +530,15 @@ class IngestPipeline:
         return IngestOutcome(load_id, "QUARANTINED", event_ty=event_ty, message=message,
                              req_id=batch["req_id"] if batch else None)
 
-    def _error_file(self, info: FileInfo, event_ty: str, message: str, local_path: Optional[str]) -> Optional[str]:
-        """Write <folder>/<ERROR_LOG_FOLDER>/<file name>.errors.txt for a rejected file: the reason, line and record."""
-        if not self.settings.write_error_file:
-            return None
-        name = basename(info.path)
-        found = re.search(r"\bline (\d+)\b", message)
-        line_no = int(found.group(1)) if found else None
-        record = raw_line(local_path, line_no, self.settings.file_encoding) if local_path else None
-        target = f"{dirname(info.path)}{self.settings.error_log_folder}/{name}.errors.txt"
-        row = "|".join("" if v is None else str(v) for v in (name, event_ty, line_no, message, record))
-        try:
-            self.store.put(info.share, target, ("File_Name|Check_Cd|Line_No|Message|Record\n" + row + "\n").encode(
-                self.settings.file_encoding, "replace"))
-        except Exception as e:  # noqa: BLE001
-            log.warning("could not write the error file of %s: %s", name, e)
-            return None
-        return self.store.uri(info.share, target)
+    def _error_file(self, info, event_ty: str, message: str, local_path: Optional[str],
+                    rows: Optional[list] = None) -> Optional[str]:
+        """The error log of a rejected file: `rows`, else the reason with its line and record."""
+        if rows is None:
+            found = re.search(r"\bline (\d+)\b", message)
+            line_no = int(found.group(1)) if found else None
+            record = raw_line(local_path, line_no, self.settings.file_encoding) if local_path else None
+            rows = [(event_ty, line_no, message, record)]
+        return write_error_log(self.store, self.settings, info.share, info.path, rows)
 
     def _archive(self, info: FileInfo, load_id: int, rejected: bool = False) -> None:
         """A loaded file moves to <its folder>/Archive/, one that was not loaded to <its folder>/Error/."""
@@ -563,7 +560,7 @@ class IngestPipeline:
                 self.conn.execute(
                     f"""UPDATE ComplianceFileLoad SET Load_Stat='FAILED_TECHNICAL', Error_Txt=%s, Updated_Dtts=%s
                         WHERE Load_ID=%s AND Load_Stat NOT IN ({marks})""",
-                    [sanitize_db_error(f"{type(err).__name__}: {err}"), self.clock.now(), load_id, *terminal])
+                    [sanitize_db_error(db.error_text(err)), self.clock.now(), load_id, *terminal])
                 if isinstance(err, RowCountMismatch):
                     self.logger.audit("CORE_LOAD_ROWCOUNT_MISMATCH", load_id=load_id, description=str(err))
                 self._report_technical_failure(load_id, err)
@@ -583,4 +580,4 @@ class IngestPipeline:
                           file_ref=self.store.uri(row["file_share"], row["file_path"]),
                           project_cd=row["project_cd"] or self._scope_project, table_nm=row["table_nm"],
                           src_id=row["src_id"], run_ty=row["run_ty"],
-                          description=sanitize_db_error(f"{type(err).__name__}: {err}")[:500])
+                          description=sanitize_db_error(db.error_text(err))[:500])
