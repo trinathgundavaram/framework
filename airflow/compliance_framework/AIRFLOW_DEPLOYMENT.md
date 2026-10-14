@@ -208,6 +208,14 @@ A path with its own server uses that server with the NAS Connection's login. `$e
   usual override. A name whose earlier delivery was rejected can always be delivered again.
   Set it in `compliance_file_load_config_var` (`"load_duplicate": "yes"`), or for one trigger of the
   file-load or the generic DAG with `{"load_duplicate": "yes"}`.
+- **Delivering a file again.** Every delivery is one row of `ComplianceFileLoad`, recognised by its location,
+  name, size and last-modified time. A file that was not loaded (`QUARANTINED`: rejected before reaching core,
+  moved to `Error`, with its reason and error log; or `RULES_FAILED`) is processed again in full when it is put
+  back in the inbound folder, for example after the configuration was fixed; it keeps its `Load_ID`. A delivery
+  that was already loaded (`PROMOTED` / `SUPERSEDED`) is not loaded twice: if it shows up again (a move to
+  `Archive` that failed, a second run over the same folder) it is ignored (`REPLAY_IGNORED`, audit event
+  `FILE_EVENT_REPLAY_IGNORED`) and moved to `Archive`. To load the same data again on purpose, deliver it as a new
+  file (a new time stamp in the name) or use `load_duplicate`.
 - There is no quarantine path and no archive path to configure. The subfolders are created when first
   needed and are never swept. Their names are the `ARCHIVE_FOLDER` / `ERROR_FOLDER` settings; with
   `ARCHIVE_BY_YEAR = true` a loaded file goes to `Archive/<year>/`.

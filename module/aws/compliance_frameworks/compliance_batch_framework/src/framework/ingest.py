@@ -157,13 +157,13 @@ class IngestPipeline:
         info = self.store.head(bucket, key, version_id)
         load, is_new = self._register(info)
         if not is_new:
-            if load["load_stat"] in TERMINAL_LOAD_STATS and not self._retryable_quarantine(load):
+            if load["load_stat"] in TERMINAL_LOAD_STATS and load["load_stat"] not in ERROR_LOAD_STATS:
                 return self._replay(load, info)
             if load["btch_id"]:
                 if not db.try_lock(self.conn, db.batch_key(load["btch_id"])):
                     return IngestOutcome(load["load_id"], "IN_PROGRESS", message="another process holds the batch lock")
                 db.unlock(self.conn, db.batch_key(load["btch_id"]))
-            log.info("restarting non-terminal load %s (%s)", load["load_id"], load["load_stat"])
+            log.info("processing load %s again (it was %s)", load["load_id"], load["load_stat"])
         self._handled.append(load["load_id"])
         try:
             return self._process(load["load_id"], info)
@@ -261,11 +261,6 @@ class IngestPipeline:
                                           WHERE Load_Stat='QUARANTINED' GROUP BY Quarantine_Rsn_Cd ORDER BY n DESC"""),
         }
 
-    @staticmethod
-    def _retryable_quarantine(load: dict) -> bool:
-        """A file quarantined only because its batch was closed is reprocessed when it is delivered again."""
-        return load["load_stat"] == "QUARANTINED" and load["quarantine_rsn_cd"] == "FILE_REJECTED_BATCH_CLOSED"
-
     def _register(self, info: ObjectInfo) -> tuple[dict, bool]:
         with self.conn.transaction():
             row = self.conn.execute(
@@ -324,7 +319,7 @@ class IngestPipeline:
                                     f"{m.rpt_start}..{m.rpt_end}: {detail}", cfg)
         with self.conn.transaction():
             self.conn.execute(
-                """UPDATE ComplianceFileLoad SET Cfg_ID=%s, Req_ID=%s, Btch_ID=%s, Load_Stat='STAGING', Error_Txt=NULL,
+                """UPDATE ComplianceFileLoad SET Cfg_ID=%s, Req_ID=%s, Btch_ID=%s, Load_Stat='STAGING', Quarantine_Rsn_Cd=NULL, Error_Txt=NULL,
                           Updated_Dtts=%s WHERE Load_ID=%s""",
                 (cfg.cfg_id, batch["req_id"], batch["btch_id"], self.clock.now(), load_id))
         if info.size == 0 and cfg.has_header:
