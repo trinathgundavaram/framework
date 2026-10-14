@@ -48,6 +48,20 @@ def dirname(key: str) -> str:
     return key.rsplit("/", 1)[0] + "/" if "/" in key else ""
 
 
+def numbered(path: str, taken: Callable[[str], bool]) -> str:
+    """`path`, or <name>_1<ext>, <name>_2<ext>, ... (the first that is free) when a file of that name is already there."""
+    if not taken(path):
+        return path
+    folder, name = dirname(path), basename(path)
+    log = ".errors.txt" if name.endswith(".errors.txt") else ""
+    ext = os.path.splitext(name[:len(name) - len(log)])[1] + log
+    stem = name[:len(name) - len(ext)] if ext else name
+    n = 1
+    while taken(f"{folder}{stem}_{n}{ext}"):
+        n += 1
+    return f"{folder}{stem}_{n}{ext}"
+
+
 def _hash_file(path, algorithm: str) -> str:
     h = hashlib.new(algorithm)
     with open(path, "rb") as f:
@@ -87,9 +101,13 @@ class ObjectStore(ABC):
     def put(self, bucket: str, key: str, data: bytes) -> None:
         raise NotImplementedError
 
+    def free_path(self, bucket: str, key: str) -> str:
+        """`key`, numbered when an object of that name is already there."""
+        return numbered(key, lambda k: self.exists(bucket, k))
+
     def archive(self, bucket: str, key: str, folder: str, version_id: Optional[str] = None) -> str:
-        """Move a file into <its own folder>/<folder>/; returns the new key."""
-        dst_key = f"{dirname(key)}{folder}/{basename(key)}"
+        """Move a file into <its own folder>/<folder>/ (numbered if the name is taken); returns the new key."""
+        dst_key = self.free_path(bucket, f"{dirname(key)}{folder}/{basename(key)}")
         self.copy(bucket, key, bucket, dst_key, version_id)
         self.delete(bucket, key)
         return dst_key

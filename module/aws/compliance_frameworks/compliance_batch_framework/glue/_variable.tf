@@ -53,12 +53,6 @@ variable "metadata_schema" {
   }
 }
 
-variable "load_duplicate" {
-  description = "true = load a file whose name was already loaded; false = reject it (FILE_REJECTED_DUPLICATE). A run can override it."
-  type        = bool
-  default     = false
-}
-
 variable "notify_from_email" {
   description = "SES-verified sender."
   type        = string

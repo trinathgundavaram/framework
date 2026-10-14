@@ -31,9 +31,6 @@
   "OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD: one project": {
     "project": "CMS_UNIVERSE"
   },
-  "OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD: load files whose names were already loaded": {
-    "load_duplicate": "yes"
-  },
   "OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES: every project": {},
   "OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES: one project, a setting for this run only": {
     "project": "CMS_UNIVERSE",

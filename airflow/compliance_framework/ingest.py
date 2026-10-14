@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import Enum
@@ -30,7 +31,7 @@ from .settings import Settings
 log = logging.getLogger(__name__)
 
 TERMINAL_LOAD_STATS = {"QUARANTINED", "RULES_FAILED", "PROMOTED", "SUPERSEDED"}
-ERROR_LOAD_STATS = {"QUARANTINED", "RULES_FAILED"}
+UNFINISHED_LOAD_STATS = ("RECEIVED", "STAGING", "STAGED")
 
 
 class Action(str, Enum):
@@ -100,7 +101,6 @@ class PathIngestSummary:
     promoted: int = 0
     quarantined: int = 0
     rejected: int = 0
-    replayed: int = 0
     other: int = 0
     skipped: int = 0
     locations: list[str] = field(default_factory=list)
@@ -116,8 +116,6 @@ class PathIngestSummary:
             self.quarantined += 1
         elif outcome.result in REJECTED_RESULTS:
             self.rejected += 1
-        elif outcome.result == "REPLAY_IGNORED":
-            self.replayed += 1
         else:
             self.other += 1
 
@@ -152,20 +150,12 @@ class IngestPipeline:
 
     def _process_registered(self, share: str, path: str) -> IngestOutcome:
         info = self.store.head(share, path)
-        load, is_new = self._register(info)
-        if not is_new:
-            if load["load_stat"] in TERMINAL_LOAD_STATS and load["load_stat"] not in ERROR_LOAD_STATS:
-                return self._replay(load, info)
-            if load["btch_id"]:
-                if not db.try_lock(self.conn, db.batch_key(load["btch_id"])):
-                    return IngestOutcome(load["load_id"], "IN_PROGRESS", message="another process holds the batch lock")
-                db.unlock(self.conn, db.batch_key(load["btch_id"]))
-            log.info("processing load %s again (it was %s)", load["load_id"], load["load_stat"])
-        self._handled.append(load["load_id"])
+        load_id = self._register(info)
+        self._handled.append(load_id)
         try:
-            return self._process(load["load_id"], info)
+            return self._process(load_id, info)
         except Exception as e:
-            self._mark_technical_failure(load["load_id"], e)
+            self._mark_technical_failure(load_id, e)
             raise
 
     def process_path(self, share: Optional[str] = None, folder: Optional[str] = None,
@@ -258,34 +248,26 @@ class IngestPipeline:
                                           WHERE Load_Stat='QUARANTINED' GROUP BY Quarantine_Rsn_Cd ORDER BY n DESC"""),
         }
 
-    def _register(self, info: FileInfo) -> tuple[dict, bool]:
-        """The load row of this delivery of the file (the caller holds the file lock); True when it is new."""
-        file_hash = db.file_hash(info.share, info.path, info.version)
-        find = "SELECT * FROM ComplianceFileLoad WHERE File_Hash=%s"
-        row = self.conn.execute(find, (file_hash,)).fetchone()
-        if row:
-            return row, False
+    def _register(self, info: FileInfo) -> int:
+        """A new load row for this pickup of the file (the caller holds the file lock).
+
+        Every pickup is a new delivery, whatever happened to the file before. A load of the same file left unfinished
+        (a run that stopped) is closed as FAILED_TECHNICAL.
+        """
         now = self.clock.now()
-        try:
+        key = db.file_hash(info.share, info.path, f"{info.version}#{uuid.uuid4().hex}")
+        marks, unfinished = db.in_list(UNFINISHED_LOAD_STATS)
+        with self.conn.transaction():
+            self.conn.execute(
+                f"""UPDATE ComplianceFileLoad SET Load_Stat='FAILED_TECHNICAL', Error_Txt=%s, Updated_Dtts=%s
+                     WHERE File_Share=%s AND File_Path=%s AND Load_Stat IN ({marks})""",
+                ["not finished; the file was picked up again", now, info.share, info.path, *unfinished])
             self.conn.execute(
                 """INSERT INTO ComplianceFileLoad (File_Hash, File_Share, File_Path, File_Version,
                                                   File_Size_Byte, Load_Stat, Rules_Stat, Created_Dtts, Updated_Dtts)
                    VALUES (%s,%s,%s,%s,%s,'RECEIVED','NOT_RUN',%s,%s)""",
-                (file_hash, info.share, info.path, info.version, info.size, now, now))
-        except Exception as e:  # noqa: BLE001
-            if not db.is_duplicate_key(e):
-                raise
-            return self.conn.execute(find, (file_hash,)).fetchone(), False
-        return self.conn.execute(find, (file_hash,)).fetchone(), True
-
-    def _replay(self, load: dict, info: FileInfo) -> IngestOutcome:
-        with self.conn.transaction():
-            self.logger.audit("FILE_EVENT_REPLAY_IGNORED", load_id=load["load_id"], req_id=load["req_id"],
-                              btch_id=load["btch_id"], file_ref=self.store.uri(info.share, info.path),
-                              description=f"load already {load['load_stat']}")
-        if self.store.exists(info.share, info.path):
-            self._archive(info, load["load_id"], rejected=load["load_stat"] in ERROR_LOAD_STATS)
-        return IngestOutcome(load["load_id"], "REPLAY_IGNORED", req_id=load["req_id"])
+                (key, info.share, info.path, info.version, info.size, now, now))
+            return self.conn.execute("SELECT Load_ID FROM ComplianceFileLoad WHERE File_Hash=%s", (key,)).fetchone()["load_id"]
 
     def _process(self, load_id: int, info: FileInfo) -> IngestOutcome:
         name = basename(info.path)
@@ -299,14 +281,6 @@ class IngestPipeline:
         if info.share != share or dirname(info.path) != folder:
             return self._quarantine(load_id, info, "FILE_REJECTED_UNPARSEABLE",
                                     f"{name} matched Cfg_ID {cfg.cfg_id} but is not in its inbound location", cfg)
-        if not self.settings.load_duplicate:
-            loaded = self.conn.execute(
-                """SELECT TOP 1 Load_ID FROM ComplianceFileLoad WHERE File_Share=%s AND File_Path=%s AND Load_ID<>%s
-                  AND Load_Stat IN ('PROMOTED','SUPERSEDED') ORDER BY Load_ID DESC""", (info.share, info.path, load_id)).fetchone()
-            if loaded:
-                return self._quarantine(load_id, info, "FILE_REJECTED_DUPLICATE",
-                                        f"{name} was already loaded (load {loaded['load_id']}); "
-                                        "LOAD_DUPLICATE=yes loads it again", cfg)
         run_ty = code(m.run_ty)
         batch, override = self._select_batch(cfg, run_ty, m.rpt_start, m.rpt_end)
         if batch is None:

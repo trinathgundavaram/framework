@@ -330,13 +330,6 @@ class FileChecker:
             elif self.pipeline._has_data(batch):
                 notes.append(f"batch {batch['btch_id']} already has data ({batch['req_stat']}); "
                              "loading this file replaces it")
-            if not self.settings.load_duplicate:
-                loaded = self.conn.execute(
-                    """SELECT Load_ID FROM ComplianceFileLoad WHERE S3_Bucket=%s AND S3_Key=%s
-                          AND Load_Stat IN ('PROMOTED','SUPERSEDED') ORDER BY Load_ID DESC""",
-                    (info.bucket, info.key)).fetchone()
-                if loaded:
-                    findings.append(("DUPLICATE", f"{name} was already loaded (load {loaded['load_id']})"))
         if cfg is not None:
             findings.extend(self._source(cfg))
         if cfg is not None and self.settings.check_content:

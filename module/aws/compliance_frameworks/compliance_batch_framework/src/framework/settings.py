@@ -39,7 +39,6 @@ class Settings:
     error_log_folder: str = "ErrorLog"
 
     filename_case_sensitive: bool = False
-    load_duplicate: bool = False
     supported_file_types: list[str] = field(default_factory=lambda: [".txt", ".csv"])
     file_encoding: str = "utf-8"
     quote_char: str = '"'

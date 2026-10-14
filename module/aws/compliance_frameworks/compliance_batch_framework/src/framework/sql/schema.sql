@@ -190,7 +190,7 @@ CREATE TABLE ComplianceFileLoad (
   CONSTRAINT fk_compliancefileload_config FOREIGN KEY (Cfg_ID) REFERENCES ComplianceSourceFileConfig,
   CONSTRAINT fk_compliancefileload_batch  FOREIGN KEY (Req_ID) REFERENCES ComplianceRequestControl
 );
-CREATE UNIQUE INDEX uq_compliancefileload_object   ON ComplianceFileLoad (S3_Bucket, S3_Key, COALESCE(S3_Version_Id, S3_ETag));
+CREATE INDEX ix_compliancefileload_object ON ComplianceFileLoad (S3_Bucket, S3_Key);
 CREATE UNIQUE INDEX uq_compliancefileload_promoted ON ComplianceFileLoad (Btch_ID) WHERE Load_Stat = 'PROMOTED';
 CREATE INDEX ix_compliancefileload_sha ON ComplianceFileLoad (File_Sha256);
 

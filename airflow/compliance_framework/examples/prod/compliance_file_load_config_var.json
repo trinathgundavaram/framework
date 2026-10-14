@@ -13,7 +13,6 @@
   "log_level": "INFO",
   "schedule_interval": "*/15 * * * *",
   "wdc_comp_oper_nas_var": "wdc_comp_oper_nas",
-  "load_duplicate": "no",
   "settings": {
     "BUSINESS_TZ": "America/Chicago",
     "LOCK_TTL_MINUTES": 240,

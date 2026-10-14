@@ -64,6 +64,20 @@ def dirname(path: str) -> str:
     return path.rsplit("/", 1)[0] + "/" if "/" in path else ""
 
 
+def numbered(path: str, taken: Callable[[str], bool]) -> str:
+    """`path`, or <name>_1<ext>, <name>_2<ext>, ... (the first that is free) when a file of that name is already there."""
+    if not taken(path):
+        return path
+    folder, name = dirname(path), basename(path)
+    log = ".errors.txt" if name.endswith(".errors.txt") else ""
+    ext = os.path.splitext(name[:len(name) - len(log)])[1] + log
+    stem = name[:len(name) - len(ext)] if ext else name
+    n = 1
+    while taken(f"{folder}{stem}_{n}{ext}"):
+        n += 1
+    return f"{folder}{stem}_{n}{ext}"
+
+
 def _hash_file(path, algorithm: str) -> str:
     h = hashlib.new(algorithm)
     with open(path, "rb") as f:
@@ -111,9 +125,13 @@ class FileStore(ABC):
     def put(self, share: str, path: str, data: bytes) -> None:
         raise NotImplementedError
 
+    def free_path(self, share: str, path: str) -> str:
+        """`path`, numbered when a file of that name is already there."""
+        return numbered(path, lambda p: self.exists(share, p))
+
     def archive(self, share: str, path: str, folder: str) -> str:
-        """Move a file into <its own folder>/<folder>/; returns the new path."""
-        dst_path = f"{dirname(path)}{folder}/{basename(path)}"
+        """Move a file into <its own folder>/<folder>/ (numbered if the name is taken); returns the new path."""
+        dst_path = self.free_path(share, f"{dirname(path)}{folder}/{basename(path)}")
         self.copy(share, path, share, dst_path)
         self.delete(share, path)
         return dst_path
@@ -270,8 +288,8 @@ class NasFileStore(FileStore):
             dst.write(data)
 
     def archive(self, share, path, folder):
-        dst_path = f"{dirname(path)}{folder}/{basename(path)}"
-        self.smb.makedirs(self._path(share, dirname(dst_path)), exist_ok=True, **self.nas)
+        self.smb.makedirs(self._path(share, f"{dirname(path)}{folder}/"), exist_ok=True, **self.nas)
+        dst_path = self.free_path(share, f"{dirname(path)}{folder}/{basename(path)}")
         try:
             self.smb.replace(self._path(share, path), self._path(share, dst_path), **self.nas)
         except OSError as e:

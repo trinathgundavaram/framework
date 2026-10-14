@@ -55,7 +55,7 @@ def write_error_log(store, settings, share: str, path: str, rows: list) -> Optio
     if not settings.write_error_file:
         return None
     name = basename(path)
-    target = f"{dirname(path)}{settings.error_log_folder}/{name}.errors.txt"
+    target = store.free_path(share, f"{dirname(path)}{settings.error_log_folder}/{name}.errors.txt")
     lines = [ERROR_LOG_HEADER, *("|".join("" if v is None else str(v) for v in (name, *row)) for row in rows)]
     try:
         store.put(share, target, ("\n".join(lines) + "\n").encode(settings.file_encoding, "replace"))
@@ -107,7 +107,7 @@ def write_reports(conn, store, settings, clock, load_ids: list, matcher) -> list
     stamp = clock.now().astimezone(ZoneInfo(settings.business_tz)).strftime("%Y%m%d_%H%M%S")
     written = []
     for (share, folder), lines in by_folder.items():
-        target = f"{folder}{settings.control_report_folder}/ControlReport_{stamp}.txt"
+        target = store.free_path(share, f"{folder}{settings.control_report_folder}/ControlReport_{stamp}.txt")
         text = "\n".join("|".join("" if v is None else str(v) for v in row) for row in [HEADER, *lines]) + "\n"
         try:
             store.put(share, target, text.encode(settings.file_encoding, "replace"))

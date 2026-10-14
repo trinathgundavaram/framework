@@ -42,7 +42,6 @@ locals {
       DB_SSLMODE            = "require"
       METADATA_SCHEMA       = var.metadata_schema
       ENVIRONMENT           = upper(var.env)
-      LOAD_DUPLICATE        = var.load_duplicate ? "yes" : "no"
       AWS_REGION            = local.region
       BUSINESS_TZ           = local.business_tz
       OBJECT_STORE          = "s3"

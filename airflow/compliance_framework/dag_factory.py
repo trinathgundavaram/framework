@@ -19,8 +19,8 @@ STEP_TIMEOUT = {"BATCH_CREATION": timedelta(hours=1), "FILE_CHECK": timedelta(ho
                 "NOTIFY": timedelta(minutes=30)}
 STEP_PARAMS = {
     "BATCH_CREATION": ("project", "run_type", "period", "table", "lookback_days", "lookback_weeks", "as_of"),
-    "FILE_CHECK": ("project", "load_duplicate", "as_of"),
-    "FILE_LOAD": ("project", "load_duplicate", "as_of"),
+    "FILE_CHECK": ("project", "as_of"),
+    "FILE_LOAD": ("project", "as_of"),
     "FILE_RULES": ("project", "as_of"),
     "OVERRIDE_DECISIONS": ("project", "as_of"),
     "BATCH_CLOSE": ("project", "table", "run_type", "as_of"),

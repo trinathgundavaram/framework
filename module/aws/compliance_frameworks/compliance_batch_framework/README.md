@@ -111,27 +111,21 @@ Every file leaves the inbound folder once it has been processed, into a subfolde
 | Outcome | Moves to |
 |---|---|
 | Loaded to core | `<inbound folder>/Archive/` |
-| Not loaded: unknown name, no batch or a closed batch, wrong column count, bad characters, an empty file where one is not allowed, a name already loaded (unless `LOAD_DUPLICATE` = `yes`) | `<inbound folder>/Error/` |
+| Not loaded: unknown name, no batch or a closed batch, wrong column count, bad characters, an empty file where one is not allowed | `<inbound folder>/Error/` |
 | Technical failure | stays in place and is retried by the next sweep |
 
-- **Duplicate file names (`LOAD_DUPLICATE`).** A file whose name was already loaded is rejected by
-  default (`FILE_REJECTED_DUPLICATE`, moved to `Error`). With `LOAD_DUPLICATE` = `yes` it is loaded like
-  any other file: while the batch is open it replaces the batch's data; a closed batch still needs the
-  usual override. A name whose earlier delivery was rejected can always be delivered again.
-  Set it for the environment with `load_duplicate = true` in `glue/env-config/us-east-1/<env>.tfvars`, for one
-  run with `"load_duplicate": "yes"` in the workflow input (`run_workflow.sh ... --load-duplicate yes`), or on
-  a Glue run started by hand with `--FRAMEWORK_LOAD_DUPLICATE yes`.
-- **Delivering a file again.** Every delivery is one row of `ComplianceFileLoad`, recognised by its location,
-  name, size and last-modified time. A file that was not loaded (`QUARANTINED`: rejected before reaching core,
-  moved to `Error`, with its reason and error log; or `RULES_FAILED`) is processed again in full when it is put
-  back in the inbound folder, for example after the configuration was fixed; it keeps its `Load_ID`. A delivery
-  that was already loaded (`PROMOTED` / `SUPERSEDED`) is not loaded twice: if it shows up again (a move to
-  `Archive` that failed, a second run over the same location) it is ignored (`REPLAY_IGNORED`, audit event
-  `FILE_EVENT_REPLAY_IGNORED`) and moved to `Archive`. To load the same data again on purpose, deliver it as a new
-  file (a new time stamp in the name) or use `load_duplicate`.
+- **Every pickup is a new load.** Each time FILE_LOAD finds a file in the inbound folder it gets a new row in
+  `ComplianceFileLoad` (a new `Load_ID`) and is processed from the start, whatever happened to a file of the same
+  name before: the same name and path may come back with updated data, after a rejection or after a load. For an
+  open batch it replaces the batch's data; a closed batch still needs the usual override. Earlier rows stay as
+  history. A load of the same file left unfinished by a run that stopped is closed as `FAILED_TECHNICAL`.
 - There is no quarantine path and no archive path to configure: `s3://bucket/odr/in/X.txt` goes to
   `s3://bucket/odr/in/Archive/X.txt` or `s3://bucket/odr/in/Error/X.txt`. Sweeps are not recursive, so
-  the two subfolders are never picked up again.
+  the two subfolders are never picked up again. A name already there gets `_1`, `_2`, ... before the extension
+  (`X_1.txt`), and its error log follows (`ErrorLog/X_1.txt.errors.txt`); nothing is replaced.
+  The schema keeps every pickup of an object (index `ix_compliancefileload_object`, not unique); on an existing
+  database: `DROP INDEX uq_compliancefileload_object; CREATE INDEX ix_compliancefileload_object ON
+  ComplianceFileLoad (S3_Bucket, S3_Key);`.
 - The folder names are the `ARCHIVE_FOLDER` and `ERROR_FOLDER` settings (defaults `Archive`, `Error`). With
   `ARCHIVE_BY_YEAR = true` a loaded file goes to `Archive/<year>/`.
 - The reason for a rejection is in `ComplianceFileLoad.Quarantine_Rsn_Cd` / `Error_Txt` and in the email.
@@ -189,7 +183,6 @@ wants to hold the load until the files are clean.
 |---|---|---|
 | File name | `FILE_NAME` | Matches exactly one `Src_File_Nm_Tmplt`; version, report dates and `{TS}` are valid; the file is in that config's inbound folder |
 | Batch | `BATCH` | A batch exists for the table, source, run type and report dates, and is open (or has an approved override) |
-| Duplicate | `DUPLICATE` | The same file name was not loaded before (skipped with `load_duplicate = yes`) |
 | Encoding | `ENCODING` | The file is valid `FILE_ENCODING`; the first bad line is named |
 | Structure | `MALFORMED`, `BLANK_LINE` | Quoting is well formed; no blank lines inside the file (blank lines at the end are ignored) |
 | Header | `HEADER` | Present when `Src_File_Has_Hdr_Ind = 1`; the expected number of fields (see `COLUMN_COUNT`); the names, with a `HEADER_NAMES` row |

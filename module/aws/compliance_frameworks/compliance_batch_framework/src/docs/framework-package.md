@@ -60,7 +60,6 @@ The environment variable is `FRAMEWORK_<NAME>`; the job argument is `--set <NAME
 | `AWS_REGION` | `us-east-1` | |
 | `BUSINESS_TZ` | `America/Chicago` | Run date, `Req_Dt_Key`, SLA hold. (Was `Business_Tz` on the crosswalk.) |
 | `OBJECT_STORE`, `LOCAL_STORE_ROOT` | `s3`, `./.local_store` | `local` for development. |
-| `LOAD_DUPLICATE` | `false` | `yes` loads a file whose name was already loaded; otherwise it is rejected with `FILE_REJECTED_DUPLICATE`. |
 | `ARCHIVE_FOLDER` / `ERROR_FOLDER` | `Archive` / `Error` | Subfolders of the inbound folder that processed and rejected files move to. (Replaces `QUARANTINE_URI`, the per-config archive path and `S3_Quarantine_Path`.) |
 | `CONTROL_REPORT_FOLDER` / `ERROR_LOG_FOLDER` | `ControlReport` / `ErrorLog` | Subfolders of the inbound folder for the control report of each FILE_LOAD run and for the error detail file of each rejected file. `WRITE_CONTROL_REPORT` / `WRITE_ERROR_FILE` (`true`) switch them off. |
 | `FILENAME_CASE_SENSITIVE` | `true` | **Q-03** |

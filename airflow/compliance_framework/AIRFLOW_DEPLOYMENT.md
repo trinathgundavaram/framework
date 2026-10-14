@@ -117,7 +117,6 @@ as the Variable's value (Admin → Variables) and replace the `REPLACE_WITH_...`
   "schedule_interval": "*/15 * * * *",
   "email_recipient": "compliance-dev@example.com",
   "project": "CMS_UNIVERSE",
-  "load_duplicate": "no",
   "settings": {"FILE_STORE": "nas", "ARCHIVE_FOLDER": "Archive", "ERROR_FOLDER": "Error"},
   "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES", "OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"]
 }
@@ -149,8 +148,8 @@ Keys by step:
 | Step | Scope keys | Settings worth setting |
 |---|---|---|
 | `BATCH_CREATION` | `project` (required). When batches are due and their report dates come from the metadata (`Batch_Schedule_Sql_Txt`, `Rpt_Dt_Sql_Txt`; below). Optional for one run: `run_type`, `table`, `period`, `lookback_days`, `lookback_weeks` | — |
-| `FILE_CHECK` | `project` (leave out for every project), `load_duplicate`, the NAS connection as for `FILE_LOAD` | `CHECK_CONTENT` and the file settings of `FILE_LOAD`; which checks a file gets is in `ComplianceFileCheckConfig` |
-| `FILE_LOAD` | `project` (leave out for every project), `load_duplicate` (`yes` / `no`, default `no`) | `FILE_STORE` (`nas`), `ARCHIVE_FOLDER`, `ERROR_FOLDER`, `CONTROL_REPORT_FOLDER`, `ERROR_LOG_FOLDER`, `NAS_MIN_AGE_SECONDS`; for large files `INSERT_BATCH_ROWS` (2000), `INSERT_BATCH_BYTES` (500000), `LOAD_ENGINE` (`BATCH`, or `FASTLOAD`), `CHECK_ON_LOAD` (`false`) — see "Large files" |
+| `FILE_CHECK` | `project` (leave out for every project), the NAS connection as for `FILE_LOAD` | `CHECK_CONTENT` and the file settings of `FILE_LOAD`; which checks a file gets is in `ComplianceFileCheckConfig` |
+| `FILE_LOAD` | `project` (leave out for every project) | `FILE_STORE` (`nas`), `ARCHIVE_FOLDER`, `ERROR_FOLDER`, `CONTROL_REPORT_FOLDER`, `ERROR_LOG_FOLDER`, `NAS_MIN_AGE_SECONDS`; for large files `INSERT_BATCH_ROWS` (2000), `INSERT_BATCH_BYTES` (500000), `LOAD_ENGINE` (`BATCH`, or `FASTLOAD`), `CHECK_ON_LOAD` (`false`) — see "Large files" |
 | `FILE_RULES` | `project`; `gre` (the GRE's own Airflow Variable, as it is: `connection_type`, `connection_id`, `environment`, `meta_db`, `meta_connection`, `project_name`, `run_params`, `text_params`, `extra_filters`, `log_level`, `max_parallel_rules`; plus `package_dir`, the folder holding the GRE's `run_rules.py`, default `<dags>/rules_engine`) | `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `FILE_RULES_MODE` |
 | `OVERRIDE_DECISIONS` | `project` | — |
 | `BATCH_CLOSE` | `project`, `table`, `run_type` | — |
@@ -167,11 +166,11 @@ date or timestamp used as "now", for a missed day), `settings` and `gre`.
   safe (locks, below).
 - **`OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE`** — the generic DAG. Its `module` parameter names the step
   and the other parameters are that step's (`project`, `run_type`, `period`, `table`, `lookback_days`,
-  `lookback_weeks`, `load_duplicate`, `as_of`). A parameter the module does not take is refused. Its
+  `lookback_weeks`, `as_of`). A parameter the module does not take is refused. Its
   Variable holds the connections, `meta_db` and the settings of every step; nothing about a step is
   fixed in it. Examples:
   - `{"module": "BATCH_CREATION", "project": "CMS_UNIVERSE", "run_type": "MNT", "period": "PREV_CALENDAR_MONTH"}`
-  - `{"module": "FILE_LOAD", "project": "CMS_UNIVERSE", "load_duplicate": "yes"}`
+  - `{"module": "FILE_LOAD", "project": "CMS_UNIVERSE"}`
   - `{"module": "FILE_RULES"}`, `{"module": "BATCH_CLOSE", "project": "CMS_UNIVERSE"}`, `{"module": "NOTIFY"}`
 - **`OSSTD_CORE_CMS_COMPLIANCE_ADMIN`** — `validate-config`, `health`, `test-connection`, `show-config`,
   `locks`, `release-lock`, `close-batch`:
@@ -199,27 +198,19 @@ A path with its own server uses that server with the NAS Connection's login. `$e
 | Outcome | Moves to |
 |---|---|
 | Loaded to core | `<inbound folder>\Archive\` |
-| Not loaded: unknown name, no batch or a closed batch, wrong column count, bad characters, an empty file where one is not allowed, a name already loaded (unless `load_duplicate` = `yes`) | `<inbound folder>\Error\` |
+| Not loaded: unknown name, no batch or a closed batch, wrong column count, bad characters, an empty file where one is not allowed | `<inbound folder>\Error\` |
 | Technical failure | stays in place and is retried by the next sweep |
 
-- **Duplicate file names (`LOAD_DUPLICATE`).** A file whose name was already loaded is rejected by
-  default (`FILE_REJECTED_DUPLICATE`, moved to `Error`). With `LOAD_DUPLICATE` = `yes` it is loaded like
-  any other file: while the batch is open it replaces the batch's data; a closed batch still needs the
-  usual override. A name whose earlier delivery was rejected can always be delivered again.
-  Set it in `compliance_file_load_config_var` (`"load_duplicate": "yes"`), or for one trigger of the
-  file-load or the generic DAG with `{"load_duplicate": "yes"}`.
-- **Delivering a file again.** Every delivery is one row of `ComplianceFileLoad`, recognised by its location,
-  name, size and last-modified time. A file that was not loaded (`QUARANTINED`: rejected before reaching core,
-  moved to `Error`, with its reason and error log; or `RULES_FAILED`) is processed again in full when it is put
-  back in the inbound folder, for example after the configuration was fixed; it keeps its `Load_ID`. A delivery
-  that was already loaded (`PROMOTED` / `SUPERSEDED`) is not loaded twice: if it shows up again (a move to
-  `Archive` that failed, a second run over the same folder) it is ignored (`REPLAY_IGNORED`, audit event
-  `FILE_EVENT_REPLAY_IGNORED`) and moved to `Archive`. To load the same data again on purpose, deliver it as a new
-  file (a new time stamp in the name) or use `load_duplicate`.
+- **Every pickup is a new load.** Each time FILE_LOAD finds a file in the inbound folder it gets a new row in
+  `ComplianceFileLoad` (a new `Load_ID`) and is processed from the start, whatever happened to a file of the same
+  name before: the same name and path may come back with updated data, after a rejection or after a load. For an
+  open batch it replaces the batch's data; a closed batch still needs the usual override. Earlier rows stay as
+  history. A load of the same file left unfinished by a run that stopped is closed as `FAILED_TECHNICAL`.
 - There is no quarantine path and no archive path to configure. The subfolders are created when first
   needed and are never swept. Their names are the `ARCHIVE_FOLDER` / `ERROR_FOLDER` settings; with
   `ARCHIVE_BY_YEAR = true` a loaded file goes to `Archive/<year>/`.
-- A file moved into `Archive` / `Error` replaces one of the same name already there.
+- A file moved into `Archive` / `Error` never replaces one already there: the name gets `_1`, `_2`, ... before
+  the extension (`X_1.txt`); its error log follows (`ErrorLog/X_1.txt.errors.txt`).
 - **Files still being copied:** a file changed in the last `NAS_MIN_AGE_SECONDS` (default 120) is left
   for the next sweep, so a half-written file is not loaded. The check compares the file's modified time
   on the NAS with the worker's clock.
@@ -285,7 +276,6 @@ wants to hold the load until the files are clean.
 |---|---|---|
 | File name | `FILE_NAME` | Matches exactly one `Src_File_Nm_Tmplt`; version, report dates and `{TS}` are valid; the file is in that config's inbound folder |
 | Batch | `BATCH` | A batch exists for the table, source, run type and report dates, and is open (or has an approved override) |
-| Duplicate | `DUPLICATE` | The same file name was not loaded before (skipped with `load_duplicate = yes`) |
 | Encoding | `ENCODING` | The file is valid `FILE_ENCODING`; the first bad line is named |
 | Structure | `MALFORMED`, `BLANK_LINE` | Quoting is well formed; no blank lines inside the file (blank lines at the end are ignored) |
 | Header | `HEADER` | Present when `Src_File_Has_Hdr_Ind = 1`; the expected number of fields (see `COLUMN_COUNT`); the names, with a `HEADER_NAMES` row |

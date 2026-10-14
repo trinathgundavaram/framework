@@ -31,7 +31,7 @@ from .settings import Settings
 log = logging.getLogger(__name__)
 
 TERMINAL_LOAD_STATS = {"QUARANTINED", "RULES_FAILED", "PROMOTED", "SUPERSEDED"}
-ERROR_LOAD_STATS = {"QUARANTINED", "RULES_FAILED"}
+UNFINISHED_LOAD_STATS = ("RECEIVED", "STAGING", "STAGED")
 
 
 class Action(str, Enum):
@@ -101,7 +101,6 @@ class PathIngestSummary:
     promoted: int = 0
     quarantined: int = 0
     rejected: int = 0
-    replayed: int = 0
     other: int = 0
     skipped: int = 0
     locations: list[str] = field(default_factory=list)
@@ -117,8 +116,6 @@ class PathIngestSummary:
             self.quarantined += 1
         elif outcome.result in REJECTED_RESULTS:
             self.rejected += 1
-        elif outcome.result == "REPLAY_IGNORED":
-            self.replayed += 1
         else:
             self.other += 1
 
@@ -155,20 +152,12 @@ class IngestPipeline:
 
     def _process_object(self, bucket: str, key: str, version_id: Optional[str]) -> IngestOutcome:
         info = self.store.head(bucket, key, version_id)
-        load, is_new = self._register(info)
-        if not is_new:
-            if load["load_stat"] in TERMINAL_LOAD_STATS and load["load_stat"] not in ERROR_LOAD_STATS:
-                return self._replay(load, info)
-            if load["btch_id"]:
-                if not db.try_lock(self.conn, db.batch_key(load["btch_id"])):
-                    return IngestOutcome(load["load_id"], "IN_PROGRESS", message="another process holds the batch lock")
-                db.unlock(self.conn, db.batch_key(load["btch_id"]))
-            log.info("processing load %s again (it was %s)", load["load_id"], load["load_stat"])
-        self._handled.append(load["load_id"])
+        load_id = self._register(info)
+        self._handled.append(load_id)
         try:
-            return self._process(load["load_id"], info)
+            return self._process(load_id, info)
         except Exception as e:
-            self._mark_technical_failure(load["load_id"], e)
+            self._mark_technical_failure(load_id, e)
             raise
 
     def process_path(self, bucket: Optional[str] = None, prefix: Optional[str] = None,
@@ -261,32 +250,23 @@ class IngestPipeline:
                                           WHERE Load_Stat='QUARANTINED' GROUP BY Quarantine_Rsn_Cd ORDER BY n DESC"""),
         }
 
-    def _register(self, info: ObjectInfo) -> tuple[dict, bool]:
+    def _register(self, info: ObjectInfo) -> int:
+        """A new load row for this pickup of the object.
+
+        Every pickup is a new delivery, whatever happened to the object before. A load of the same object left
+        unfinished (a run that stopped) is closed as FAILED_TECHNICAL.
+        """
+        now = self.clock.now()
         with self.conn.transaction():
-            row = self.conn.execute(
+            self.conn.execute(
+                """UPDATE ComplianceFileLoad SET Load_Stat='FAILED_TECHNICAL', Error_Txt=%s, Updated_Dtts=%s
+                     WHERE S3_Bucket=%s AND S3_Key=%s AND Load_Stat = ANY(%s)""",
+                ("not finished; the file was picked up again", now, info.bucket, info.key, list(UNFINISHED_LOAD_STATS)))
+            return self.conn.execute(
                 """INSERT INTO ComplianceFileLoad (S3_Bucket, S3_Key, S3_Version_Id, S3_ETag, File_Size_Byte,
                                                   Load_Stat, Created_Dtts, Updated_Dtts)
-                   VALUES (%s,%s,%s,%s,%s,'RECEIVED',%s,%s)
-                   ON CONFLICT (S3_Bucket, S3_Key, COALESCE(S3_Version_Id, S3_ETag)) DO NOTHING
-                   RETURNING *""",
-                (info.bucket, info.key, info.version_id, info.etag, info.size, self.clock.now(),
-                 self.clock.now())).fetchone()
-            if row:
-                return row, True
-            row = self.conn.execute(
-                """SELECT * FROM ComplianceFileLoad WHERE S3_Bucket=%s AND S3_Key=%s
-                      AND COALESCE(S3_Version_Id, S3_ETag) = COALESCE(%s, %s)""",
-                (info.bucket, info.key, info.version_id, info.etag)).fetchone()
-            return row, False
-
-    def _replay(self, load: dict, info: ObjectInfo) -> IngestOutcome:
-        with self.conn.transaction():
-            self.logger.audit("FILE_EVENT_REPLAY_IGNORED", load_id=load["load_id"], req_id=load["req_id"],
-                              btch_id=load["btch_id"], file_ref=self.store.uri(info.bucket, info.key),
-                              description=f"load already {load['load_stat']}")
-        if self.store.exists(info.bucket, info.key):
-            self._archive(info, load["load_id"], rejected=load["load_stat"] in ERROR_LOAD_STATS)
-        return IngestOutcome(load["load_id"], "REPLAY_IGNORED", req_id=load["req_id"])
+                   VALUES (%s,%s,%s,%s,%s,'RECEIVED',%s,%s) RETURNING Load_ID""",
+                (info.bucket, info.key, info.version_id, info.etag, info.size, now, now)).fetchone()["load_id"]
 
     def _process(self, load_id: int, info: ObjectInfo) -> IngestOutcome:
         name = basename(info.key)
@@ -300,14 +280,6 @@ class IngestPipeline:
         if info.bucket != bucket or dirname(info.key) != prefix:
             return self._quarantine(load_id, info, "FILE_REJECTED_UNPARSEABLE",
                                     f"{name} matched Cfg_ID {cfg.cfg_id} but is not in its inbound location", cfg)
-        if not self.settings.load_duplicate:
-            loaded = self.conn.execute(
-                """SELECT Load_ID FROM ComplianceFileLoad WHERE S3_Bucket=%s AND S3_Key=%s AND Load_ID<>%s
-                  AND Load_Stat IN ('PROMOTED','SUPERSEDED') ORDER BY Load_ID DESC LIMIT 1""", (info.bucket, info.key, load_id)).fetchone()
-            if loaded:
-                return self._quarantine(load_id, info, "FILE_REJECTED_DUPLICATE",
-                                        f"{name} was already loaded (load {loaded['load_id']}); "
-                                        "LOAD_DUPLICATE=yes loads it again", cfg)
         run_ty = code(m.run_ty)
         batch, override = self._select_batch(cfg, run_ty, m.rpt_start, m.rpt_end)
         if batch is None:

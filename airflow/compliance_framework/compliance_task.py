@@ -99,8 +99,6 @@ def resolve_config(variable_key: str, overrides: dict = None, scope_index: int =
     settings = {str(k).upper(): ",".join(map(str, v)) if isinstance(v, (list, tuple)) else v
                 for k, v in merged["settings"].items()}
     settings["METADATA_SCHEMA"] = config["meta_db"]
-    if config.get("load_duplicate") not in (None, ""):
-        settings["LOAD_DUPLICATE"] = config["load_duplicate"]
     environment = config.get("load_env") or config.get("environment") or config["gre"].get("environment")
     if environment:
         settings.setdefault("ENVIRONMENT", environment)
