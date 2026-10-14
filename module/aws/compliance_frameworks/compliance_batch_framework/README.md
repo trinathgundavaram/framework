@@ -121,6 +121,14 @@ Every file leaves the inbound folder once it has been processed, into a subfolde
   Set it for the environment with `load_duplicate = true` in `glue/env-config/us-east-1/<env>.tfvars`, for one
   run with `"load_duplicate": "yes"` in the workflow input (`run_workflow.sh ... --load-duplicate yes`), or on
   a Glue run started by hand with `--FRAMEWORK_LOAD_DUPLICATE yes`.
+- **Delivering a file again.** Every delivery is one row of `ComplianceFileLoad`, recognised by its location,
+  name, size and last-modified time. A file that was not loaded (`QUARANTINED`: rejected before reaching core,
+  moved to `Error`, with its reason and error log; or `RULES_FAILED`) is processed again in full when it is put
+  back in the inbound folder, for example after the configuration was fixed; it keeps its `Load_ID`. A delivery
+  that was already loaded (`PROMOTED` / `SUPERSEDED`) is not loaded twice: if it shows up again (a move to
+  `Archive` that failed, a second run over the same location) it is ignored (`REPLAY_IGNORED`, audit event
+  `FILE_EVENT_REPLAY_IGNORED`) and moved to `Archive`. To load the same data again on purpose, deliver it as a new
+  file (a new time stamp in the name) or use `load_duplicate`.
 - There is no quarantine path and no archive path to configure: `s3://bucket/odr/in/X.txt` goes to
   `s3://bucket/odr/in/Archive/X.txt` or `s3://bucket/odr/in/Error/X.txt`. Sweeps are not recursive, so
   the two subfolders are never picked up again.
