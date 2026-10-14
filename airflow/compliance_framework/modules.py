@@ -35,6 +35,7 @@ class ModuleSpec:
 
 
 CODE_PARAMS = ("project", "run_type", "table")
+NOT_LOADED = ("QUARANTINED", "RULES_FAILED", "REJECTED_CLOSED")
 
 
 def normalize(name: str) -> str:
@@ -79,6 +80,7 @@ def _batch_creation(app, p: dict) -> ModuleOutcome:
 
 
 def _file_load(app, p: dict) -> ModuleOutcome:
+    """Every file is processed; exit 1 when any of them was not loaded (after all were tried)."""
     share, file, folder, project = p.get("share"), p.get("file"), p.get("folder"), p.get("project")
     if project and (share or file or folder):
         raise ConfigError("FILE_LOAD takes --project (that project's configured folders) or "
@@ -89,11 +91,12 @@ def _file_load(app, p: dict) -> ModuleOutcome:
         if folder:
             raise ConfigError("FILE_LOAD takes --file (one file) or --folder (one folder), not both")
         try:
-            return ModuleOutcome("FILE_LOAD", app.pipeline.process_file(share, file), 0)
+            out = app.pipeline.process_file(share, file)
+            return ModuleOutcome("FILE_LOAD", out, 1 if out.result in NOT_LOADED else 0)
         finally:
             app.pipeline.control_report()
     s = app.pipeline.process_path(share, folder, project)
-    return ModuleOutcome("FILE_LOAD", s, 1 if s.errors else 0)
+    return ModuleOutcome("FILE_LOAD", s, 1 if s.errors or s.quarantined or s.rejected else 0)
 
 
 def _file_check(app, p: dict) -> ModuleOutcome:

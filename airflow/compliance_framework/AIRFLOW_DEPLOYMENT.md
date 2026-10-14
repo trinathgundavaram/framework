@@ -138,7 +138,7 @@ Keys every Variable can have:
 | `snow_assignment_group` | ServiceNow assignment group of the incident opened when a task fails (default `D&AE - EDE Govt Compliance`) |
 | `owner`, `tags` | DAG owner (default `oss`) and tags |
 | `settings` | Framework settings by name. Common: `BUSINESS_TZ`, `LOCK_TIMEOUT_SECONDS` (300), `LOCK_TTL_MINUTES` (240); plus the step's own, below |
-| `fail_on_problems` | `true` / `false`: whether "completed with problems" (exit code 1) fails the task. Default: true, except `FILE_LOAD` and `OVERRIDE_DECISIONS` (a bad file or override is audited and emailed, not a task failure) |
+| `fail_on_problems` | `true` / `false`: whether "completed with problems" (exit code 1) fails the task. Default: true, except `OVERRIDE_DECISIONS`. `FILE_LOAD` processes every file first and then fails the task when any file was not loaded (rejected, or a technical failure); the DAGs it triggers are then not started |
 | `runs` | Optional list of scopes: one task per entry, each with its own `project` / `run_type` / `period` / ... (and `settings`, `gre`). Without it the DAG has one task, scoped by the Variable's own keys |
 | `log_level` | `INFO` (default), `DEBUG`, ... |
 | `execution_timeout_minutes` | Time limit of the step's task. Default: `BATCH_CREATION` and `FILE_CHECK` 60, `FILE_LOAD` and `FILE_RULES` 120, the others 30 |
@@ -586,7 +586,11 @@ Rules:
 - The rows need no order. Where a column sits in the table decides its place: derived columns can be at the
   start, at the end or between file columns, and the file's values fill the remaining columns left to right.
 - A row for one table wins over the project's `*` row for the same column.
-- **Columns the file does not have (fillers).** A `HEADER_NAMES` row in `ComplianceFileCheckConfig` is the list
+- **How the file's fields reach the table.** The columns in `ComplianceTargetColumnConfig` (and `Btch_ID`) are
+  filled by the framework wherever they are in the table. The file's fields fill the other columns in table order,
+  from the first one on: the file and the table must be in the same order from there. Columns after the file's last
+  field are loaded as NULL.
+- **Columns the file does not have (fillers).** A `HEADER_NAMES` row is the list
   of columns the file has, in file order; the file must have exactly that many fields. When every name in the
   list is a column of the staging table (upper and lower case do not matter), each field goes to the column
   of its name. Otherwise the fields fill the staging columns left to right. Without `HEADER_NAMES`, a

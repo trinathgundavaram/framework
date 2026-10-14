@@ -18,7 +18,7 @@ variable "step_settings" {
   default = {
     BATCH_CREATION     = { capacity = 0.0625, timeout_minutes = 60, fail_on_problems = true }
     FILE_CHECK         = { capacity = 1, timeout_minutes = 60, fail_on_problems = true }
-    FILE_LOAD          = { capacity = 1, timeout_minutes = 120, fail_on_problems = false }
+    FILE_LOAD          = { capacity = 1, timeout_minutes = 120, fail_on_problems = true }
     FILE_RULES         = { capacity = 0.0625, timeout_minutes = 120, fail_on_problems = true }
     OVERRIDE_DECISIONS = { capacity = 0.0625, timeout_minutes = 30, fail_on_problems = false }
     BATCH_CLOSE        = { capacity = 0.0625, timeout_minutes = 30, fail_on_problems = true }

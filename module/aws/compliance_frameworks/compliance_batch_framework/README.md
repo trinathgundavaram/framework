@@ -296,6 +296,8 @@ file again adds no new row.
   default. A project that wants it puts it in front of `FILE_LOAD` in its schedule's `steps`
   (`["FILE_CHECK", "FILE_LOAD", ...]`): the workflow stops when the check fails, unless
   `step_settings.FILE_CHECK.fail_on_problems` is `false`. One run by hand: `src/run_workflow.sh dev ODR FILE_CHECK`.
+  `FILE_LOAD` processes every file first and then fails its step when any file was not loaded, which stops the
+  workflow (`step_settings.FILE_LOAD.fail_on_problems`, default `true`).
 
 ## File rules run after the load
 
@@ -470,7 +472,11 @@ Rules:
 - The rows need no order. Where a column sits in the table decides its place: derived columns can be at the
   start, at the end or between file columns, and the file's values fill the remaining columns left to right.
 - A row for one table wins over the project's `*` row for the same column.
-- **Columns the file does not have (fillers).** A `HEADER_NAMES` row in `ComplianceFileCheckConfig` is the list
+- **How the file's fields reach the table.** The columns in `ComplianceTargetColumnConfig` (and `Btch_ID`) are
+  filled by the framework wherever they are in the table. The file's fields fill the other columns in table order,
+  from the first one on: the file and the table must be in the same order from there. Columns after the file's last
+  field are loaded as NULL.
+- **Columns the file does not have (fillers).** A `HEADER_NAMES` row is the list
   of columns the file has, in file order; the file must have exactly that many fields. When every name in the
   list is a column of the staging table (upper and lower case do not matter), each field goes to the column
   of its name. Otherwise the fields fill the staging columns left to right. Without `HEADER_NAMES`, a

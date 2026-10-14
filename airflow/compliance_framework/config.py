@@ -504,11 +504,13 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
         except ConfigError as e:
             add("FILE_CHECK_CONFIG", str(e))
             continue
-        names = header_columns(c, opts)
-        if opts.column_count and names and opts.column_count != len(names) + (1 if opts.record_types else 0):
-            add("FILE_CHECK_CONFIG", f"file config {c.cfg_id} ({c.project_cd}/{c.table_nm}/{c.src_id}): COLUMN_COUNT "
-                                     f"{opts.column_count} does not match the {len(names)} HEADER_NAMES"
-                                     + (" plus the record type" if opts.record_types else ""))
+        extra = 1 if opts.record_types else 0
+        counts = {k: v for k, v in (("COLUMN_COUNT", opts.column_count),
+                                    ("HEADER_NAMES", len(header_columns(c, opts)) + extra if opts.header else None)) if v}
+        if len(set(counts.values())) > 1:
+            add("FILE_CHECK_CONFIG", f"file config {c.cfg_id} ({c.project_cd}/{c.table_nm}/{c.src_id}): the field counts "
+                                     "do not agree: " + ", ".join(f"{k} {v}" for k, v in counts.items())
+                                     + (" (record type included)" if extra else ""))
     for k in checks:
         if k.check_cd not in CHECKS:
             add("FILE_CHECK_CONFIG", f"{k.label}: unknown Check_Cd; accepted: {', '.join(CHECKS)}")
