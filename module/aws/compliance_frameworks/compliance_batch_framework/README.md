@@ -122,7 +122,7 @@ Every file leaves the inbound folder once it has been processed, into a subfolde
 - There is no quarantine path and no archive path to configure: `s3://bucket/odr/in/X.txt` goes to
   `s3://bucket/odr/in/Archive/X.txt` or `s3://bucket/odr/in/Error/X.txt`. Sweeps are not recursive, so
   the two subfolders are never picked up again. A name already there gets `_1`, `_2`, ... before the extension
-  (`X_1.txt`), and its error log follows (`ErrorLog/X_1.txt.errors.txt`); nothing is replaced.
+  (`X_1.txt`), and its error log follows (`ErrorLog/X_1_errors.txt`); nothing is replaced.
   The schema keeps every pickup of an object (index `ix_compliancefileload_object`, not unique); on an existing
   database: `DROP INDEX uq_compliancefileload_object; CREATE INDEX ix_compliancefileload_object ON
   ComplianceFileLoad (S3_Bucket, S3_Key);`.
@@ -267,14 +267,14 @@ rejected as `FILE_CONTENT_CHECK_FAILED`, with every problem in its error log). E
 A run that covers several inbound folders writes one report in each. A run that handled no file writes none.
 
 The detail of a rejection (the check, the line number, the message and the record) is in its own file,
-`<inbound folder>/ErrorLog/<file name>.errors.txt`, written by `FILE_LOAD` and by `FILE_CHECK`. The rejected file itself
+`<inbound folder>/ErrorLog/<file name without extension>_errors.txt` (`X.txt` -> `X_errors.txt`), written by `FILE_LOAD` and by `FILE_CHECK`. The rejected file itself
 still moves to `Error/`.
 
 The two folder names are the settings `CONTROL_REPORT_FOLDER` (default `ControlReport`) and `ERROR_LOG_FOLDER`
 (default `ErrorLog`); `WRITE_CONTROL_REPORT = false` and `WRITE_ERROR_FILE = false` switch them off.
 
 **Error file and failed files.** For every file that fails, `FILE_CHECK` writes
-`<inbound folder>/ErrorLog/<file name>.errors.txt` (settings `WRITE_ERROR_FILE`, on by default, and
+`<inbound folder>/ErrorLog/<file name without extension>_errors.txt` (`X.txt` -> `X_errors.txt`) (settings `WRITE_ERROR_FILE`, on by default, and
 `ERROR_LOG_FOLDER`): pipe-delimited,
 one line per problem, with the check, the line number, the message and **the record itself**
 (`File_Name|Check_Cd|Line_No|Message|Record`). With `CHECK_MOVE_FAILED = true` the failed file is also moved

@@ -69,8 +69,7 @@ def numbered(path: str, taken: Callable[[str], bool]) -> str:
     if not taken(path):
         return path
     folder, name = dirname(path), basename(path)
-    log = ".errors.txt" if name.endswith(".errors.txt") else ""
-    ext = os.path.splitext(name[:len(name) - len(log)])[1] + log
+    ext = "_errors.txt" if name.endswith("_errors.txt") else os.path.splitext(name)[1]
     stem = name[:len(name) - len(ext)] if ext else name
     n = 1
     while taken(f"{folder}{stem}_{n}{ext}"):

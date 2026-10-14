@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import datetime
 from typing import Optional
@@ -48,14 +49,14 @@ def _local(value, tz: str) -> str:
 
 
 def write_error_log(store, settings, share: str, path: str, rows: list) -> Optional[str]:
-    """Write <folder>/<ERROR_LOG_FOLDER>/<file name>.errors.txt: one (check, line, message, record) per row.
+    """Write <folder>/<ERROR_LOG_FOLDER>/<file name without extension>_errors.txt: one (check, line, message, record) per row.
 
     Returns where it was written, or None when error logs are off or the file could not be written.
     """
     if not settings.write_error_file:
         return None
     name = basename(path)
-    target = store.free_path(share, f"{dirname(path)}{settings.error_log_folder}/{name}.errors.txt")
+    target = store.free_path(share, f"{dirname(path)}{settings.error_log_folder}/{os.path.splitext(name)[0]}_errors.txt")
     lines = [ERROR_LOG_HEADER, *("|".join("" if v is None else str(v) for v in (name, *row)) for row in rows)]
     try:
         store.put(share, target, ("\n".join(lines) + "\n").encode(settings.file_encoding, "replace"))

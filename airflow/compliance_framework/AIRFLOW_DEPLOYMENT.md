@@ -210,7 +210,7 @@ A path with its own server uses that server with the NAS Connection's login. `$e
   needed and are never swept. Their names are the `ARCHIVE_FOLDER` / `ERROR_FOLDER` settings; with
   `ARCHIVE_BY_YEAR = true` a loaded file goes to `Archive/<year>/`.
 - A file moved into `Archive` / `Error` never replaces one already there: the name gets `_1`, `_2`, ... before
-  the extension (`X_1.txt`); its error log follows (`ErrorLog/X_1.txt.errors.txt`).
+  the extension (`X_1.txt`); its error log follows (`ErrorLog/X_1_errors.txt`).
 - **Files still being copied:** a file changed in the last `NAS_MIN_AGE_SECONDS` (default 120) is left
   for the next sweep, so a half-written file is not loaded. The check compares the file's modified time
   on the NAS with the worker's clock.
@@ -364,14 +364,14 @@ NAS) and sent to the staging table in batches.
 A run that covers several inbound folders writes one report in each. A run that handled no file writes none.
 
 The detail of a rejection (the check, the line number, the message and the record) is in its own file,
-`<inbound folder>/ErrorLog/<file name>.errors.txt`, written by `FILE_LOAD` and by `FILE_CHECK`. The rejected file itself
+`<inbound folder>/ErrorLog/<file name without extension>_errors.txt` (`X.txt` -> `X_errors.txt`), written by `FILE_LOAD` and by `FILE_CHECK`. The rejected file itself
 still moves to `Error/`.
 
 The two folder names are the settings `CONTROL_REPORT_FOLDER` (default `ControlReport`) and `ERROR_LOG_FOLDER`
 (default `ErrorLog`); `WRITE_CONTROL_REPORT = false` and `WRITE_ERROR_FILE = false` switch them off.
 
 **Error file and failed files.** For every file that fails, `FILE_CHECK` writes
-`<inbound folder>/ErrorLog/<file name>.errors.txt` (settings `WRITE_ERROR_FILE`, on by default, and
+`<inbound folder>/ErrorLog/<file name without extension>_errors.txt` (`X.txt` -> `X_errors.txt`) (settings `WRITE_ERROR_FILE`, on by default, and
 `ERROR_LOG_FOLDER`): pipe-delimited,
 one line per problem, with the check, the line number, the message and **the record itself**
 (`File_Name|Check_Cd|Line_No|Message|Record`). With `CHECK_MOVE_FAILED = true` the failed file is also moved
