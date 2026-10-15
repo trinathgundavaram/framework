@@ -93,18 +93,37 @@ def report_line(conn, load: dict, matcher, tz: str, sources: dict) -> list:
             _local(load["updated_dtts"], tz), None if accepted else business_message(load)]
 
 
-def write_reports(conn, store, settings, clock, load_ids: list, matcher) -> list[str]:
-    """One report per inbound folder for the files this run handled; returns where they were written."""
-    if not settings.write_control_report or not load_ids:
-        return []
+def file_details(conn, load_ids: list, matcher, tz: str) -> list[dict]:
+    """What happened to each file a run handled, for the step report and the control report."""
     sources = {code(r["src_id"]): r["src_nm"] for r in conn.execute(
         "SELECT Src_ID, Src_Nm FROM ComplianceSourceSystem").fetchall()}
-    by_folder: dict = {}
+    out = []
     for load_id in dict.fromkeys(load_ids):
         load = conn.execute("SELECT * FROM ComplianceFileLoad WHERE Load_ID=%s", (load_id,)).fetchone()
-        if load:
-            by_folder.setdefault((load[LOCATION[0]], dirname(load[LOCATION[1]])), []).append(
-                report_line(conn, load, matcher, settings.business_tz, sources))
+        if not load:
+            continue
+        source, name, status, rows_in, rows_loaded, submitted, processed, reason = report_line(conn, load, matcher, tz,
+                                                                                                sources)
+        batch = conn.execute("SELECT Req_Stat FROM ComplianceRequestControl WHERE Req_ID=%s",
+                             (load["req_id"],)).fetchone() if load["req_id"] is not None else None
+        text, _, error_log = str(load["error_txt"] or "").partition("; details in ")
+        out.append({"file": name, "status": status, "source": source, "load_id": load_id, "batch": load["btch_id"],
+                    "batch_status": batch["req_stat"] if batch else None, "rows_in_file": rows_in,
+                    "rows_loaded": rows_loaded, "file_date": submitted, "processed": processed, "reason": reason,
+                    "detail": text or None if status != "ACCEPTED" else None, "error_log": error_log or None,
+                    "share": load[LOCATION[0]], "folder": dirname(load[LOCATION[1]])})
+    return out
+
+
+def write_reports(store, settings, clock, details: list) -> list[str]:
+    """One control report per inbound folder for the files a run handled; returns where they were written."""
+    if not settings.write_control_report or not details:
+        return []
+    by_folder: dict = {}
+    for d in details:
+        by_folder.setdefault((d["share"], d["folder"]), []).append(
+            [d["source"], d["file"], d["status"], d["rows_in_file"], d["rows_loaded"], d["file_date"], d["processed"],
+             d["reason"]])
     stamp = clock.now().astimezone(ZoneInfo(settings.business_tz)).strftime("%Y%m%d_%H%M%S")
     written = []
     for (share, folder), lines in by_folder.items():

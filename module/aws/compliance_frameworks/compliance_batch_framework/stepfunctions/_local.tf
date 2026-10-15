@@ -53,6 +53,7 @@ locals {
       run_type        = try(s.run_type, null)
       period          = try(s.period, null)
       table           = try(s.table, null)
+      table_group     = try(s.table_group, null)
       as_of           = try(s.as_of, null)
       metadata_schema = try(s.metadata_schema, null)
       metadata_db     = try(s.metadata_db, null)
@@ -72,6 +73,7 @@ locals {
         run_type        = s.run_type
         period          = s.period
         table           = s.table
+        table_group     = s.table_group
         as_of           = s.as_of
         metadata_schema = s.metadata_schema
         metadata_db     = s.metadata_db

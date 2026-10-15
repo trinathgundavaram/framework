@@ -17,16 +17,17 @@ from . import db
 from .adapters import FileInfo, FileStore, basename, dirname, parse_uri, sha256_file
 from .audit import EventLogger
 from .batches import get_batch, promoted_load
-from .common import (COMPLETED, EXCEPTION_PENDING, PROMOTED, Clock, FileRejected, RowCountMismatch, btch_id_version, check_transition,
+from .common import (DATA_NOT_PROVIDED, REQUEST_COMPLETE, SOURCE_DATA_READY, SOURCE_DATA_READY_NO_DATA, Clock, FileRejected, RowCountMismatch, btch_id_version, check_transition,
                      code)
 from .config import FileConfig, MatchError, TemplateMatcher
-from .control_report import write_error_log, write_reports
+from .control_report import file_details, write_error_log, write_reports
 from .filecheck import check_content, error_rows, file_columns
 from .db import Connection
 from .filecheck_options import check_options
 from .layout import LoadContext
 from .load import file_layout, raw_line, sanitize_db_error, stage, swap
 from .settings import Settings
+from .scope import Scope
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ class PathIngestSummary:
     locations: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     reports: list[str] = field(default_factory=list)
+    files: list[dict] = field(default_factory=list)
     outcomes: list[IngestOutcome] = field(default_factory=list)
 
     def tally(self, outcome: IngestOutcome) -> None:
@@ -159,52 +161,70 @@ class IngestPipeline:
             raise
 
     def process_path(self, share: Optional[str] = None, folder: Optional[str] = None,
-                     project_cd: Optional[str] = None) -> PathIngestSummary:
-        """Process every file in one folder, a project's folders, or every configured folder."""
-        project_cd = code(project_cd)
+                     scope: Optional[Scope] = None) -> PathIngestSummary:
+        """Process every file of one folder, or of the folders of a scope (a project, a table group or table, a run
+        type), or of every configured folder."""
+        scope = scope or Scope()
+        project_cd = scope.project_cd
         if bool(share) != bool(folder):
             raise ValueError("share and folder must be given together, or both omitted")
-        if project_cd and share:
-            raise ValueError("a project sweep covers that project's configured locations; omit share and folder")
+        if (project_cd or scope.narrowed) and share:
+            raise ValueError("a scoped sweep covers the scope's configured locations; omit share and folder")
         own = None
-        if project_cd:
-            locations, shared, own = self._project_locations(project_cd)
+        if project_cd or scope.narrowed:
+            locations, shared, own = self._scope_locations(scope)
         else:
             locations = [(share, folder if not folder or folder.endswith("/") else folder + "/")] if share \
                 else self._configured_locations()
             shared = set()
         summary = PathIngestSummary(locations=[f"{b}/{p}" for b, p in locations])
-        if project_cd and not locations:
-            summary.errors.append(f"project {project_cd} has no active file config")
+        if (project_cd or scope.narrowed) and not locations:
+            summary.errors.append(f"{scope.label()}: no active file config")
         self._sweep_config = self._load_config()
         self._scope_project = project_cd
         try:
-            self._sweep(locations, summary, shared, own)
+            self._sweep(locations, summary, shared, own, scope)
         finally:
-            summary.reports = self.control_report()
+            summary.reports, summary.files = self.control_report()
             self._sweep_config = self._scope_project = None
         return summary
 
-    def control_report(self) -> list[str]:
-        """Write the control report of the files handled since the last one."""
+    def control_report(self) -> tuple[list[str], list[dict]]:
+        """(control reports written, details of each file) for the files handled since the last call."""
         handled, self._handled = self._handled, []
         try:
-            return write_reports(self.conn, self.store, self.settings, self.clock, handled,
-                                 self._sweep_config or self._load_config())
+            details = file_details(self.conn, handled, self._sweep_config or self._load_config(),
+                                   self.settings.business_tz)
         except Exception as e:  # noqa: BLE001
-            log.warning("could not write the control report: %s", e)
-            return []
+            log.warning("could not read what happened to the files: %s", db.error_text(e))
+            return [], []
+        return write_reports(self.store, self.settings, self.clock, details), details
 
-    def _project_locations(self, project_cd: str) -> tuple[list[tuple[str, str]], set, TemplateMatcher]:
-        """(the project's inbound locations, the ones other projects also use, its own templates)."""
+    def _scope_locations(self, scope: Scope) -> tuple[list[tuple[str, str]], set, TemplateMatcher]:
+        """(the scope's inbound locations, the ones file configs outside the scope also use, the scope's templates)."""
         cfgs = cfgmod.active_file_configs(self.conn, self.settings)
-        mine = [c for c in cfgs if c.project_cd == project_cd]
+        mine = [c for c in cfgs if scope.covers(c.project_cd, c.table_nm)]
         locations = sorted({parse_uri(c.src_file_path) for c in mine})
-        shared = {parse_uri(c.src_file_path) for c in cfgs if c.project_cd != project_cd} & set(locations)
+        shared = {parse_uri(c.src_file_path) for c in cfgs if c not in mine} & set(locations)
         return locations, shared, TemplateMatcher(mine, self.settings.filename_case_sensitive)
 
+    @staticmethod
+    def belongs(name: str, location: tuple, shared: set, own: Optional[TemplateMatcher], scope: Scope) -> bool:
+        """Whether a listed file is the scope's: in a folder shared with other file configs it must fit one of the
+        scope's templates; with a run type, its name must carry that run type. Other files are left in place."""
+        if own is None:
+            return True
+        if location in shared and not own.candidates(name):
+            return False
+        if scope.run_ty:
+            try:
+                return code(own.match(name).run_ty) == scope.run_ty
+            except MatchError:
+                return False
+        return True
+
     def _sweep(self, locations: list[tuple[str, str]], summary: PathIngestSummary, shared: set,
-               own: Optional[TemplateMatcher]) -> None:
+               own: Optional[TemplateMatcher], scope: Scope) -> None:
         for loc_share, loc_folder in locations:
             try:
                 files = self.store.list_files(loc_share, loc_folder)
@@ -212,9 +232,11 @@ class IngestPipeline:
                 log.warning("could not list %s/%s: %s", loc_share, loc_folder, e)
                 summary.errors.append(f"{loc_share}/{loc_folder}: {db.error_text(e)}")
                 continue
+            log.info("FILE_LOAD | %s | %s file(s) found%s", self.store.uri(loc_share, loc_folder), len(files),
+                     ": " + ", ".join(basename(i.path) for i in files[:50]) + (" ..." if len(files) > 50 else "") if files else "")
             for info in files:
                 summary.scanned += 1
-                if (loc_share, loc_folder) in shared and not own.candidates(basename(info.path)):
+                if not self.belongs(basename(info.path), (loc_share, loc_folder), shared, own, scope):
                     summary.skipped += 1
                     continue
                 try:
@@ -366,26 +388,26 @@ class IngestPipeline:
                     return self._quarantine(load_id, info, "FILE_CONTENT_CHECK_FAILED",
                                             f"{len(found)} problem(s); first: {found[0][0]}: {found[0][1]}", cfg, batch,
                                             rows=error_rows(found, details))
+            log.info("FILE_LOAD | %s | load %s | batch %s | %s bytes read", basename(info.path), load_id, batch["btch_id"],
+                     info.size)
             try:
                 staged_rows = stage(self.conn, self.settings, file_path=path, cfg=cfg, layout=layout, ctx=ctx,
                                     opts=opts)
             except FileRejected as e:
                 return self._quarantine(load_id, info, e.event_ty, str(e), cfg, batch, local_path=path)
+        log.info("FILE_LOAD | %s | load %s | %s data row(s) staged into %s.%s", basename(info.path), load_id, staged_rows,
+                 cfg.stg_schema_nm, cfg.stg_table_nm)
         with self.conn.transaction():
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, Updated_Dtts=%s "
                               "WHERE Load_ID=%s", (staged_rows, self.clock.now(), load_id))
 
-        failure = None
-        if staged_rows == 0 and not cfg.allow_zero_records:
-            failure = ("FILE_ZERO_RECORDS_REJECTED", "file has no data rows")
-        result = self._resolve(load_id, info, cfg, req_id, failure)
+        result = self._resolve(load_id, info, cfg, req_id, staged_rows)
         self._archive(info, load_id, rejected=result.result not in PROMOTED_RESULTS)
         return result
 
-    def _resolve(self, load_id, info, cfg, req_id, failure: Optional[tuple[str, str]]) -> IngestOutcome:
-        """Promote the staged file, or record why it is not promoted; `failure` = (event, detail) of a file that
-        failed after staging (today: an empty file that is not allowed)."""
-        failure_event, detail = failure or (None, None)
+    def _resolve(self, load_id, info, cfg, req_id, rows: int) -> IngestOutcome:
+        """Promote the staged file (an empty file is the source's delivery too: it had no data), or reject it when
+        its batch is closed without an override."""
         now = self.clock.now()
         ref = self.store.uri(info.share, info.path)
         today = self.clock.today(self.settings.business_tz)
@@ -394,7 +416,7 @@ class IngestPipeline:
             closed = b["batch_close_ind"] == 1
             has_data = self._has_data(b)
             ovrd = self.active_override(b, required_override_ty(has_data), today) if closed else None
-            d = decide(ResolutionInput(batch_closed=closed, has_data=has_data, file_passed=failure is None,
+            d = decide(ResolutionInput(batch_closed=closed, has_data=has_data, file_passed=True,
                                        override_ty=code(ovrd["override_ty"]) if ovrd else None))
             ctx = dict(project_cd=b["project_cd"], table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"],
                        req_id=req_id, btch_id=b["btch_id"], load_id=load_id, file_ref=ref)
@@ -403,7 +425,10 @@ class IngestPipeline:
                                     detail=f"{ref} rule={d.rule}")
 
             if d.action in (Action.PROMOTE, Action.PROMOTE_REPLACE, Action.PROMOTE_LATE, Action.PROMOTE_CORRECTION):
-                to_stat = COMPLETED if closed else PROMOTED
+                if closed:
+                    to_stat = REQUEST_COMPLETE if rows else DATA_NOT_PROVIDED
+                else:
+                    to_stat = SOURCE_DATA_READY if rows else SOURCE_DATA_READY_NO_DATA
                 check_transition(b["req_stat"], to_stat)
                 staged_cnt = self.conn.execute("SELECT Stg_Rcd_Cnt FROM ComplianceFileLoad WHERE Load_ID=%s",
                                                (load_id,)).fetchone()["stg_rcd_cnt"]
@@ -412,8 +437,8 @@ class IngestPipeline:
                     self._supersede(prior["load_id"])
                 res = swap(self.conn, cfg, *self._load, staged_cnt)
                 self.conn.execute(
-                    """UPDATE ComplianceRequestControl SET Resolution_Ty='NEW_FILE', Req_Stat=%s, Reuse_Btch_ID=NULL,
-                              Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, now, req_id))
+                    """UPDATE ComplianceRequestControl SET Resolution_Ty=%s, Req_Stat=%s, Reuse_Btch_ID=NULL,
+                              Updated_Dtts=%s WHERE Req_ID=%s""", ("NEW_FILE" if rows else "NO_DATA", to_stat, now, req_id))
                 self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='PROMOTED', Rules_Stat='NOT_RUN', Updated_Dtts=%s "
                                   "WHERE Load_ID=%s", (now, load_id))
                 if d.action == Action.PROMOTE_REPLACE:
@@ -427,26 +452,12 @@ class IngestPipeline:
                                   Action.PROMOTE_CORRECTION: "CORRECTION_PROMOTED"}.get(d.action, "FILE_PROMOTED")
                 self.logger.batch_event(promoted_event, req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
                                         ovrd_id=out.ovrd_id, detail=f"appended={res.appended_cnt} deleted={res.deleted_cnt}"
-                                               + (f"; {detail}" if detail else ""))
+                                               + ("" if rows else "; the source had no data"))
+                log.info("FILE_LOAD | load %s | %s row(s) loaded into %s.%s, %s earlier row(s) of the batch removed | "
+                         "batch %s is %s", load_id, res.appended_cnt, cfg.core_schema_nm, cfg.core_table_nm, res.deleted_cnt,
+                         b["btch_id"], to_stat)
                 out.result = {Action.PROMOTE_LATE: "LATE_PROMOTED",
                               Action.PROMOTE_CORRECTION: "CORRECTION_PROMOTED"}.get(d.action, "PROMOTED")
-
-            elif d.action in (Action.EXCEPTION_NO_DATA, Action.EXCEPTION_KEEP_PRIOR):
-                check_transition(b["req_stat"], EXCEPTION_PENDING)
-                self.conn.execute("UPDATE ComplianceRequestControl SET Req_Stat=%s, Updated_Dtts=%s WHERE Req_ID=%s",
-                                  (EXCEPTION_PENDING, now, req_id))
-                self._rules_failed(load_id, detail, now)
-                self.logger.batch_event("FILE_RULES_FAILED", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
-                                        detail=detail)
-                self.logger.audit(failure_event, description=detail, **ctx)
-                out.result, out.event_ty = "RULES_FAILED", failure_event
-
-            elif d.action == Action.REJECT_RULES:
-                self._rules_failed(load_id, detail, now)
-                self.logger.batch_event("FILE_RULES_FAILED", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
-                                        detail=detail)
-                self.logger.audit(failure_event, description=f"closed batch: {detail}", **ctx)
-                out.result, out.event_ty = "RULES_FAILED", failure_event
 
             else:
                 self._rules_failed(load_id, "batch is closed and has no approved override", now)
@@ -515,7 +526,8 @@ class IngestPipeline:
         if not rejected and self.settings.archive_by_year:
             folder = f"{folder}/{self.clock.today(self.settings.business_tz):%Y}"
         try:
-            self.store.archive(info.share, info.path, folder)
+            moved = self.store.archive(info.share, info.path, folder)
+            log.info("FILE_LOAD | %s | load %s | moved to %s", basename(info.path), load_id, self.store.uri(info.share, moved))
         except Exception as e:  # noqa: BLE001
             log.warning("moving %s to %s/ failed: %s", info.path, folder, e)
             with self.conn.transaction():

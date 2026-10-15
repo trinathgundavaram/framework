@@ -203,7 +203,8 @@ class ScheduleSummary:
 
 def create_batches(conn: psycopg.Connection, clock: Clock, settings: Settings, *, project_cd: str, run_ty: Optional[str] = None,
                    period: Optional[str] = None, table_nm: Optional[str] = None, period_file: Optional[str] = None,
-                   lookback_days: Optional[int] = None, lookback_weeks: Optional[int] = None) -> ScheduleSummary:
+                   lookback_days: Optional[int] = None, lookback_weeks: Optional[int] = None,
+                   tables: Optional[tuple] = None) -> ScheduleSummary:
     """The scheduled batches due on the run date for the project's effective crosswalk rows.
 
     The run type's Batch_Schedule_Sql_Txt says whether batches are due on the run date; the crosswalk row's
@@ -221,8 +222,8 @@ def create_batches(conn: psycopg.Connection, clock: Clock, settings: Settings, *
     logger = EventLogger(conn, clock)
     rows = [x for x in cfg.xwalk_rows(conn, project_cd=project_cd, table_nm=table_nm, run_ty=run_ty)
             if x.effective_on(s.run_date) and x.run_ty in run_types and run_types[x.run_ty].active
-            and run_types[x.run_ty].run_category_cd == SCHEDULED]
-    if not rows and (run_ty or table_nm):
+            and run_types[x.run_ty].run_category_cd == SCHEDULED and (tables is None or x.table_nm in tables)]
+    if not rows and (run_ty or table_nm or tables is not None):
         s.errors.append(f"no effective crosswalk rows for {project_cd}/{table_nm or '*'}/{run_ty or '*'} on {s.run_date}")
     cache: dict = {}
 
@@ -296,7 +297,8 @@ class IntakeProcessor:
         self.settings = settings
         self.logger = EventLogger(conn, clock)
 
-    def run(self, project_cd: Optional[str] = None, run_ty: Optional[str] = None) -> IntakeSummary:
+    def run(self, project_cd: Optional[str] = None, run_ty: Optional[str] = None,
+            tables: Optional[tuple] = None) -> IntakeSummary:
         """Sweep the requests due today."""
         summary = IntakeSummary(run_date=self.clock.today(self.settings.business_tz))
         run_types: Optional[dict[str, RunType]] = None
@@ -309,8 +311,9 @@ class IntakeProcessor:
                             WHERE %(d)s BETWEEN Req_Start_Dt_Key AND Req_End_Dt_Key
                               AND Last_Run_Dt_Key IS DISTINCT FROM %(d)s
                               AND (%(p)s::text IS NULL OR UPPER(Project_Cd) = %(p)s) AND (%(r)s::text IS NULL OR UPPER(Run_Ty) = %(r)s)
+                              AND (%(t)s::text[] IS NULL OR UPPER(Table_Nm) = ANY(%(t)s))
                             ORDER BY Created_Dtts, Intake_ID LIMIT 1 FOR UPDATE SKIP LOCKED""",
-                        {"d": summary.run_date, "p": code(project_cd), "r": code(run_ty)}).fetchone()
+                        {"d": summary.run_date, "p": code(project_cd), "r": code(run_ty), "t": list(tables) if tables is not None else None}).fetchone()
                     if row is None:
                         return summary
                     current = row["intake_id"]

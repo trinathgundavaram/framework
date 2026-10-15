@@ -1,6 +1,6 @@
 # CMS Compliance Framework: Module Reference
 
-What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.32 (design v5).
+What each file in `framework/` does, what it owns, and what it leaves to other modules. Matches package version 0.3.33 (design v5).
 
 - **Design:** [`design/cms-compliance-framework-design.md`](design/cms-compliance-framework-design.md). `D-nn` = decision, `Q-nn` = open question, `§n` = design section.
 - **Setup, configuration, commands:** [`framework-package.md`](framework-package.md).
@@ -160,7 +160,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 
 ### `overrides.py`
 - `DecisionProcessor.run` (P7, D-74): handles `REUSE` only — `LATE_ARRIVAL` and `CORRECTION` are read by the ingest pipeline.
-  - **apply:** an approved, still-valid `REUSE` on an open batch without data → checks `Carry_Fwd_Ind`, that the batch has no promoted load, and that a source batch exists (the requested `Reuse_Btch_ID`, else the latest earlier closed batch with data; a carried batch resolves to its own source). Sets CRC `Resolution_Ty='CARRY_FORWARD'`, `Reuse_Btch_ID`, `Req_Stat='CARRIED_FORWARD'`; logs `OVERRIDE_APPROVED` + `CARRY_FORWARD_APPLIED`. An invalid row → `OVERRIDE_INVALID_DETECTED`, batch unchanged.
+  - **apply:** an approved, still-valid `REUSE` on an open batch without data → checks `Carry_Fwd_Ind`, that the batch has no promoted load, and that a source batch exists (the requested `Reuse_Btch_ID`, else the latest earlier closed batch with data; a carried batch resolves to its own source). Sets CRC `Resolution_Ty='CARRY_FORWARD'`, `Reuse_Btch_ID`, `Req_Stat='SOURCE_DATA_CARRY_FORWARD'`; logs `OVERRIDE_APPROVED` + `CARRY_FORWARD_APPLIED`. An invalid row → `OVERRIDE_INVALID_DETECTED`, batch unchanged.
   - **expire:** an open carried batch whose override ran out (`Valid_Thru_Dt_Key < today`), was rejected or is gone → back to `REQUEST_CREATED`, `OVERRIDE_EXPIRED` + `CARRY_FORWARD_REMOVED`.
 - `run(project_cd)` scopes both passes to one project. An invalid override is audited (`OVERRIDE_INVALID_DETECTED`) once, not on every run.
 - There is no revoke and no promotion state: stopping an override is a date change (`sql/approvals.sql` template 6).
@@ -168,7 +168,7 @@ Exit codes: 0 = ok, 1 = completed with problems, 2 = blocked or framework error.
 
 ### `closing.py`
 - Each batch closes on its own after its hold `Req_Dt_Key + (SLA_Days − 1)` (D-38, D-77); the extract is produced by a separate process (D-76).
-- `close_resolution(batch)`: `EXCEPTION_PENDING` → `COMPLETED_WITH_EXCEPTION`; `NEW_FILE` / `CARRY_FORWARD` → `COMPLETED`; otherwise `DATA_NOT_PROVIDED` / `MISSING` (+ `SOURCE_MISSING_AT_CLOSE`). `closes_automatically(batch)`: has data or is in exception.
+- `close_resolution(batch)`: `EXCEPTION_PENDING` → `COMPLETED_WITH_EXCEPTION`; `NEW_FILE` / `CARRY_FORWARD` → `REQUEST_COMPLETE`; `NO_DATA` → `DATA_NOT_PROVIDED` / `NO_DATA`; otherwise `DATA_NOT_PROVIDED` / `MISSING` (+ `SOURCE_MISSING_AT_CLOSE`). `closes_automatically(batch)`: has a delivery (data, carry-forward or no data) or is in exception.
 - `BatchCloser.run(project, table, run type)` (P10, `close-batches`): sweeps the open batches in scope whose hold has passed; closes the ones that close automatically; lists the others as `waiting` (a person decides) and the locked ones as `deferred` (next sweep, `BATCH_CLOSE_DEFERRED_LOCKED`).
 - `BatchCloser.close(btch_id, closed_by)` (P11, `close-batch`): closes one open batch past its hold, whatever its data; `CloseBlocked` + `BATCH_CLOSE_BLOCKED` inside the hold or when already closed.
 - Every close takes the batch lock, re-reads the row `FOR UPDATE`, checks the `Req_Stat` transition and logs `BATCH_CLOSED` with the actor.

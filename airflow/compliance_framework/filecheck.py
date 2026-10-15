@@ -25,6 +25,7 @@ from .filecheck_options import CheckOptions, check_options, data_fields, trailer
 from .load import (DELIMITED_FILE_TYPES, _file_lines, _lf_lines, _undecodable_line, delimiter_for, file_layout,
                    header_columns, raw_line)
 from .settings import Settings
+from .scope import Scope
 
 log = logging.getLogger(__name__)
 
@@ -92,10 +93,12 @@ def file_columns(layout) -> list:
 
 
 def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional[int], settings: Settings,
-                  opts: CheckOptions, details: Optional[list] = None, columns: Optional[list] = None) -> list[Finding]:
+                  opts: CheckOptions, details: Optional[list] = None, columns: Optional[list] = None,
+                  stats: Optional[dict] = None) -> list[Finding]:
     """Every content problem of a downloaded file; nothing is loaded anywhere.
 
-    `details` collects one (check, line number, message, record) per problem line, for the error file.
+    `details` collects one (check, line number, message, record) per problem line, for the error file; `stats`
+    receives the counts: non-blank lines, data rows, rows validated (every data row), and the COLUMN_VALUES rules.
     """
     out: list[Finding] = []
     details = details if details is not None else []
@@ -229,8 +232,9 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
         for check, text in found:
             note(check, trailer[0], text.split(": ", 1)[1], trailer[1])
         out.extend(found)
-    if counts["data"] == 0 and not cfg.allow_zero_records:
-        out.append(("ZERO_RECORDS", "file has no data rows"))
+    if stats is not None:
+        stats.update(lines=counts["content"], data_rows=counts["data"], rows_validated=counts["data"],
+                     value_rules=",".join(rules) or "none")
     return out
 
 
@@ -258,17 +262,19 @@ class FileChecker:
         self._checks: Optional[list] = None
         self._config_errors: dict = {}
 
-    def run(self, project_cd: Optional[str] = None) -> FileCheckSummary:
-        """Check the files waiting in one project's inbound folders, or in every configured folder."""
-        project_cd = code(project_cd)
+    def run(self, scope: Optional[Scope] = None) -> FileCheckSummary:
+        """Check the files waiting in the folders of a scope (a project, a table group or table, a run type), or in
+        every configured folder."""
+        scope = scope or Scope()
+        project_cd = scope.project_cd
         self._sources = self._checks = None
         self._config_errors = {}
         summary = FileCheckSummary(run_date=self.clock.today(self.settings.business_tz))
         own, shared = None, set()
-        if project_cd:
-            locations, shared, own = self.pipeline._project_locations(project_cd)
+        if project_cd or scope.narrowed:
+            locations, shared, own = self.pipeline._scope_locations(scope)
             if not locations:
-                summary.errors.append(f"project {project_cd} has no active file config")
+                summary.errors.append(f"{scope.label()}: no active file config")
         else:
             locations = self.pipeline._configured_locations()
         summary.locations = [f"{s}/{f}" for s, f in locations]
@@ -279,8 +285,10 @@ class FileChecker:
             except Exception as e:  # noqa: BLE001
                 summary.errors.append(f"{share}/{folder}: {db.error_text(e)}")
                 continue
+            log.info("FILE_CHECK | %s | %s file(s) found%s", self.store.uri(share, folder), len(files),
+                     ": " + ", ".join(basename(i.path) for i in files[:50]) + (" ..." if len(files) > 50 else "") if files else "")
             for info in files:
-                if (share, folder) in shared and not own.candidates(basename(info.path)):
+                if not self.pipeline.belongs(basename(info.path), (share, folder), shared, own, scope):
                     summary.skipped += 1
                     continue
                 try:
@@ -332,8 +340,9 @@ class FileChecker:
                              "loading this file replaces it")
         if cfg is not None:
             findings.extend(self._source(cfg))
+        stats: dict = {}
         if cfg is not None and self.settings.check_content:
-            found = self._content(info, name, cfg, details)
+            found = self._content(info, name, cfg, details, stats)
             checked = found is not None
             findings.extend(found or [])
         version = (btch_id_version(batch["btch_id"], cfg.project_cd, cfg.table_nm, cfg.src_id, run_ty)
@@ -344,11 +353,14 @@ class FileChecker:
                   "rpt_start": str(m.rpt_start) if m else None, "rpt_end": str(m.rpt_end) if m else None,
                   "batch": batch["btch_id"] if batch else None, "req_id": batch["req_id"] if batch else None,
                   "result": "FAILED" if findings else "PASSED" if checked else "NOT_CHECKED",
-                  "findings": [f"{c}: {text}" for c, text in findings], "notes": notes}
+                  "findings": [f"{c}: {text}" for c, text in findings], "notes": notes, "records": stats or None}
         if findings:
             self._after_failure(info, name, result, findings, details)
         if checked or findings:
             self._record(result, cfg, batch, run_ty)
+        log.info("FILE_CHECK | %s | %s | %s | batch %s", name, result["result"],
+                 ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in stats.items()) or "content not read",
+                 result["batch"] or "-")
         return result
 
     def _after_failure(self, info, name: str, result: dict, findings: list, details: list) -> None:
@@ -371,7 +383,7 @@ class FileChecker:
             return [("SOURCE", f"source {cfg.src_id} of {cfg.project_cd}/{cfg.table_nm} is not in ComplianceSourceSystem")]
         return [] if active else [("SOURCE", f"source {cfg.src_id} of {cfg.project_cd}/{cfg.table_nm} is inactive")]
 
-    def _content(self, info, name: str, cfg: FileConfig, details: list) -> Optional[list[Finding]]:
+    def _content(self, info, name: str, cfg: FileConfig, details: list, stats: dict) -> Optional[list[Finding]]:
         """The problems in the file itself; None = its configuration is wrong, which is not a problem of the file."""
         try:
             if self._checks is None:
@@ -390,7 +402,7 @@ class FileChecker:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, name)
             self.store.download(info.share, info.path, path)
-            return check_content(path, name, cfg, expected_cols, self.settings, opts, details, columns)
+            return check_content(path, name, cfg, expected_cols, self.settings, opts, details, columns, stats)
 
     def _record(self, result: dict, cfg: Optional[FileConfig], batch: Optional[dict], run_ty: Optional[str]) -> None:
         """One audit row per file and outcome; a repeat of the same outcome for the same file adds nothing."""

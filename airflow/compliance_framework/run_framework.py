@@ -12,7 +12,7 @@ from .cli import _json_default
 from .cli import main as cli_main
 from .common import FrameworkError, parse_as_of
 from .compliance_task import SCOPE_KEYS
-from .modules import resolve_module
+from .modules import report, resolve_module
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -38,14 +38,15 @@ def run_step(step: str, *, as_of: Optional[str] = None, settings: Optional[Mappi
         accepted = {k: v for k, v in params.items() if k in spec.params and v not in (None, "")}
         dropped = sorted(k for k, v in params.items() if k not in spec.params and v not in (None, ""))
         resolved = Settings.load(overrides={k: str(v) for k, v in (settings or {}).items()})
-        log.info("step=%s project=%s params=%s%s", spec.name, accepted.get("project", "*"), accepted,
-                 f" (not used by {spec.name}: {', '.join(dropped)})" if dropped else "")
+        log.info("%s starting | project %s | %s%s", spec.name, accepted.get("project", "all projects"),
+                 ", ".join(f"{k}={v}" for k, v in accepted.items() if k != "project") or "no other parameters",
+                 f" | not used by {spec.name}: {', '.join(dropped)}" if dropped else "")
         with App.from_settings(resolved, parse_as_of(as_of, resolved.business_tz)) as app:
             out = app.run_module(spec.name, accepted)
     except (FrameworkError, ValueError, LookupError) as e:
         log.error("%s: %s", type(e).__name__, e)
-        return {"module": step, "error": f"{type(e).__name__}: {e}"}, 2
-    return {"module": out.module, "result": _plain(out.result)}, out.exit_code
+        return {"step": step, "result": "COULD NOT RUN", "problem": f"{type(e).__name__}: {e}"}, 2
+    return _plain(report(out)), out.exit_code
 
 
 def run_command(command: str, *, args: Optional[list] = None, as_of: Optional[str] = None,

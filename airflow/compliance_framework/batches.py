@@ -249,7 +249,8 @@ class ScheduleSummary:
 
 def create_batches(conn: Connection, clock: Clock, settings: Settings, *, project_cd: str, run_ty: Optional[str] = None,
                    period: Optional[str] = None, table_nm: Optional[str] = None, period_file: Optional[str] = None,
-                   lookback_days: Optional[int] = None, lookback_weeks: Optional[int] = None) -> ScheduleSummary:
+                   lookback_days: Optional[int] = None, lookback_weeks: Optional[int] = None,
+                   tables: Optional[tuple] = None) -> ScheduleSummary:
     """The scheduled batches due on the run date for the project's effective crosswalk rows.
 
     The run type's Batch_Schedule_Sql_Txt says whether batches are due on the run date; the crosswalk row's
@@ -267,8 +268,8 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
     logger = EventLogger(conn, clock)
     rows = [x for x in cfg.xwalk_rows(conn, project_cd=project_cd, table_nm=table_nm, run_ty=run_ty)
             if x.effective_on(s.run_date) and x.run_ty in run_types and run_types[x.run_ty].active
-            and run_types[x.run_ty].run_category_cd == SCHEDULED]
-    if not rows and (run_ty or table_nm):
+            and run_types[x.run_ty].run_category_cd == SCHEDULED and (tables is None or x.table_nm in tables)]
+    if not rows and (run_ty or table_nm or tables is not None):
         s.errors.append(f"no effective crosswalk rows for {project_cd}/{table_nm or '*'}/{run_ty or '*'} on {s.run_date}")
     cache: dict = {}
 
@@ -343,7 +344,8 @@ class IntakeProcessor:
         self.settings = settings
         self.logger = EventLogger(conn, clock)
 
-    def run(self, project_cd: Optional[str] = None, run_ty: Optional[str] = None) -> IntakeSummary:
+    def run(self, project_cd: Optional[str] = None, run_ty: Optional[str] = None,
+            tables: Optional[tuple] = None) -> IntakeSummary:
         """Sweep the requests due today; each request is claimed with its own lock."""
         summary = IntakeSummary(run_date=self.clock.today(self.settings.business_tz))
         where = ["%s BETWEEN Req_Start_Dt_Key AND Req_End_Dt_Key", "(Last_Run_Dt_Key IS NULL OR Last_Run_Dt_Key <> %s)"]
@@ -352,6 +354,10 @@ class IntakeProcessor:
             if val is not None:
                 where.append(f"UPPER({col}) = %s")
                 params.append(code(val))
+        if tables is not None:
+            marks, names = db.in_list(tables or ("",))
+            where.append(f"UPPER(Table_Nm) IN ({marks})")
+            params.extend(names)
         due = self.conn.execute(f"SELECT Intake_ID FROM ComplianceRequestInTake WHERE {' AND '.join(where)} "
                                 "ORDER BY Created_Dtts, Intake_ID", params).fetchall()
         run_types = cfg.run_types(self.conn) if due else {}

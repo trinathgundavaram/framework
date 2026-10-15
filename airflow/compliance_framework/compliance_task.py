@@ -12,13 +12,14 @@ DEFAULT_TIMEZONE = "America/Chicago"
 STEPS = ("BATCH_CREATION", "FILE_CHECK", "FILE_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY")
 FAIL_ON_PROBLEMS = {"BATCH_CREATION": True, "FILE_CHECK": True, "FILE_LOAD": True, "FILE_RULES": True, "OVERRIDE_DECISIONS": False,
                     "BATCH_CLOSE": True, "NOTIFY": True}
-SCOPE_KEYS = ("project", "run_type", "period", "table", "period_file", "lookback_days", "lookback_weeks",
+SCOPE_KEYS = ("project", "table_group", "run_type", "period", "table", "period_file", "lookback_days", "lookback_weeks",
               "share", "file", "folder")
 _GRE_ENV = {"environment": "GRE_ENVIRONMENT", "meta_db": "GRE_META_DB", "log_level": "GRE_LOG_LEVEL",
             "log_dir": "GRE_LOG_DIR", "max_parallel_rules": "GRE_MAX_PARALLEL_RULES",
             "package_dir": "GRE_PACKAGE_DIR", "project_name": "GRE_PROJECT_NAME"}
 _GRE_PARAMS = {"run_params": "GRE_RUN_PARAMS", "text_params": "GRE_TEXT_PARAMS", "extra_filters": "GRE_EXTRA_FILTERS"}
 _MERGED = ("settings", "gre")
+QUIET_LOGGERS = ("smbprotocol", "smbclient", "spnego")
 
 
 def _set_env(key: str, value) -> None:
@@ -135,15 +136,18 @@ def run_compliance_step(step: str, variable_key: str, overrides: dict = None, sc
     from .run_framework import run_step
 
     params = {k: config.get(k) for k in SCOPE_KEYS if config.get(k) not in (None, "")}
+    for name in QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
     outcome, exit_code = run_step(step, as_of=config.get("as_of") or None, settings=settings,
                                   log_level=config.get("log_level") or "INFO", **params)
     fail_on_problems = config.get("fail_on_problems")
     if not isinstance(fail_on_problems, bool):
         fail_on_problems = FAIL_ON_PROBLEMS.get(step, True)
+    text = json.dumps(outcome, indent=2, default=str)
     if exit_code == 2 or (exit_code == 1 and fail_on_problems):
-        raise RuntimeError(f"compliance framework step {step} failed (exit_code={exit_code}). outcome={outcome!r}")
-    if exit_code:
-        logger.warning("step %s completed with problems (exit_code=%s): %r", step, exit_code, outcome)
+        logger.error("%s report:\n%s", step, text)
+        raise RuntimeError(f"{step}: {outcome.get('result') or 'failed'} (exit code {exit_code}); the report is above")
+    (logger.warning if exit_code else logger.info)("%s report:\n%s", step, text)
     return outcome
 
 
@@ -156,8 +160,9 @@ def run_compliance_command(command: str, variable_key: str, args: list = None, o
 
     outcome, exit_code = run_command(command, args=args, as_of=config.get("as_of") or None, settings=settings,
                                      log_level=config.get("log_level") or "INFO")
-    logger.info("command %s exit_code=%s outcome=%r", command, exit_code, outcome)
+    text = json.dumps(outcome, indent=2, default=str)
     if exit_code != 0:
-        raise RuntimeError(f"compliance framework command {command} failed (exit_code={exit_code}). "
-                           f"outcome={outcome!r}")
+        logger.error("%s result:\n%s", command, text)
+        raise RuntimeError(f"{command} failed (exit code {exit_code}); the result is above")
+    logger.info("%s result:\n%s", command, text)
     return outcome

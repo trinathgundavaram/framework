@@ -104,6 +104,82 @@ They can also be given for one run: `metadata_schema` / `metadata_db` in a workf
 job arguments above on a direct Glue run. A run's value wins over the project's settings and the job
 default. `metadata_load` adds the schema to a `--TABLE_NAME` that has none.
 
+## Scope of a run: project, table group, table, run type
+
+Every step takes the same scope parameters: `project`, then optionally `table_group` **or** `table`, and
+optionally `run_type`. The levels:
+
+| Given | The step works on |
+|---|---|
+| nothing | every project (`BATCH_CREATION` needs `project`) |
+| `project` | the whole project |
+| `project` + `table_group` | the project's tables in that group (`ComplianceTable`) |
+| `project` + `table` | that table |
+| any of the above + `run_type` | only that run type |
+
+- `table_group` and `table` need `project`; give one of them, not both.
+- Table groups are optional: `ComplianceTable` (`Project_Cd`, `Table_Nm`, `Table_Grp_Cd`, `Table_Desc`,
+  `Active_Ind`) is read only when a run names a `table_group`. A project without rows there works exactly as
+  before, per project or per table. A group with no active table does nothing (the step reports it).
+- What each step does with the scope: `BATCH_CREATION` creates the scope's batches (scheduled and ad hoc requests);
+  `FILE_CHECK` / `FILE_LOAD` take only the scope's files from the inbound folders and leave every other file in place
+  (a file of another table, or of another run type); `FILE_RULES`, `OVERRIDE_DECISIONS` and `BATCH_CLOSE` act on the
+  scope's batches; `NOTIFY` sends the scope's events.
+- In a run narrowed to a table, a table group or a run type, a file whose name fits none of the scope's templates is
+  left in place (a run for the whole project rejects it).
+
+## What the log shows for a step
+
+At the end of every step the task log has one report, indented (JSON), instead of a single long line:
+
+- `FILE_LOAD`: `result` (`ALL FILES LOADED`, `n FILE(S) NOT LOADED`, `NO FILES`), the folders, the counts
+  (`files_found`, `accepted`, `rejected`, `failed`, `skipped`), the control reports written, then one block per
+  file: `file`, `status` (`ACCEPTED` / `REJECTED` / `FAILED`, as in the control report), `source`, `load_id`,
+  `batch`, `batch_status`, `rows_in_file`, `rows_loaded`, `file_date`, `processed`, and for a file that was not
+  loaded `reason` (plain language), `detail` (technical) and `error_log`.
+- `FILE_CHECK`: `result` (`ALL FILES PASSED`, `n FILE(S) WITH PROBLEMS`, `NO FILES`), the counts (`files_checked`,
+  `passed`, `failed`, `not_checked`), then one block per file: `file`, `result`, `source`, `run_type`, `version`,
+  `report_dates`, `batch`, `lines`, `data_rows`, `rows_validated`, `value_rules`, `problems`, `notes`, `error_log`,
+  `moved_to`.
+- The other steps: `step`, `result` and their details.
+
+A failed step logs its report as an error and the task fails with a one-line message pointing to it. While a
+step runs, each event is one line: `<event> | <batch, or project/table/source> | load <Load_ID> | <text>`, and
+the progress is logged without any data from the files: the files found in each folder (names), and per file
+the bytes read, lines and data rows counted, rows validated, rows staged, rows loaded into core (and earlier rows
+of the batch removed), the batch status afterwards, and where the file was moved.
+The SMB library's connection messages are no longer written (warnings and errors still are).
+
+## Batch status (`ComplianceRequestControl.Req_Stat`)
+
+| `Req_Stat` | Open / closed | When |
+|---|---|---|
+| `REQUEST_CREATED` | Open | BATCH_CREATION created the batch (schedule or ad-hoc request); also when a carry-forward runs out |
+| `SOURCE_DATA_READY` | Open | FILE_LOAD loaded the source's file into core (`Resolution_Ty = NEW_FILE`); a later file replaces it |
+| `SOURCE_DATA_READY_NO_DATA` | Open | FILE_LOAD received the source's file and it had no data rows: the source had nothing to provide (`Resolution_Ty = NO_DATA`); the batch's core rows are removed |
+| `SOURCE_DATA_CARRY_FORWARD` | Open | OVERRIDE_DECISIONS applied an approved `REUSE` override (`Resolution_Ty = CARRY_FORWARD`, `Reuse_Btch_ID`) |
+| `EXCEPTION_PENDING` | Open | Older rows only: no step sets it any more |
+| `REQUEST_COMPLETE` | Closed | Closed with data (`NEW_FILE` or `CARRY_FORWARD`); also after a late or corrected file with an approved override |
+| `COMPLETED_WITH_EXCEPTION` | Closed | Closed while `EXCEPTION_PENDING` (older rows) |
+| `DATA_NOT_PROVIDED` | Closed | Closed without data: `Resolution_Ty = NO_DATA` (the source sent a file with no data rows; closed by BATCH_CLOSE) or `MISSING` (no file at all; closed by hand with `close-batch`, audit event `SOURCE_MISSING_AT_CLOSE`) |
+
+BATCH_CLOSE closes, once the SLA hold has passed, every batch that has a delivery: `SOURCE_DATA_READY` /
+`SOURCE_DATA_CARRY_FORWARD` become `REQUEST_COMPLETE`, `SOURCE_DATA_READY_NO_DATA` becomes `DATA_NOT_PROVIDED`
+(`NO_DATA`). A batch still `REQUEST_CREATED` (no file) waits for `close-batch`. A file that is rejected does not
+change the batch status. `Allow_Zero_Rcd_Ind` is no longer used: a file with no data rows is always accepted as
+the source's delivery. The loads themselves keep their own status (`ComplianceFileLoad.Load_Stat`: `PROMOTED`,
+`SUPERSEDED`, `QUARANTINED`, ...).
+
+Batches created before version 0.3.33 carry the earlier names; to rename them:
+
+```sql
+UPDATE <meta_db>.ComplianceRequestControl
+SET Req_Stat = CASE Req_Stat WHEN 'PROMOTED' THEN 'SOURCE_DATA_READY'
+                             WHEN 'CARRIED_FORWARD' THEN 'SOURCE_DATA_CARRY_FORWARD'
+                             WHEN 'COMPLETED' THEN 'REQUEST_COMPLETE' END
+WHERE Req_Stat IN ('PROMOTED', 'CARRIED_FORWARD', 'COMPLETED');
+```
+
 ## Where files go after a run
 
 Every file leaves the inbound folder once it has been processed, into a subfolder of that same folder:
@@ -111,7 +187,7 @@ Every file leaves the inbound folder once it has been processed, into a subfolde
 | Outcome | Moves to |
 |---|---|
 | Loaded to core | `<inbound folder>/Archive/` |
-| Not loaded: unknown name, no batch or a closed batch, wrong column count, bad characters, an empty file where one is not allowed | `<inbound folder>/Error/` |
+| Not loaded: unknown name, no batch or a closed batch, wrong column count, bad characters | `<inbound folder>/Error/` |
 | Technical failure | stays in place and is retried by the next sweep |
 
 - **Every pickup is a new load.** Each time FILE_LOAD finds a file in the inbound folder it gets a new row in
@@ -189,7 +265,6 @@ wants to hold the load until the files are clean.
 | Record types | `RECORD_TYPE` | With a `RECORD_TYPE` row (for example `H,D,T`): the first field of the header, of every data row and of the trailer |
 | Columns | `COLUMN_COUNT` | Every data row has the expected number of fields: the `COLUMN_COUNT` row, or else the number of names in the `HEADER_NAMES` row; with neither row the count is not checked. The first lines are named |
 | Trailer | `TRAILER` | Present when `Src_File_Has_Trlr_Ind = 1`; with a `TRAILER` row: field count, file name, row count, timestamp |
-| Rows | `ZERO_RECORDS` | At least one data row, unless `Allow_Zero_Rcd_Ind = 1` |
 | Source | `SOURCE` | The file's source is in `ComplianceSourceSystem` and active |
 
 A file belongs to the batch of its project, table, source, run type and report dates. Nothing else is looked at: not `ComplianceDataSetSourceXwalk`, not its effective dates and not the day the batch was requested, so a file for an ad hoc batch or for a batch requested on another day matches the same way.

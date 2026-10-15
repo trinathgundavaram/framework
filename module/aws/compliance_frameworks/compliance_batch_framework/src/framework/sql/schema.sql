@@ -12,6 +12,20 @@ CREATE TABLE ComplianceProject (
 );
 CREATE UNIQUE INDEX uq_complianceproject_code ON ComplianceProject (UPPER(Project_Cd));
 
+-- Optional: the table group of a project's tables, used only when a run names a table group.
+CREATE TABLE ComplianceTable (
+  Project_Cd    VARCHAR(30)  NOT NULL,
+  Table_Nm      VARCHAR(63)  NOT NULL,
+  Table_Grp_Cd  VARCHAR(30)  NOT NULL,
+  Table_Desc    VARCHAR(200),
+  Active_Ind    SMALLINT     NOT NULL DEFAULT 1,
+  Created_Dtts  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Created_By    VARCHAR(100) NOT NULL DEFAULT current_user,
+  Updated_Dtts  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  Updated_By    VARCHAR(100) NOT NULL DEFAULT current_user,
+  CONSTRAINT pk_compliancetable PRIMARY KEY (Project_Cd, Table_Nm)
+);
+
 CREATE TABLE ComplianceSourceSystem (
   Src_ID        VARCHAR(30)  NOT NULL,
   Src_Nm        VARCHAR(100) NOT NULL,

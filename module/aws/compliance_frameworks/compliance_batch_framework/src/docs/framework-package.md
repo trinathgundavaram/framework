@@ -166,7 +166,7 @@ Options go after the command. Every command accepts `--set NAME=VALUE` (repeatab
 | `test-connection` | Connect and check the schema; exit 1 if not initialised | Deploy / ops |
 | `validate-config` | Configuration checks; exit 1 on errors, logs `CONFIG_VALIDATION_FAILED` | CI / before activating config |
 | `process-decisions` | Apply approved `REUSE` overrides and remove the ones that ran out | Poll |
-| `close-batches [--project] [--table] [--run-type]` | SLA sweep: close every open batch past its hold that has data (`COMPLETED`) or is in exception (`COMPLETED_WITH_EXCEPTION`); list the ones without data as `waiting`; exit 1 if a batch was locked | Project schedule |
+| `close-batches [--project] [--table] [--run-type]` | SLA sweep: close every open batch past its hold that has data (`REQUEST_COMPLETE`) or is in exception (`COMPLETED_WITH_EXCEPTION`); list the ones without data as `waiting`; exit 1 if a batch was locked | Project schedule |
 | `close-batch --btch-id --closed-by` | Close one batch past its hold, with or without data (no data → `DATA_NOT_PROVIDED`); exit 2 if still inside the hold or already closed | Human |
 | `notify` | Email pending notifications | Poll |
 | `health` | Operational report (§15.3) | Ops |

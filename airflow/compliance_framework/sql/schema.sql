@@ -11,6 +11,20 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceProject (
 )
 UNIQUE PRIMARY INDEX (Project_Cd);
 
+-- Optional: the table group of a project's tables, used only when a run names a table group.
+CREATE MULTISET TABLE {{META_DB}}.ComplianceTable (
+  Project_Cd    VARCHAR(30)  NOT NULL,
+  Table_Nm      VARCHAR(63)  NOT NULL,
+  Table_Grp_Cd  VARCHAR(30)  NOT NULL,
+  Table_Desc    VARCHAR(200),
+  Active_Ind    SMALLINT     DEFAULT 1 NOT NULL,
+  Created_Dtts  TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Created_By    VARCHAR(100) DEFAULT USER NOT NULL,
+  Updated_Dtts  TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Updated_By    VARCHAR(100) DEFAULT USER NOT NULL
+)
+UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm);
+
 CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceSystem (
   Src_ID        VARCHAR(30)  NOT NULL,
   Src_Nm        VARCHAR(100) NOT NULL,

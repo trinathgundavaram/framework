@@ -17,16 +17,17 @@ logger = logging.getLogger(__name__)
 STEP_TIMEOUT = {"BATCH_CREATION": timedelta(hours=1), "FILE_CHECK": timedelta(hours=1), "FILE_LOAD": timedelta(hours=2), "FILE_RULES": timedelta(hours=2),
                 "OVERRIDE_DECISIONS": timedelta(minutes=30), "BATCH_CLOSE": timedelta(minutes=30),
                 "NOTIFY": timedelta(minutes=30)}
+SCOPE = ("project", "table_group", "table", "run_type")
 STEP_PARAMS = {
-    "BATCH_CREATION": ("project", "run_type", "period", "table", "lookback_days", "lookback_weeks", "as_of"),
-    "FILE_CHECK": ("project", "as_of"),
-    "FILE_LOAD": ("project", "as_of"),
-    "FILE_RULES": ("project", "as_of"),
-    "OVERRIDE_DECISIONS": ("project", "as_of"),
-    "BATCH_CLOSE": ("project", "table", "run_type", "as_of"),
-    "NOTIFY": ("project", "as_of"),
+    "BATCH_CREATION": (*SCOPE, "period", "lookback_days", "lookback_weeks", "as_of"),
+    "FILE_CHECK": (*SCOPE, "as_of"),
+    "FILE_LOAD": (*SCOPE, "as_of"),
+    "FILE_RULES": (*SCOPE, "as_of"),
+    "OVERRIDE_DECISIONS": (*SCOPE, "as_of"),
+    "BATCH_CLOSE": (*SCOPE, "as_of"),
+    "NOTIFY": (*SCOPE, "as_of"),
 }
-PASSED_ON = ("project", "as_of")
+PASSED_ON = (*SCOPE, "as_of")
 ADMIN_COMMANDS = ["validate-config", "health", "test-connection", "show-config", "locks",
                   "release-lock", "close-batch"]
 DEFAULT_ASSIGNMENT_GROUP = "D&AE - EDE Govt Compliance"
@@ -95,7 +96,7 @@ def _add_emails(dag: DAG, dag_config: dict, upstream: list) -> None:
 def _task_id(step: str, scope: dict, index: int, scopes: list) -> str:
     if len(scopes) == 1:
         return step.lower()
-    name = "_".join(str(scope[k]) for k in ("project", "table", "run_type") if scope.get(k)) or str(index + 1)
+    name = "_".join(str(scope[k]) for k in ("project", "table_group", "table", "run_type") if scope.get(k)) or str(index + 1)
     return f"{step.lower()}_{''.join(c if c.isalnum() else '_' for c in name).lower()}"
 
 
@@ -129,7 +130,8 @@ def build_step_dag(dag_id: str, step: str, variable_key: str) -> DAG:
         scopes = [{}]
     tasks = [PythonOperator(task_id=_task_id(step, scope, i, scopes), dag=dag, python_callable=run_step,
                             op_kwargs={"scope_index": i if dag_config.get("runs") else None},
-                            execution_timeout=_minutes(dag_config, "execution_timeout_minutes", STEP_TIMEOUT[step]))
+                            execution_timeout=_minutes(dag_config, "execution_timeout_minutes", STEP_TIMEOUT[step]),
+                            show_return_value_in_logs=False)
              for i, scope in enumerate(scopes)]
     given = "{{ (dag_run.conf or {}).get('%s') or params.get('%s') or '' }}"
     triggers = [TriggerDagRunOperator(task_id=f"trigger_{str(target).lower()}", dag=dag, trigger_dag_id=str(target),
@@ -162,7 +164,7 @@ def build_module_dag(dag_id: str, variable_key: str) -> DAG:
 
     task = PythonOperator(task_id="run_module", dag=dag, python_callable=run_module,
                           execution_timeout=_minutes(dag_config, "execution_timeout_minutes",
-                                                     max(STEP_TIMEOUT.values())))
+                                                     max(STEP_TIMEOUT.values())), show_return_value_in_logs=False)
     _add_emails(dag, dag_config, [task])
     return dag
 
@@ -180,5 +182,6 @@ def build_admin_dag(dag_id: str, variable_key: str) -> DAG:
         command, args = str(conf.pop("command")).strip().lower(), conf.pop("args", [])
         return run_compliance_command(command, variable_key, args=list(args), overrides=conf)
 
-    PythonOperator(task_id="run_command", dag=dag, python_callable=run_command, execution_timeout=timedelta(hours=1))
+    PythonOperator(task_id="run_command", dag=dag, python_callable=run_command, execution_timeout=timedelta(hours=1),
+                   show_return_value_in_logs=False)
     return dag
