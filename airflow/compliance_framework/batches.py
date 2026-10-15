@@ -622,8 +622,9 @@ class Releases:
         self.on_hold = set(hold)
         self.logger = EventLogger(conn, clock)
 
-    def hold(self, b: dict, done: set) -> Optional[str]:
-        """None when the batch may go now, else until when it waits."""
+    def hold(self, b: dict, done: set, due: bool = True) -> Optional[str]:
+        """None when the batch may go now, else until when it waits; due=False: a scheduled run type does not wait
+        for its due date (SOURCE_LOAD pulls from the request date on)."""
         if b["req_id"] in done:
             return None
         if b["run_ty"] in self.on_hold:
@@ -633,17 +634,19 @@ class Releases:
             return None
         if rt.run_category_cd != SCHEDULED:
             return f"held until released (run type {b['run_ty']} is ad hoc)"
+        if not due:
+            return None
         due = earliest_close_date(db.as_date(b["req_dt_key"]), rt.sla_days)
         if due < self.today or (due == self.today and (self.release_time is None or self.now_hhmm >= self.release_time)):
             return None
         return f"held until {due}{f' {self.release_time}' if self.release_time else ''} (its due date)"
 
-    def split(self, batches: list[dict]) -> tuple[list[dict], list[dict]]:
+    def split(self, batches: list[dict], due: bool = True) -> tuple[list[dict], list[dict]]:
         """(batches that may go now, held batches with a `hold` note)."""
         done = released(self.conn, (b["req_id"] for b in batches))
         ready, held = [], []
         for b in batches:
-            why = self.hold(b, done)
+            why = self.hold(b, done, due)
             if why is None:
                 ready.append(b)
             else:

@@ -197,10 +197,13 @@ def report(out: ModuleOutcome) -> dict:
     if out.module == "SOURCE_LOAD":
         counts = _summary(r.files)
         not_loaded = counts["rejected"] + counts["failed"]
+        waiting = sum(f["status"] == "WAITING" for f in r.files)
         return {"step": "SOURCE_LOAD", "result": ("NO BATCHES TO PULL" if not r.files and not r.errors
                                                    else f"{not_loaded or len(r.errors)} BATCH(ES) NOT LOADED"
-                                                   if not_loaded or r.errors else "ALL BATCHES LOADED"),
-                "sources": r.locations, "batches_found": r.scanned, **counts,
+                                                   if not_loaded or r.errors
+                                                   else f"{waiting} BATCH(ES) WITHOUT DATA YET" if waiting
+                                                   else "ALL BATCHES LOADED"),
+                "sources": r.locations, "batches_found": r.scanned, **counts, **({"waiting": waiting} if waiting else {}),
                 **({"released": r.released} if r.released else {}), **({"held": r.held} if r.held else {}),
                 "loads": [{("rows_read" if k == "rows_in_file" else k): v for k, v in f.items()
                            if k not in ("file", "share", "folder", "file_date") and v is not None} for f in r.files],

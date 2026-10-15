@@ -16,8 +16,8 @@ from . import config as cfgmod, db
 from .adapters import FileInfo, FileStore, basename, dirname, parse_uri, sha256_file
 from .audit import EventLogger
 from .batches import Releases, REOPENED_AWAITING_DATA, get_batch, promoted_load
-from .common import (Clock, DATA_NOT_PROVIDED, FileRejected, REQUEST_COMPLETE, RowCountMismatch, SOURCE_DATA_READY,
-    SOURCE_DATA_READY_NO_DATA, check_transition, code)
+from .common import (DATA_NOT_PROVIDED, REQUEST_COMPLETE, SOURCE_DATA_READY, SOURCE_DATA_READY_NO_DATA, Clock,
+                     FileRejected, RowCountMismatch, check_transition, code, earliest_close_date)
 from .config import FileConfig, MatchError, QueryConfig, Scope, TemplateMatcher, check_options
 from .db import Connection, Settings, source_connection
 from .filecheck import check_content, error_rows, file_columns
@@ -645,7 +645,7 @@ class SourceLoader:
         if not todo:
             return todo
         r = Releases(self.conn, self.clock, self.settings, self._hold)
-        ready, held = r.split([b for b, _ in todo])
+        ready, held = r.split([b for b, _ in todo], due=False)
         if release and held:
             r.release(held, "SOURCE_LOAD")
             summary.released = [b["btch_id"] for b in held]
@@ -702,6 +702,9 @@ class SourceLoader:
                 return self._reject(load_id, b, q, e.event_ty, str(e), ref)
             log.info("SOURCE_LOAD | %s | load %s | %s row(s) %s into %s.%s", b["btch_id"], load_id, rows,
                      "copied on Teradata" if q.same_system else f"read from {q.conn_cd}", q.stg_schema_nm, q.stg_table_nm)
+            due = self._due(b)
+            if rows == 0 and self.clock.today(self.settings.business_tz) < due:
+                return self._not_yet(load_id, b, due)
             with self.conn.transaction():
                 self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, Updated_Dtts=%s "
                                   "WHERE Load_ID=%s", (rows, self.clock.now(), load_id))
@@ -735,6 +738,21 @@ class SourceLoader:
             return stage_rows(self.conn, self.settings, cfg=q, layout=layout, ctx=ctx, records=rows()), layout
         finally:
             cur.close()
+
+    def _due(self, b: dict) -> date:
+        rt = cfgmod.run_type(self.conn, b["run_ty"])
+        return earliest_close_date(_as_date(b["req_dt_key"]), rt.sla_days if rt else 1)
+
+    def _not_yet(self, load_id: int, b: dict, due: date) -> IngestOutcome:
+        """No rows before the due date: the source has no data yet; the batch stays open and is pulled again."""
+        text = f"no rows yet; pulled again on the next runs until {due}"
+        with self.conn.transaction():
+            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='NO_DATA_YET', Stg_Rcd_Cnt=0, Error_Txt=%s, "
+                              "Updated_Dtts=%s WHERE Load_ID=%s", (text, self.clock.now(), load_id))
+            self.logger.batch_event("SOURCE_NO_DATA_YET", req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id,
+                                    detail=text)
+        log.info("SOURCE_LOAD | %s | source %s | %s", b["btch_id"], b["src_id"], text)
+        return IngestOutcome(load_id, "NO_DATA_YET", message=text, req_id=b["req_id"])
 
     def _reject(self, load_id: int, b: dict, q: QueryConfig, event_ty: str, message: str, ref: str) -> IngestOutcome:
         with self.conn.transaction():

@@ -245,8 +245,12 @@ Server needs `pyodbc` and the Microsoft ODBC driver on the workers. Check a conn
 **Which batches are pulled.** With the scope (`project`, `table_group` or `table`, `run_type`): every open batch
 of a query source that has no data yet (`REQUEST_CREATED`, request date reached). With `batch` (one `Btch_ID`, or
 several separated by commas): the query sources of those batches, whatever their data; the new pull replaces the batch's rows
-(a closed batch still needs its override). A query that returns no rows means the source had no data
-(`SOURCE_DATA_READY_NO_DATA`). Each pull is a row of `ComplianceFileLoad` (`File_Share` = `QUERY:<Src_Conn_Cd>`
+(a closed batch still needs its override). A scheduled run type's batch is pulled from its request date on, so data that
+is ready early is taken at once. A query that returns no rows **before the batch's due date** (`Req_Dt_Key + SLA_Days - 1`)
+means "no data yet": the batch stays `REQUEST_CREATED` (`SOURCE_NO_DATA_YET` in its timeline, `WAITING` in the step
+report, the task does not fail) and the next SOURCE_LOAD runs try again; on or after the due date no rows means the
+source had no data (`SOURCE_DATA_READY_NO_DATA`). Data pulled early is not pulled again by itself: a later change in
+the source needs `batch` (it replaces the batch's rows). Each pull is a row of `ComplianceFileLoad` (`File_Share` = `QUERY:<Src_Conn_Cd>`
 or `QUERY:LOCAL`, `File_Path` = project/table/source/batch), so FILE_RULES, the step report and the history work
 as for files; no control report file is written for pulls. A query that fails or a value that does not fit
 rejects that pull (`SOURCE_QUERY_FAILED` / `SOURCE_DATA_REJECTED`, emailed); the other batches are still pulled
@@ -284,9 +288,11 @@ no data (empty file) removes the period's rows. An older batch of a period that 
 skipped (`EXPORT_LOADED` in the timeline says why).
 
 **When: by run type category.** Files always load to core as they arrive. Pulling internal sources (SOURCE_LOAD),
-the export and therefore the rules follow the batch's run type (`ComplianceRunType.Run_Category_Cd`):
+the export and therefore the rules follow the batch's run type (`ComplianceRunType.Run_Category_Cd`). Internal
+sources of a scheduled run type are pulled from the request date on (an empty result waits until the due date, see
+SOURCE_LOAD); the export:
 
-| Run category | Internal sources pulled and data exported |
+| Run category | Data exported (and, for ad hoc, internal sources pulled) |
 |---|---|
 | `SCHEDULED` (DAILY, WEEKLY, MONTHLY, ...) | from the batch's due date on: its close date, `Req_Dt_Key + SLA_Days - 1` (WEEKLY created Sunday 10/18 with `SLA_Days = 6`: Friday 10/23; DAILY with `SLA_Days = 1`: the same day). After that every change is exported at once |
 | `ADHOC` | only when released |
