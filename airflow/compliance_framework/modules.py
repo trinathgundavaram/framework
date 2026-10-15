@@ -229,15 +229,15 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
     ModuleSpec(
         "SOURCE_LOAD", "pull internal sources (ComplianceSourceQueryConfig) by batch: the open batches of the scope "
                        "that have no data yet, or the batches named in --batch (comma separated; a new pull replaces "
-                       "the batch's rows). Run types released ON_DUE / MANUAL wait for their due date or "
+                       "the batch's rows). Scheduled run types wait for their due date, ad-hoc ones for "
                        "--release true; --hold (run types) holds them until released",
         required=(), optional=(Param("project"), *SCOPE, Param("batch"), Param("release"), Param("hold")), handler=_source_load),
     ModuleSpec(
         "EXPORT_LOAD", "copy each batch whose data changed (load, carry-forward, late arrival, correction) from core "
                        "into its export table (ComplianceExportConfig): the batch's rows replace the earlier rows of "
                        "that source and report period; a carried-forward batch gets a copy of the reused rows under "
-                       "its own batch; --batch exports named batches again; run types released ON_DUE / "
-                       "MANUAL wait for their due date or --release true (which also lets BATCH_CLOSE close them); --hold (run types) "
+                       "its own batch; --batch exports named batches again; scheduled run types wait "
+                       "for their due date, ad-hoc ones for --release true (which also lets BATCH_CLOSE close them); --hold (run types) "
                        "holds them until released",
         required=(), optional=(Param("project"), *SCOPE, Param("batch"), Param("release"), Param("hold")), handler=_export_load),
     ModuleSpec(

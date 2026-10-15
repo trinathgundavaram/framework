@@ -51,6 +51,8 @@ class Settings:
     rule_engine: str = "gre"
     gre_entrypoint: Optional[str] = None
 
+    release_time: Optional[str] = None
+
     lock_timeout_seconds: int = 300
     lock_ttl_minutes: int = 240
     heartbeat_stale_minutes: int = 30
@@ -120,6 +122,8 @@ class Settings:
             raise ConfigError("INSERT_BATCH_ROWS and INSERT_BATCH_BYTES must be >= 1")
         if self.lock_ttl_minutes < 1:
             raise ConfigError("LOCK_TTL_MINUTES must be >= 1")
+        if self.release_time and not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", str(self.release_time).strip()):
+            raise ConfigError(f"RELEASE_TIME must be HH:MM (24 hours), got {self.release_time!r}")
 
     def db_target(self) -> dict:
         """Where this run connects (no credentials)."""

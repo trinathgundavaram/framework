@@ -15,7 +15,7 @@ from typing import Optional
 from . import config as cfgmod
 from . import db
 from .audit import EventLogger
-from .common import btch_id_version, build_exp_btch_id, code
+from .common import ConfigError, btch_id_version, build_exp_btch_id, code
 from .layout import BATCH_COLUMN, LoadContext, column_mapping
 from .load import _cast, columns
 from .release import Releases
@@ -53,7 +53,7 @@ class ExportLoader:
     def run(self, scope: Optional[Scope] = None, batches: Optional[list[str]] = None,
             release: bool = False, hold: tuple = ()) -> ExportSummary:
         """Export the scope's batches whose data changed since their last export, or the batches named. Batches of
-        run types released ON_DUE / MANUAL wait until due, and run types in `hold` until released, unless `release`
+        scheduled run types wait until due, ad-hoc ones until released, and run types in `hold` until released, unless `release`
         releases the ones with data now."""
         scope = scope or Scope()
         exports = {(e.project_cd, e.table_nm): e for e in cfgmod.active_export_configs(self.conn, self.settings)
@@ -171,16 +171,17 @@ class ExportLoader:
             raise LookupError(f"{b['project_cd']}/{b['table_nm']}/{b['src_id']} has no file or query config")
         chain = self._data_chain(b)
         source = chain[-1] if chain else None
-        core = db.qualified(cfg.core_schema_nm, cfg.core_table_nm)
         export = db.qualified(e.exp_schema_nm, e.exp_table_nm)
+        exp_btch_id = build_exp_btch_id(_as_date(b["req_dt_key"]), b["project_cd"], b["table_nm"], b["run_ty"])
+        version = btch_id_version(b["btch_id"], b["project_cd"], b["table_nm"], b["src_id"], b["run_ty"])
+        if e.proc_nm:
+            return self._call(e, b, item, export, exp_btch_id, version, chain)
+        core = db.qualified(cfg.core_schema_nm, cfg.core_table_nm)
         core_cols = {c.name for c in columns(self.conn, cfg.core_schema_nm, cfg.core_table_nm) if not c.auto}
         exp_cols = [c for c in columns(self.conn, e.exp_schema_nm, e.exp_table_nm)
                     if not c.auto and (c.name in core_cols or c.name == e.exp_btch_col)]
-        exp_btch_id = build_exp_btch_id(_as_date(b["req_dt_key"]), b["project_cd"], b["table_nm"], b["run_ty"])
         mapping = column_mapping(cfg, cfgmod.target_columns(self.conn))
-        ctx = LoadContext(b["btch_id"], 0, b["run_ty"],
-                          btch_id_version(b["btch_id"], b["project_cd"], b["table_nm"], b["src_id"], b["run_ty"]),
-                          b["src_id"], "", self.clock.now(), b["project_cd"], b["table_nm"], _as_date(b["rpt_start_dt_key"]),
+        ctx = LoadContext(b["btch_id"], 0, b["run_ty"], version, b["src_id"], "", self.clock.now(), b["project_cd"], b["table_nm"], _as_date(b["rpt_start_dt_key"]),
                           _as_date(b["rpt_end_dt_key"]), b["req_id"], self.settings.business_tz)
         exprs, values = [], []
         for c in exp_cols:
@@ -214,6 +215,30 @@ class ExportLoader:
         item.update(status="EXPORTED", export_batch=exp_btch_id, data_from=source or "-", rows_exported=inserted, rows_removed=deleted)
         log.info("EXPORT_LOAD | %s | %s row(s) exported to %s (%s), %s earlier row(s) of the period removed",
                  b["btch_id"], inserted, item["export_table"], how, deleted)
+        return item
+
+    def _call(self, e, b: dict, item: dict, export: str, exp_btch_id: str, version, chain: list[str]) -> dict:
+        """The configured procedure exports the batch (deletes and inserts its export rows itself)."""
+        unknown = [n for n in e.proc_params if n not in cfgmod.EXPORT_PROC_PARAMS]
+        if unknown:
+            raise ConfigError(f"{e.label}: Exp_Proc_Parm_Txt uses {', '.join(unknown)}")
+        source = chain[-1] if chain else None
+        given = {"btch_id": b["btch_id"], "data_btch_id": source, "exp_btch_id": exp_btch_id,
+                 "reused_btch_ids": ",".join(chain[1:]) or None, "project_cd": b["project_cd"], "table_nm": b["table_nm"],
+                 "src_id": b["src_id"], "run_ty": b["run_ty"], "version": version, "req_id": b["req_id"],
+                 "req_dt": _as_date(b["req_dt_key"]), "rpt_start": _as_date(b["rpt_start_dt_key"]),
+                 "rpt_end": _as_date(b["rpt_end_dt_key"])}
+        proc = ".".join(db.ident(p) for p in e.proc_nm.split("."))
+        with self.conn.transaction():
+            self.conn.execute_qmark(f"CALL {proc}({', '.join('?' for _ in e.proc_params)})",
+                                    [given[n] for n in e.proc_params])
+            rows = self.conn.execute(f"SELECT COUNT(*) AS n FROM {export} WHERE {db.ident(BATCH_COLUMN)} = %s",
+                                     (b["btch_id"],)).fetchone()["n"]
+            self._done(b, f"exported by {e.proc_nm} (data of {source or 'no batch'}): {rows} row(s) of the batch in the export")
+        item.update(status="EXPORTED", export_batch=exp_btch_id, data_from=source or "-", procedure=e.proc_nm,
+                    rows_exported=rows)
+        log.info("EXPORT_LOAD | %s | exported by procedure %s: %s row(s) of the batch in %s", b["btch_id"], e.proc_nm,
+                 rows, item["export_table"])
         return item
 
     def _done(self, b: dict, detail: str) -> None:

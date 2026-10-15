@@ -29,12 +29,11 @@ class RunType:
     carry_fwd: bool
     active: bool
     schedule_sql: Optional[str] = None
-    release_mode: str = "ON_LOAD"
 
     @classmethod
     def from_row(cls, r: dict) -> "RunType":
         return cls(code(r["run_ty"]), code(r["run_category_cd"]), r["sla_days"], r["carry_fwd_ind"] == 1, r["active_ind"] == 1,
-                   _text(r.get("batch_schedule_sql_txt")), code(r.get("release_mode_cd") or "ON_LOAD"))
+                   _text(r.get("batch_schedule_sql_txt")))
 
 
 @dataclass(frozen=True)
@@ -227,6 +226,11 @@ def active_query_configs(conn: Connection, settings=None) -> list[QueryConfig]:
     return [QueryConfig.from_row(r, settings) for r in rows]
 
 
+EXPORT_PROC_PARAMS = ("btch_id", "data_btch_id", "exp_btch_id", "reused_btch_ids", "project_cd", "table_nm", "src_id",
+                      "run_ty", "version", "req_id", "req_dt", "rpt_start", "rpt_end")
+DEFAULT_EXPORT_PROC_PARAMS = ("btch_id", "data_btch_id", "exp_btch_id")
+
+
 @dataclass(frozen=True)
 class ExportConfig:
     """One ComplianceExportConfig row: the export table a core table's batches are copied to (EXPORT_LOAD)."""
@@ -236,6 +240,8 @@ class ExportConfig:
     exp_table_nm: str
     active: bool = True
     exp_btch_col: str = "exp_btch_id"
+    proc_nm: Optional[str] = None
+    proc_params: tuple = DEFAULT_EXPORT_PROC_PARAMS
 
     @property
     def label(self) -> str:
@@ -245,7 +251,10 @@ class ExportConfig:
     def from_row(cls, r: dict, settings=None) -> "ExportConfig":
         name = settings.resolve_env if settings else (lambda text, identifier=True: text)
         return cls(code(r["project_cd"]), code(r["table_nm"]), name(r["exp_schema_nm"]), r["exp_table_nm"],
-                   r["active_ind"] == 1, (_text(r.get("exp_btch_col_nm")) or "Exp_Btch_ID").lower())
+                   r["active_ind"] == 1, (_text(r.get("exp_btch_col_nm")) or "Exp_Btch_ID").lower(),
+                   name(_text(r.get("exp_proc_nm"))) if _text(r.get("exp_proc_nm")) else None,
+                   tuple(t.strip().strip("{}").strip().lower() for t in r["exp_proc_parm_txt"].split(",") if t.strip())
+                   if _text(r.get("exp_proc_parm_txt")) else DEFAULT_EXPORT_PROC_PARAMS)
 
 
 def active_export_configs(conn: Connection, settings=None) -> list[ExportConfig]:
@@ -553,8 +562,6 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             add("RUN_TYPE", f"run type {rt.run_ty!r} must be letters and digits only (it is the {{RUNTY}} token)")
         if rt.run_category_cd not in (SCHEDULED, ADHOC) or rt.sla_days < 1:
             add("RUN_TYPE", f"run type {rt.run_ty}: category must be SCHEDULED/ADHOC and SLA_Days >= 1")
-        if rt.release_mode not in ("ON_LOAD", "ON_DUE", "MANUAL"):
-            add("RUN_TYPE", f"run type {rt.run_ty}: Release_Mode_Cd must be ON_LOAD, ON_DUE or MANUAL")
     projects = {code(r["project_cd"]): r["active_ind"] == 1
                 for r in conn.execute("SELECT Project_Cd, Active_Ind FROM ComplianceProject").fetchall()}
     sources = {code(r["src_id"]) for r in conn.execute("SELECT Src_ID FROM ComplianceSourceSystem").fetchall()}
@@ -720,6 +727,12 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
         if src is None:
             add("EXPORT_CONFIG", f"{label}: the table has no active file or query config", "WARNING")
             continue
+        unknown = [n for n in e.proc_params if n not in EXPORT_PROC_PARAMS]
+        if e.proc_nm and unknown:
+            add("EXPORT_CONFIG", f"{label}: Exp_Proc_Parm_Txt uses {', '.join(unknown)}; available: "
+                                 f"{', '.join('{' + n + '}' for n in EXPORT_PROC_PARAMS)}")
+        if e.proc_nm and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}(\.[A-Za-z_][A-Za-z0-9_]{0,127})?", e.proc_nm):
+            add("EXPORT_CONFIG", f"{label}: Exp_Proc_Nm {e.proc_nm!r} must be [database.]procedure")
         exp = {c.name for c in columns(conn, e.exp_schema_nm, e.exp_table_nm) if not c.auto}
         if not exp:
             add("EXPORT_CONFIG", f"{label}: export table {e.exp_schema_nm}.{e.exp_table_nm} not found")

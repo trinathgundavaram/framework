@@ -10,10 +10,12 @@ from contextlib import ExitStack, contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence
+from zoneinfo import ZoneInfo
 
-from .common import ConfigError, LockTimeout
+from .common import BUSINESS_TZ, ConfigError, LockTimeout
 
 log = logging.getLogger(__name__)
+BUSINESS_ZONE = ZoneInfo(BUSINESS_TZ)
 
 _PARAM = re.compile(r"%\((\w+)\)s|%s")
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$")
@@ -84,7 +86,8 @@ def _bind(value: Any) -> Any:
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, datetime) and value.tzinfo is not None:
-        return value.astimezone(timezone.utc)
+        local = value.astimezone(BUSINESS_ZONE)
+        return local.replace(tzinfo=timezone(local.utcoffset()))
     if isinstance(value, str) and type(value) is not str:
         return str(value)
     return value
@@ -94,7 +97,7 @@ def _clean(value: Any) -> Any:
     if isinstance(value, Decimal) and value == value.to_integral_value():
         return int(value)
     if isinstance(value, datetime) and value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
+        return value.replace(tzinfo=BUSINESS_ZONE)
     return value
 
 
@@ -365,7 +368,7 @@ def try_lock(conn: Connection, key: str) -> bool:
     """Take the lock row for `key`; False when another process holds it. Expired locks are replaced."""
     if conn.in_transaction:
         raise RuntimeError("locks are taken outside a transaction")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(BUSINESS_ZONE)
     conn.execute("DELETE FROM ComplianceLock WHERE Lock_Key = %s AND Expires_Dtts < %s", (key, now))
     try:
         conn.execute("INSERT INTO ComplianceLock (Lock_Key, Owner_ID, Acquired_Dtts, Expires_Dtts) "

@@ -120,12 +120,12 @@ as the Variable's value (Admin → Variables) and replace the `REPLACE_WITH_...`
   "schedule_interval": "*/15 * * * *",
   "email_recipient": "compliance-dev@example.com",
   "project": "CMS_UNIVERSE",
-  "settings": {"FILE_STORE": "nas", "ARCHIVE_FOLDER": "Archive", "ERROR_FOLDER": "Error"},
-  "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES", "OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"]
+  "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_EXPORT_LOAD", "OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"]
 }
 ```
 
-Keys every Variable can have:
+Keys every Variable can have. Only `meta_db` is required; every other key has a default and is left out when the
+default is right (the examples carry only what differs: connections, `load_env`, `project`, schedule, triggers, emails):
 
 | Key | Meaning |
 |---|---|
@@ -134,12 +134,12 @@ Keys every Variable can have:
 | `wdc_comp_oper_nas_var` | Airflow Connection of the NAS file server. Required where files are loaded (`FILE_LOAD`, and the generic and admin DAGs when they touch files) |
 | `load_env` | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); falls back to `environment`, then `gre.environment`, else `DEV` |
 | `schedule_interval` | Cron expression of the DAG; leave out for a DAG that is only triggered |
-| `schedule_timezone` | Time zone of the schedule (default `America/Chicago`; follows daylight saving) |
+| `schedule_timezone` | Optional; schedules run in Central time (`America/Chicago`, with daylight saving) |
 | `trigger_dags` | DAG ids to start when the step succeeds; the scope (`project`, `table_group`, `table`, `run_type`) and `as_of` of this run are passed on, so a chain started for one table group stays on it |
 | `email_recipient` | Who gets the DAG's success / failure emails (`success_email`, `fail_email` tasks). Without it the DAG has no email tasks |
 | `snow_assignment_group` | ServiceNow assignment group of the incident opened when a task fails (default `D&AE - EDE Govt Compliance`) |
 | `owner`, `tags` | DAG owner (default `oss`) and tags |
-| `settings` | Framework settings by name. Common: `BUSINESS_TZ`, `LOCK_TIMEOUT_SECONDS` (300), `LOCK_TTL_MINUTES` (240); plus the step's own, below |
+| `settings` | Framework settings by name, only where they differ from the default. Common: `LOCK_TIMEOUT_SECONDS` (300), `LOCK_TTL_MINUTES` (240); plus the step's own, below (defaults in brackets) |
 | `fail_on_problems` | `true` / `false`: whether "completed with problems" (exit code 1) fails the task. Default: true, except `OVERRIDE_DECISIONS`. `FILE_LOAD` processes every file first and then fails the task when any file was not loaded (rejected, or a technical failure); the DAGs it triggers are then not started |
 | `runs` | Optional list of scopes: one task per entry, each with its own `project` / `run_type` / `period` / ... (and `settings`, `gre`). Without it the DAG has one task, scoped by the Variable's own keys |
 | `log_level` | `INFO` (default), `DEBUG`, ... |
@@ -152,11 +152,11 @@ Keys by step:
 |---|---|---|
 | `BATCH_CREATION` | `project` (required). When batches are due and their report dates come from the metadata (`Batch_Schedule_Sql_Txt`, `Rpt_Dt_Sql_Txt`; below). Optional: `table_group`, `run_type`, `table`, `period`, `lookback_days`, `lookback_weeks` | — |
 | `FILE_CHECK` | the scope (`project`, `table_group` or `table`, `run_type`; see "Scope of a run"), the NAS connection as for `FILE_LOAD` | `CHECK_CONTENT` and the file settings of `FILE_LOAD`; which checks a file gets is in `ComplianceFileCheckConfig` |
-| `FILE_LOAD` | the scope (`project`, `table_group` or `table`, `run_type`) | `FILE_STORE` (`nas`), `ARCHIVE_FOLDER`, `ERROR_FOLDER`, `CONTROL_REPORT_FOLDER`, `ERROR_LOG_FOLDER`, `NAS_MIN_AGE_SECONDS`; for large files `INSERT_BATCH_ROWS` (2000), `INSERT_BATCH_BYTES` (500000), `LOAD_ENGINE` (`BATCH`, or `FASTLOAD`), `CHECK_ON_LOAD` (`false`) — see "Large files" |
-| `FILE_RULES` | the scope; `gre` (the GRE's own Airflow Variable, as it is: `connection_type`, `connection_id`, `environment`, `meta_db`, `meta_connection`, `project_name`, `run_params`, `text_params`, `extra_filters`, `log_level`, `max_parallel_rules`; plus `package_dir`, the folder holding the GRE's `run_rules.py`, default `<dags>/rules_engine`) | `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `FILE_RULES_MODE` |
+| `FILE_LOAD` | the scope (`project`, `table_group` or `table`, `run_type`) | `FILE_STORE` (`nas`), `ARCHIVE_FOLDER` (`Archive`), `ERROR_FOLDER` (`Error`), `CONTROL_REPORT_FOLDER` (`ControlReport`), `ERROR_LOG_FOLDER` (`ErrorLog`), `NAS_MIN_AGE_SECONDS` (120), `ARCHIVE_BY_YEAR` (`false`); for large files `INSERT_BATCH_ROWS` (2000), `INSERT_BATCH_BYTES` (500000), `LOAD_ENGINE` (`BATCH`, or `FASTLOAD`), `CHECK_ON_LOAD` (`false`) — see "Large files" |
+| `FILE_RULES` | the scope; `gre` (the GRE's own Airflow Variable; every key optional: `meta_db` (default the Variable's `meta_db`), `environment` (`load_env`), `project_name` (`project`), `log_level` (the Variable's, `INFO`), `max_parallel_rules` (1), `connection_type` / `meta_connection` (`teradata`), `run_params` / `text_params` / `extra_filters` (none); plus `package_dir`, the folder holding the GRE's `run_rules.py`, default `<dags>/rules_engine`) | `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `FILE_RULES_MODE` (`GATE`) |
 | `OVERRIDE_DECISIONS` | the scope | — |
 | `BATCH_CLOSE` | the scope | — |
-| `NOTIFY` | the scope (no `project`: every pending event, including those of no project) | `NOTIFY_BACKEND` (`airflow` = Airflow's email backend, `log` = write to the task log), `DEFAULT_NOTIFY_EMAILS` |
+| `NOTIFY` | the scope (no `project`: every pending event, including those of no project) | `NOTIFY_BACKEND` (`airflow` = Airflow's email backend, `log` = write to the task log, the default), `DEFAULT_NOTIFY_EMAILS` |
 
 A trigger's configuration overrides the Variable for that run: any scope key above, `as_of` (an ISO
 date or timestamp used as "now", for a missed day), `settings` and `gre`.
@@ -250,14 +250,18 @@ included, is copied as it is. The reused batch keeps its own rows, so both batch
 no data (empty file) removes the period's rows. An older batch of a period that has a later batch with data is
 skipped (`EXPORT_LOADED` in the timeline says why).
 
-**When: release by run type (`ComplianceRunType.Release_Mode_Cd`).** Files always load to core as they arrive.
-Pulling internal sources (SOURCE_LOAD), the export and therefore the rules follow the batch's run type:
+**When: by run type category.** Files always load to core as they arrive. Pulling internal sources (SOURCE_LOAD),
+the export and therefore the rules follow the batch's run type (`ComplianceRunType.Run_Category_Cd`):
 
-| `Release_Mode_Cd` | Typical run type | Internal sources pulled and data exported |
-|---|---|---|
-| `ON_LOAD` (default) | DAILY | as soon as the batch's request date is reached / its data is loaded (as before) |
-| `ON_DUE` | WEEKLY, MONTHLY | from the batch's due date on: its close date, `Req_Dt_Key + SLA_Days - 1` (created Sunday 10/18 with `SLA_Days = 6`: Friday 10/23). After that every change is exported at once |
-| `MANUAL` | ADHOC | only when released |
+| Run category | Internal sources pulled and data exported |
+|---|---|
+| `SCHEDULED` (DAILY, WEEKLY, MONTHLY, ...) | from the batch's due date on: its close date, `Req_Dt_Key + SLA_Days - 1` (WEEKLY created Sunday 10/18 with `SLA_Days = 6`: Friday 10/23; DAILY with `SLA_Days = 1`: the same day). After that every change is exported at once |
+| `ADHOC` | only when released |
+
+`RELEASE_TIME` (setting, `HH:MM` Central time) makes the due date start at that time instead of midnight, e.g.
+`"RELEASE_TIME": "20:00"` in the EXPORT_LOAD Variable: a DAILY batch created in the morning is exported from 20:00
+that evening. It applies to the steps whose Variable has it (the examples: EXPORT_LOAD only, so internal sources are
+pulled in the morning and exported in the evening).
 
 A held batch is listed under `held` in the step report (with the date it waits for); it is not a problem and does
 not fail the task. FILE_RULES leaves the loads of tables with an export table until their batch has been exported
@@ -275,22 +279,39 @@ Each released batch gets `BATCH_RELEASED` in its timeline. From then on it is tr
 exported at once, and BATCH_CLOSE closes it on its next run (or `close-batch`) without waiting for the SLA, once it
 has data. Batches without data still close on their SLA date. Other run types and batches are not touched.
 
-**Holding a run type for business reasons** (whatever its `Release_Mode_Cd`, also past the due date): put
+**Holding a run type for business reasons** (scheduled or ad hoc, also past the due date): put
 `"hold": "WEEKLY"` (run types, comma separated, or a list) in the Variable of `SOURCE_LOAD`, `EXPORT_LOAD` and
 `BATCH_CLOSE`, or give it in a trigger. As long as a DAG gets that input, its project's batches of those run types
 are not pulled, exported or closed (listed under `held` / `on_hold` in the report), next week's batches included.
 To run them anyway, trigger with `release` = `true` and the scope: the batches it releases go through every step
 (pull, export, rules, close), hold or not. Remove the `hold` input to return to the run type's normal release.
 
-Give EXPORT_LOAD its own daily `schedule_interval` (the examples: 07:00) so `ON_DUE` batches are exported on their
-due date even when no file arrives that day. Existing installations add the column with
-`ALTER TABLE <META_DB>.ComplianceRunType ADD Release_Mode_Cd VARCHAR(10) DEFAULT 'ON_LOAD' NOT NULL;` (until then
-every run type is `ON_LOAD`).
+Give EXPORT_LOAD its own daily `schedule_interval` at or after `RELEASE_TIME` (the examples: 20:00) so scheduled
+batches are exported on their due date even when no file arrives that day, and schedule BATCH_CLOSE after it (the
+examples: 22:00), so a batch is exported before it closes.
+
+**Export through a procedure.** When `ComplianceExportConfig.Exp_Proc_Nm` names a procedure (`database.procedure`,
+`$env` replaced), EXPORT_LOAD calls it instead of its own delete and `INSERT ... SELECT`: the framework still decides
+which batches to export (changes, hold, release, latest batch of the period), takes the locks, runs the call in one
+transaction, counts the batch's rows in the export table afterwards and records `EXPORT_LOADED`; the procedure deletes
+and inserts the export rows itself. `Exp_Proc_Parm_Txt` lists its parameters in order, e.g.
+`{btch_id}, {data_btch_id}, {exp_btch_id}` (the default when empty). Available: `{btch_id}` (the batch exported),
+`{data_btch_id}` (the batch whose core rows are its data: itself, the batch it reuses, or NULL when it has no data),
+`{exp_btch_id}`, `{reused_btch_ids}` (the batches it reuses, comma separated, whose rows must stay), `{project_cd}`,
+`{table_nm}`, `{src_id}`, `{run_ty}`, `{version}`, `{req_id}`, `{req_dt}`, `{rpt_start}`, `{rpt_end}`. Existing
+tables: `ALTER TABLE <META_DB>.ComplianceExportConfig ADD Exp_Proc_Nm VARCHAR(256), ADD Exp_Proc_Parm_Txt VARCHAR(1000);`.
 
 Each batch is exported in one transaction (delete, then `INSERT ... SELECT` on Teradata; no row passes through
 Airflow) and recorded as `EXPORT_LOADED` in `ComplianceRequestFileDetail`. A batch that fails is rolled back and
 reported (`EXPORT_LOAD_FAILED`, emailed); the others are still exported and the task fails at the end, so
 FILE_RULES is not triggered on a partial export.
+
+## Time zone
+
+Everything runs in Central time (`America/Chicago`, with daylight saving): business dates, schedules, due dates and
+`RELEASE_TIME`. Every timestamp the framework writes (`Created_Dtts`, `Updated_Dtts`, `Event_Dtts`, locks, load
+times) is the current Central time with its offset (e.g. `2026-10-14 22:59:02-05:00`), not UTC. No Variable needs
+`BUSINESS_TZ` or `schedule_timezone`.
 
 ## Scope of a run: project, table group, table, run type
 
@@ -566,7 +587,7 @@ NAS) and sent to the staging table in batches.
 | `Total_Rows_In_File` | Data rows read from the file; empty when the file was rejected before it was read |
 | `Total_Rows_Loaded` | Rows loaded to the core table; `0` unless accepted |
 | `File_Submitted_Date` | The date part of the timestamp in the file name |
-| `File_Processed_Date` | When the load finished, in `BUSINESS_TZ` |
+| `File_Processed_Date` | When the load finished, in Central time |
 | `Error_Message` | Why the file was not loaded, in plain language for the business (for example "No request exists for this run type and reporting period." or "The file contains data that is not in the expected format (first at line 3)."); empty when accepted. Database and system errors never appear here: they are in the error log, the audit table and the support email |
 
 A run that covers several inbound folders writes one report in each. A run that handled no file writes none.
@@ -668,7 +689,7 @@ under each run type; a source with only monthly batches has no row under the wee
 
 A single `SELECT` that returns **one row on a day batches are due and no row on any other day**.
 
-- `{run_date}` is the run date (today in `BUSINESS_TZ`, or `as_of`); `{project_cd}` and `{run_ty}` are
+- `{run_date}` is the run date (today in Central time, or `as_of`); `{project_cd}` and `{run_ty}` are
   the project and run type of the run. Use `{run_date}`, not `CURRENT_DATE`, so a re-run for a missed day works.
 - What the row contains is up to you, and **every column it returns can be used by name in the report
   date statements** — for example a `period_dt` the dates are counted from.

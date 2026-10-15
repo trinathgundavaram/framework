@@ -43,8 +43,8 @@ class SourceLoader:
     def run(self, scope: Optional[Scope] = None, batches: Optional[list[str]] = None,
             release: bool = False, hold: tuple = ()) -> PathIngestSummary:
         """Pull the batches of the scope's query sources that have no data yet or were reopened, or the batches named
-        in `batches` (whatever their data: a new pull replaces the batch's rows). Batches of run types released ON_DUE / MANUAL
-        wait until due, and run types in `hold` until released, unless `release` releases them now."""
+        in `batches` (whatever their data: a new pull replaces the batch's rows). Batches of scheduled run types
+        wait until due, ad-hoc ones until released, and run types in `hold` until released, unless `release` releases them now."""
         scope = scope or Scope()
         cfgs = {(q.project_cd, q.table_nm, q.src_id): q for q in cfgmod.active_query_configs(self.conn, self.settings)
                 if scope.covers(q.project_cd, q.table_nm)}

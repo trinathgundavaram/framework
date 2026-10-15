@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -128,11 +128,14 @@ def period_lookback(period: str) -> tuple:
     return (name, n, None) if name == "PREV_N_DAYS" else (name, None, n)
 
 
+BUSINESS_TZ = "America/Chicago"
+
+
 class Clock:
-    """Injected time source."""
+    """Injected time source: the current time in the business time zone (Central), as written to the tables."""
 
     def now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(ZoneInfo(BUSINESS_TZ))
 
     def today(self, tz: str) -> date:
         return self.now().astimezone(ZoneInfo(tz)).date()
@@ -150,7 +153,7 @@ class FixedClock(Clock):
     def set(self, at: datetime) -> None:
         if at.tzinfo is None:
             raise ValueError("timezone-aware datetime required")
-        self._at = at.astimezone(timezone.utc)
+        self._at = at.astimezone(ZoneInfo(BUSINESS_TZ))
 
 
 def parse_as_of(value: str | None, business_tz: str = "UTC") -> Clock:

@@ -101,7 +101,7 @@ def resolve_config(variable_key: str, overrides: dict = None, scope_index: int =
     settings = {str(k).upper(): ",".join(map(str, v)) if isinstance(v, (list, tuple)) else v
                 for k, v in merged["settings"].items()}
     settings["METADATA_SCHEMA"] = config["meta_db"]
-    environment = config.get("load_env") or config.get("environment") or config["gre"].get("environment")
+    environment = config.get("load_env") or config.get("environment") or (config.get("gre") or {}).get("environment")
     if environment:
         settings.setdefault("ENVIRONMENT", environment)
     return config, settings
@@ -115,14 +115,15 @@ def _connect_environment(config: dict, connection_id: str = None) -> None:
         _load_nas_connection(config[NAS_CONN_KEY])
     if gre and str(gre.get("connection_type") or "teradata").lower() != "teradata":
         raise ValueError("gre.connection_type must be 'teradata': the rules run on the framework's Teradata connection")
+    defaults = {"environment": config.get("load_env"), "meta_db": config.get("meta_db"),
+                "log_level": config.get("log_level") or "INFO", "max_parallel_rules": 1, "project_name": config.get("project")}
     for key, env_key in _GRE_ENV.items():
-        _set_env(env_key, gre.get(key))
+        _set_env(env_key, gre.get(key) if gre.get(key) not in (None, "") else defaults.get(key))
     for key, env_key in _GRE_PARAMS.items():
         if gre.get(key) is not None and not isinstance(gre[key], dict):
             raise ValueError(f"gre.{key} must be a JSON object")
         os.environ[env_key] = json.dumps(gre.get(key) or {})
-    if gre:
-        _set_env("GRE_META_CONNECTION", gre.get("meta_connection") or "teradata")
+    _set_env("GRE_META_CONNECTION", gre.get("meta_connection") or "teradata")
 
 
 def run_compliance_step(step: str, variable_key: str, overrides: dict = None, scope_index: int = None,
