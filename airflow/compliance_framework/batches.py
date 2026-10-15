@@ -41,11 +41,12 @@ def find_batch(conn, project_cd, table_nm, src_id, run_ty, rpt_start: date, rpt_
 
 def scheduled(rt: Optional[RunType], x: XwalkRow) -> bool:
     """Whether the schedule creates this crosswalk row's batches: every row of a SCHEDULED run type, and the rows of
-    an ADHOC run type that has a Batch_Schedule_Sql_Txt when the row has its own Rpt_Dt_Sql_Txt (its other rows
+    an ADHOC run type that has a schedule when the row has its own Rpt_Period_Cd / Rpt_Dt_Sql_Txt (its other rows
     get batches from ComplianceRequestInTake only)."""
     if rt is None or not rt.active:
         return False
-    return rt.run_category_cd == SCHEDULED or bool(rt.run_category_cd == ADHOC and rt.schedule_sql and x.rpt_dt_sql)
+    return rt.run_category_cd == SCHEDULED or bool(rt.run_category_cd == ADHOC and rt.has_schedule
+                                                    and (x.rpt_dt_sql or x.rpt_period_cd))
 
 
 def open_batch_of_other(conn, x: XwalkRow, rpt_start: date, rpt_end: date, intake_id: int) -> Optional[dict]:
@@ -233,11 +234,63 @@ def _config_sql(conn, what: str, sql: str, params: dict, cache: Optional[dict] =
     return rows
 
 
-def batch_due(conn, rt: RunType, run_date: date, project_cd: str, cache: Optional[dict] = None) -> Optional[dict]:
-    """The row of the run type's Batch_Schedule_Sql_Txt for a run date, or None when no batch is due that day.
+WEEKDAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+SCHED_CODES = ("DAILY", "WEEKLY", "MONTHLY")
 
-    Its columns are available by name to the report date statements of the crosswalk.
+
+def _scheduled_on(rt: RunType, d: date) -> bool:
+    """Whether the run type's schedule codes name this date."""
+    if rt.sched_cd == "DAILY":
+        return True
+    if rt.sched_cd == "WEEKLY":
+        return WEEKDAYS[d.weekday()] == rt.sched_day
+    if rt.sched_months and d.month not in rt.sched_months:
+        return False
+    last = (_month_start(d, 1) - timedelta(days=1)).day
+    if rt.sched_day in WEEKDAYS:
+        if WEEKDAYS[d.weekday()] != rt.sched_day:
+            return False
+        return d.day > last - 7 if rt.sched_week == "LAST" else (d.day - 1) // 7 + 1 == int(rt.sched_week)
+    return d.day == (last if rt.sched_day == "LAST" else min(int(rt.sched_day), last))
+
+
+def check_schedule(rt: RunType) -> Optional[str]:
+    """What is wrong with a run type's schedule codes, or None."""
+    if not rt.sched_cd:
+        return None
+    if rt.sched_cd not in SCHED_CODES:
+        return f"Sched_Cd must be one of {', '.join(SCHED_CODES)}"
+    if rt.sched_cd == "WEEKLY" and rt.sched_day not in WEEKDAYS:
+        return f"Sched_Day_Cd of a WEEKLY schedule must be one of {', '.join(WEEKDAYS)}"
+    if rt.sched_cd == "MONTHLY":
+        if rt.sched_day in WEEKDAYS:
+            if rt.sched_week not in ("1", "2", "3", "4", "LAST"):
+                return "a MONTHLY schedule on a weekday needs Sched_Week_Cd 1, 2, 3, 4 or LAST"
+        elif not (rt.sched_day == "LAST" or (rt.sched_day or "").isdigit() and 1 <= int(rt.sched_day) <= 31):
+            return "Sched_Day_Cd of a MONTHLY schedule must be 1 to 31, LAST or a weekday (MON ... SUN)"
+        if any(not 1 <= m <= 12 for m in rt.sched_months):
+            return "Sched_Months_Txt must list months 1 to 12"
+    if rt.sched_window_days < 1:
+        return "Sched_Window_Days must be 1 or more"
+    return None
+
+
+def batch_due(conn, rt: RunType, run_date: date, project_cd: str, cache: Optional[dict] = None) -> Optional[dict]:
+    """Whether a batch of the run type is due on a run date: None, or a row whose period_dt is the scheduled date.
+
+    With schedule codes the batch is due on its scheduled date and the Sched_Window_Days - 1 days after it (a missed
+    day still gets it; same report dates, so one batch). Otherwise the row of Batch_Schedule_Sql_Txt; its columns
+    are available by name to the report date statements of the crosswalk.
     """
+    if rt.sched_cd:
+        problem = check_schedule(rt)
+        if problem:
+            raise ConfigError(f"run type {rt.run_ty}: {problem}")
+        for back in range(rt.sched_window_days):
+            day = run_date - timedelta(days=back)
+            if _scheduled_on(rt, day):
+                return {"period_dt": day}
+        return None
     what = f"run type {rt.run_ty}: Batch_Schedule_Sql_Txt"
     rows = _config_sql(conn, what, rt.schedule_sql,
                        {"run_date": run_date, "project_cd": code(project_cd), "run_ty": rt.run_ty}, cache)
@@ -258,6 +311,8 @@ def report_dates(conn, x: XwalkRow, run_date: date, due: dict, cache: Optional[d
     None = the statement returned no row: this table has no batch for the run date.
     """
     what = f"Rpt_Dt_Sql_Txt of {x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty}"
+    if x.rpt_period_cd:
+        return compute_period(conn, x.rpt_period_cd, db.as_date(due.get("period_dt")) or run_date)
     if x.rpt_dt_sql:
         rows = _config_sql(conn, what, x.rpt_dt_sql, {**due, "run_date": run_date, "project_cd": x.project_cd,
                                                       "run_ty": x.run_ty, "table_nm": x.table_nm, "src_id": x.src_id}, cache)
@@ -272,7 +327,7 @@ def report_dates(conn, x: XwalkRow, run_date: date, due: dict, cache: Optional[d
     elif "rpt_start" in due and "rpt_end" in due:
         row, what = due, f"run type {x.run_ty}: Batch_Schedule_Sql_Txt"
     else:
-        raise ConfigError(f"{x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty} has no Rpt_Dt_Sql_Txt")
+        raise ConfigError(f"{x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty} has no Rpt_Period_Cd or Rpt_Dt_Sql_Txt")
     start, end = db.as_date(row["rpt_start"]), db.as_date(row["rpt_end"])
     if not isinstance(start, date) or not isinstance(end, date) or end < start:
         raise ConfigError(f"{what} returned invalid report dates for {run_date}: rpt_start={start}, rpt_end={end}")
@@ -295,8 +350,9 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
                    tables: Optional[tuple] = None) -> ScheduleSummary:
     """The scheduled batches due on the run date for the project's effective crosswalk rows.
 
-    The run type's Batch_Schedule_Sql_Txt says whether batches are due on the run date; the crosswalk row's
-    Rpt_Dt_Sql_Txt gives its report dates (rows of ADHOC run types only when they have both, see `scheduled`). A stretch of consecutive due days with the same dates gets one
+    The run type's schedule (Sched_Cd ..., else Batch_Schedule_Sql_Txt) says whether batches are due on the run date;
+    the crosswalk row's Rpt_Period_Cd (else Rpt_Dt_Sql_Txt) gives its report dates (rows of ADHOC run types only when
+    they have both, see `scheduled`). Then the ComplianceBatchCalendar rows of the run date. A stretch of consecutive due days with the same dates gets one
     batch. `period` replaces both for this call: one batch for that period on this run date.
     """
     if period and not period_file:
@@ -305,8 +361,8 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
     run_types = cfg.run_types(conn)
     if run_ty is not None:
         rt = run_types.get(code(run_ty))
-        if rt is None or not rt.active or not (rt.run_category_cd == SCHEDULED or rt.schedule_sql):
-            raise ConfigError(f"run type {run_ty} is unknown, inactive, or {ADHOC} without Batch_Schedule_Sql_Txt")
+        if rt is None or not rt.active or not (rt.run_category_cd == SCHEDULED or rt.has_schedule):
+            raise ConfigError(f"run type {run_ty} is unknown, inactive, or {ADHOC} without a schedule")
     logger = EventLogger(conn, clock)
     rows = [x for x in cfg.xwalk_rows(conn, project_cd=project_cd, table_nm=table_nm, run_ty=run_ty)
             if x.effective_on(s.run_date) and scheduled(run_types.get(x.run_ty), x)
@@ -325,7 +381,7 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
         try:
             if period:
                 dates = compute_period(conn, period, s.run_date, lookback_days, lookback_weeks, period_file)
-            elif rt.schedule_sql:
+            elif rt.has_schedule:
                 dates = dates_on(x, s.run_date)
                 if dates is None:
                     s.not_due += 1
@@ -336,10 +392,11 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
                     s.batches.append(f"{label} {dates[0]}..{dates[1]}: exists")
                     continue
             elif run_ty is None:
-                s.batches.append(f"{label}: run type {rt.run_ty} has no Batch_Schedule_Sql_Txt")
+                s.batches.append(f"{label}: run type {rt.run_ty} has no schedule")
                 continue
             else:
-                raise ConfigError(f"run type {rt.run_ty} has no Batch_Schedule_Sql_Txt; set it or pass --period")
+                raise ConfigError(f"run type {rt.run_ty} has no schedule (Sched_Cd or Batch_Schedule_Sql_Txt); set one "
+                                  "or pass --period")
         except ConfigError as e:
             s.errors.append(f"{label}: {e}")
             continue
@@ -350,7 +407,29 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
         else:
             s.existing += 1
         s.batches.append(f"{label} {dates[0]}..{dates[1]}: {'created' if res.created else 'exists'}")
+    if not period:
+        _from_calendar(conn, clock, settings, logger, s, project_cd, run_ty, table_nm, tables, run_types)
     return s
+
+
+def _from_calendar(conn, clock, settings, logger, s, project_cd, run_ty, table_nm, tables, run_types) -> None:
+    """The batches ComplianceBatchCalendar lists for the run date: every effective crosswalk source of the run type
+    (and table, when the row names one) gets a batch for the row's report dates."""
+    for c in cfg.calendar_rows(conn, project_cd, s.run_date):
+        rt = run_types.get(c.run_ty)
+        if (run_ty and c.run_ty != code(run_ty)) or rt is None or not rt.active:
+            continue
+        for x in cfg.effective_sources(conn, c.project_cd, None if c.table_nm == "*" else c.table_nm, c.run_ty, s.run_date):
+            if (table_nm and x.table_nm != code(table_nm)) or (tables is not None and x.table_nm not in tables):
+                continue
+            label = f"{x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty}"
+            res = create_batch(conn, clock, logger, xwalk=x, rpt_start=c.rpt_start, rpt_end=c.rpt_end,
+                               req_dt=s.run_date, lock_timeout=settings.lock_timeout_seconds)
+            if res.created:
+                s.created += 1
+            else:
+                s.existing += 1
+            s.batches.append(f"{label} {c.rpt_start}..{c.rpt_end}: {'created' if res.created else 'exists'} (calendar)")
 
 
 def _already_created(conn, x: XwalkRow, dates: tuple, run_date: date, period_on) -> bool:

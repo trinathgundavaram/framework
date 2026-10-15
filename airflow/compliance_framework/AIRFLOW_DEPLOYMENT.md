@@ -705,20 +705,63 @@ yet (`ComplianceFileLoad.Load_Stat = PROMOTED`, `Rules_Stat = NOT_RUN`), runs th
 
 ## Scheduled batches: when they are created and for which dates (metadata)
 
-Scheduled batch creation is configured in the metadata with two SQL statements. Nothing about it is in
-the DAG, the Airflow Variable, the Glue job or the code. The scheduler only starts `BATCH_CREATION` for a
-project, normally once a day, and a run started by hand behaves the same way.
+Scheduled batch creation is configured in the metadata, with codes; SQL is only a fallback for what the codes
+cannot express. Nothing about it is in the DAG, the Airflow Variable or the code. The scheduler only starts
+`BATCH_CREATION` for a project, normally once a day, and a run started by hand behaves the same way.
 
-| Question | Table (one statement per ...) | Column |
-|---|---|---|
-| **When** are batches created? | `ComplianceRunType` (run type) | `Batch_Schedule_Sql_Txt` |
-| **Which report dates** does a batch get? | `ComplianceDataSetSourceXwalk` (project, table, source, run type) | `Rpt_Dt_Sql_Txt` |
+| Question | Table | Columns (codes) | Fallback |
+|---|---|---|---|
+| **When** are batches created? | `ComplianceRunType` (run type) | `Sched_Cd`, `Sched_Day_Cd`, `Sched_Week_Cd`, `Sched_Months_Txt`, `Sched_Window_Days` | `Batch_Schedule_Sql_Txt` |
+| **Which report dates** does a batch get? | `ComplianceDataSetSourceXwalk` (project, table, source, run type) | `Rpt_Period_Cd` | `Rpt_Dt_Sql_Txt` |
+| **Irregular dates** (an extra or moved submission) | `ComplianceBatchCalendar` (optional) | one row per date and report period | — |
+
+### When: schedule codes on `ComplianceRunType`
+
+| Batches are due | `Sched_Cd` | `Sched_Day_Cd` | `Sched_Week_Cd` | `Sched_Months_Txt` |
+|---|---|---|---|---|
+| Every day | `DAILY` | | | |
+| Every Sunday | `WEEKLY` | `SUN` (`MON` ... `SUN`) | | |
+| The 5th of each month | `MONTHLY` | `5` (a day past the month's end = its last day) | | |
+| The last day of each month | `MONTHLY` | `LAST` | | |
+| The 3rd Tuesday of each month | `MONTHLY` | `TUE` | `3` (`1` ... `4`, `LAST`) | |
+| The 1st of each quarter | `MONTHLY` | `1` | | `1,4,7,10` |
+
+`Sched_Window_Days` (default 1): the batch can still be created that many days from its scheduled date, for the
+same report dates, so a missed run catches up (e.g. `5` for the 3rd Tuesday: Tuesday to Saturday). One batch is
+made per scheduled date, never one per day of the window.
+
+### Which dates: `Rpt_Period_Cd` on the crosswalk
+
+Counted from the scheduled date: `PREV_DAY`, `SAME_DAY`, `PREV_CALENDAR_WEEK` (Monday to Sunday),
+`PREV_CALENDAR_MONTH`, `CURRENT_CALENDAR_MONTH`, `ROLLING_1_MONTH`, `PREV_CALENDAR_QUARTER`, `PREV_CALENDAR_YEAR`,
+`PREV_N_DAYS(n)`, `PREV_WEEK_SAME_DAY(n)`, `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])`. Example: MNT on the 3rd Tuesday of
+October with `PREV_CALENDAR_MONTH` gets 09-01 to 09-30.
+
+### Irregular dates: `ComplianceBatchCalendar` (optional)
+
+One row per run type, request date and report period (`Project_Cd`, `Table_Nm` (`*` = every table), `Run_Ty`,
+`Req_Dt_Key`, `Rpt_Start_Dt_Key`, `Rpt_End_Dt_Key`): on `Req_Dt_Key` BATCH_CREATION creates a batch for those
+report dates for every source of the run type in the crosswalk, next to the schedule. Rows for a whole year can be
+written with one `INSERT ... SELECT` from `sys_calendar.calendar`. A missed day is caught up with `as_of`.
+
+### Fallback: the SQL columns
+
+Used only when the run type has no `Sched_Cd` (`Batch_Schedule_Sql_Txt`) or the crosswalk row no `Rpt_Period_Cd`
+(`Rpt_Dt_Sql_Txt`); existing rows keep working. With a code schedule, `Rpt_Dt_Sql_Txt` can use `{period_dt}` (the
+scheduled date). Existing installations add the columns:
+
+```sql
+ALTER TABLE <META_DB>.ComplianceRunType ADD Sched_Cd VARCHAR(10), ADD Sched_Day_Cd VARCHAR(5), ADD Sched_Week_Cd VARCHAR(5),
+  ADD Sched_Months_Txt VARCHAR(40), ADD Sched_Window_Days SMALLINT DEFAULT 1 NOT NULL;
+ALTER TABLE <META_DB>.ComplianceDataSetSourceXwalk ADD Rpt_Period_Cd VARCHAR(60);
+-- and ComplianceBatchCalendar from sql/schema.sql when it is used
+```
 
 Which tables and sources get batches of a run type is the crosswalk itself, as before: one active,
 effective row per project, table, source and run type. A table with weekly and monthly batches has a row
 under each run type; a source with only monthly batches has no row under the weekly run type.
 
-### When: `ComplianceRunType.Batch_Schedule_Sql_Txt`
+### SQL fallback for when: `ComplianceRunType.Batch_Schedule_Sql_Txt`
 
 A single `SELECT` that returns **one row on a day batches are due and no row on any other day**.
 
@@ -739,7 +782,7 @@ Examples (Teradata):
 | Any day of the 4th quarter | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE EXTRACT(MONTH FROM d) >= 10` |
 | Any day of the second month of the second quarter (May) | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE EXTRACT(MONTH FROM d) = 5` |
 
-### Which dates: `ComplianceDataSetSourceXwalk.Rpt_Dt_Sql_Txt`
+### SQL fallback for which dates: `ComplianceDataSetSourceXwalk.Rpt_Dt_Sql_Txt`
 
 A single `SELECT` that returns **one row with `rpt_start` and `rpt_end`** for that table, source and run
 type. It only runs on a day the run type is due.

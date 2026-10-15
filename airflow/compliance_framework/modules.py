@@ -73,10 +73,10 @@ def _batch_creation(app, p: dict) -> ModuleOutcome:
         rt = cfgmod.run_type(app.conn, run_type)
         if rt is None or not rt.active:
             raise ConfigError(f"run type {run_type} is unknown or inactive")
-        if rt.run_category_cd == SCHEDULED or rt.schedule_sql:
+        if rt.run_category_cd == SCHEDULED or rt.has_schedule:
             scheduled = app.create_batches(**scheduled_kw)
         elif any(k in p for k in period_args):
-            raise ConfigError(f"run type {run_type} is {ADHOC} without Batch_Schedule_Sql_Txt; --period/--period-file/"
+            raise ConfigError(f"run type {run_type} is {ADHOC} without a schedule; --period/--period-file/"
                               f"--lookback-* only apply to a run type with a schedule")
     else:
         scheduled = app.create_batches(**scheduled_kw)

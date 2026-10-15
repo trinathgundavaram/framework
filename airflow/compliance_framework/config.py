@@ -29,11 +29,24 @@ class RunType:
     carry_fwd: bool
     active: bool
     schedule_sql: Optional[str] = None
+    sched_cd: Optional[str] = None
+    sched_day: Optional[str] = None
+    sched_week: Optional[str] = None
+    sched_months: tuple = ()
+    sched_window_days: int = 1
+
+    @property
+    def has_schedule(self) -> bool:
+        return bool(self.sched_cd or self.schedule_sql)
 
     @classmethod
     def from_row(cls, r: dict) -> "RunType":
+        months = _text(r.get("sched_months_txt"))
         return cls(code(r["run_ty"]), code(r["run_category_cd"]), r["sla_days"], r["carry_fwd_ind"] == 1, r["active_ind"] == 1,
-                   _text(r.get("batch_schedule_sql_txt")))
+                   _text(r.get("batch_schedule_sql_txt")), code(_text(r.get("sched_cd"))), code(_text(r.get("sched_day_cd"))),
+                   code(_text(r.get("sched_week_cd"))),
+                   tuple(int(m) for m in months.replace(" ", "").split(",") if m.isdigit()) if months else (),
+                   int(r.get("sched_window_days") or 1))
 
 
 @dataclass(frozen=True)
@@ -47,12 +60,13 @@ class XwalkRow:
     cmplnc_vrsn: str
     active: bool
     rpt_dt_sql: Optional[str] = None
+    rpt_period_cd: Optional[str] = None
 
     @classmethod
     def from_row(cls, r: dict) -> "XwalkRow":
         return cls(code(r["project_cd"]), code(r["table_nm"]), code(r["src_id"]), code(r["run_ty"]), db.as_date(r["effective_start_dt_key"]),
                    db.as_date(r["effective_end_dt_key"]), code(r["cmplnc_vrsn"]), r["active_ind"] == 1,
-                   _text(r.get("rpt_dt_sql_txt")))
+                   _text(r.get("rpt_dt_sql_txt")), code(_text(r.get("rpt_period_cd"))))
 
     def effective_on(self, d: date) -> bool:
         return self.active and self.effective_start_dt <= d and (self.effective_end_dt is None or d <= self.effective_end_dt)
@@ -171,6 +185,31 @@ def xwalk_rows(conn: Connection, *, project_cd: Optional[str] = None, table_nm: 
     rows = conn.execute(f"SELECT * FROM ComplianceDataSetSourceXwalk WHERE {' AND '.join(where)} "
                         "ORDER BY Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key", params).fetchall()
     return [XwalkRow.from_row(r) for r in rows]
+
+
+@dataclass(frozen=True)
+class CalendarRow:
+    """One ComplianceBatchCalendar row: batches of a run type created on Req_Dt_Key for these report dates."""
+    project_cd: str
+    table_nm: str
+    run_ty: str
+    req_dt: date
+    rpt_start: date
+    rpt_end: date
+
+    @classmethod
+    def from_row(cls, r: dict) -> "CalendarRow":
+        return cls(code(r["project_cd"]), code(r["table_nm"] or "*"), code(r["run_ty"]), db.as_date(r["req_dt_key"]),
+                   db.as_date(r["rpt_start_dt_key"]), db.as_date(r["rpt_end_dt_key"]))
+
+
+def calendar_rows(conn: Connection, project_cd: str, req_dt: date) -> list[CalendarRow]:
+    """The active calendar rows of a project for a request date; none when ComplianceBatchCalendar does not exist."""
+    if not db.table_exists(conn, conn.schema, "ComplianceBatchCalendar"):
+        return []
+    rows = conn.execute("SELECT * FROM ComplianceBatchCalendar WHERE UPPER(Project_Cd) = %s AND Req_Dt_Key = %s "
+                        "AND Active_Ind = 1 ORDER BY Run_Ty, Table_Nm", (code(project_cd), req_dt)).fetchall()
+    return [CalendarRow.from_row(r) for r in rows]
 
 
 def effective_sources(conn, project_cd, table_nm, run_ty, on_date: date) -> list[XwalkRow]:
@@ -557,21 +596,29 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
                               "HAVING count(*) > 1").fetchall():
             add("CODE_CASE_DUPLICATE", f"{table}: {r['n']} rows have {column} {r['cd']} in different upper / lower case")
     rts = run_types(conn)
+    from .batches import batch_due, check_period, check_schedule, report_dates, scheduled
     for rt in rts.values():
         if not rt.run_ty.isalnum():
             add("RUN_TYPE", f"run type {rt.run_ty!r} must be letters and digits only (it is the {{RUNTY}} token)")
         if rt.run_category_cd not in (SCHEDULED, ADHOC) or rt.sla_days < 1:
             add("RUN_TYPE", f"run type {rt.run_ty}: category must be SCHEDULED/ADHOC and SLA_Days >= 1")
+        problem = check_schedule(rt)
+        if problem:
+            add("RUN_TYPE", f"run type {rt.run_ty}: {problem}")
     projects = {code(r["project_cd"]): r["active_ind"] == 1
                 for r in conn.execute("SELECT Project_Cd, Active_Ind FROM ComplianceProject").fetchall()}
     sources = {code(r["src_id"]) for r in conn.execute("SELECT Src_ID FROM ComplianceSourceSystem").fetchall()}
     xw = xwalk_rows(conn)
-    from .batches import batch_due, report_dates, scheduled
 
     run_date, cache, due = run_date or date.today(), {}, {}
     for x in xw:
         rt = rts.get(x.run_ty)
-        if not scheduled(rt, x) or not rt.schedule_sql or not x.effective_on(run_date):
+        if x.rpt_period_cd:
+            try:
+                check_period(x.rpt_period_cd)
+            except ConfigError as e:
+                add("RPT_PERIOD", f"Rpt_Period_Cd of {x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty}: {e}")
+        if not scheduled(rt, x) or not rt.has_schedule or not x.effective_on(run_date) or check_schedule(rt):
             continue
         key = (x.project_cd, x.run_ty)
         if key not in due:
@@ -588,6 +635,16 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
         elif x.rpt_dt_sql and not re.match(r"^\s*(SELECT|WITH)\b[^;]*;?\s*$", x.rpt_dt_sql, re.IGNORECASE):
             add("RPT_DT_SQL", f"Rpt_Dt_Sql_Txt of {x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty} must be a single "
                               "SELECT statement")
+    if db.table_exists(conn, conn.schema, "ComplianceBatchCalendar"):
+        for r in conn.execute("SELECT * FROM ComplianceBatchCalendar WHERE Active_Ind = 1").fetchall():
+            c = CalendarRow.from_row(r)
+            label = f"ComplianceBatchCalendar {c.project_cd}/{c.table_nm}/{c.run_ty} {c.req_dt}"
+            if c.project_cd not in projects:
+                add("BATCH_CALENDAR", f"{label}: project {c.project_cd} is not in ComplianceProject")
+            if c.run_ty not in rts:
+                add("BATCH_CALENDAR", f"{label}: run type {c.run_ty} is not in ComplianceRunType")
+            if c.rpt_end < c.rpt_start:
+                add("BATCH_CALENDAR", f"{label}: Rpt_End_Dt_Key is before Rpt_Start_Dt_Key")
     cfgs = active_file_configs(conn, settings)
     from .filecheck_options import CHECKS, check_options
 

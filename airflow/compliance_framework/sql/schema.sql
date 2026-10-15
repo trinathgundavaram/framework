@@ -81,6 +81,11 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceRunType (
   SLA_Days        INTEGER      NOT NULL,
   Carry_Fwd_Ind   SMALLINT     DEFAULT 0 NOT NULL,
   Batch_Schedule_Sql_Txt VARCHAR(8000),
+  Sched_Cd        VARCHAR(10),
+  Sched_Day_Cd    VARCHAR(5),
+  Sched_Week_Cd   VARCHAR(5),
+  Sched_Months_Txt VARCHAR(40),
+  Sched_Window_Days SMALLINT    DEFAULT 1 NOT NULL,
   Active_Ind      SMALLINT     DEFAULT 1 NOT NULL,
   Created_Dtts    TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Created_By      VARCHAR(100) DEFAULT USER NOT NULL,
@@ -88,6 +93,22 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceRunType (
   Updated_By      VARCHAR(100) DEFAULT USER NOT NULL
 )
 UNIQUE PRIMARY INDEX (Run_Ty);
+
+-- Optional: batches created on given dates with given report dates (irregular schedules), per run type and table.
+CREATE MULTISET TABLE {{META_DB}}.ComplianceBatchCalendar (
+  Project_Cd       VARCHAR(30)  NOT NULL,
+  Table_Nm         VARCHAR(63)  DEFAULT '*' NOT NULL,
+  Run_Ty           VARCHAR(20)  NOT NULL,
+  Req_Dt_Key       DATE         NOT NULL,
+  Rpt_Start_Dt_Key DATE         NOT NULL,
+  Rpt_End_Dt_Key   DATE         NOT NULL,
+  Active_Ind       SMALLINT     DEFAULT 1 NOT NULL,
+  Created_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Created_By       VARCHAR(100) DEFAULT USER NOT NULL,
+  Updated_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Updated_By       VARCHAR(100) DEFAULT USER NOT NULL
+)
+UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Run_Ty, Req_Dt_Key, Rpt_Start_Dt_Key, Rpt_End_Dt_Key);
 
 CREATE MULTISET TABLE {{META_DB}}.ComplianceDataSetSourceXwalk (
   Project_Cd             VARCHAR(30)  NOT NULL,
@@ -98,6 +119,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceDataSetSourceXwalk (
   Effective_End_Dt_Key   DATE,
   Cmplnc_Vrsn            VARCHAR(10)  NOT NULL,
   Rpt_Dt_Sql_Txt         VARCHAR(8000),
+  Rpt_Period_Cd          VARCHAR(60),
   Active_Ind             SMALLINT     DEFAULT 1 NOT NULL,
   Created_Dtts           TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Created_By             VARCHAR(100) DEFAULT USER NOT NULL,
