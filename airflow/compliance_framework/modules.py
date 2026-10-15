@@ -114,6 +114,12 @@ def report(out: ModuleOutcome) -> dict:
                 "loads": [{("rows_read" if k == "rows_in_file" else k): v for k, v in f.items()
                            if k not in ("file", "share", "folder", "file_date") and v is not None} for f in r.files],
                 "problems": r.errors}
+    if out.module == "EXPORT_LOAD":
+        return {"step": "EXPORT_LOAD", "result": ("NO BATCHES TO EXPORT" if not r.batches and not r.errors
+                                                   else f"{r.failed or len(r.errors)} BATCH(ES) NOT EXPORTED"
+                                                   if r.failed or r.errors else "ALL BATCHES EXPORTED"),
+                "export_tables": r.tables, "batches_found": len(r.batches), "exported": r.exported,
+                "skipped": r.skipped, "failed": r.failed, "batches": r.batches, "problems": r.errors}
     if out.module == "FILE_CHECK":
         return {"step": "FILE_CHECK", "result": ("NO FILES" if not r.files and not r.errors
                                                   else f"{r.failed} FILE(S) WITH PROBLEMS" if r.failed or r.errors
@@ -161,6 +167,13 @@ def _source_load(app, p: dict) -> ModuleOutcome:
     names = [n.strip() for n in (p.get("batch") or "").split(",") if n.strip()]
     s = app.source_loader.run(_scope(app, p), names or None)
     return ModuleOutcome("SOURCE_LOAD", s, 1 if s.errors or s.quarantined or s.rejected else 0)
+
+
+def _export_load(app, p: dict) -> ModuleOutcome:
+    """Copy the batches whose data changed into the export tables; exit 1 when a batch could not be exported."""
+    names = [n.strip() for n in (p.get("batch") or "").split(",") if n.strip()]
+    s = app.exporter.run(_scope(app, p), names or None)
+    return ModuleOutcome("EXPORT_LOAD", s, 1 if s.errors or s.failed else 0)
 
 
 def _file_check(app, p: dict) -> ModuleOutcome:
@@ -213,6 +226,12 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
                        "that have no data yet, or the batches named in --batch (comma separated; a new pull replaces "
                        "the batch's rows)",
         required=(), optional=(Param("project"), *SCOPE, Param("batch")), handler=_source_load),
+    ModuleSpec(
+        "EXPORT_LOAD", "copy each batch whose data changed (load, carry-forward, late arrival, correction) from core "
+                       "into its export table (ComplianceExportConfig): the batch's rows replace the earlier rows of "
+                       "that source and report period; a carried-forward batch gets a copy of the reused rows under "
+                       "its own batch; --batch exports named batches again",
+        required=(), optional=(Param("project"), *SCOPE, Param("batch")), handler=_export_load),
     ModuleSpec(
         "FILE_CHECK", "optional check of the files waiting in the inbound folders, before FILE_LOAD: name, batch, "
                       "header, trailer, record types and column counts. It loads nothing, moves no file and changes "

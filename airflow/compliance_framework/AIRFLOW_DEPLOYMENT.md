@@ -43,6 +43,7 @@ airflow/
    | `FILE_CHECK` (optional) | `OSSTD_CORE_CMS_COMPLIANCE_FILE_CHECK` | `compliance_file_check_config_var` |
    | `FILE_LOAD` | `OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD` | `compliance_file_load_config_var` |
    | `SOURCE_LOAD` (internal sources) | `OSSTD_CORE_CMS_COMPLIANCE_SOURCE_LOAD` | `compliance_source_load_config_var` |
+   | `EXPORT_LOAD` (optional) | `OSSTD_CORE_CMS_COMPLIANCE_EXPORT_LOAD` | `compliance_export_load_config_var` |
    | `FILE_RULES` | `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` | `compliance_file_rules_config_var` |
    | `OVERRIDE_DECISIONS` | `OSSTD_CORE_CMS_COMPLIANCE_OVERRIDE_DECISIONS` | `compliance_override_decisions_config_var` |
    | `BATCH_CLOSE` | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CLOSE` | `compliance_batch_close_config_var` |
@@ -55,8 +56,9 @@ airflow/
    `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD` / `TERADATA_LOGMECH` and `NAS_HOST` /
    `NAS_USER` / `NAS_PASSWORD` / `NAS_PORT`.
 3. **DAGs start each other** through `trigger_dags` in the Variable (`TriggerDagRunOperator`, not
-   waiting): in the examples `FILE_LOAD` starts `FILE_RULES`, `OVERRIDE_DECISIONS` and `NOTIFY`; the
-   others start `NOTIFY`. Each DAG can also have its own `schedule_interval`.
+   waiting): in the examples `FILE_LOAD` and `SOURCE_LOAD` start `EXPORT_LOAD` (which starts `FILE_RULES`),
+   `FILE_LOAD` also `OVERRIDE_DECISIONS`, and the others start `NOTIFY`. Without export tables, point
+   `FILE_LOAD` / `SOURCE_LOAD` at `FILE_RULES` as before. Each DAG can also have its own `schedule_interval`.
 4. A task runs one step in-process. It fails on a framework error (exit code 2), and on "completed
    with problems" (exit code 1) where the step is configured that way; otherwise the outcome is the
    task's XCom.
@@ -215,6 +217,35 @@ or `QUERY:LOCAL`, `File_Path` = project/table/source/batch), so FILE_RULES, the 
 as for files; no control report file is written for pulls. A query that fails or a value that does not fit
 rejects that pull (`SOURCE_QUERY_FAILED` / `SOURCE_DATA_REJECTED`, emailed); the other batches are still pulled
 and the task fails at the end. Sources on another server are read in batches of `INSERT_BATCH_ROWS`.
+
+## Export tables (`EXPORT_LOAD`)
+
+Optional step between the load (FILE_LOAD / SOURCE_LOAD) and FILE_RULES: it copies each batch's core rows into
+the table's export table, so the rules (and downstream feeds) read the export. Without `ComplianceExportConfig`
+rows (or without the table) the step finds nothing to do.
+
+**One row per core table in `ComplianceExportConfig`** (DDL in `sql/schema.sql`): `Project_Cd`, `Table_Nm`,
+`Exp_Schema_Nm` (`$env` replaced as in database names), `Exp_Table_Nm`, `Active_Ind`. The export table has the
+core table's columns (it may have fewer, and its own identity column); `Btch_ID` is required. Columns of the export
+that are not in core are left NULL (`validate-config` warns). The core row ID column is copied as it is, so an
+export row can be traced back to core.
+
+**Which batches are exported.** With the scope: every batch whose data changed after its last export (a load,
+late arrival, correction, carry-forward applied or removed, or a change of the batch it reuses), for every run
+type. With `batch`: exactly those batches, again.
+
+**What the export holds.** Per source, run type and report dates, the latest batch with data: exporting it removes
+the rows of the other batches of that period and inserts its own. A carried-forward batch gets a copy of the
+reused batch's core rows under its own `Btch_ID`, with its own run type, version, request and report dates (the
+columns mapped to them in `ComplianceTargetColumnConfig`); every other column, row ID, file name and load times
+included, is copied as it is. The reused batch keeps its own rows, so both batches have their data. A batch with
+no data (empty file) removes the period's rows. An older batch of a period that has a later batch with data is
+skipped (`EXPORT_LOADED` in the timeline says why).
+
+Each batch is exported in one transaction (delete, then `INSERT ... SELECT` on Teradata; no row passes through
+Airflow) and recorded as `EXPORT_LOADED` in `ComplianceRequestFileDetail`. A batch that fails is rolled back and
+reported (`EXPORT_LOAD_FAILED`, emailed); the others are still exported and the task fails at the end, so
+FILE_RULES is not triggered on a partial export.
 
 ## Scope of a run: project, table group, table, run type
 
@@ -532,7 +563,8 @@ yet (`ComplianceFileLoad.Load_Stat = PROMOTED`, `Rules_Stat = NOT_RUN`), runs th
 - Only the batch's current load is checked; a load replaced by a newer file is not. A file loaded again
   is checked again.
 - The engine is given the staging and the core table of the file (`stg_schema_nm`, `stg_table_nm`,
-  `core_schema_nm`, `core_table_nm`) with the batch and load ids.
+  `core_schema_nm`, `core_table_nm`) with the batch and load ids, and its export table (`exp_schema_nm`,
+  `exp_table_nm`) when the table has one (`EXPORT_LOAD`).
 - **Airflow:** the rules have their own DAG, `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES`, with its own
   Variable. The file-load DAG starts it after each load through `trigger_dags` (without waiting for
   it); it can also be triggered by hand (`{"project": "CMS_UNIVERSE"}`, or `{}` for every project) or
@@ -849,7 +881,7 @@ String comparisons follow the session's transaction mode (Teradata mode is not c
 With `RULE_ENGINE=gre` and `GRE_ENTRYPOINT=compliance_framework.gre_bridge:run_gre`, each
 `ComplianceRuleBinding` of a file runs that GRE `rule_group` (and `rule_variant`; `*` = all) through the
 GRE's `run_rules()`, with `run_key = CBF_LOAD_<Load_ID>` and the file's context as `run_params`
-(`{btch_id}`, `{load_id}`, `{stg_schema_nm}`, `{stg_table_nm}`, `{core_schema_nm}`, `{core_table_nm}`, `{project_cd}`, `{table_nm}`, `{src_id}`,
+(`{btch_id}`, `{load_id}`, `{stg_schema_nm}`, `{stg_table_nm}`, `{core_schema_nm}`, `{core_table_nm}`, `{exp_schema_nm}`, `{exp_table_nm}` (only with an export table), `{project_cd}`, `{table_nm}`, `{src_id}`,
 `{run_ty}`, `{rpt_start_dt_key}`, `{rpt_end_dt_key}`, `{req_dt_key}`). The verdict of each rule is read
 from `<gre meta_db>.gre_results`: `PASS` / `WARN` pass, `FAIL` marks the file's rules as failed (or as
 warnings under ANNOTATE), anything else is a technical failure that is retried. This happens in the

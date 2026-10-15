@@ -67,6 +67,11 @@ class App:
         return SourceLoader(self.conn, self.clock, self.settings, self.pipeline)
 
     @cached_property
+    def exporter(self):
+        from .export import ExportLoader
+        return ExportLoader(self.conn, self.clock, self.settings)
+
+    @cached_property
     def rules_runner(self) -> RulesRunner:
         return RulesRunner(self.conn, self.clock, self.settings, self.rules)
 

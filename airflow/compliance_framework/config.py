@@ -226,6 +226,43 @@ def active_query_configs(conn: Connection, settings=None) -> list[QueryConfig]:
     return [QueryConfig.from_row(r, settings) for r in rows]
 
 
+@dataclass(frozen=True)
+class ExportConfig:
+    """One ComplianceExportConfig row: the export table a core table's batches are copied to (EXPORT_LOAD)."""
+    project_cd: str
+    table_nm: str
+    exp_schema_nm: str
+    exp_table_nm: str
+    active: bool = True
+
+    @property
+    def label(self) -> str:
+        return f"ComplianceExportConfig {self.project_cd}/{self.table_nm}"
+
+    @classmethod
+    def from_row(cls, r: dict, settings=None) -> "ExportConfig":
+        name = settings.resolve_env if settings else (lambda text, identifier=True: text)
+        return cls(code(r["project_cd"]), code(r["table_nm"]), name(r["exp_schema_nm"]), r["exp_table_nm"],
+                   r["active_ind"] == 1)
+
+
+def active_export_configs(conn: Connection, settings=None) -> list[ExportConfig]:
+    """The active export tables; none when ComplianceExportConfig does not exist."""
+    if not db.table_exists(conn, conn.schema, "ComplianceExportConfig"):
+        return []
+    rows = conn.execute("SELECT * FROM ComplianceExportConfig WHERE Active_Ind = 1 ORDER BY Project_Cd, Table_Nm").fetchall()
+    return [ExportConfig.from_row(r, settings) for r in rows]
+
+
+def target_tables(conn: Connection, project_cd: str, table_nm: str, src_id: str, settings=None):
+    """The staging / core tables of a source: its file config, else its query config."""
+    cfg = file_config(conn, project_cd, table_nm, src_id, settings=settings)
+    if cfg is not None:
+        return cfg
+    return next((q for q in active_query_configs(conn, settings)
+                 if (q.project_cd, q.table_nm, q.src_id) == (code(project_cd), code(table_nm), code(src_id))), None)
+
+
 def active_file_configs(conn: Connection, settings=None) -> list[FileConfig]:
     rows = conn.execute("SELECT * FROM ComplianceSourceFileConfig WHERE Active_Ind = 1 ORDER BY Cfg_ID").fetchall()
     return [FileConfig.from_row(r, settings) for r in rows]
@@ -665,6 +702,28 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             file_layout(conn, q, targets, check_options(q, checks))
         except (LookupError, ConfigError) as e:
             add("TARGET_TABLE", f"{label}: {e}")
+
+    from .layout import BATCH_COLUMN
+    from .load import columns
+    cores = {(c.project_cd, c.table_nm): c for c in [*cfgs, *queries]}
+    for e in active_export_configs(conn, settings):
+        label = e.label
+        if e.project_cd not in projects:
+            add("EXPORT_CONFIG", f"{label}: project {e.project_cd} is not in ComplianceProject")
+        src = cores.get((e.project_cd, e.table_nm))
+        if src is None:
+            add("EXPORT_CONFIG", f"{label}: the table has no active file or query config", "WARNING")
+            continue
+        exp = {c.name for c in columns(conn, e.exp_schema_nm, e.exp_table_nm) if not c.auto}
+        if not exp:
+            add("EXPORT_CONFIG", f"{label}: export table {e.exp_schema_nm}.{e.exp_table_nm} not found")
+        elif BATCH_COLUMN not in exp:
+            add("EXPORT_CONFIG", f"{label}: export table {e.exp_schema_nm}.{e.exp_table_nm} lacks the batch column {BATCH_COLUMN}")
+        else:
+            missing = sorted(exp - {c.name for c in columns(conn, src.core_schema_nm, src.core_table_nm)})
+            if missing:
+                add("EXPORT_CONFIG", f"{label}: export columns not in core {src.core_schema_nm}.{src.core_table_nm} "
+                                     f"(loaded as NULL): {', '.join(missing)}", "WARNING")
 
     for r in conn.execute("SELECT * FROM ComplianceRuleBinding WHERE Active_Ind = 1 "
                           "ORDER BY Project_Cd, Table_Nm, Src_ID, Run_Ty").fetchall():

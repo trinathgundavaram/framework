@@ -25,6 +25,20 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceTable (
 )
 UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm);
 
+-- Optional: the export table of a core table (EXPORT_LOAD), one row per project / table.
+CREATE MULTISET TABLE {{META_DB}}.ComplianceExportConfig (
+  Project_Cd      VARCHAR(30)    NOT NULL,
+  Table_Nm        VARCHAR(63)    NOT NULL,
+  Exp_Schema_Nm   VARCHAR(128)   NOT NULL,
+  Exp_Table_Nm    VARCHAR(63)    NOT NULL,
+  Active_Ind      SMALLINT       DEFAULT 1 NOT NULL,
+  Created_Dtts    TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Created_By      VARCHAR(100)   DEFAULT USER NOT NULL,
+  Updated_Dtts    TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Updated_By      VARCHAR(100)   DEFAULT USER NOT NULL
+)
+UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm);
+
 -- Optional: internal sources pulled with a query (SOURCE_LOAD), one row per project / table / source.
 CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceQueryConfig (
   Project_Cd      VARCHAR(30)    NOT NULL,

@@ -9,9 +9,9 @@ DEFAULT_CONNECTION_ID = "compliance_teradata"
 TD_CONN_KEY = "td_conn_var"
 NAS_CONN_KEY = "wdc_comp_oper_nas_var"
 DEFAULT_TIMEZONE = "America/Chicago"
-STEPS = ("BATCH_CREATION", "FILE_CHECK", "FILE_LOAD", "SOURCE_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BATCH_CLOSE",
+STEPS = ("BATCH_CREATION", "FILE_CHECK", "FILE_LOAD", "SOURCE_LOAD", "EXPORT_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BATCH_CLOSE",
          "NOTIFY")
-FAIL_ON_PROBLEMS = {"BATCH_CREATION": True, "FILE_CHECK": True, "FILE_LOAD": True, "SOURCE_LOAD": True, "FILE_RULES": True, "OVERRIDE_DECISIONS": False,
+FAIL_ON_PROBLEMS = {"BATCH_CREATION": True, "FILE_CHECK": True, "FILE_LOAD": True, "SOURCE_LOAD": True, "EXPORT_LOAD": True, "FILE_RULES": True, "OVERRIDE_DECISIONS": False,
                     "BATCH_CLOSE": True, "NOTIFY": True}
 SCOPE_KEYS = ("project", "table_group", "run_type", "period", "table", "period_file", "lookback_days", "lookback_weeks",
               "share", "file", "folder", "batch")

@@ -70,17 +70,21 @@ class RulesRunner:
         ctx = dict(project_cd=b["project_cd"], table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"],
                    req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id)
         bindings = cfgmod.rule_bindings(self.conn, b["project_cd"], b["table_nm"], b["src_id"], b["run_ty"])
-        cfg = cfgmod.file_config(self.conn, b["project_cd"], b["table_nm"], b["src_id"], settings=self.settings)
+        cfg = cfgmod.target_tables(self.conn, b["project_cd"], b["table_nm"], b["src_id"], settings=self.settings)
         if not bindings or cfg is None:
             self._set(load_id, "SKIPPED")
             s.skipped.append(load_id)
             return
+        exp = next((e for e in cfgmod.active_export_configs(self.conn, self.settings)
+                    if (e.project_cd, e.table_nm) == (b["project_cd"], b["table_nm"])), None)
         outcome = self.rules.run(self.conn, bindings, {
             "scope": "FILE_LEVEL", "btch_id": b["btch_id"], "load_id": load_id,
             "project_cd": b["project_cd"], "table_nm": b["table_nm"], "src_id": b["src_id"], "run_ty": b["run_ty"],
             "rpt_start_dt_key": b["rpt_start_dt_key"], "rpt_end_dt_key": b["rpt_end_dt_key"],
             "req_dt_key": b["req_dt_key"], "stg_schema_nm": cfg.stg_schema_nm, "stg_table_nm": cfg.stg_table_nm,
-            "core_schema_nm": cfg.core_schema_nm, "core_table_nm": cfg.core_table_nm}, self.settings.file_rules_mode)
+            "core_schema_nm": cfg.core_schema_nm, "core_table_nm": cfg.core_table_nm,
+            "exp_schema_nm": exp.exp_schema_nm if exp else None, "exp_table_nm": exp.exp_table_nm if exp else None},
+            self.settings.file_rules_mode)
         with self.conn.transaction():
             self._set(load_id, outcome.status)
             if outcome.status == ERROR:
