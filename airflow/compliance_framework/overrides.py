@@ -9,8 +9,9 @@ from typing import Optional
 from . import config as cfgmod
 from . import db
 from .audit import EventLogger
-from .batches import get_batch, promoted_load
-from .common import SOURCE_DATA_CARRY_FORWARD, OPEN_STATUSES, REQUEST_CREATED, Clock, check_transition, code
+from .batches import REOPENED_AWAITING_DATA, get_batch, promoted_load
+from .common import (COMPLETED_WITH_EXCEPTION, EXCEPTION_PENDING, OPEN_STATUSES, REOPEN_STATUS, REQUEST_CREATED,
+                     SOURCE_DATA_CARRY_FORWARD, Clock, check_transition, code)
 from .db import Connection
 from .settings import Settings
 from .scope import Scope
@@ -21,6 +22,7 @@ class DecisionSummary:
     applied: list[int] = field(default_factory=list)
     expired: list[int] = field(default_factory=list)
     invalid: list[int] = field(default_factory=list)
+    reopened: list[int] = field(default_factory=list)
 
 
 class DecisionProcessor:
@@ -29,11 +31,12 @@ class DecisionProcessor:
         self.logger = EventLogger(conn, clock)
 
     def run(self, scope: Optional[Scope] = None) -> DecisionSummary:
-        """Expire, then apply, REUSE overrides of a scope (a project, a table group or table, a run type), or of
-        every project."""
+        """Reopen batches (REOPEN), then expire and apply REUSE overrides of a scope (a project, a table group or
+        table, a run type), or of every project."""
         s = DecisionSummary()
         scope = scope or Scope()
         today = self.clock.today(self.settings.business_tz)
+        self._reopen(s, today, scope)
         self._expire(s, today, scope)
         self._apply(s, today, scope)
         return s
@@ -95,6 +98,44 @@ class DecisionProcessor:
                                 detail=f"reuses {src['btch_id']} through {valid_thru}")
         s.applied.append(o["ovrd_id"])
 
+    def _reopen(self, s: DecisionSummary, today: date, scope: Scope) -> None:
+        """Approved, still-valid REOPEN overrides not applied yet whose batch is closed: the batch is open again
+        (with the open status of its data) until new data arrives; BATCH_CLOSE then closes it."""
+        where, params = scope.sql("c")
+        rows = self.conn.execute(
+            f"""SELECT o.Ovrd_ID, o.Reviewed_By, o.Created_By, c.Req_ID, c.Btch_ID FROM ComplianceBatchOverride o
+                 JOIN ComplianceRequestControl c ON c.Req_ID = o.Req_ID
+                WHERE UPPER(o.Override_Ty) = 'REOPEN' AND UPPER(o.Apprvl_Stat) = 'APPROVED' AND o.Valid_Thru_Dt_Key >= %s
+                  AND c.Batch_Close_Ind = 1 AND NOT EXISTS (SELECT 1 FROM ComplianceRequestFileDetail d
+                        WHERE d.Ovrd_ID = o.Ovrd_ID AND d.Event_Ty = 'BATCH_REOPENED'){where}
+                ORDER BY o.Ovrd_ID""", [today, *params]).fetchall()
+        for r in rows:
+            key = db.batch_key(r["btch_id"])
+            if not db.try_lock(self.conn, key):
+                continue
+            try:
+                with self.conn.transaction():
+                    b = get_batch(self.conn, r["req_id"])
+                    if b["batch_close_ind"] != 1:
+                        continue
+                    to_stat = (EXCEPTION_PENDING if b["req_stat"] == COMPLETED_WITH_EXCEPTION
+                               else REOPEN_STATUS.get(b["resolution_ty"], REQUEST_CREATED))
+                    resolution = None if b["resolution_ty"] == "MISSING" else b["resolution_ty"]
+                    check_transition(b["req_stat"], to_stat)
+                    self.conn.execute(
+                        """UPDATE ComplianceRequestControl SET Batch_Close_Ind = 0, Req_Stat=%s, Resolution_Ty=%s,
+                                  Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, resolution, self.clock.now(), b["req_id"]))
+                    actor = r["reviewed_by"] or r["created_by"] or "SYSTEM"
+                    detail = f"reopened: {b['req_stat']} / {b['resolution_ty']} -> {to_stat}; open until new data arrives"
+                    self.logger.batch_event("BATCH_REOPENED", req_id=b["req_id"], btch_id=b["btch_id"],
+                                            ovrd_id=r["ovrd_id"], actor=actor, detail=detail)
+                    self.logger.audit("BATCH_REOPENED", actor=actor, description=detail, ovrd_id=r["ovrd_id"],
+                                      req_id=b["req_id"], btch_id=b["btch_id"], project_cd=b["project_cd"],
+                                      table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"])
+                    s.reopened.append(r["ovrd_id"])
+            finally:
+                db.unlock(self.conn, key)
+
     def _expire(self, s: DecisionSummary, today: date, scope: Scope) -> None:
         """A batch still carrying data whose override has run out (or was rejected) goes back to REQUEST_CREATED."""
         where, params = scope.sql("c")
@@ -104,7 +145,7 @@ class DecisionProcessor:
                  LEFT JOIN ComplianceBatchOverride o
                         ON o.Req_ID = c.Req_ID AND UPPER(o.Override_Ty) = 'REUSE' AND UPPER(o.Apprvl_Stat) = 'APPROVED'
                 WHERE c.Resolution_Ty = 'CARRY_FORWARD' AND c.Batch_Close_Ind = 0
-                  AND (o.Ovrd_ID IS NULL OR o.Valid_Thru_Dt_Key < %s){where}
+                  AND (o.Ovrd_ID IS NULL OR o.Valid_Thru_Dt_Key < %s) AND NOT {REOPENED_AWAITING_DATA}{where}
                 ORDER BY c.Req_ID""", params).fetchall()
         for r in rows:
             key = db.batch_key(r["btch_id"])

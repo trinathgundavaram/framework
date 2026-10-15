@@ -109,6 +109,8 @@ class PathIngestSummary:
     reports: list[str] = field(default_factory=list)
     files: list[dict] = field(default_factory=list)
     outcomes: list[IngestOutcome] = field(default_factory=list)
+    held: list[dict] = field(default_factory=list)
+    released: list[str] = field(default_factory=list)
 
     def tally(self, outcome: IngestOutcome) -> None:
         self.outcomes.append(outcome)

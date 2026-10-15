@@ -29,11 +29,12 @@ class RunType:
     carry_fwd: bool
     active: bool
     schedule_sql: Optional[str] = None
+    release_mode: str = "ON_LOAD"
 
     @classmethod
     def from_row(cls, r: dict) -> "RunType":
         return cls(code(r["run_ty"]), code(r["run_category_cd"]), r["sla_days"], r["carry_fwd_ind"] == 1, r["active_ind"] == 1,
-                   _text(r.get("batch_schedule_sql_txt")))
+                   _text(r.get("batch_schedule_sql_txt")), code(r.get("release_mode_cd") or "ON_LOAD"))
 
 
 @dataclass(frozen=True)
@@ -234,6 +235,7 @@ class ExportConfig:
     exp_schema_nm: str
     exp_table_nm: str
     active: bool = True
+    exp_btch_col: str = "exp_btch_id"
 
     @property
     def label(self) -> str:
@@ -243,7 +245,7 @@ class ExportConfig:
     def from_row(cls, r: dict, settings=None) -> "ExportConfig":
         name = settings.resolve_env if settings else (lambda text, identifier=True: text)
         return cls(code(r["project_cd"]), code(r["table_nm"]), name(r["exp_schema_nm"]), r["exp_table_nm"],
-                   r["active_ind"] == 1)
+                   r["active_ind"] == 1, (_text(r.get("exp_btch_col_nm")) or "Exp_Btch_ID").lower())
 
 
 def active_export_configs(conn: Connection, settings=None) -> list[ExportConfig]:
@@ -551,6 +553,8 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             add("RUN_TYPE", f"run type {rt.run_ty!r} must be letters and digits only (it is the {{RUNTY}} token)")
         if rt.run_category_cd not in (SCHEDULED, ADHOC) or rt.sla_days < 1:
             add("RUN_TYPE", f"run type {rt.run_ty}: category must be SCHEDULED/ADHOC and SLA_Days >= 1")
+        if rt.release_mode not in ("ON_LOAD", "ON_DUE", "MANUAL"):
+            add("RUN_TYPE", f"run type {rt.run_ty}: Release_Mode_Cd must be ON_LOAD, ON_DUE or MANUAL")
     projects = {code(r["project_cd"]): r["active_ind"] == 1
                 for r in conn.execute("SELECT Project_Cd, Active_Ind FROM ComplianceProject").fetchall()}
     sources = {code(r["src_id"]) for r in conn.execute("SELECT Src_ID FROM ComplianceSourceSystem").fetchall()}
@@ -614,6 +618,8 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
         seen_cfg.setdefault(key, c.cfg_id)
     for r in conn.execute("""SELECT Req_ID, UPPER(Override_Ty) AS override_ty, count(*) AS n FROM ComplianceBatchOverride
                               WHERE UPPER(Apprvl_Stat) IN ('PENDING_REVIEW','APPROVED')
+                                AND NOT (UPPER(Override_Ty) = 'REOPEN' AND EXISTS (SELECT 1 FROM ComplianceRequestFileDetail d
+                                         WHERE d.Ovrd_ID = ComplianceBatchOverride.Ovrd_ID AND d.Event_Ty = 'BATCH_REOPENED'))
                               GROUP BY Req_ID, UPPER(Override_Ty) HAVING count(*) > 1""").fetchall():
         add("OVERRIDE_DUPLICATE", f"batch {r['req_id']} has {r['n']} open {r['override_ty']} overrides")
     cfg_sources = {(c.project_cd, c.table_nm, c.src_id) for c in cfgs}
@@ -720,7 +726,7 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
         elif BATCH_COLUMN not in exp:
             add("EXPORT_CONFIG", f"{label}: export table {e.exp_schema_nm}.{e.exp_table_nm} lacks the batch column {BATCH_COLUMN}")
         else:
-            missing = sorted(exp - {c.name for c in columns(conn, src.core_schema_nm, src.core_table_nm)})
+            missing = sorted(exp - {c.name for c in columns(conn, src.core_schema_nm, src.core_table_nm)} - {e.exp_btch_col})
             if missing:
                 add("EXPORT_CONFIG", f"{label}: export columns not in core {src.core_schema_nm}.{src.core_table_nm} "
                                      f"(loaded as NULL): {', '.join(missing)}", "WARNING")

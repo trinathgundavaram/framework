@@ -19,6 +19,12 @@ from .settings import Settings
 
 log = logging.getLogger(__name__)
 
+DATA_EVENTS = ("FILE_PROMOTED", "LATE_ARRIVAL_PROMOTED", "CORRECTION_PROMOTED", "CARRY_FORWARD_APPLIED")
+REOPENED_AWAITING_DATA = f"""EXISTS (SELECT 1 FROM ComplianceRequestFileDetail o WHERE o.Req_ID = c.Req_ID
+      AND o.Event_Ty = 'BATCH_REOPENED' AND NOT EXISTS (SELECT 1 FROM ComplianceRequestFileDetail n
+            WHERE n.Req_ID = o.Req_ID AND n.Detail_ID > o.Detail_ID
+              AND n.Event_Ty IN ({", ".join(f"'{e}'" for e in DATA_EVENTS)})))"""
+
 
 @dataclass
 class CreateResult:

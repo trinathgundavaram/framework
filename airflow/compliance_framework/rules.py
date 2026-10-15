@@ -10,7 +10,7 @@ from . import db
 from .adapters import ERROR, RuleEngine
 from .audit import EventLogger
 from .batches import get_batch
-from .common import Clock
+from .common import Clock, build_exp_btch_id
 from .load import sanitize_db_error
 from .settings import Settings
 from .scope import Scope
@@ -18,6 +18,7 @@ from .scope import Scope
 log = logging.getLogger(__name__)
 
 PENDING_RULES_STATS = ("NOT_RUN", "ERROR")
+PROMOTIONS = ("FILE_PROMOTED", "LATE_ARRIVAL_PROMOTED", "CORRECTION_PROMOTED")
 
 
 @dataclass
@@ -29,6 +30,7 @@ class RulesSummary:
     failed: list[int] = field(default_factory=list)
     skipped: list[int] = field(default_factory=list)
     deferred: list[int] = field(default_factory=list)
+    waiting_for_export: list[int] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
@@ -38,16 +40,24 @@ class RulesRunner:
     def __init__(self, conn, clock: Clock, settings: Settings, rule_engine: RuleEngine):
         self.conn, self.clock, self.settings, self.rules = conn, clock, settings, rule_engine
         self.logger = EventLogger(conn, clock)
+        self._exports: dict = {}
 
     def run(self, scope: Optional[Scope] = None) -> RulesSummary:
         """The loaded files of a scope (a project, a table group or table, a run type), or of every project."""
         s = RulesSummary()
         where, params = (scope or Scope()).sql("c")
         rows = self.conn.execute(
-            "SELECT f.Load_ID, f.Btch_ID FROM ComplianceFileLoad f JOIN ComplianceRequestControl c ON c.Req_ID = f.Req_ID "
+            "SELECT f.Load_ID, f.Btch_ID, c.Project_Cd, c.Table_Nm FROM ComplianceFileLoad f "
+            "JOIN ComplianceRequestControl c ON c.Req_ID = f.Req_ID "
             "WHERE f.Load_Stat = 'PROMOTED' AND f.Rules_Stat IN ('NOT_RUN', 'ERROR')" + where + " ORDER BY f.Load_ID",
             params).fetchall()
+        self._exports = {(e.project_cd, e.table_nm): e for e in cfgmod.active_export_configs(self.conn, self.settings)}
+        waiting = self._not_exported([r["load_id"] for r in rows
+                                      if (r["project_cd"], r["table_nm"]) in self._exports])
         for r in rows:
+            if r["load_id"] in waiting:
+                s.waiting_for_export.append(r["load_id"])
+                continue
             key = db.batch_key(r["btch_id"])
             if not db.try_lock(self.conn, key):
                 s.deferred.append(r["load_id"])
@@ -60,6 +70,23 @@ class RulesRunner:
             finally:
                 db.unlock(self.conn, key)
         return s
+
+    def _not_exported(self, load_ids: list[int]) -> set:
+        """Loads of tables with an export table whose batch has not been exported since the load (EXPORT_LOAD)."""
+        out = set()
+        marks, promotions = db.in_list(PROMOTIONS)
+        for i in range(0, len(load_ids), 500):
+            ids, chunk = db.in_list(load_ids[i:i + 500])
+            out.update(r["load_id"] for r in self.conn.execute(
+                f"""SELECT f.Load_ID FROM ComplianceFileLoad f
+                      LEFT JOIN (SELECT Load_ID, MAX(Event_Dtts) AS promoted_at FROM ComplianceRequestFileDetail
+                                  WHERE Event_Ty IN ({marks}) AND Load_ID IN ({ids}) GROUP BY Load_ID) p
+                             ON p.Load_ID = f.Load_ID
+                      LEFT JOIN (SELECT Req_ID, MAX(Event_Dtts) AS exported_at FROM ComplianceRequestFileDetail
+                                  WHERE Event_Ty = 'EXPORT_LOADED' GROUP BY Req_ID) e ON e.Req_ID = f.Req_ID
+                     WHERE f.Load_ID IN ({ids}) AND (e.exported_at IS NULL OR e.exported_at < p.promoted_at)""",
+                [*promotions, *chunk, *chunk]).fetchall())
+        return out
 
     def _run_load(self, load_id: int, s: RulesSummary) -> None:
         load = self.conn.execute("SELECT * FROM ComplianceFileLoad WHERE Load_ID=%s", (load_id,)).fetchone()
@@ -75,15 +102,16 @@ class RulesRunner:
             self._set(load_id, "SKIPPED")
             s.skipped.append(load_id)
             return
-        exp = next((e for e in cfgmod.active_export_configs(self.conn, self.settings)
-                    if (e.project_cd, e.table_nm) == (b["project_cd"], b["table_nm"])), None)
+        exp = self._exports.get((b["project_cd"], b["table_nm"]))
         outcome = self.rules.run(self.conn, bindings, {
             "scope": "FILE_LEVEL", "btch_id": b["btch_id"], "load_id": load_id,
             "project_cd": b["project_cd"], "table_nm": b["table_nm"], "src_id": b["src_id"], "run_ty": b["run_ty"],
             "rpt_start_dt_key": b["rpt_start_dt_key"], "rpt_end_dt_key": b["rpt_end_dt_key"],
             "req_dt_key": b["req_dt_key"], "stg_schema_nm": cfg.stg_schema_nm, "stg_table_nm": cfg.stg_table_nm,
             "core_schema_nm": cfg.core_schema_nm, "core_table_nm": cfg.core_table_nm,
-            "exp_schema_nm": exp.exp_schema_nm if exp else None, "exp_table_nm": exp.exp_table_nm if exp else None},
+            "exp_schema_nm": exp.exp_schema_nm if exp else None, "exp_table_nm": exp.exp_table_nm if exp else None,
+            "exp_btch_id": build_exp_btch_id(db.as_date(b["req_dt_key"]), b["project_cd"], b["table_nm"], b["run_ty"])
+            if exp else None},
             self.settings.file_rules_mode)
         with self.conn.transaction():
             self._set(load_id, outcome.status)

@@ -22,11 +22,11 @@ STEP_PARAMS = {
     "BATCH_CREATION": (*SCOPE, "period", "lookback_days", "lookback_weeks", "as_of"),
     "FILE_CHECK": (*SCOPE, "as_of"),
     "FILE_LOAD": (*SCOPE, "as_of"),
-    "SOURCE_LOAD": (*SCOPE, "batch", "as_of"),
-    "EXPORT_LOAD": (*SCOPE, "batch", "as_of"),
+    "SOURCE_LOAD": (*SCOPE, "batch", "release", "hold", "as_of"),
+    "EXPORT_LOAD": (*SCOPE, "batch", "release", "hold", "as_of"),
     "FILE_RULES": (*SCOPE, "as_of"),
     "OVERRIDE_DECISIONS": (*SCOPE, "as_of"),
-    "BATCH_CLOSE": (*SCOPE, "as_of"),
+    "BATCH_CLOSE": (*SCOPE, "hold", "as_of"),
     "NOTIFY": (*SCOPE, "as_of"),
 }
 PASSED_ON = (*SCOPE, "as_of")

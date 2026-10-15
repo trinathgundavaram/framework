@@ -1,7 +1,8 @@
 """EXPORT_LOAD: copy each batch whose data changed from core into its export table (ComplianceExportConfig).
 
 The export keeps the latest batch with data per source, run type and report dates: its rows replace the rows of
-the other batches of that period, except the batches it reuses. A carried-forward batch gets a copy of the reused
+the other batches of that period, except the batches it reuses. Every export row also carries its export batch (Exp_Btch_ID: request date, project, table and run type,
+common to every source of the run type). A carried-forward batch gets a copy of the reused
 batch's core rows under its own batch (batch ID, run type, version, request and report dates of the new batch; every other column, the
 row ID included, as in core), so the old and the new batch each have their rows. Rows move on Teradata only.
 """
@@ -14,9 +15,10 @@ from typing import Optional
 from . import config as cfgmod
 from . import db
 from .audit import EventLogger
-from .common import btch_id_version, code
+from .common import btch_id_version, build_exp_btch_id, code
 from .layout import BATCH_COLUMN, LoadContext, column_mapping
 from .load import _cast, columns
+from .release import Releases
 from .scope import Scope
 
 log = logging.getLogger(__name__)
@@ -34,6 +36,8 @@ class ExportSummary:
     skipped: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
+    held: list[dict] = field(default_factory=list)
+    released: list[str] = field(default_factory=list)
 
 
 def _as_date(value):
@@ -44,14 +48,20 @@ class ExportLoader:
     def __init__(self, conn, clock, settings):
         self.conn, self.clock, self.settings = conn, clock, settings
         self.logger = EventLogger(conn, clock)
+        self._hold: tuple = ()
 
-    def run(self, scope: Optional[Scope] = None, batches: Optional[list[str]] = None) -> ExportSummary:
-        """Export the scope's batches whose data changed since their last export, or the batches named."""
+    def run(self, scope: Optional[Scope] = None, batches: Optional[list[str]] = None,
+            release: bool = False, hold: tuple = ()) -> ExportSummary:
+        """Export the scope's batches whose data changed since their last export, or the batches named. Batches of
+        run types released ON_DUE / MANUAL wait until due, and run types in `hold` until released, unless `release`
+        releases the ones with data now."""
         scope = scope or Scope()
         exports = {(e.project_cd, e.table_nm): e for e in cfgmod.active_export_configs(self.conn, self.settings)
                    if scope.covers(e.project_cd, e.table_nm)}
         s = ExportSummary(tables=sorted(f"{e.exp_schema_nm}.{e.exp_table_nm}" for e in exports.values()))
-        todo = self._named(exports, scope, batches, s) if batches else self._changed(exports, scope)
+        self._hold = hold
+        todo = self._held(self._named(exports, scope, batches, s) if batches else self._changed(exports, scope),
+                          s, release, bool(batches))
         log.info("EXPORT_LOAD | %s | %s batch(es) to export%s", scope.label(), len(todo),
                  ": " + ", ".join(b["btch_id"] for b in todo[:50]) if todo else "")
         for b in todo:
@@ -75,6 +85,25 @@ class ExportLoader:
             elif item["status"] == "SKIPPED":
                 s.skipped += 1
         return s
+
+    def _held(self, todo: list[dict], s: ExportSummary, release: bool, named: bool) -> list[dict]:
+        """The batches that may be exported now; named batches always are. `release` releases held batches with data."""
+        if not todo:
+            return todo
+        r = Releases(self.conn, self.clock, self.settings, self._hold)
+        ready, held = r.split(todo)
+        freed = [b for b in held if b["resolution_ty"] is not None] if release else []
+        if freed:
+            r.release(freed, "EXPORT_LOAD")
+            s.released = [b["btch_id"] for b in freed]
+        if named:
+            return todo
+        held = [b for b in held if b not in freed]
+        s.held = [{"batch": b["btch_id"], "hold": b["hold"]} for b in held]
+        if held:
+            log.info("EXPORT_LOAD | %s batch(es) held: %s", len(held), ", ".join(b["btch_id"] for b in held[:50]))
+        go = {b["req_id"] for b in ready} | {b["req_id"] for b in freed}
+        return [b for b in todo if b["req_id"] in go]
 
     def _named(self, exports: dict, scope: Scope, names: list[str], s: ExportSummary) -> list[dict]:
         out = []
@@ -145,7 +174,9 @@ class ExportLoader:
         core = db.qualified(cfg.core_schema_nm, cfg.core_table_nm)
         export = db.qualified(e.exp_schema_nm, e.exp_table_nm)
         core_cols = {c.name for c in columns(self.conn, cfg.core_schema_nm, cfg.core_table_nm) if not c.auto}
-        exp_cols = [c for c in columns(self.conn, e.exp_schema_nm, e.exp_table_nm) if not c.auto and c.name in core_cols]
+        exp_cols = [c for c in columns(self.conn, e.exp_schema_nm, e.exp_table_nm)
+                    if not c.auto and (c.name in core_cols or c.name == e.exp_btch_col)]
+        exp_btch_id = build_exp_btch_id(_as_date(b["req_dt_key"]), b["project_cd"], b["table_nm"], b["run_ty"])
         mapping = column_mapping(cfg, cfgmod.target_columns(self.conn))
         ctx = LoadContext(b["btch_id"], 0, b["run_ty"],
                           btch_id_version(b["btch_id"], b["project_cd"], b["table_nm"], b["src_id"], b["run_ty"]),
@@ -154,7 +185,11 @@ class ExportLoader:
         exprs, values = [], []
         for c in exp_cols:
             value_cd = "BATCH_ID" if c.name == BATCH_COLUMN else mapping.get(c.name)
-            if source != b["btch_id"] and (value_cd == "BATCH_ID" or value_cd in BATCH_VALUES):
+            if c.name == e.exp_btch_col:
+                expr, v = _cast(c, exp_btch_id)
+                exprs.append(expr)
+                values.extend(v)
+            elif source != b["btch_id"] and (value_cd == "BATCH_ID" or value_cd in BATCH_VALUES):
                 expr, v = _cast(c, ctx.value(value_cd, c.text, c.temporal))
                 exprs.append(expr)
                 values.extend(v)
@@ -176,7 +211,7 @@ class ExportLoader:
             how = ("no data" if source is None else "its own rows" if source == b["btch_id"]
                    else f"a copy of {source}")
             self._done(b, f"exported {how}: inserted={inserted} deleted={deleted}")
-        item.update(status="EXPORTED", data_from=source or "-", rows_exported=inserted, rows_removed=deleted)
+        item.update(status="EXPORTED", export_batch=exp_btch_id, data_from=source or "-", rows_exported=inserted, rows_removed=deleted)
         log.info("EXPORT_LOAD | %s | %s row(s) exported to %s (%s), %s earlier row(s) of the period removed",
                  b["btch_id"], inserted, item["export_table"], how, deleted)
         return item

@@ -14,7 +14,7 @@ from typing import Optional
 from . import config as cfgmod
 from . import db
 from .audit import EventLogger
-from .batches import get_batch
+from .batches import REOPENED_AWAITING_DATA, get_batch
 from .common import FileRejected, btch_id_version, code
 from .config import QueryConfig
 from .connection_factory import source_connection
@@ -23,6 +23,7 @@ from .filecheck_options import check_options
 from .ingest import IngestOutcome, PathIngestSummary
 from .layout import PLACEHOLDER, LoadContext, build_layout, column_mapping, sql_body
 from .load import columns, sanitize_db_error, stage_query, stage_rows
+from .release import Releases
 from .scope import Scope
 
 log = logging.getLogger(__name__)
@@ -37,16 +38,20 @@ class SourceLoader:
         self.conn, self.clock, self.settings, self.pipeline = conn, clock, settings, pipeline
         self.logger = EventLogger(conn, clock)
         self._sources: dict = {}
+        self._hold: tuple = ()
 
-    def run(self, scope: Optional[Scope] = None, batches: Optional[list[str]] = None) -> PathIngestSummary:
-        """Pull the batches of the scope's query sources that have no data yet, or the batches named in `batches`
-        (whatever their data: a new pull replaces the batch's rows)."""
+    def run(self, scope: Optional[Scope] = None, batches: Optional[list[str]] = None,
+            release: bool = False, hold: tuple = ()) -> PathIngestSummary:
+        """Pull the batches of the scope's query sources that have no data yet or were reopened, or the batches named
+        in `batches` (whatever their data: a new pull replaces the batch's rows). Batches of run types released ON_DUE / MANUAL
+        wait until due, and run types in `hold` until released, unless `release` releases them now."""
         scope = scope or Scope()
         cfgs = {(q.project_cd, q.table_nm, q.src_id): q for q in cfgmod.active_query_configs(self.conn, self.settings)
                 if scope.covers(q.project_cd, q.table_nm)}
         summary = PathIngestSummary(locations=sorted({f"{q.db_ty} {q.conn_cd or 'same Teradata system'}"
                                                       for q in cfgs.values()}))
-        todo = self._batches(cfgs, scope, batches, summary)
+        self._hold = hold
+        todo = self._held(self._batches(cfgs, scope, batches, summary), summary, release, bool(batches))
         summary.scanned = len(todo)
         log.info("SOURCE_LOAD | %s | %s batch(es) to pull%s", scope.label(), len(todo),
                  ": " + ", ".join(b["btch_id"] for b, _ in todo[:50]) if todo else "")
@@ -93,10 +98,28 @@ class SourceLoader:
         where, params = scope.sql("c")
         rows = self.conn.execute(
             f"""SELECT c.* FROM ComplianceRequestControl c
-                 WHERE c.Batch_Close_Ind = 0 AND c.Req_Stat = 'REQUEST_CREATED' AND c.Req_Dt_Key <= %s{where}
+                 WHERE c.Batch_Close_Ind = 0 AND (c.Req_Stat = 'REQUEST_CREATED' OR {REOPENED_AWAITING_DATA})
+                   AND c.Req_Dt_Key <= %s{where}
                  ORDER BY c.Req_ID""", [self.clock.today(self.settings.business_tz), *params]).fetchall()
         return [(b, cfgs[(b["project_cd"], b["table_nm"], b["src_id"])]) for b in rows
                 if (b["project_cd"], b["table_nm"], b["src_id"]) in cfgs]
+
+    def _held(self, todo: list, summary, release: bool, named: bool) -> list:
+        """The batches that may be pulled now; named batches always are."""
+        if not todo:
+            return todo
+        r = Releases(self.conn, self.clock, self.settings, self._hold)
+        ready, held = r.split([b for b, _ in todo])
+        if release and held:
+            r.release(held, "SOURCE_LOAD")
+            summary.released = [b["btch_id"] for b in held]
+        elif not named:
+            summary.held = [{"batch": b["btch_id"], "hold": b["hold"]} for b in held]
+            if held:
+                log.info("SOURCE_LOAD | %s batch(es) held: %s", len(held), ", ".join(b["btch_id"] for b in held[:50]))
+            go = {b["req_id"] for b in ready}
+            return [(b, q) for b, q in todo if b["req_id"] in go]
+        return todo
 
     def _register(self, batch: dict, q: QueryConfig) -> int:
         """The load row of one pull; its 'file' is the source and the batch."""

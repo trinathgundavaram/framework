@@ -7,6 +7,7 @@ from typing import Any, Callable, Mapping, Optional
 from . import config as cfgmod
 from .adapters import dirname
 from .common import ADHOC, SCHEDULED, ConfigError, code
+from .release import run_type_list, wanted
 from .scope import resolve_scope
 
 
@@ -111,6 +112,7 @@ def report(out: ModuleOutcome) -> dict:
                                                    else f"{not_loaded or len(r.errors)} BATCH(ES) NOT LOADED"
                                                    if not_loaded or r.errors else "ALL BATCHES LOADED"),
                 "sources": r.locations, "batches_found": r.scanned, **counts,
+                **({"released": r.released} if r.released else {}), **({"held": r.held} if r.held else {}),
                 "loads": [{("rows_read" if k == "rows_in_file" else k): v for k, v in f.items()
                            if k not in ("file", "share", "folder", "file_date") and v is not None} for f in r.files],
                 "problems": r.errors}
@@ -119,7 +121,8 @@ def report(out: ModuleOutcome) -> dict:
                                                    else f"{r.failed or len(r.errors)} BATCH(ES) NOT EXPORTED"
                                                    if r.failed or r.errors else "ALL BATCHES EXPORTED"),
                 "export_tables": r.tables, "batches_found": len(r.batches), "exported": r.exported,
-                "skipped": r.skipped, "failed": r.failed, "batches": r.batches, "problems": r.errors}
+                "skipped": r.skipped, "failed": r.failed, **({"released": r.released} if r.released else {}),
+                **({"held": r.held} if r.held else {}), "batches": r.batches, "problems": r.errors}
     if out.module == "FILE_CHECK":
         return {"step": "FILE_CHECK", "result": ("NO FILES" if not r.files and not r.errors
                                                   else f"{r.failed} FILE(S) WITH PROBLEMS" if r.failed or r.errors
@@ -165,14 +168,16 @@ def _file_load(app, p: dict) -> ModuleOutcome:
 def _source_load(app, p: dict) -> ModuleOutcome:
     """Pull internal sources by batch; exit 1 when a batch could not be pulled or loaded (after all were tried)."""
     names = [n.strip() for n in (p.get("batch") or "").split(",") if n.strip()]
-    s = app.source_loader.run(_scope(app, p), names or None)
+    s = app.source_loader.run(_scope(app, p), names or None, release=wanted(p.get("release")),
+                                   hold=run_type_list(p.get("hold")))
     return ModuleOutcome("SOURCE_LOAD", s, 1 if s.errors or s.quarantined or s.rejected else 0)
 
 
 def _export_load(app, p: dict) -> ModuleOutcome:
     """Copy the batches whose data changed into the export tables; exit 1 when a batch could not be exported."""
     names = [n.strip() for n in (p.get("batch") or "").split(",") if n.strip()]
-    s = app.exporter.run(_scope(app, p), names or None)
+    s = app.exporter.run(_scope(app, p), names or None, release=wanted(p.get("release")),
+                                   hold=run_type_list(p.get("hold")))
     return ModuleOutcome("EXPORT_LOAD", s, 1 if s.errors or s.failed else 0)
 
 
@@ -195,7 +200,7 @@ def _override_decisions(app, p: dict) -> ModuleOutcome:
 
 def _batch_close(app, p: dict) -> ModuleOutcome:
     """Batches without data (waiting) and locked ones (deferred, closed by the next sweep) are normal."""
-    s = app.closer.run(_scope(app, p))
+    s = app.closer.run(_scope(app, p), hold=run_type_list(p.get("hold")))
     return ModuleOutcome("BATCH_CLOSE", s, 0)
 
 
@@ -224,14 +229,17 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
     ModuleSpec(
         "SOURCE_LOAD", "pull internal sources (ComplianceSourceQueryConfig) by batch: the open batches of the scope "
                        "that have no data yet, or the batches named in --batch (comma separated; a new pull replaces "
-                       "the batch's rows)",
-        required=(), optional=(Param("project"), *SCOPE, Param("batch")), handler=_source_load),
+                       "the batch's rows). Run types released ON_DUE / MANUAL wait for their due date or "
+                       "--release true; --hold (run types) holds them until released",
+        required=(), optional=(Param("project"), *SCOPE, Param("batch"), Param("release"), Param("hold")), handler=_source_load),
     ModuleSpec(
         "EXPORT_LOAD", "copy each batch whose data changed (load, carry-forward, late arrival, correction) from core "
                        "into its export table (ComplianceExportConfig): the batch's rows replace the earlier rows of "
                        "that source and report period; a carried-forward batch gets a copy of the reused rows under "
-                       "its own batch; --batch exports named batches again",
-        required=(), optional=(Param("project"), *SCOPE, Param("batch")), handler=_export_load),
+                       "its own batch; --batch exports named batches again; run types released ON_DUE / "
+                       "MANUAL wait for their due date or --release true (which also lets BATCH_CLOSE close them); --hold (run types) "
+                       "holds them until released",
+        required=(), optional=(Param("project"), *SCOPE, Param("batch"), Param("release"), Param("hold")), handler=_export_load),
     ModuleSpec(
         "FILE_CHECK", "optional check of the files waiting in the inbound folders, before FILE_LOAD: name, batch, "
                       "header, trailer, record types and column counts. It loads nothing, moves no file and changes "
@@ -247,8 +255,9 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
         required=(), optional=(Param("project"), *SCOPE), handler=_override_decisions),
     ModuleSpec(
         "BATCH_CLOSE", "close the batches past their SLA hold that have data or are in exception; "
-                       "scope --project / --table / --run-type, or every batch",
-        required=(), optional=(Param("project"), *SCOPE), handler=_batch_close),
+                       "scope --project / --table / --run-type, or every batch; --hold leaves those run types' "
+                       "batches open unless released",
+        required=(), optional=(Param("project"), *SCOPE, Param("hold")), handler=_batch_close),
     ModuleSpec(
         "NOTIFY", "email pending events: one project's (--project), or every event including those of no project",
         required=(), optional=(Param("project"), *SCOPE), handler=_notify),

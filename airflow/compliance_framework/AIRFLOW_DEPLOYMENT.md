@@ -230,6 +230,14 @@ core table's columns (it may have fewer, and its own identity column); `Btch_ID`
 that are not in core are left NULL (`validate-config` warns). The core row ID column is copied as it is, so an
 export row can be traced back to core.
 
+**Export batch.** Besides the source batch (`Btch_ID`), each export row can carry the export batch: one ID for all
+sources of a table, run type and request date, `{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Run_Ty}` (e.g.
+`20261018_CMSUNIV_ODAG3_DAILY`), so the export is read per run type instead of per source. It is filled when the
+export table has the column `Exp_Btch_ID` (another name: `Exp_Btch_Col_Nm` in `ComplianceExportConfig`; existing
+tables: `ALTER TABLE <META_DB>.ComplianceExportConfig ADD Exp_Btch_Col_Nm VARCHAR(128);`, optional). A carried-
+forward copy gets the export batch of the batch it is copied to. It is derived from the batch, so no table holds
+it; the rules receive it as `exp_btch_id`.
+
 **Which batches are exported.** With the scope: every batch whose data changed after its last export (a load,
 late arrival, correction, carry-forward applied or removed, or a change of the batch it reuses), for every run
 type. With `batch`: exactly those batches, again.
@@ -241,6 +249,43 @@ columns mapped to them in `ComplianceTargetColumnConfig`); every other column, r
 included, is copied as it is. The reused batch keeps its own rows, so both batches have their data. A batch with
 no data (empty file) removes the period's rows. An older batch of a period that has a later batch with data is
 skipped (`EXPORT_LOADED` in the timeline says why).
+
+**When: release by run type (`ComplianceRunType.Release_Mode_Cd`).** Files always load to core as they arrive.
+Pulling internal sources (SOURCE_LOAD), the export and therefore the rules follow the batch's run type:
+
+| `Release_Mode_Cd` | Typical run type | Internal sources pulled and data exported |
+|---|---|---|
+| `ON_LOAD` (default) | DAILY | as soon as the batch's request date is reached / its data is loaded (as before) |
+| `ON_DUE` | WEEKLY, MONTHLY | from the batch's due date on: its close date, `Req_Dt_Key + SLA_Days - 1` (created Sunday 10/18 with `SLA_Days = 6`: Friday 10/23). After that every change is exported at once |
+| `MANUAL` | ADHOC | only when released |
+
+A held batch is listed under `held` in the step report (with the date it waits for); it is not a problem and does
+not fail the task. FILE_RULES leaves the loads of tables with an export table until their batch has been exported
+(`waiting_for_export` in its report), so the rules always read the export.
+
+**Releasing early** (e.g. weekly data ready on Wednesday): trigger the DAG with `release` = `true` and the scope,
+for example `{"project": "CMS_UNIVERSE", "run_type": "WEEKLY", "release": "true"}` (or a `table_group`, a
+`table`, or `batch`):
+
+- `SOURCE_LOAD` releases and pulls the scope's held batches of internal sources (and triggers EXPORT_LOAD);
+- `EXPORT_LOAD` releases and exports the scope's held batches that have data (batches still without data stay
+  held).
+
+Each released batch gets `BATCH_RELEASED` in its timeline. From then on it is treated as due: later changes are
+exported at once, and BATCH_CLOSE closes it on its next run (or `close-batch`) without waiting for the SLA, once it
+has data. Batches without data still close on their SLA date. Other run types and batches are not touched.
+
+**Holding a run type for business reasons** (whatever its `Release_Mode_Cd`, also past the due date): put
+`"hold": "WEEKLY"` (run types, comma separated, or a list) in the Variable of `SOURCE_LOAD`, `EXPORT_LOAD` and
+`BATCH_CLOSE`, or give it in a trigger. As long as a DAG gets that input, its project's batches of those run types
+are not pulled, exported or closed (listed under `held` / `on_hold` in the report), next week's batches included.
+To run them anyway, trigger with `release` = `true` and the scope: the batches it releases go through every step
+(pull, export, rules, close), hold or not. Remove the `hold` input to return to the run type's normal release.
+
+Give EXPORT_LOAD its own daily `schedule_interval` (the examples: 07:00) so `ON_DUE` batches are exported on their
+due date even when no file arrives that day. Existing installations add the column with
+`ALTER TABLE <META_DB>.ComplianceRunType ADD Release_Mode_Cd VARCHAR(10) DEFAULT 'ON_LOAD' NOT NULL;` (until then
+every run type is `ON_LOAD`).
 
 Each batch is exported in one transaction (delete, then `INSERT ... SELECT` on Teradata; no row passes through
 Airflow) and recorded as `EXPORT_LOADED` in `ComplianceRequestFileDetail`. A batch that fails is rolled back and
@@ -312,6 +357,26 @@ BATCH_CLOSE closes, once the SLA hold has passed, every batch that has a deliver
 change the batch status. `Allow_Zero_Rcd_Ind` is no longer used: a file with no data rows is always accepted as
 the source's delivery. The loads themselves keep their own status (`ComplianceFileLoad.Load_Stat`: `PROMOTED`,
 `SUPERSEDED`, `QUARANTINED`, ...).
+
+**Reopening a closed batch (`REOPEN` override).** A late or corrected file can always be loaded into a closed
+batch with an approved `LATE_ARRIVAL` / `CORRECTION` override (the batch stays closed). To open the batch again
+instead, add a `REOPEN` row to `ComplianceBatchOverride` (`Override_Ty = 'REOPEN'`, `Apprvl_Stat = 'APPROVED'`,
+`Valid_Thru_Dt_Key` = the last day it may be applied, `Rsn_Txt`, `Reviewed_By`). The next OVERRIDE_DECISIONS run
+reopens any closed batch, with or without data:
+
+| Closed as | Reopened as |
+|---|---|
+| `REQUEST_COMPLETE` / `NEW_FILE` | `SOURCE_DATA_READY` |
+| `REQUEST_COMPLETE` / `CARRY_FORWARD` | `SOURCE_DATA_CARRY_FORWARD` (kept even if the `REUSE` override has expired) |
+| `DATA_NOT_PROVIDED` / `NO_DATA` | `SOURCE_DATA_READY_NO_DATA` |
+| `DATA_NOT_PROVIDED` / `MISSING` | `REQUEST_CREATED` |
+| `COMPLETED_WITH_EXCEPTION` | `EXCEPTION_PENDING` |
+
+`BATCH_REOPENED` is written to the timeline and the audit (emailed). The reopened batch takes files like any open
+batch (no override needed; a resend replaces its rows), SOURCE_LOAD pulls an internal source's reopened batch
+again, and the export and rules follow as usual. BATCH_CLOSE leaves it open until new data has arrived after the
+reopen (a load, a pull or a carry-forward), then closes it on its next run; without new data it closes only with
+`close-batch`. Each `REOPEN` row is applied once; to reopen the same batch again, add a new row.
 
 Batches created before version 0.3.33 carry the earlier names; to rename them:
 
@@ -881,7 +946,7 @@ String comparisons follow the session's transaction mode (Teradata mode is not c
 With `RULE_ENGINE=gre` and `GRE_ENTRYPOINT=compliance_framework.gre_bridge:run_gre`, each
 `ComplianceRuleBinding` of a file runs that GRE `rule_group` (and `rule_variant`; `*` = all) through the
 GRE's `run_rules()`, with `run_key = CBF_LOAD_<Load_ID>` and the file's context as `run_params`
-(`{btch_id}`, `{load_id}`, `{stg_schema_nm}`, `{stg_table_nm}`, `{core_schema_nm}`, `{core_table_nm}`, `{exp_schema_nm}`, `{exp_table_nm}` (only with an export table), `{project_cd}`, `{table_nm}`, `{src_id}`,
+(`{btch_id}`, `{load_id}`, `{stg_schema_nm}`, `{stg_table_nm}`, `{core_schema_nm}`, `{core_table_nm}`, `{exp_schema_nm}`, `{exp_table_nm}`, `{exp_btch_id}` (only with an export table), `{project_cd}`, `{table_nm}`, `{src_id}`,
 `{run_ty}`, `{rpt_start_dt_key}`, `{rpt_end_dt_key}`, `{req_dt_key}`). The verdict of each rule is read
 from `<gre meta_db>.gre_results`: `PASS` / `WARN` pass, `FAIL` marks the file's rules as failed (or as
 warnings under ANNOTATE), anything else is a technical failure that is retried. This happens in the

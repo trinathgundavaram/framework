@@ -177,6 +177,11 @@ def build_btch_id(req_dt: date, project_cd: str, table_nm: str, src_id: str, run
     return value
 
 
+def build_exp_btch_id(req_dt: date, project_cd: str, table_nm: str, run_ty: str) -> str:
+    """Export batch: {Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Run_Ty}, the batches of every source of a run type."""
+    return "_".join([f"{req_dt:%Y%m%d}", *map(code, (project_cd, table_nm, run_ty))])
+
+
 def btch_id_version(btch_id: str, project_cd: str, table_nm: str, src_id: str, run_ty: str) -> Optional[str]:
     """The compliance version a batch was created with: the part of its Btch_ID before the sequence."""
     head = "_".join(map(code, (project_cd, table_nm, src_id, run_ty))) + "_"
@@ -215,10 +220,11 @@ TRANSITIONS: dict[str, set[str]] = {
                                 REQUEST_COMPLETE},
     EXCEPTION_PENDING: {SOURCE_DATA_READY, SOURCE_DATA_READY_NO_DATA, SOURCE_DATA_CARRY_FORWARD, REQUEST_CREATED,
                         COMPLETED_WITH_EXCEPTION},
-    REQUEST_COMPLETE: {REQUEST_COMPLETE, DATA_NOT_PROVIDED},
-    COMPLETED_WITH_EXCEPTION: {REQUEST_COMPLETE, DATA_NOT_PROVIDED},
-    DATA_NOT_PROVIDED: {REQUEST_COMPLETE, DATA_NOT_PROVIDED},
+    REQUEST_COMPLETE: {REQUEST_COMPLETE, DATA_NOT_PROVIDED, SOURCE_DATA_READY, SOURCE_DATA_CARRY_FORWARD},
+    COMPLETED_WITH_EXCEPTION: {REQUEST_COMPLETE, DATA_NOT_PROVIDED, EXCEPTION_PENDING},
+    DATA_NOT_PROVIDED: {REQUEST_COMPLETE, DATA_NOT_PROVIDED, REQUEST_CREATED, SOURCE_DATA_READY_NO_DATA},
 }
+REOPEN_STATUS = {"NEW_FILE": SOURCE_DATA_READY, "CARRY_FORWARD": SOURCE_DATA_CARRY_FORWARD, "NO_DATA": SOURCE_DATA_READY_NO_DATA}
 
 
 def check_transition(from_stat: str, to_stat: str) -> None:

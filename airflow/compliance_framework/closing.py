@@ -7,9 +7,11 @@ from typing import Optional
 
 from . import db
 from .audit import EventLogger
+from .batches import REOPENED_AWAITING_DATA
 from .common import (COMPLETED_WITH_EXCEPTION, DATA_NOT_PROVIDED, EXCEPTION_PENDING, REQUEST_COMPLETE, Clock,
                      CloseBlocked, CloseDeferred, check_transition, earliest_close_date, code)
 from .db import Connection
+from .release import released
 from .settings import Settings
 from .scope import Scope
 
@@ -45,6 +47,7 @@ class CloseSummary:
     closed: list[str] = field(default_factory=list)
     waiting: list[str] = field(default_factory=list)
     deferred: list[str] = field(default_factory=list)
+    on_hold: list[str] = field(default_factory=list)
 
 
 class BatchCloser:
@@ -58,7 +61,8 @@ class BatchCloser:
         if b is None:
             raise LookupError(f"batch {btch_id} not found")
         reason = ("batch is already closed" if b["batch_close_ind"] == 1
-                  else f"SLA hold until {b['hold_dt']}" if self._today() < b["hold_dt"] else None)
+                  else f"SLA hold until {b['hold_dt']}" if self._today() < b["hold_dt"] and not self._released(b)
+                  else None)
         if reason:
             self._blocked(b, closed_by, reason)
         out = self._close_locked(b, closed_by, automatic=False)
@@ -66,10 +70,17 @@ class BatchCloser:
             self._blocked(b, closed_by, "batch is already closed")
         return out
 
-    def run(self, scope: Optional[Scope] = None) -> CloseSummary:
-        """Sweep the open batches of a scope (a project, a table group or table, a run type) whose hold has passed."""
+    def run(self, scope: Optional[Scope] = None, hold: tuple = ()) -> CloseSummary:
+        """Sweep the open batches of a scope (a project, a table group or table, a run type) whose hold has passed, and
+        the batches with data released early (BATCH_RELEASED). Batches of the run types in `hold` stay open unless
+        released."""
         s = CloseSummary()
-        for b in self._open_past_hold(scope or Scope()):
+        rows = self._open_past_hold(scope or Scope(), sweep=True)
+        done = released(self.conn, [b["req_id"] for b in rows if b["run_ty"] in hold]) if hold else set()
+        for b in rows:
+            if b["run_ty"] in hold and b["req_id"] not in done:
+                s.on_hold.append(b["btch_id"])
+                continue
             s.evaluated += 1
             if not closes_automatically(b):
                 s.waiting.append(b["btch_id"])
@@ -100,12 +111,22 @@ class BatchCloser:
             b["hold_dt"] = earliest_close_date(db.as_date(b["req_dt_key"]), 1 if b["sla_days"] is None else b["sla_days"])
         return b
 
-    def _open_past_hold(self, scope: Scope, last_hold: Optional[date] = None) -> list[dict]:
-        """Open batches in scope whose hold ends on or before `last_hold` (default today)."""
+    def _released(self, b: dict) -> bool:
+        return b["resolution_ty"] is not None and self.conn.execute(
+            "SELECT 1 AS ok FROM ComplianceRequestFileDetail WHERE Req_ID = %s AND Event_Ty = 'BATCH_RELEASED'",
+            (b["req_id"],)).fetchone() is not None
+
+    def _open_past_hold(self, scope: Scope, last_hold: Optional[date] = None, sweep: bool = False) -> list[dict]:
+        """Open batches in scope whose hold ends on or before `last_hold` (default today); with `sweep`, also the
+        batches with data released early, and not the reopened batches still waiting for new data."""
         where, params = scope.sql("c")
+        if sweep:
+            where = f" AND NOT {REOPENED_AWAITING_DATA}{where}"
+        early = ("""OR (c.Resolution_Ty IS NOT NULL AND EXISTS (SELECT 1 FROM ComplianceRequestFileDetail d
+                          WHERE d.Req_ID = c.Req_ID AND d.Event_Ty = 'BATCH_RELEASED'))""" if sweep else "")
         return self.conn.execute(
             f"""SELECT c.* FROM ComplianceRequestControl c JOIN ComplianceRunType r ON UPPER(r.Run_Ty) = c.Run_Ty
-                 WHERE c.Batch_Close_Ind = 0 AND c.Req_Dt_Key + (r.SLA_Days - 1) <= %s{where} ORDER BY c.Req_ID""",
+                 WHERE c.Batch_Close_Ind = 0 AND (c.Req_Dt_Key + (r.SLA_Days - 1) <= %s {early}){where} ORDER BY c.Req_ID""",
             [last_hold or self._today(), *params]).fetchall()
 
     def _blocked(self, b: dict, closed_by: str, reason: str) -> None:
