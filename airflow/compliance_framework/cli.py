@@ -76,8 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
     add("validate-config", "validate the configuration tables and target tables")
     add("process-decisions", "apply approved reuse overrides and remove expired ones")
     scope(add("close-batches", "close the batches past their SLA hold that have data or are in exception"))
-    sp = add("close-batch", "close one batch past its SLA hold, with or without data (manual)")
+    sp = add("close-batch", "close a batch past its SLA hold, with or without data (manual): every open source of it, "
+                            "or the one in --src-id")
     sp.add_argument("--btch-id", required=True)
+    sp.add_argument("--src-id")
     sp.add_argument("--closed-by", required=True)
     add("notify", "send pending notifications")
     add("locks", "list the locks currently held (a crashed run leaves its locks until they expire)")
@@ -157,7 +159,7 @@ def _dispatch(app: App, args) -> int:
         _print(s)
         return 1 if s.deferred else 0
     if c == "close-batch":
-        _print(app.closer.close(args.btch_id, args.closed_by))
+        _print(app.closer.close(args.btch_id, args.closed_by, args.src_id))
         return 0
     if c == "notify":
         notifier = app.notifier()

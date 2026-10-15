@@ -15,7 +15,7 @@ from . import config as cfgmod
 from . import db
 from .audit import EventLogger
 from .batches import REOPENED_AWAITING_DATA, get_batch
-from .common import FileRejected, btch_id_version, code
+from .common import FileRejected, code
 from .config import QueryConfig
 from .connection_factory import source_connection
 from .control_report import QUERY_PREFIX, file_details
@@ -83,15 +83,17 @@ class SourceLoader:
     def _batches(self, cfgs: dict, scope: Scope, names: Optional[list[str]], summary) -> list[tuple[dict, QueryConfig]]:
         if names:
             out = []
-            for name in names:
-                b = self.conn.execute("SELECT * FROM ComplianceRequestControl WHERE Btch_ID = %s", (code(name),)).fetchone()
-                q = cfgs.get((b["project_cd"], b["table_nm"], b["src_id"])) if b else None
-                if b is None:
+            for name in dict.fromkeys(code(n) for n in names):
+                rows = self.conn.execute("SELECT * FROM ComplianceRequestControl WHERE Btch_ID = %s ORDER BY Req_ID",
+                                         (code(name),)).fetchall()
+                found = [(b, cfgs[(b["project_cd"], b["table_nm"], b["src_id"])]) for b in rows
+                         if (b["project_cd"], b["table_nm"], b["src_id"]) in cfgs
+                         and scope.covers(b["project_cd"], b["table_nm"], b["run_ty"])]
+                if not rows:
                     summary.errors.append(f"{name}: no such batch")
-                elif q is None or not scope.covers(b["project_cd"], b["table_nm"], b["run_ty"]):
-                    summary.errors.append(f"{name}: not a batch of a query source in {scope.label()}")
-                else:
-                    out.append((b, q))
+                elif not found:
+                    summary.errors.append(f"{name}: no query source of this batch in {scope.label()}")
+                out.extend(found)
             return out
         if not cfgs:
             return []
@@ -148,11 +150,11 @@ class SourceLoader:
                               "Updated_Dtts=%s WHERE Load_ID=%s", (batch["req_id"], batch["btch_id"], self.clock.now(), load_id))
         opts = check_options(q, cfgmod.file_checks(self.conn))
         stage_lock = db.batch_key(f"STAGE {q.stg_schema_nm}.{q.stg_table_nm}".upper())
-        with db.held(self.conn, db.batch_key(batch["btch_id"]), self.settings.lock_timeout_seconds), \
+        with db.held(self.conn, db.req_key(batch), self.settings.lock_timeout_seconds), \
                 db.held(self.conn, stage_lock, self.settings.lock_timeout_seconds):
             b = get_batch(self.conn, batch["req_id"])
             ctx = LoadContext(b["btch_id"], load_id, b["run_ty"],
-                              btch_id_version(b["btch_id"], q.project_cd, q.table_nm, q.src_id, b["run_ty"]), q.src_id,
+                              b["cmplnc_vrsn"], q.src_id,
                               f"{q.project_cd}/{q.table_nm}/{q.src_id}", self.clock.now(), q.project_cd, q.table_nm,
                               _as_date(b["rpt_start_dt_key"]), _as_date(b["rpt_end_dt_key"]), b["req_id"],
                               self.settings.business_tz)

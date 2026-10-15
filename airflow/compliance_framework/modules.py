@@ -61,28 +61,26 @@ class BatchCreationSummary:
 
 
 def _batch_creation(app, p: dict) -> ModuleOutcome:
-    """Scheduled batches that are due by their configuration, then the project's ad-hoc intake requests."""
+    """Scheduled batches that are due by their configuration, then the intake requests (of `run_type` when given)."""
     project, run_type = p["project"], p.get("run_type")
     scope = _scope(app, p)
     period_args = ("period", "period_file", "lookback_days", "lookback_weeks")
     scheduled_kw = dict(project_cd=project, table_nm=p.get("table"), run_ty=run_type, period=p.get("period"),
                         period_file=p.get("period_file"), lookback_days=p.get("lookback_days"),
                         lookback_weeks=p.get("lookback_weeks"), tables=scope.tables if p.get("table_group") else None)
-    scheduled = adhoc_run_ty = None
+    scheduled = None
     if run_type:
         rt = cfgmod.run_type(app.conn, run_type)
         if rt is None or not rt.active:
             raise ConfigError(f"run type {run_type} is unknown or inactive")
-        if rt.run_category_cd == SCHEDULED:
+        if rt.run_category_cd == SCHEDULED or rt.schedule_sql:
             scheduled = app.create_batches(**scheduled_kw)
         elif any(k in p for k in period_args):
-            raise ConfigError(f"run type {run_type} is {ADHOC}; --period/--period-file/--lookback-* "
-                              f"only apply to a {SCHEDULED} run type")
-        else:
-            adhoc_run_ty = run_type
+            raise ConfigError(f"run type {run_type} is {ADHOC} without Batch_Schedule_Sql_Txt; --period/--period-file/"
+                              f"--lookback-* only apply to a run type with a schedule")
     else:
         scheduled = app.create_batches(**scheduled_kw)
-    adhoc = app.intake.run(project_cd=project, run_ty=adhoc_run_ty, tables=scope.tables)
+    adhoc = app.intake.run(project_cd=project, run_ty=run_type, tables=scope.tables)
     errors = bool(scheduled and scheduled.errors) or bool(adhoc.failed)
     return ModuleOutcome("BATCH_CREATION", BatchCreationSummary(scheduled, adhoc), 1 if errors else 0)
 

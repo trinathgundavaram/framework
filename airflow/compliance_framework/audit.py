@@ -96,7 +96,8 @@ class EventLogger:
             (event_ty, sev, project_cd, table_nm, src_id, run_ty, req_id, load_id, ovrd_id, intake_id,
              btch_id, file_ref, actor, _text(description), self.clock.now(), 0 if et.notify else 1))
         level = logging.ERROR if sev == "ERROR" else logging.WARNING if sev == "WARNING" else logging.INFO
-        where = btch_id or "/".join(x for x in (project_cd, table_nm, src_id) if x) or "-"
+        where = (f"{btch_id} source {src_id}" if btch_id and src_id else btch_id
+                 or "/".join(x for x in (project_cd, table_nm, src_id) if x) or "-")
         log.log(level, "%s | %s | load %s | %s", event_ty, where, load_id if load_id is not None else "-",
                 description or "")
 

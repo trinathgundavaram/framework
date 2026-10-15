@@ -355,8 +355,14 @@ def file_hash(share: str, path: str, version: str) -> str:
     return hashlib.sha256(f"{share}/{path}@{version}".encode("utf-8")).hexdigest()
 
 
-def seq_key(project: str, table: str, src: str, run_ty: str) -> str:
-    return f"SEQ:{project}|{table}|{src}|{run_ty}"
+def seq_key(project: str, table: str, run_ty: str) -> str:
+    """Lock of the batch IDs of a table and run type (shared by every source)."""
+    return f"SEQ:{project}|{table}|{run_ty}"
+
+
+def req_key(b: dict) -> str:
+    """Lock of one batch row (a source of a table-level batch)."""
+    return f"REQ:{b['req_id']}"
 
 
 def row_key(kind: str, row_id) -> str:

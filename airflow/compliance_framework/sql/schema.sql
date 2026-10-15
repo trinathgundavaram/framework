@@ -205,6 +205,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceRequestControl (
   Rpt_End_Dt_Key   DATE         NOT NULL,
   Req_Dt_Key       DATE         NOT NULL,
   Btch_ID          VARCHAR(250) NOT NULL,
+  Cmplnc_Vrsn      VARCHAR(10),
   Req_Stat         VARCHAR(30)  NOT NULL,
   Resolution_Ty    VARCHAR(15),
   Reuse_Btch_ID    VARCHAR(250),
@@ -214,7 +215,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceRequestControl (
 )
 UNIQUE PRIMARY INDEX (Req_ID);
 
-CREATE UNIQUE INDEX uq_reqcontrol_btch (Btch_ID)
+CREATE UNIQUE INDEX uq_reqcontrol_btch (Btch_ID, Src_ID)
 ON {{META_DB}}.ComplianceRequestControl;
 
 CREATE UNIQUE INDEX uq_reqcontrol_key (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key)
@@ -245,6 +246,9 @@ CREATE UNIQUE INDEX uq_fileload_file (File_Hash)
 ON {{META_DB}}.ComplianceFileLoad;
 
 CREATE INDEX ix_fileload_batch (Btch_ID)
+ON {{META_DB}}.ComplianceFileLoad;
+
+CREATE INDEX ix_fileload_req (Req_ID)
 ON {{META_DB}}.ComplianceFileLoad;
 
 CREATE INDEX ix_fileload_sha (File_Sha256)

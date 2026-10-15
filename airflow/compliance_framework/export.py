@@ -15,7 +15,7 @@ from typing import Optional
 from . import config as cfgmod
 from . import db
 from .audit import EventLogger
-from .common import ConfigError, btch_id_version, build_exp_btch_id, code
+from .common import ConfigError, code
 from .layout import BATCH_COLUMN, LoadContext, column_mapping
 from .load import _cast, columns
 from .release import Releases
@@ -67,7 +67,7 @@ class ExportLoader:
         for b in todo:
             e = exports[(b["project_cd"], b["table_nm"])]
             try:
-                with db.held(self.conn, db.batch_key(b["btch_id"]), self.settings.lock_timeout_seconds), \
+                with db.held(self.conn, db.req_key(b), self.settings.lock_timeout_seconds), \
                         db.held(self.conn, db.batch_key(f"EXPORT {e.exp_schema_nm}.{e.exp_table_nm}".upper()),
                                 self.settings.lock_timeout_seconds):
                     item = self._export(e, b)
@@ -107,14 +107,16 @@ class ExportLoader:
 
     def _named(self, exports: dict, scope: Scope, names: list[str], s: ExportSummary) -> list[dict]:
         out = []
-        for name in names:
-            b = self.conn.execute("SELECT * FROM ComplianceRequestControl WHERE Btch_ID = %s", (code(name),)).fetchone()
-            if b is None:
+        for name in dict.fromkeys(code(n) for n in names):
+            rows = self.conn.execute("SELECT * FROM ComplianceRequestControl WHERE Btch_ID = %s ORDER BY Req_ID",
+                                     (code(name),)).fetchall()
+            found = [b for b in rows if (b["project_cd"], b["table_nm"]) in exports
+                     and scope.covers(b["project_cd"], b["table_nm"], b["run_ty"])]
+            if not rows:
                 s.errors.append(f"{name}: no such batch")
-            elif (b["project_cd"], b["table_nm"]) not in exports or not scope.covers(b["project_cd"], b["table_nm"], b["run_ty"]):
+            elif not found:
                 s.errors.append(f"{name}: its table has no export table in {scope.label()}")
-            else:
-                out.append(b)
+            out.extend(found)
         return out
 
     def _changed(self, exports: dict, scope: Scope) -> list[dict]:
@@ -127,7 +129,7 @@ class ExportLoader:
             f"""SELECT c.* FROM ComplianceRequestControl c
                   JOIN (SELECT Req_ID, MAX(Event_Dtts) AS changed_at FROM ComplianceRequestFileDetail
                          WHERE Event_Ty IN ({marks}) GROUP BY Req_ID) ch ON ch.Req_ID = c.Req_ID
-                  LEFT JOIN ComplianceRequestControl r ON r.Btch_ID = c.Reuse_Btch_ID
+                  LEFT JOIN ComplianceRequestControl r ON r.Btch_ID = c.Reuse_Btch_ID AND r.Src_ID = c.Src_ID
                   LEFT JOIN (SELECT Req_ID, MAX(Event_Dtts) AS changed_at FROM ComplianceRequestFileDetail
                               WHERE Event_Ty IN ({marks}) GROUP BY Req_ID) rch ON rch.Req_ID = r.Req_ID
                   LEFT JOIN (SELECT Req_ID, MAX(Event_Dtts) AS exported_at FROM ComplianceRequestFileDetail
@@ -146,8 +148,8 @@ class ExportLoader:
                 return chain
             if b["resolution_ty"] != "CARRY_FORWARD" or not b["reuse_btch_id"]:
                 return []
-            b = self.conn.execute("SELECT * FROM ComplianceRequestControl WHERE Btch_ID = %s",
-                                  (b["reuse_btch_id"],)).fetchone()
+            b = self.conn.execute("SELECT * FROM ComplianceRequestControl WHERE Btch_ID = %s AND Src_ID = %s",
+                                  (b["reuse_btch_id"], b["src_id"])).fetchone()
         return []
 
     def _export(self, e, b: dict) -> dict:
@@ -172,17 +174,22 @@ class ExportLoader:
         chain = self._data_chain(b)
         source = chain[-1] if chain else None
         export = db.qualified(e.exp_schema_nm, e.exp_table_nm)
-        exp_btch_id = build_exp_btch_id(_as_date(b["req_dt_key"]), b["project_cd"], b["table_nm"], b["run_ty"])
-        version = btch_id_version(b["btch_id"], b["project_cd"], b["table_nm"], b["src_id"], b["run_ty"])
+        exp_btch_id, version = b["btch_id"], b["cmplnc_vrsn"]
+        mapping = column_mapping(cfg, cfgmod.target_columns(self.conn))
+        ctx = LoadContext(b["btch_id"], 0, b["run_ty"], version, b["src_id"], "", self.clock.now(), b["project_cd"],
+                          b["table_nm"], _as_date(b["rpt_start_dt_key"]), _as_date(b["rpt_end_dt_key"]), b["req_id"],
+                          self.settings.business_tz)
+        exp_all = columns(self.conn, e.exp_schema_nm, e.exp_table_nm)
+        src_col = next((c for c in exp_all if mapping.get(c.name) == "SOURCE_ID"), None)
+        if src_col is None:
+            raise LookupError(f"export table {e.exp_schema_nm}.{e.exp_table_nm} lacks the column mapped to SOURCE_ID")
+        by_src = f"{db.ident(src_col.name)} = ?"
+        src_val = ctx.value("SOURCE_ID", src_col.text, src_col.temporal)
         if e.proc_nm:
-            return self._call(e, b, item, export, exp_btch_id, version, chain)
+            return self._call(e, b, item, export, exp_btch_id, version, chain, by_src, src_val)
         core = db.qualified(cfg.core_schema_nm, cfg.core_table_nm)
         core_cols = {c.name for c in columns(self.conn, cfg.core_schema_nm, cfg.core_table_nm) if not c.auto}
-        exp_cols = [c for c in columns(self.conn, e.exp_schema_nm, e.exp_table_nm)
-                    if not c.auto and (c.name in core_cols or c.name == e.exp_btch_col)]
-        mapping = column_mapping(cfg, cfgmod.target_columns(self.conn))
-        ctx = LoadContext(b["btch_id"], 0, b["run_ty"], version, b["src_id"], "", self.clock.now(), b["project_cd"], b["table_nm"], _as_date(b["rpt_start_dt_key"]),
-                          _as_date(b["rpt_end_dt_key"]), b["req_id"], self.settings.business_tz)
+        exp_cols = [c for c in exp_all if not c.auto and (c.name in core_cols or c.name == e.exp_btch_col)]
         exprs, values = [], []
         for c in exp_cols:
             value_cd = "BATCH_ID" if c.name == BATCH_COLUMN else mapping.get(c.name)
@@ -199,16 +206,17 @@ class ExportLoader:
         with self.conn.transaction():
             kept = [k for k in keep if k != b["btch_id"]]
             marks, kept = db.in_list(kept) if kept else ("", [])
-            deleted = self.conn.execute(
-                f"""DELETE FROM {export} WHERE {db.ident(BATCH_COLUMN)} IN (
-                      SELECT Btch_ID FROM ComplianceRequestControl WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s
-                         AND Run_Ty=%s AND Rpt_Start_Dt_Key=%s AND Rpt_End_Dt_Key=%s)"""
-                + (f" AND {db.ident(BATCH_COLUMN)} NOT IN ({marks})" if kept else ""), [*period, *kept]).rowcount
+            deleted = self.conn.execute_qmark(
+                f"""DELETE FROM {export} WHERE {by_src} AND {db.ident(BATCH_COLUMN)} IN (
+                      SELECT Btch_ID FROM ComplianceRequestControl WHERE Project_Cd=? AND Table_Nm=? AND Src_ID=?
+                         AND Run_Ty=? AND Rpt_Start_Dt_Key=? AND Rpt_End_Dt_Key=?)"""
+                + (f" AND {db.ident(BATCH_COLUMN)} NOT IN ({marks.replace('%s', '?')})" if kept else ""),
+                [src_val, *period, *kept]).rowcount
             inserted = 0
             if source is not None:
                 text = (f"INSERT INTO {export} ({', '.join(db.ident(c.name) for c in exp_cols)}) "
-                        f"SELECT {', '.join(exprs)} FROM {core} WHERE {db.ident(BATCH_COLUMN)} = ?")
-                inserted = self.conn.execute_qmark(text, [*values, source]).rowcount
+                        f"SELECT {', '.join(exprs)} FROM {core} WHERE {db.ident(BATCH_COLUMN)} = ? AND {by_src}")
+                inserted = self.conn.execute_qmark(text, [*values, source, src_val]).rowcount
             how = ("no data" if source is None else "its own rows" if source == b["btch_id"]
                    else f"a copy of {source}")
             self._done(b, f"exported {how}: inserted={inserted} deleted={deleted}")
@@ -217,7 +225,8 @@ class ExportLoader:
                  b["btch_id"], inserted, item["export_table"], how, deleted)
         return item
 
-    def _call(self, e, b: dict, item: dict, export: str, exp_btch_id: str, version, chain: list[str]) -> dict:
+    def _call(self, e, b: dict, item: dict, export: str, exp_btch_id: str, version, chain: list[str], by_src: str,
+              src_val) -> dict:
         """The configured procedure exports the batch (deletes and inserts its export rows itself)."""
         unknown = [n for n in e.proc_params if n not in cfgmod.EXPORT_PROC_PARAMS]
         if unknown:
@@ -232,8 +241,8 @@ class ExportLoader:
         with self.conn.transaction():
             self.conn.execute_qmark(f"CALL {proc}({', '.join('?' for _ in e.proc_params)})",
                                     [given[n] for n in e.proc_params])
-            rows = self.conn.execute(f"SELECT COUNT(*) AS n FROM {export} WHERE {db.ident(BATCH_COLUMN)} = %s",
-                                     (b["btch_id"],)).fetchone()["n"]
+            rows = self.conn.execute_qmark(f"SELECT COUNT(*) AS n FROM {export} WHERE {db.ident(BATCH_COLUMN)} = ? "
+                                           f"AND {by_src}", [b["btch_id"], src_val]).fetchone()["n"]
             self._done(b, f"exported by {e.proc_nm} (data of {source or 'no batch'}): {rows} row(s) of the batch in the export")
         item.update(status="EXPORTED", export_batch=exp_btch_id, data_from=source or "-", procedure=e.proc_nm,
                     rows_exported=rows)

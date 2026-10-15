@@ -17,7 +17,7 @@ from . import db
 from .adapters import FileInfo, FileStore, basename, dirname, parse_uri, sha256_file
 from .audit import EventLogger
 from .batches import get_batch, promoted_load
-from .common import (DATA_NOT_PROVIDED, REQUEST_COMPLETE, SOURCE_DATA_READY, SOURCE_DATA_READY_NO_DATA, Clock, FileRejected, RowCountMismatch, btch_id_version, check_transition,
+from .common import (DATA_NOT_PROVIDED, REQUEST_COMPLETE, SOURCE_DATA_READY, SOURCE_DATA_READY_NO_DATA, Clock, FileRejected, RowCountMismatch, check_transition,
                      code)
 from .config import FileConfig, MatchError, TemplateMatcher
 from .control_report import file_details, write_error_log, write_reports
@@ -323,7 +323,7 @@ class IngestPipeline:
             return self._quarantine(load_id, info, "FILE_PARSE_ERROR", "zero-byte file but a header is expected",
                                     cfg, batch)
         stage_table = db.batch_key(f"STAGE {cfg.stg_schema_nm}.{cfg.stg_table_nm}".upper())
-        with db.held(self.conn, db.batch_key(batch["btch_id"]), self.settings.lock_timeout_seconds), \
+        with db.held(self.conn, db.req_key(batch), self.settings.lock_timeout_seconds), \
                 db.held(self.conn, stage_table, self.settings.lock_timeout_seconds):
             return self._process_locked(load_id, info, cfg, batch["req_id"])
 
@@ -354,15 +354,14 @@ class IngestPipeline:
             (batch["req_id"], override_ty, today)).fetchone()
 
     def _has_data(self, batch: dict) -> bool:
-        return batch["resolution_ty"] == "CARRY_FORWARD" or promoted_load(self.conn, batch["btch_id"]) is not None
+        return batch["resolution_ty"] == "CARRY_FORWARD" or promoted_load(self.conn, batch["req_id"]) is not None
 
     def _process_locked(self, load_id: int, info: FileInfo, cfg: FileConfig, req_id: int) -> IngestOutcome:
         """The caller holds the batch lock and the lock of the staging table (stage and core load are one unit)."""
         batch = get_batch(self.conn, req_id)
         opts = check_options(cfg, cfgmod.file_checks(self.conn))
         layout = file_layout(self.conn, cfg, cfgmod.target_columns(self.conn), opts)
-        version = btch_id_version(batch["btch_id"], cfg.project_cd, cfg.table_nm, cfg.src_id, batch["run_ty"])
-        ctx = LoadContext(batch["btch_id"], load_id, batch["run_ty"], version, cfg.src_id, basename(info.path),
+        ctx = LoadContext(batch["btch_id"], load_id, batch["run_ty"], batch["cmplnc_vrsn"], cfg.src_id, basename(info.path),
                           self.clock.now(), cfg.project_cd, cfg.table_nm, _as_date(batch["rpt_start_dt_key"]),
                           _as_date(batch["rpt_end_dt_key"]), req_id, self.settings.business_tz)
         self._load = (layout, ctx)
@@ -373,8 +372,8 @@ class IngestPipeline:
                 self.conn.execute("UPDATE ComplianceFileLoad SET File_Sha256=%s, Updated_Dtts=%s WHERE Load_ID=%s",
                                   (sha, self.clock.now(), load_id))
             other = self.conn.execute(
-                """SELECT TOP 1 Load_ID, Btch_ID FROM ComplianceFileLoad WHERE File_Sha256=%s AND Btch_ID<>%s
-                      AND Load_Stat <> 'QUARANTINED'""", (sha, batch["btch_id"])).fetchone()
+                """SELECT TOP 1 Load_ID, Btch_ID FROM ComplianceFileLoad WHERE File_Sha256=%s AND Req_ID<>%s
+                      AND Load_Stat <> 'QUARANTINED'""", (sha, batch["req_id"])).fetchone()
             if other:
                 with self.conn.transaction():
                     self.logger.audit("FILE_SAME_CONTENT_OTHER_BATCH", load_id=load_id, req_id=req_id,
@@ -434,7 +433,7 @@ class IngestPipeline:
                 check_transition(b["req_stat"], to_stat)
                 staged_cnt = self.conn.execute("SELECT Stg_Rcd_Cnt FROM ComplianceFileLoad WHERE Load_ID=%s",
                                                (load_id,)).fetchone()["stg_rcd_cnt"]
-                prior = promoted_load(self.conn, b["btch_id"])
+                prior = promoted_load(self.conn, b["req_id"])
                 if prior and prior["load_id"] != load_id:
                     self._supersede(prior["load_id"])
                 res = swap(self.conn, cfg, *self._load, staged_cnt)

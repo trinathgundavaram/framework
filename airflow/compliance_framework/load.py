@@ -283,7 +283,9 @@ def _clean_stage(conn, table: str, cfg: "FileConfig", layout: Layout, ctx: LoadC
     if col:
         conn.execute(f"DELETE FROM {table} WHERE {db.ident(col.name)} = %s", (ctx.value("RUN_TYPE", col.text),))
     else:
-        conn.execute(f"DELETE FROM {table} WHERE {db.ident(BATCH_COLUMN)} = %s", (ctx.btch_id,))
+        src = layout.column("SOURCE_ID")
+        conn.execute(f"DELETE FROM {table} WHERE {db.ident(BATCH_COLUMN)} = %s AND {db.ident(src.name)} = %s",
+                     (ctx.btch_id, ctx.value("SOURCE_ID", src.text, src.temporal)))
 
 
 def stage(conn: Connection, settings: "Settings", *, file_path: str, cfg: "FileConfig", layout: Layout,
@@ -455,7 +457,9 @@ class PromotionResult:
 def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_rows: int) -> PromotionResult:
     """Delete the batch's core rows and insert the staged ones; runs inside the caller's transaction."""
     core, stg = _table(cfg.core_schema_nm, cfg.core_table_nm), _table(cfg.stg_schema_nm, cfg.stg_table_nm)
-    deleted = conn.execute(f"DELETE FROM {core} WHERE {db.ident(BATCH_COLUMN)} = %s", (ctx.btch_id,)).rowcount
+    core_src, stage_src = layout.column("SOURCE_ID", "core"), layout.column("SOURCE_ID")
+    deleted = conn.execute(f"DELETE FROM {core} WHERE {db.ident(BATCH_COLUMN)} = %s AND {db.ident(core_src.name)} = %s",
+                           (ctx.btch_id, ctx.value("SOURCE_ID", core_src.text, core_src.temporal))).rowcount
     names, exprs, values = [], [], []
     for c, kind, _ in layout.core_plan():
         names.append(db.ident(c.name))
@@ -468,8 +472,8 @@ def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_row
                          else "CAST(%s AS TIMESTAMP(0))" if c.temporal == "TIMESTAMP"
                          else "CAST(%s AS TIMESTAMP(0) WITH TIME ZONE)")
             values.append(ctx.value("LOAD_TIMESTAMP", c.text, c.temporal or "TIMESTAMP_TZ"))
-    where = f"{db.ident(BATCH_COLUMN)} = %s"
-    values.append(ctx.btch_id)
+    where = f"{db.ident(BATCH_COLUMN)} = %s AND {db.ident(stage_src.name)} = %s"
+    values.extend((ctx.btch_id, ctx.value("SOURCE_ID", stage_src.text, stage_src.temporal)))
     load_col = layout.column("LOAD_ID", "stage")
     if load_col:
         where += f" AND {db.ident(load_col.name)} = %s"

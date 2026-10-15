@@ -284,12 +284,13 @@ VALUES
 --   ALTER TABLE CMSUNIV_EXPORT_DEV_T.ODAG_DE_TABLE3_2022_EXP ADD Exp_Btch_ID VARCHAR(100);
 --
 -- Optional: export through a procedure instead of the framework's delete and INSERT ... SELECT. The procedure deletes
--- and inserts the batch's export rows itself; Exp_Proc_Parm_Txt lists its parameters in order ({btch_id},
+-- and inserts the batch's export rows of that one source itself (a Btch_ID covers every source of the table, so it
+-- filters on {src_id} and fills the source column); Exp_Proc_Parm_Txt lists its parameters in order ({btch_id},
 -- {data_btch_id}, {exp_btch_id}, {reused_btch_ids}, {project_cd}, {table_nm}, {src_id}, {run_ty}, {version},
 -- {req_id}, {req_dt}, {rpt_start}, {rpt_end}; empty = {btch_id}, {data_btch_id}, {exp_btch_id}):
 --   UPDATE HSABC_DEV.ComplianceExportConfig
 --      SET Exp_Proc_Nm = 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_ODAG3',
---          Exp_Proc_Parm_Txt = '{btch_id}, {data_btch_id}, {exp_btch_id}, {reused_btch_ids}'
+--          Exp_Proc_Parm_Txt = '{btch_id}, {data_btch_id}, {src_id}, {reused_btch_ids}'
 --    WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'ODAG3';
 
 
@@ -360,15 +361,15 @@ VALUES
 
 -- ----------------------------------------------------------------------------------------------------
 -- 10. Only for a carry-forward, and only after the batches exist: an approved REUSE override.
---     The batch that reuses is found by its Btch_ID; Reuse_Btch_ID is the earlier batch whose data is reused.
+--     The batch that reuses is found by its Btch_ID and source; Reuse_Btch_ID is the earlier batch whose data is reused.
 -- ----------------------------------------------------------------------------------------------------
 
 INSERT INTO HSABC_DEV.ComplianceBatchOverride
   (Override_Ty, Req_ID, Btch_ID, Reuse_Btch_ID, Apprvl_Stat, Valid_Thru_Dt_Key, Rsn_Txt, Reviewed_By, Reviewed_Dtts)
-SELECT 'REUSE', Req_ID, Btch_ID, '20261019_CMSUNIV_ODAG3_140_CMS_2200_1', 'APPROVED', DATE '2026-10-30',
+SELECT 'REUSE', Req_ID, Btch_ID, '20261019_CMSUNIV_ODAG3_CMS', 'APPROVED', DATE '2026-10-30',
        'ESI confirmed no change since the previous CMS request', 'approver_id', CURRENT_TIMESTAMP(6)
 FROM HSABC_DEV.ComplianceRequestControl
-WHERE Btch_ID = '20261021_CMSUNIV_ODAG3_140_CMS_2200_1';
+WHERE Btch_ID = '20261021_CMSUNIV_ODAG3_CMS' AND Src_ID = '140';
 
 
 -- ----------------------------------------------------------------------------------------------------
@@ -382,4 +383,4 @@ INSERT INTO HSABC_DEV.ComplianceBatchOverride
 SELECT 'REOPEN', Req_ID, Btch_ID, 'APPROVED', DATE '2026-10-31',
        'ESI resends corrected data for the closed CMS request', 'approver_id', CURRENT_TIMESTAMP(6)
 FROM HSABC_DEV.ComplianceRequestControl
-WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_140_CMS_2200_1';
+WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_CMS' AND Src_ID = '140';

@@ -46,14 +46,14 @@ class DecisionProcessor:
         where, params = scope.sql("c")
         params = [today, *params]
         rows = self.conn.execute(
-            f"""SELECT o.Ovrd_ID, c.Btch_ID FROM ComplianceBatchOverride o
+            f"""SELECT o.Ovrd_ID, c.Req_ID, c.Btch_ID FROM ComplianceBatchOverride o
                  JOIN ComplianceRequestControl c ON c.Req_ID = o.Req_ID
                 WHERE UPPER(o.Override_Ty) = 'REUSE' AND UPPER(o.Apprvl_Stat) = 'APPROVED' AND o.Valid_Thru_Dt_Key >= %s
                   AND c.Batch_Close_Ind = 0 AND (c.Resolution_Ty IS NULL OR c.Resolution_Ty <> 'CARRY_FORWARD'){where}
                 ORDER BY o.Ovrd_ID""", params).fetchall()
         run_types = cfgmod.run_types(self.conn) if rows else {}
         for r in rows:
-            key = db.batch_key(r["btch_id"])
+            key = db.req_key(r)
             if not db.try_lock(self.conn, key):
                 continue
             try:
@@ -110,7 +110,7 @@ class DecisionProcessor:
                         WHERE d.Ovrd_ID = o.Ovrd_ID AND d.Event_Ty = 'BATCH_REOPENED'){where}
                 ORDER BY o.Ovrd_ID""", [today, *params]).fetchall()
         for r in rows:
-            key = db.batch_key(r["btch_id"])
+            key = db.req_key(r)
             if not db.try_lock(self.conn, key):
                 continue
             try:
@@ -148,7 +148,7 @@ class DecisionProcessor:
                   AND (o.Ovrd_ID IS NULL OR o.Valid_Thru_Dt_Key < %s) AND NOT {REOPENED_AWAITING_DATA}{where}
                 ORDER BY c.Req_ID""", params).fetchall()
         for r in rows:
-            key = db.batch_key(r["btch_id"])
+            key = db.req_key(r)
             if not db.try_lock(self.conn, key):
                 continue
             try:
@@ -199,7 +199,7 @@ class DecisionProcessor:
             return f"run type {b['run_ty']} does not allow carry-forward (Carry_Fwd_Ind = 0)"
         if b["batch_close_ind"] == 1:
             return "batch is closed"
-        if promoted_load(self.conn, b["btch_id"]) is not None:
+        if promoted_load(self.conn, b["req_id"]) is not None:
             return "batch already has promoted data"
         if src is None:
             return ("no earlier closed batch with data"
@@ -221,6 +221,6 @@ class DecisionProcessor:
                 ORDER BY Rpt_Start_Dt_Key DESC, Req_Dt_Key DESC, Req_ID DESC""", params).fetchall()
         row = rows[0] if rows else None
         if row and row["resolution_ty"] == "CARRY_FORWARD":
-            row = self.conn.execute("SELECT * FROM ComplianceRequestControl WHERE Btch_ID=%s",
-                                    (row["reuse_btch_id"],)).fetchone()
-        return row if row and promoted_load(self.conn, row["btch_id"]) else None
+            row = self.conn.execute("SELECT * FROM ComplianceRequestControl WHERE Btch_ID=%s AND Src_ID=%s",
+                                    (row["reuse_btch_id"], row["src_id"])).fetchone()
+        return row if row and promoted_load(self.conn, row["req_id"]) else None

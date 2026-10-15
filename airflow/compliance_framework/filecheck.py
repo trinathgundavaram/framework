@@ -18,7 +18,7 @@ from . import config as cfgmod
 from . import db
 from .adapters import FileStore, basename, dirname, parse_uri
 from .audit import EventLogger
-from .common import Clock, ConfigError, btch_id_version, code
+from .common import Clock, ConfigError, code
 from .control_report import write_error_log
 from .config import FileConfig, MatchError
 from .filecheck_options import CheckOptions, check_options, data_fields, trailer_problems
@@ -345,8 +345,7 @@ class FileChecker:
             found = self._content(info, name, cfg, details, stats)
             checked = found is not None
             findings.extend(found or [])
-        version = (btch_id_version(batch["btch_id"], cfg.project_cd, cfg.table_nm, cfg.src_id, run_ty)
-                   if batch else None)
+        version = batch["cmplnc_vrsn"] if batch else None
         result = {"file": self.store.uri(info.share, info.path),
                   "config": f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}" if cfg else None,
                   "run_type": run_ty, "version": version,

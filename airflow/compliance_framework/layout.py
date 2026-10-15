@@ -20,7 +20,7 @@ TEXT_CODES = ("CONSTANT", "SQL")
 SQL_PARAMS = ("btch_id", "run_ty", "version", "src_id", "file_name", "project_cd", "table_nm", "load_id", "req_id",
               "rpt_start", "rpt_end", "load_date")
 PLACEHOLDER = re.compile(r"\{(\w+)\}")
-DEFAULT_MAPPING = {"load_id": "LOAD_ID", "src_file_nm": "FILE_NAME", "stg_load_dtts": "LOAD_TIMESTAMP",
+DEFAULT_MAPPING = {"src_id": "SOURCE_ID", "load_id": "LOAD_ID", "src_file_nm": "FILE_NAME", "stg_load_dtts": "LOAD_TIMESTAMP",
                    "current_ind": "CURRENT_FLAG", "load_dtts": "LOAD_TIMESTAMP", "end_dtts": "END_TIMESTAMP"}
 TIMESTAMP_TEXT = "%Y-%m-%d %H:%M:%S"
 
@@ -243,6 +243,10 @@ def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], 
         if missing:
             raise LookupError(f"{label}: column {missing[0]} of ComplianceTargetColumnConfig is in neither {stage_name} "
                               f"nor {core_name}")
+    for side, name in (("stage", stage_name), ("core", core_name)):
+        if not layout.column("SOURCE_ID", side):
+            raise LookupError(f"{label}: table {name} needs a column mapped to SOURCE_ID in ComplianceTargetColumnConfig "
+                              "(a batch holds every source of the table; its rows are told apart by that column)")
     if layout.column("ROW_SEQUENCE", "core") and not layout.column("ROW_SEQUENCE", "stage"):
         raise LookupError(f"{label}: the ROW_SEQUENCE column must also be in the staging table {stage_name}")
     if not layout.free_cols:

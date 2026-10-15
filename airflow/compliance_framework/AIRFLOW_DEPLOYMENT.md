@@ -177,7 +177,8 @@ date or timestamp used as "now", for a missed day), `settings` and `gre`.
   - `{"module": "FILE_RULES"}`, `{"module": "BATCH_CLOSE", "project": "CMS_UNIVERSE"}`, `{"module": "NOTIFY"}`
 - **`OSSTD_CORE_CMS_COMPLIANCE_ADMIN`** — `validate-config`, `health`, `test-connection`, `show-config`,
   `locks`, `release-lock`, `close-batch`:
-  `{"command": "close-batch", "args": ["--btch-id", "<Btch_ID>", "--closed-by", "jdoe"]}`.
+  `{"command": "close-batch", "args": ["--btch-id", "<Btch_ID>", "--closed-by", "jdoe"]}` closes every open source
+  of the batch; add `"--src-id", "<Src_ID>"` to close one source.
 - A missing or invalid Variable never breaks parsing: the DAG is still there, unscheduled, and its task
   fails with the reason when run.
 - More trigger examples: [`examples/trigger_configurations.json`](examples/trigger_configurations.json).
@@ -210,7 +211,7 @@ Server needs `pyodbc` and the Microsoft ODBC driver on the workers. Check a conn
 
 **Which batches are pulled.** With the scope (`project`, `table_group` or `table`, `run_type`): every open batch
 of a query source that has no data yet (`REQUEST_CREATED`, request date reached). With `batch` (one `Btch_ID`, or
-several separated by commas): exactly those batches, whatever their data; the new pull replaces the batch's rows
+several separated by commas): the query sources of those batches, whatever their data; the new pull replaces the batch's rows
 (a closed batch still needs its override). A query that returns no rows means the source had no data
 (`SOURCE_DATA_READY_NO_DATA`). Each pull is a row of `ComplianceFileLoad` (`File_Share` = `QUERY:<Src_Conn_Cd>`
 or `QUERY:LOCAL`, `File_Path` = project/table/source/batch), so FILE_RULES, the step report and the history work
@@ -230,13 +231,12 @@ core table's columns (it may have fewer, and its own identity column); `Btch_ID`
 that are not in core are left NULL (`validate-config` warns). The core row ID column is copied as it is, so an
 export row can be traced back to core.
 
-**Export batch.** Besides the source batch (`Btch_ID`), each export row can carry the export batch: one ID for all
-sources of a table, run type and request date, `{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Run_Ty}` (e.g.
-`20261018_CMSUNIV_ODAG3_DAILY`), so the export is read per run type instead of per source. It is filled when the
-export table has the column `Exp_Btch_ID` (another name: `Exp_Btch_Col_Nm` in `ComplianceExportConfig`; existing
-tables: `ALTER TABLE <META_DB>.ComplianceExportConfig ADD Exp_Btch_Col_Nm VARCHAR(128);`, optional). A carried-
-forward copy gets the export batch of the batch it is copied to. It is derived from the batch, so no table holds
-it; the rules receive it as `exp_btch_id`.
+**Batch and source in the export.** `Btch_ID` is the table-level batch (every source of the table and run type), so
+the export table needs the column mapped to `SOURCE_ID` too: a batch's export rows are replaced per source. The
+optional column `Exp_Btch_ID` (another name: `Exp_Btch_Col_Nm` in `ComplianceExportConfig`) is filled with the same
+`Btch_ID`; the rules receive it as `exp_btch_id`. A carried-forward copy gets the `Btch_ID` of the batch it is
+copied to. An export procedure gets `{src_id}`: it deletes and inserts only that source's rows and fills the source
+column.
 
 **Which batches are exported.** With the scope: every batch whose data changed after its last export (a load,
 late arrival, correction, carry-forward applied or removed, or a change of the batch it reuses), for every run
@@ -358,6 +358,38 @@ the progress is logged without any data from the files: the files found in each 
 the bytes read, lines and data rows counted, rows validated, rows staged, rows loaded into core (and earlier rows
 of the batch removed), the batch status afterwards, and where the file was moved.
 The SMB library's connection messages are no longer written (warnings and errors still are).
+
+## Batch ID (`Btch_ID`)
+
+`Btch_ID` = `{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Run_Ty}`, e.g. `20261019_CMSUNIV_ODAG3_DAILY`: one batch per table,
+run type and request date, shared by every source. Each source has its own row in `ComplianceRequestControl`
+(`Btch_ID` + `Src_ID` is unique; `Req_ID` identifies the row) with its own status, data, SLA, close, overrides and
+timeline. A second report period of the same table and run type on the same request date (an ad-hoc request, an
+intake row for another month) gets `_2`, then `_3`: `20261019_CMSUNIV_ODAG3_CMS_2`. The compliance version is in
+`Cmplnc_Vrsn` of the batch row.
+
+What that means in use:
+
+- Core, staging and export rows of a batch are told apart by the column mapped to `SOURCE_ID` (required).
+- `batch` in SOURCE_LOAD / EXPORT_LOAD and `close-batch` act on every source of the batch (`--src-id` for one).
+- Queries and rules that select by `{btch_id}` get every source: add `{src_id}` where they work per source.
+- Overrides are entered for one source: `... FROM ComplianceRequestControl WHERE Btch_ID = '...' AND Src_ID = '...'`.
+
+Upgrading an installation from 0.3.37 (DEV: the earlier batches are removed and created again):
+
+```sql
+ALTER TABLE <META_DB>.ComplianceRequestControl ADD Cmplnc_Vrsn VARCHAR(10);
+DROP INDEX uq_reqcontrol_btch ON <META_DB>.ComplianceRequestControl;
+CREATE UNIQUE INDEX uq_reqcontrol_btch (Btch_ID, Src_ID) ON <META_DB>.ComplianceRequestControl;
+CREATE INDEX ix_fileload_req (Req_ID) ON <META_DB>.ComplianceFileLoad;
+-- clear the old batches (then run BATCH_CREATION again, and FILE_LOAD / SOURCE_LOAD for their data)
+DELETE FROM <META_DB>.ComplianceBatchOverride;
+DELETE FROM <META_DB>.ComplianceRequestFileDetail;
+DELETE FROM <META_DB>.ComplianceFileLoad;
+DELETE FROM <META_DB>.ComplianceRequestControl;
+UPDATE <META_DB>.ComplianceRequestInTake SET Last_Run_Dt_Key = NULL;
+-- and the rows of those batches in the staging, core and export tables
+```
 
 ## Batch status (`ComplianceRequestControl.Req_Stat`)
 
@@ -799,7 +831,7 @@ of the file, in table order.**
 
 | `Value_Cd` | Value |
 |---|---|
-| `RUN_TYPE`, `VERSION`, `SOURCE_ID` | The batch's run type, the compliance version the batch was created with (the version part of `Btch_ID`), the batch's `Src_ID` |
+| `RUN_TYPE`, `VERSION`, `SOURCE_ID` | The batch's run type, the compliance version the batch was created with (`ComplianceRequestControl.Cmplnc_Vrsn`), the batch's `Src_ID` |
 | `FILE_NAME` | The name of the file |
 | `LOAD_TIMESTAMP` | When the file was loaded: a timestamp, or text `YYYY-MM-DD HH:MM:SS` (business time zone) in a character column |
 | `ROW_SEQUENCE` | A running row number, continuing from the highest value in the staging and core tables |
@@ -839,14 +871,16 @@ Rules:
   table order. Every staging or core column that is neither filled from the file nor in
   `ComplianceTargetColumnConfig` is loaded as NULL, so it must allow NULL. With neither row every such column is
   expected in the file. The load skips the header line; it never counts or compares it (that is `FILE_CHECK`).
-- **Core holds one load per batch.** When a file is loaded for a batch that already has rows in the core
-  table, those rows are deleted by `Btch_ID` and the new rows are inserted, in one transaction. The core table
+- **Core holds one load per batch and source.** When a file is loaded for a batch that already has rows of that
+  source in the core table, those rows are deleted by `Btch_ID` and the source column (the one mapped to
+  `SOURCE_ID`, required in the staging and core table) and the new rows are inserted, in one transaction. The core table
   needs no flag or end-date column; rows of other batches are not touched.
 - **Staging is cleared before a load by run type**: every staging row of the file's run type is removed,
   then the file is loaded (the staging table needs a `RUN_TYPE` column for this, as in the example below).
-  Rows of other run types are not touched. A staging table without a run type column is cleared by batch.
+  Rows of other run types are not touched. A staging table without a run type column is cleared by batch and source.
 - **`SQL` columns.** `Value_Txt` is a single `SELECT` that returns one row with one column, for example
-  `SELECT CURRENT_DATE` or a lookup such as `SELECT Audit_ID FROM <db>.Audit_Run WHERE Btch_ID = {btch_id}`.
+  `SELECT CURRENT_DATE` or a lookup such as `SELECT Audit_ID FROM <db>.Audit_Run WHERE Btch_ID = {btch_id} AND Src_ID = {src_id}`
+  (a `Btch_ID` covers every source of the table: add `{src_id}`, or use `{req_id}`; `validate-config` warns).
   It runs once per load, before the file is staged, with the framework's database account; its value goes
   on every row of that load. It can use `{btch_id}`, `{run_ty}`, `{version}`, `{src_id}`, `{file_name}`,
   `{project_cd}`, `{table_nm}`, `{load_id}`, `{req_id}`, `{rpt_start}`, `{rpt_end}` and `{load_date}`, bound as
@@ -902,7 +936,21 @@ The framework keeps codes upper case in what it writes (batch rows, `Btch_ID`, a
 `ComplianceProject`, `ComplianceSourceSystem` or `ComplianceRunType` differ only in case.
 
 The run categories are `SCHEDULED` (batches created on a schedule for a period; was `ROUTINE`) and
-`ADHOC` (batches requested through `ComplianceRequestInTake`).
+`ADHOC` (batches requested through `ComplianceRequestInTake`). The two ways of creating batches can be mixed:
+
+- An `ADHOC` run type with a `Batch_Schedule_Sql_Txt` gets scheduled batches for its crosswalk rows that have a
+  `Rpt_Dt_Sql_Txt`; its rows without one get batches from `ComplianceRequestInTake` only. So one ad-hoc run type can
+  run daily for some sources and on request (other dates) for others.
+- `ComplianceRequestInTake` takes any active run type, `SCHEDULED` ones too (e.g. an extra `MNT` batch for an earlier
+  month).
+- A request whose source, run type and report dates already have an open batch made by the schedule or another
+  request uses that batch (no second batch); a closed batch gets a new one (a re-request). A request's own window
+  (`Req_Start_Dt_Key` to `Req_End_Dt_Key`) still makes its batch on each day. The schedule skips report dates
+  that already have a batch.
+- Release follows the run type's category, whichever way the batch was made: `SCHEDULED` on the due date, `ADHOC`
+  with `release=true`.
+- `BATCH_CREATION` with `run_type` runs the schedule when that run type has one, and only that run type's
+  requests.
 
 ## Environment in database names (`$env`)
 

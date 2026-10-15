@@ -566,12 +566,12 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
                 for r in conn.execute("SELECT Project_Cd, Active_Ind FROM ComplianceProject").fetchall()}
     sources = {code(r["src_id"]) for r in conn.execute("SELECT Src_ID FROM ComplianceSourceSystem").fetchall()}
     xw = xwalk_rows(conn)
-    from .batches import batch_due, report_dates
+    from .batches import batch_due, report_dates, scheduled
 
     run_date, cache, due = run_date or date.today(), {}, {}
     for x in xw:
         rt = rts.get(x.run_ty)
-        if rt is None or not rt.active or rt.run_category_cd != SCHEDULED or not rt.schedule_sql or not x.effective_on(run_date):
+        if not scheduled(rt, x) or not rt.schedule_sql or not x.effective_on(run_date):
             continue
         key = (x.project_cd, x.run_ty)
         if key not in due:
@@ -664,6 +664,10 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             add("TARGET_COLUMN", f"{t.label}: unknown Value_Cd {t.value_cd!r}; accepted: {', '.join(VALUE_CODES)}")
         if t.project_cd not in projects:
             add("TARGET_COLUMN", f"{t.label}: project {t.project_cd} is not in ComplianceProject")
+        names = {n.lower() for n in re.findall(r"\{(\w+)\}", t.value_txt or "")} if t.value_cd == "SQL" else set()
+        if "btch_id" in names and not names & {"src_id", "req_id"}:
+            add("TARGET_COLUMN", f"{t.label}: Value_Txt uses {{btch_id}} without {{src_id}}; a batch ID covers every "
+                                 "source of the table, so add {src_id} (or use {req_id} for the one batch row)", "WARNING")
 
     for c in cfgs:
         label = f"file config {c.cfg_id} ({c.project_cd}/{c.table_nm}/{c.src_id})"

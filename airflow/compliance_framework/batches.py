@@ -39,15 +39,35 @@ def find_batch(conn, project_cd, table_nm, src_id, run_ty, rpt_start: date, rpt_
         (project_cd, table_nm, src_id, run_ty, rpt_start, rpt_end, req_dt)).fetchone()
 
 
+def scheduled(rt: Optional[RunType], x: XwalkRow) -> bool:
+    """Whether the schedule creates this crosswalk row's batches: every row of a SCHEDULED run type, and the rows of
+    an ADHOC run type that has a Batch_Schedule_Sql_Txt when the row has its own Rpt_Dt_Sql_Txt (its other rows
+    get batches from ComplianceRequestInTake only)."""
+    if rt is None or not rt.active:
+        return False
+    return rt.run_category_cd == SCHEDULED or bool(rt.run_category_cd == ADHOC and rt.schedule_sql and x.rpt_dt_sql)
+
+
+def open_batch_of_other(conn, x: XwalkRow, rpt_start: date, rpt_end: date, intake_id: int) -> Optional[dict]:
+    """An open batch for these report dates that this intake request did not create itself."""
+    return conn.execute(
+        """SELECT c.* FROM ComplianceRequestControl c WHERE c.Project_Cd=%s AND c.Table_Nm=%s AND c.Src_ID=%s
+              AND c.Run_Ty=%s AND c.Rpt_Start_Dt_Key=%s AND c.Rpt_End_Dt_Key=%s AND c.Batch_Close_Ind = 0
+              AND NOT EXISTS (SELECT 1 FROM ComplianceRequestFileDetail d WHERE d.Req_ID = c.Req_ID
+                                AND d.Event_Ty = 'BATCH_CREATED' AND d.Intake_ID = %s)
+            ORDER BY c.Req_ID DESC""",
+        (x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, intake_id)).fetchone()
+
+
 def get_batch(conn: Connection, req_id: int) -> dict:
     """The batch row; callers that change it hold the batch lock."""
     return conn.execute("SELECT * FROM ComplianceRequestControl WHERE Req_ID=%s", (req_id,)).fetchone()
 
 
-def promoted_load(conn: Connection, btch_id: str) -> Optional[dict]:
+def promoted_load(conn: Connection, req_id: int) -> Optional[dict]:
     """The batch's PROMOTED load, if any."""
-    return conn.execute("SELECT * FROM ComplianceFileLoad WHERE Btch_ID=%s AND Load_Stat='PROMOTED'",
-                        (btch_id,)).fetchone()
+    return conn.execute("SELECT * FROM ComplianceFileLoad WHERE Req_ID=%s AND Load_Stat='PROMOTED'",
+                        (req_id,)).fetchone()
 
 
 def create_batch(conn: Connection, clock: Clock, logger: EventLogger, *, xwalk: XwalkRow,
@@ -57,7 +77,7 @@ def create_batch(conn: Connection, clock: Clock, logger: EventLogger, *, xwalk: 
     x = xwalk
     if locked:
         return _create_batch(conn, clock, logger, x, rpt_start, rpt_end, req_dt, intake_id)
-    with db.held(conn, db.seq_key(x.project_cd, x.table_nm, x.src_id, x.run_ty), lock_timeout):
+    with db.held(conn, db.seq_key(x.project_cd, x.table_nm, x.run_ty), lock_timeout):
         with conn.transaction():
             return _create_batch(conn, clock, logger, x, rpt_start, rpt_end, req_dt, intake_id)
 
@@ -66,21 +86,37 @@ def _create_batch(conn, clock, logger, x: XwalkRow, rpt_start, rpt_end, req_dt, 
     existing = find_batch(conn, x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt)
     if existing:
         return CreateResult(existing["req_id"], False)
-    seq = 1 + conn.execute(
-        """SELECT count(*) AS n FROM ComplianceRequestControl WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s
-              AND Run_Ty=%s AND Req_Dt_Key=%s""",
-        (x.project_cd, x.table_nm, x.src_id, x.run_ty, req_dt)).fetchone()["n"]
-    btch = build_btch_id(req_dt, x.project_cd, x.table_nm, x.src_id, x.run_ty, x.cmplnc_vrsn, seq)
+    btch = table_batch_id(conn, x, rpt_start, rpt_end, req_dt)
     now = clock.now()
     conn.execute(
         """INSERT INTO ComplianceRequestControl (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key,
-             Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Req_Stat, Batch_Close_Ind, Created_Dtts, Updated_Dtts)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s)""",
-        (x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt, btch, REQUEST_CREATED, now, now))
-    req_id = conn.execute("SELECT Req_ID FROM ComplianceRequestControl WHERE Btch_ID=%s", (btch,)).fetchone()["req_id"]
+             Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Cmplnc_Vrsn, Req_Stat, Batch_Close_Ind, Created_Dtts, Updated_Dtts)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s)""",
+        (x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt, btch, x.cmplnc_vrsn,
+         REQUEST_CREATED, now, now))
+    req_id = conn.execute("SELECT Req_ID FROM ComplianceRequestControl WHERE Btch_ID=%s AND Src_ID=%s",
+                          (btch, x.src_id)).fetchone()["req_id"]
     logger.batch_event("BATCH_CREATED", req_id=req_id, btch_id=btch, intake_id=intake_id,
                        detail=f"run_date={req_dt} period={rpt_start}..{rpt_end}")
     return CreateResult(req_id, True)
+
+
+def table_batch_id(conn, x: XwalkRow, rpt_start: date, rpt_end: date, req_dt: date) -> str:
+    """The table-level batch of these report dates on this request date: the one other sources already have, else
+    the next free one (no suffix for the first report period of the day, then _2, _3, ...). The caller holds the
+    table's sequence lock."""
+    same = conn.execute(
+        """SELECT DISTINCT Btch_ID, Rpt_Start_Dt_Key, Rpt_End_Dt_Key FROM ComplianceRequestControl
+            WHERE Project_Cd=%s AND Table_Nm=%s AND Run_Ty=%s AND Req_Dt_Key=%s""",
+        (x.project_cd, x.table_nm, x.run_ty, req_dt)).fetchall()
+    for r in same:
+        if (db.as_date(r["rpt_start_dt_key"]), db.as_date(r["rpt_end_dt_key"])) == (rpt_start, rpt_end):
+            return r["btch_id"]
+    taken = {r["btch_id"] for r in same}
+    seq = 1
+    while build_btch_id(req_dt, x.project_cd, x.table_nm, x.run_ty, seq) in taken:
+        seq += 1
+    return build_btch_id(req_dt, x.project_cd, x.table_nm, x.run_ty, seq)
 
 
 def _month_start(d: date, months: int = 0) -> date:
@@ -260,7 +296,7 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
     """The scheduled batches due on the run date for the project's effective crosswalk rows.
 
     The run type's Batch_Schedule_Sql_Txt says whether batches are due on the run date; the crosswalk row's
-    Rpt_Dt_Sql_Txt gives its report dates. A stretch of consecutive due days with the same dates gets one
+    Rpt_Dt_Sql_Txt gives its report dates (rows of ADHOC run types only when they have both, see `scheduled`). A stretch of consecutive due days with the same dates gets one
     batch. `period` replaces both for this call: one batch for that period on this run date.
     """
     if period and not period_file:
@@ -269,12 +305,12 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
     run_types = cfg.run_types(conn)
     if run_ty is not None:
         rt = run_types.get(code(run_ty))
-        if rt is None or not rt.active or rt.run_category_cd != SCHEDULED:
-            raise ConfigError(f"run type {run_ty} is unknown, inactive or not {SCHEDULED}")
+        if rt is None or not rt.active or not (rt.run_category_cd == SCHEDULED or rt.schedule_sql):
+            raise ConfigError(f"run type {run_ty} is unknown, inactive, or {ADHOC} without Batch_Schedule_Sql_Txt")
     logger = EventLogger(conn, clock)
     rows = [x for x in cfg.xwalk_rows(conn, project_cd=project_cd, table_nm=table_nm, run_ty=run_ty)
-            if x.effective_on(s.run_date) and x.run_ty in run_types and run_types[x.run_ty].active
-            and run_types[x.run_ty].run_category_cd == SCHEDULED and (tables is None or x.table_nm in tables)]
+            if x.effective_on(s.run_date) and scheduled(run_types.get(x.run_ty), x)
+            and (tables is None or x.table_nm in tables)]
     if not rows and (run_ty or table_nm or tables is not None):
         s.errors.append(f"no effective crosswalk rows for {project_cd}/{table_nm or '*'}/{run_ty or '*'} on {s.run_date}")
     cache: dict = {}
@@ -342,7 +378,9 @@ class IntakeSummary:
 
 
 class IntakeProcessor:
-    """ComplianceRequestInTake holds ad-hoc requests only (the run type must be in the ADHOC category)."""
+    """ComplianceRequestInTake: requests for batches of given report dates, for any active run type (ADHOC, or a
+    SCHEDULED one outside its schedule). A request reuses an open batch of the same source, run type and report dates
+    that something else created; its own batches on the days of its window are new each day."""
 
     def __init__(self, conn: Connection, clock: Clock, settings: Settings):
         self.conn = conn
@@ -394,8 +432,8 @@ class IntakeProcessor:
         rt = run_types.get(it["run_ty"])
         reason = None
         targets: list[XwalkRow] = []
-        if rt is None or not rt.active or rt.run_category_cd != ADHOC:
-            reason = f"run type {it['run_ty']} is unknown, inactive or not ADHOC"
+        if rt is None or not rt.active:
+            reason = f"run type {it['run_ty']} is unknown or inactive"
         else:
             rpt_start, rpt_end = db.as_date(it["rpt_start_dt_key"]), db.as_date(it["rpt_end_dt_key"])
             sources = cfg.effective_sources(self.conn, it["project_cd"], it["table_nm"], it["run_ty"], rpt_start)
@@ -407,16 +445,23 @@ class IntakeProcessor:
                 self._mark_run(it["intake_id"])
                 self._fail(it, summary, reason)
             return
-        keys = [db.seq_key(x.project_cd, x.table_nm, x.src_id, x.run_ty) for x in targets]
+        keys = sorted({db.seq_key(x.project_cd, x.table_nm, x.run_ty) for x in targets})
         with db.held_all(self.conn, keys, self.settings.lock_timeout_seconds):
             with self.conn.transaction():
                 self._mark_run(it["intake_id"])
-                created = sum(create_batch(self.conn, self.clock, self.logger, xwalk=x, rpt_start=rpt_start,
-                                           rpt_end=rpt_end, req_dt=summary.run_date, intake_id=it["intake_id"],
-                                           locked=True).created for x in targets)
+                created, reused = 0, []
+                for x in targets:
+                    other = open_batch_of_other(self.conn, x, rpt_start, rpt_end, it["intake_id"])
+                    if other is not None:
+                        reused.append(other["btch_id"])
+                        continue
+                    created += create_batch(self.conn, self.clock, self.logger, xwalk=x, rpt_start=rpt_start,
+                                            rpt_end=rpt_end, req_dt=summary.run_date, intake_id=it["intake_id"],
+                                            locked=True).created
         summary.created += created
         summary.existing += len(targets) - created
-        summary.details.append(f"{it['intake_id']}: created={created} existing={len(targets) - created}")
+        summary.details.append(f"{it['intake_id']}: created={created} existing={len(targets) - created}"
+                               + (f" (open batch used: {', '.join(reused)})" if reused else ""))
 
     def _fail(self, it: dict, summary: IntakeSummary, reason: str) -> None:
         self.logger.audit("INTAKE_FAILED", intake_id=it["intake_id"], project_cd=it["project_cd"],

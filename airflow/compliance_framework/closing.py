@@ -55,20 +55,22 @@ class BatchCloser:
         self.conn, self.clock, self.settings = conn, clock, settings
         self.logger = EventLogger(conn, clock)
 
-    def close(self, btch_id: str, closed_by: str) -> CloseOutcome:
-        """Close one open batch whose SLA hold has passed, whatever its data (CloseBlocked otherwise)."""
-        b = self._batch(btch_id)
-        if b is None:
-            raise LookupError(f"batch {btch_id} not found")
-        reason = ("batch is already closed" if b["batch_close_ind"] == 1
-                  else f"SLA hold until {b['hold_dt']}" if self._today() < b["hold_dt"] and not self._released(b)
-                  else None)
-        if reason:
-            self._blocked(b, closed_by, reason)
-        out = self._close_locked(b, closed_by, automatic=False)
-        if out is None:
-            self._blocked(b, closed_by, "batch is already closed")
-        return out
+    def close(self, btch_id: str, closed_by: str, src_id: Optional[str] = None) -> list[CloseOutcome]:
+        """Close the open sources of a batch (or the one named) whose SLA hold has passed, whatever their data
+        (CloseBlocked otherwise, before any is closed)."""
+        rows = self._batches(btch_id, src_id)
+        if not rows:
+            raise LookupError(f"batch {btch_id}{f' source {src_id}' if src_id else ''} not found")
+        todo = [b for b in rows if b["batch_close_ind"] == 0]
+        if not todo:
+            self._blocked(rows[0], closed_by, "batch is already closed")
+        for b in todo:
+            if self._today() < b["hold_dt"] and not self._released(b):
+                self._blocked(b, closed_by, f"SLA hold until {b['hold_dt']}")
+        outs = [o for o in (self._close_locked(b, closed_by, automatic=False) for b in todo) if o is not None]
+        if not outs:
+            self._blocked(rows[0], closed_by, "batch is already closed")
+        return outs
 
     def run(self, scope: Optional[Scope] = None, hold: tuple = ()) -> CloseSummary:
         """Sweep the open batches of a scope (a project, a table group or table, a run type) whose hold has passed, and
@@ -103,13 +105,16 @@ class BatchCloser:
     def _today(self) -> date:
         return self.clock.today(self.settings.business_tz)
 
-    def _batch(self, btch_id: str) -> Optional[dict]:
-        b = self.conn.execute(
-            """SELECT c.*, r.SLA_Days FROM ComplianceRequestControl c
-                 LEFT JOIN ComplianceRunType r ON UPPER(r.Run_Ty) = c.Run_Ty WHERE c.Btch_ID = %s""", (code(btch_id),)).fetchone()
-        if b:
+    def _batches(self, btch_id: str, src_id: Optional[str] = None) -> list[dict]:
+        where, params = ("c.Btch_ID = %s", [code(btch_id)]) if src_id is None else \
+            ("c.Btch_ID = %s AND c.Src_ID = %s", [code(btch_id), code(src_id)])
+        rows = self.conn.execute(
+            f"""SELECT c.*, r.SLA_Days FROM ComplianceRequestControl c
+                 LEFT JOIN ComplianceRunType r ON UPPER(r.Run_Ty) = c.Run_Ty WHERE {where} ORDER BY c.Req_ID""",
+            params).fetchall()
+        for b in rows:
             b["hold_dt"] = earliest_close_date(db.as_date(b["req_dt_key"]), 1 if b["sla_days"] is None else b["sla_days"])
-        return b
+        return rows
 
     def _released(self, b: dict) -> bool:
         return b["resolution_ty"] is not None and self.conn.execute(
@@ -136,7 +141,7 @@ class BatchCloser:
 
     def _close_locked(self, b: dict, closed_by: str, automatic: bool) -> Optional[CloseOutcome]:
         """Close under the batch lock; None if there is nothing to close any more."""
-        key = db.batch_key(b["btch_id"])
+        key = db.req_key(b)
         if not db.try_lock(self.conn, key):
             with self.conn.transaction():
                 self.logger.audit("BATCH_CLOSE_DEFERRED_LOCKED", description="batch busy; close deferred", **_ctx(b))

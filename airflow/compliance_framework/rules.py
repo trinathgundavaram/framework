@@ -10,7 +10,7 @@ from . import db
 from .adapters import ERROR, RuleEngine
 from .audit import EventLogger
 from .batches import get_batch
-from .common import Clock, build_exp_btch_id
+from .common import Clock
 from .load import sanitize_db_error
 from .settings import Settings
 from .scope import Scope
@@ -47,7 +47,7 @@ class RulesRunner:
         s = RulesSummary()
         where, params = (scope or Scope()).sql("c")
         rows = self.conn.execute(
-            "SELECT f.Load_ID, f.Btch_ID, c.Project_Cd, c.Table_Nm FROM ComplianceFileLoad f "
+            "SELECT f.Load_ID, f.Req_ID, f.Btch_ID, c.Project_Cd, c.Table_Nm FROM ComplianceFileLoad f "
             "JOIN ComplianceRequestControl c ON c.Req_ID = f.Req_ID "
             "WHERE f.Load_Stat = 'PROMOTED' AND f.Rules_Stat IN ('NOT_RUN', 'ERROR')" + where + " ORDER BY f.Load_ID",
             params).fetchall()
@@ -58,7 +58,7 @@ class RulesRunner:
             if r["load_id"] in waiting:
                 s.waiting_for_export.append(r["load_id"])
                 continue
-            key = db.batch_key(r["btch_id"])
+            key = db.req_key(r)
             if not db.try_lock(self.conn, key):
                 s.deferred.append(r["load_id"])
                 continue
@@ -110,8 +110,7 @@ class RulesRunner:
             "req_dt_key": b["req_dt_key"], "stg_schema_nm": cfg.stg_schema_nm, "stg_table_nm": cfg.stg_table_nm,
             "core_schema_nm": cfg.core_schema_nm, "core_table_nm": cfg.core_table_nm,
             "exp_schema_nm": exp.exp_schema_nm if exp else None, "exp_table_nm": exp.exp_table_nm if exp else None,
-            "exp_btch_id": build_exp_btch_id(db.as_date(b["req_dt_key"]), b["project_cd"], b["table_nm"], b["run_ty"])
-            if exp else None},
+            "exp_btch_id": b["btch_id"] if exp else None},
             self.settings.file_rules_mode)
         with self.conn.transaction():
             self._set(load_id, outcome.status)

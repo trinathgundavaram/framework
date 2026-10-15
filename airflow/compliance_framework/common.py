@@ -169,27 +169,15 @@ def parse_as_of(value: str | None, business_tz: str = "UTC") -> Clock:
 BTCH_ID_MAX_LEN = 250
 
 
-def build_btch_id(req_dt: date, project_cd: str, table_nm: str, src_id: str, run_ty: str,
-                  cmplnc_vrsn: str, seq: int) -> str:
-    """{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Src}_{Run_Ty}_{Vrsn}_{Seq}."""
+def build_btch_id(req_dt: date, project_cd: str, table_nm: str, run_ty: str, seq: int = 1) -> str:
+    """{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Run_Ty}, shared by every source of the table and run type; a second,
+    third, ... report period on the same request date gets _2, _3, ..."""
     if seq < 1:
         raise ValueError("seq must be >= 1")
-    value = "_".join([f"{req_dt:%Y%m%d}", *map(code, (project_cd, table_nm, src_id, run_ty, cmplnc_vrsn)), str(seq)])
+    value = "_".join([f"{req_dt:%Y%m%d}", *map(code, (project_cd, table_nm, run_ty))]) + (f"_{seq}" if seq > 1 else "")
     if len(value) > BTCH_ID_MAX_LEN:
         raise ValueError(f"Btch_ID exceeds {BTCH_ID_MAX_LEN} characters: {value}")
     return value
-
-
-def build_exp_btch_id(req_dt: date, project_cd: str, table_nm: str, run_ty: str) -> str:
-    """Export batch: {Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Run_Ty}, the batches of every source of a run type."""
-    return "_".join([f"{req_dt:%Y%m%d}", *map(code, (project_cd, table_nm, run_ty))])
-
-
-def btch_id_version(btch_id: str, project_cd: str, table_nm: str, src_id: str, run_ty: str) -> Optional[str]:
-    """The compliance version a batch was created with: the part of its Btch_ID before the sequence."""
-    head = "_".join(map(code, (project_cd, table_nm, src_id, run_ty))) + "_"
-    body = str(btch_id).partition("_")[2]
-    return body[len(head):].rpartition("_")[0] or None if body.upper().startswith(head) else None
 
 
 def earliest_close_date(req_dt: date, sla_days: int) -> date:
