@@ -1,0 +1,254 @@
+"""Runtime settings and the database connection - no metadata tables involved."""
+from __future__ import annotations
+
+import functools
+import json
+import os
+import re
+import typing
+from dataclasses import dataclass, field, fields
+from typing import Any, Callable, Mapping, Optional
+
+import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg.rows import dict_row
+
+from .common import ConfigError, resolve_env
+
+PREFIX = "FRAMEWORK_"
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+_DB_FIELDS = {"host": "HOST", "port": "PORT", "dbname": "NAME", "user": "USER", "password": "PASSWORD",
+              "sslmode": "SSLMODE", "connect_timeout": "CONNECT_TIMEOUT"}
+_SECRET_KEYS = {"host": ("host",), "port": ("port",), "dbname": ("dbname", "database", "db"),
+                "user": ("username", "user"), "password": ("password",), "sslmode": ("sslmode",)}
+
+
+@dataclass
+class Settings:
+    metadata_schema: str = "cms_compliance"
+    environment: str = "DEV"
+    env_value: Optional[str] = None
+    aws_region: str = "us-east-1"
+    business_tz: str = "America/Chicago"
+
+    object_store: str = "s3"
+    local_store_root: str = "./.local_store"
+    archive_folder: str = "Archive"
+    error_folder: str = "Error"
+    control_report_folder: str = "ControlReport"
+    error_log_folder: str = "ErrorLog"
+
+    filename_case_sensitive: bool = False
+    supported_file_types: list[str] = field(default_factory=lambda: [".txt", ".csv"])
+    file_encoding: str = "utf-8"
+    quote_char: str = '"'
+    empty_as_null: bool = True
+    check_content: bool = True
+    write_error_file: bool = True
+    write_control_report: bool = True
+    check_move_failed: bool = False
+    archive_by_year: bool = False
+    check_on_load: bool = False
+
+    load_engine: str = "PANDAS"
+    file_rules_mode: str = "GATE"
+    rule_engine: str = "gre"
+    gre_entrypoint: Optional[str] = None
+    spark_jdbc_url: Optional[str] = None
+    spark_write_partitions: int = 4
+    spark_batch_size: int = 10000
+
+    lock_timeout_seconds: int = 300
+    heartbeat_stale_minutes: int = 30
+
+    notify_backend: str = "log"
+    notify_from_email: Optional[str] = None
+    default_notify_emails: list[str] = field(default_factory=list)
+
+    sources: dict = field(default_factory=dict, repr=False, compare=False)
+
+    @classmethod
+    def names(cls) -> list[str]:
+        return [f.name for f in fields(cls) if f.name != "sources"]
+
+    @classmethod
+    def load(cls, env: Optional[Mapping[str, str]] = None, overrides: Optional[Mapping[str, str]] = None,
+             env_file: Optional[str] = None) -> "Settings":
+        env = merged_env(env, env_file)
+        s = cls()
+        for name in cls.names():
+            key = PREFIX + name.upper()
+            if key in env:
+                s.set(name, env[key], env.source(key))
+        for raw, value in (overrides or {}).items():
+            name = raw.lower().removeprefix("framework_").replace("-", "_")
+            if name not in cls.names():
+                raise ConfigError(f"unknown setting {raw!r}")
+            s.set(name, value, "argument")
+        s.validate()
+        s.env = env
+        return s
+
+    def set(self, name: str, raw: Any, source: str = "code") -> None:
+        try:
+            setattr(self, name, _coerce(name, raw))
+        except (ValueError, TypeError) as e:
+            raise ConfigError(f"setting {name}: {e}") from e
+        self.sources[name] = source
+
+    def validate(self) -> None:
+        if not _IDENT.match(self.metadata_schema or ""):
+            raise ConfigError(f"METADATA_SCHEMA {self.metadata_schema!r} is not a valid identifier")
+        self.environment = (self.environment or "").strip().upper()
+        if not re.match(r"^[A-Z0-9_]{1,20}$", self.environment):
+            raise ConfigError(f"ENVIRONMENT {self.environment!r} must be letters, digits or _ (e.g. DEV, TEST, PROD)")
+        if self.env_value is not None and not re.match(r"^[A-Za-z0-9_]{0,20}$", self.env_value):
+            raise ConfigError(f"ENV_VALUE {self.env_value!r} must be letters, digits or _")
+        for name in ("archive_folder", "error_folder", "control_report_folder", "error_log_folder"):
+            if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_ .-]{0,99}$", getattr(self, name) or ""):
+                raise ConfigError(f"{name.upper()} {getattr(self, name)!r} must be a plain folder name")
+        for name in ("file_rules_mode", "load_engine"):
+            if isinstance(getattr(self, name, None), str):
+                setattr(self, name, getattr(self, name).strip().upper())
+        for name in ("notify_backend", "object_store"):
+            if isinstance(getattr(self, name, None), str):
+                setattr(self, name, getattr(self, name).strip().lower())
+        if self.rule_engine.strip().lower() in ("gre", "none"):
+            self.rule_engine = self.rule_engine.strip().lower()
+        for name, allowed in (("load_engine", ("PANDAS", "SPARK")), ("file_rules_mode", ("GATE", "ANNOTATE")),
+                              ("notify_backend", ("log", "ses")), ("object_store", ("s3", "local"))):
+            if getattr(self, name) not in allowed:
+                raise ConfigError(f"{name.upper()} must be one of {allowed}, got {getattr(self, name)!r}")
+
+    def db_conninfo(self, secret_loader: Optional[Callable[[str], dict]] = None) -> tuple[str, dict]:
+        """Returns (conninfo, description-without-password)."""
+        env = getattr(self, "env", None) or merged_env()
+        values: dict = {}
+        secret_name = env.get(PREFIX + "DB_SECRET_NAME")
+        if secret_name:
+            loader = secret_loader or _secret_loader(self.aws_region)
+            try:
+                sec = loader(secret_name)
+            except Exception as e:  # noqa: BLE001
+                raise ConfigError(f"cannot read secret {secret_name!r}: {type(e).__name__}: {e}") from e
+            for f, keys in _SECRET_KEYS.items():
+                v = next((sec[k] for k in keys if sec.get(k) not in (None, "")), None)
+                if v is not None:
+                    values[f] = v
+        if env.get(PREFIX + "DB_DSN"):
+            try:
+                values.update({k: v for k, v in conninfo_to_dict(env[PREFIX + "DB_DSN"]).items() if k in _DB_FIELDS})
+            except psycopg.ProgrammingError as e:
+                raise ConfigError(f"invalid FRAMEWORK_DB_DSN: {e}") from e
+        for f, suffix in _DB_FIELDS.items():
+            if env.get(PREFIX + "DB_" + suffix) not in (None, ""):
+                values[f] = env[PREFIX + "DB_" + suffix]
+        if not values.get("dbname"):
+            raise ConfigError("no database configured: set FRAMEWORK_DB_DSN / FRAMEWORK_DB_NAME (.env) "
+                              "or FRAMEWORK_DB_SECRET_NAME (AWS)")
+        desc = {k: v for k, v in values.items() if k != "password"}
+        desc["schema"] = self.metadata_schema
+        values["options"] = f"-c search_path={self.metadata_schema},public"
+        return make_conninfo(**{k: str(v) for k, v in values.items()}), desc
+
+    def connect(self, secret_loader=None) -> psycopg.Connection:
+        """Direct autocommit connection - session advisory locks depend on it (D-55)."""
+        conninfo, desc = self.db_conninfo(secret_loader)
+        try:
+            return psycopg.connect(conninfo, autocommit=True, row_factory=dict_row,
+                                   application_name="cms-compliance-framework")
+        except psycopg.OperationalError as e:
+            raise ConfigError(f"cannot connect to {desc}: {str(e).strip().splitlines()[0]}") from e
+
+    def resolve_env(self, text: Optional[str], identifier: bool = True) -> Optional[str]:
+        """$env tokens of a configured name -> this environment's value."""
+        return resolve_env(text, self.environment, self.env_value, identifier)
+
+    def describe(self) -> dict:
+        return {n: {"value": getattr(self, n), "source": self.sources.get(n, "default")} for n in self.names()}
+
+
+class _Env(dict):
+    """Environment merged with the .env file; remembers where each value came from."""
+
+    def __init__(self):
+        super().__init__()
+        self.origin: dict[str, str] = {}
+
+    def source(self, key: str) -> str:
+        return self.origin.get(key, "env")
+
+
+def merged_env(env: Optional[Mapping[str, str]] = None, env_file: Optional[str] = None) -> _Env:
+    if isinstance(env, _Env):
+        return env
+    base = os.environ if env is None else env
+    out = _Env()
+    path = env_file or base.get(PREFIX + "ENV_FILE") or ".env"
+    if os.path.isfile(path):
+        for k, v in read_env_file(path).items():
+            out[k], out.origin[k] = v, ".env"
+    elif env_file or base.get(PREFIX + "ENV_FILE"):
+        raise ConfigError(f"env file {path} does not exist")
+    for k, v in base.items():
+        out[k], out.origin[k] = v, "env"
+    return out
+
+
+def read_env_file(path: str) -> dict[str, str]:
+    """Minimal .env reader."""
+    out = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.removeprefix("export ").split("=", 1)
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+                v = v[1:-1]
+            elif " #" in v:
+                v = v.split(" #", 1)[0].rstrip()
+            out[k.strip()] = v
+    return out
+
+
+def _secret_loader(region: str) -> Callable[[str], dict]:
+    def load(name: str) -> dict:
+        import boto3
+
+        return json.loads(boto3.client("secretsmanager", region_name=region).get_secret_value(SecretId=name)["SecretString"])
+    return load
+
+
+@functools.cache
+def _type_hints() -> dict[str, Any]:
+    return typing.get_type_hints(Settings)
+
+
+def _coerce(name: str, raw: Any) -> Any:
+    """Convert a text value to the declared type of setting `name`."""
+    if not isinstance(raw, str):
+        return raw
+    typ = _type_hints()[name]
+    text = raw.strip()
+    if typing.get_origin(typ) is typing.Union:
+        if text == "" or text.lower() in ("none", "null"):
+            return None
+        typ = next(a for a in typing.get_args(typ) if a is not type(None))
+    if typ is bool:
+        if text.lower() in ("1", "true", "yes", "y", "on"):
+            return True
+        if text.lower() in ("0", "false", "no", "n", "off"):
+            return False
+        raise ValueError(f"{raw!r} is not a boolean")
+    if typ is int:
+        return int(text)
+    if typing.get_origin(typ) is list:
+        items = [x.strip() for x in text.split(",") if x.strip()]
+        return [i.lower() for i in items] if name == "supported_file_types" else items
+    if name == "quote_char":
+        return raw
+    if name.endswith(("_mode", "_engine")) and name != "rule_engine":
+        return text.upper()
+    return text

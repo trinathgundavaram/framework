@@ -1,0 +1,79 @@
+resource "aws_sns_topic" "ops" {
+  count = var.enable_failure_alerts ? 1 : 0
+  name  = "${local.name_prefix}_ops_${var.env}"
+  tags  = local.tags
+}
+
+resource "aws_sns_topic" "workflow" {
+  for_each = var.enable_failure_alerts ? { for k, w in local.workflows : k => w if w.project != null } : {}
+
+  name = "${local.workflow_name[each.key]}_failures"
+  tags = merge(local.tags, { Project = each.value.project })
+}
+
+resource "aws_sns_topic_subscription" "email" {
+  for_each  = local.subscriptions
+  topic_arn = each.value.topic
+  protocol  = "email"
+  endpoint  = each.value.email
+}
+
+resource "aws_sns_topic_policy" "alerts" {
+  for_each = local.topics_by_name
+  arn      = each.value
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = ["events.amazonaws.com", "cloudwatch.amazonaws.com"] }
+      Action    = "sns:Publish"
+      Resource  = each.value
+      Condition = { StringEquals = { "aws:SourceAccount" = local.account_id } }
+    }]
+  })
+}
+
+resource "aws_cloudwatch_event_rule" "workflow_stopped" {
+  for_each = local.alert_topics
+
+  name        = "${local.workflow_name[each.key]}_stopped"
+  description = "${local.workflows[each.key].label}: workflow execution timed out or was aborted"
+
+  event_pattern = jsonencode({
+    source        = ["aws.states"]
+    "detail-type" = ["Step Functions Execution Status Change"]
+    detail = {
+      stateMachineArn = [aws_sfn_state_machine.workflow[each.key].arn]
+      status          = ["TIMED_OUT", "ABORTED"]
+    }
+  })
+
+  tags = local.tags
+}
+
+resource "aws_cloudwatch_event_target" "workflow_stopped" {
+  for_each = local.alert_topics
+
+  rule      = aws_cloudwatch_event_rule.workflow_stopped[each.key].name
+  target_id = "sns"
+  arn       = each.value
+}
+
+resource "aws_cloudwatch_metric_alarm" "schedule_failed" {
+  for_each = var.enable_failure_alerts ? local.schedules : {}
+
+  alarm_name          = "${aws_cloudwatch_event_rule.schedule[each.key].name}_failed"
+  alarm_description   = "Schedule ${each.key} could not start its workflow after retries"
+  namespace           = "AWS/Events"
+  metric_name         = "FailedInvocations"
+  dimensions          = { RuleName = aws_cloudwatch_event_rule.schedule[each.key].name }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.ops[0].arn]
+  tags                = local.tags
+}

@@ -1,0 +1,841 @@
+# gov-compliance-it deployer role: gov-compliance-it-deployer.original.yml with duplicates removed and
+# MaaGOVCOMPLIANCEITScheduler added (EventBridge Scheduler, SQS, Step Functions log delivery for
+# compliance* resources). Same policy resources and names, so CloudFormation updates them in place.
+# Reference only; not deployed from this repository.
+Mappings:
+  EnvMap:
+    dev:
+      GitEnvironments: ["dev"]
+    test:
+      GitEnvironments: ["test"]
+    prod:
+      GitEnvironments: ["prod"]
+
+Resources:
+  GovComplianceItDeployerRole:
+    Type: Zilverton::DeployerRole
+    Properties:
+      RoleName: gov-compliance-it-deployer
+      GitConfig:
+        Repo:
+          - gov-compliance-it
+        Environment: !FindInMap [EnvMap, !Ref Env, GitEnvironments]
+      TfState:
+        IncludeDeletePermission: true
+        Key:
+          - gov-compliance-it/*/terraform.state
+          - env:/*/gov-compliance-it/*/terraform.state
+          - env:/*/gov-compliance-it/terraform.state
+      ManagedPolicyArns:
+        - !Ref MaaGOVCOMPLIANCEITVPCVPC
+        - !Ref MaaGOVCOMPLIANCEITVPCRequirements
+        - !Ref MaaGOVCOMPLIANCEITStorage
+        - !Ref MaaGOVCOMPLIANCEITIAM
+        - !Ref MaaGOVCOMPLIANCEITSNS
+        - !Ref MaaGOVCOMPLIANCEITProcess
+        - !Ref MaaGOVCOMPLIANCEITGlue
+        - !Ref MaaGOVCOMPLIANCEITScheduler
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+
+  MaaGOVCOMPLIANCEITVPCVPC:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "RJMaaGOVCOMPLITVPC-${Env}"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: VpcEndpoints
+            Effect: Allow
+            Action:
+              - ec2:*VpcEndpoint*
+            Resource:
+              - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:vpc-endpoint/*
+              - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:vpc-endpoint-service/*
+          - Sid: CloudFrontMonitoring
+            Effect: Allow
+            Action:
+              - cloudfront:CreateMonitoringSubscription
+              - cloudfront:DeleteMonitoringSubscription
+            Resource: "*"
+          - Sid: CloudFront
+            Effect: Allow
+            Action:
+              - cloudfront:Create*
+              - cloudfront:Update*
+              - cloudfront:Associate*
+              - cloudfront:Delete*
+              - cloudfront:Get*
+              - cloudfront:List*
+              - cloudfront:Tag*
+              - cloudfront:Untag*
+              - cloudfront:AllowVendedLogDeliveryForResource
+            Resource:
+              - !Sub arn:aws:cloudfront::${AWS::AccountId}:cache-policy/*
+              - !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/*
+          - Sid: Buckets
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+            Resource: "*"
+
+  MaaGOVCOMPLIANCEITVPCRequirements:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "RJMaaGOVCOMPLITVPCRequirements-${Env}"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ServiceLinkedRoles
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/*
+          - Sid: CreateAnyRole
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+            Resource: "*"
+          - Sid: NetworkRoles
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:DeleteRolePolicy
+              - iam:Get*
+              - iam:List*
+              - iam:PassRole
+              - iam:PutRolePolicy
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/VpcFlowLogsRole
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/VPCTransitGatewayRole
+              - !Sub arn:aws:iam::${AWS::AccountId}:policy/GoldenFlowLogPolicy
+          - Sid: SsmParametersRead
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:DescribeParameters
+              - ssm:GetParametersByPath
+            Resource:
+              - !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/*
+          - Sid: SsmDocuments
+            Effect: Allow
+            Action:
+              - ssm:Create*
+              - ssm:Delete*
+              - ssm:UpdateDocument
+              - ssm:UpdateDocumentDefaultVersion
+              - ssm:UpdateAssociation
+              - ssm:AddTagsToResource
+            Resource: "*"
+          - Sid: SecretsAny
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:DeleteSecret
+            Resource: "*"
+          - Sid: AutoScaling
+            Effect: Allow
+            Action:
+              - autoscaling:Create*
+              - autoscaling:UpdateAutoScalingGroup
+              - autoscaling:DescribeAutoScalingGroup
+              - autoscaling:DeleteAutoScalingGroup
+              - autoscaling:AttachInstances
+              - autoscaling:DetachInstances
+              - autoscaling:TerminateInstanceInAutoScalingGroup
+            Resource: "*"
+          - Sid: Route53
+            Effect: Allow
+            Action:
+              - route53:AssociateVPCWithHostedZone
+              - route53:DisassociateVPCFromHostedZone
+              - route53:ChangeResourceRecordSets
+              - route53:ChangeTagsForResource
+              - route53:GetHostedZone
+              - route53:GetChange
+              - route53:List*
+              - route53resolver:CreateResolverEndpoint
+              - route53resolver:GetResolverEndpoint
+              - route53resolver:DeleteResolverEndpoint
+              - route53resolver:CreateResolverRule
+              - route53resolver:GetResolverRule
+              - route53resolver:DeleteResolverRule
+              - route53resolver:AssociateResolverRule
+              - route53resolver:DisassociateResolverRule
+              - route53resolver:GetResolverRuleAssociation
+              - route53resolver:ListResolverRuleAssociations
+              - route53resolver:AssociateResolverQueryLogConfig
+              - route53resolver:DisassociateResolverQueryLogConfig
+              - route53resolver:GetResolverQueryLogConfig*
+            Resource: "*"
+          - Sid: LogGroups
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:Describe*
+              - logs:GetLogGroupFields
+              - logs:GetLogEvents
+              - logs:PutRetentionPolicy
+              - logs:PutSubscriptionFilter
+              - logs:DeleteSubscriptionFilter
+              - logs:PutResourcePolicy
+              - logs:DeleteResourcePolicy
+              - logs:ListTagsForResource
+              - logs:ListTagsLogGroup
+              - logs:TagResource
+              - logs:TagLogGroup
+              - logs:UntagResource
+              - logs:UntagLogGroup
+            Resource: "*"
+          - Sid: LogDeliveries
+            Effect: Allow
+            Action:
+              - logs:*Delivery
+              - logs:*DeliverySource
+              - logs:UpdateDeliveryConfiguration
+            Resource:
+              - arn:aws:logs:*:230514223367:delivery-destination:silverton-cloudfront-logs
+              - !Sub arn:aws:logs:*:${AWS::AccountId}:delivery-source:*
+              - !Sub arn:aws:logs:*:${AWS::AccountId}:delivery:*
+          - Sid: Ec2Network
+            Effect: Allow
+            Action:
+              - ec2:Describe*
+              - ec2:Create*
+              - ec2:Delete*
+              - ec2:Attach*
+              - ec2:Detach*
+              - ec2:Authorize*
+              - ec2:AssociateDhcpOptions
+              - ec2:AssociateIamInstanceProfile
+              - ec2:AssociateRouteTable
+              - ec2:AssociateSubnetCidrBlock
+              - ec2:AssociateVpcCidrBlock
+              - ec2:DisassociateRouteTable
+              - ec2:DisassociateSubnetCidrBlock
+              - ec2:DisassociateVpcCidrBlock
+              - ec2:GetManagedPrefixListEntries
+              - ec2:ModifyLaunchTemplate
+              - ec2:ModifyTransitGatewayVpcAttachment
+              - ec2:ModifyVpcAttribute
+              - ec2:ModifyVpcEndpoint
+              - ec2:ReplaceNetworkAclAssociation
+              - ec2:ReplaceNetworkAclEntry
+              - ec2:ReplaceRoute
+              - ec2:ReplaceRouteTableAssociation
+              - ec2:RevokeSecurityGroupEgress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:RunInstances
+              - ec2:UpdateSecurityGroupRuleDescriptionsEgress
+              - ec2:UpdateSecurityGroupRuleDescriptionsIngress
+            Resource: "*"
+
+  MaaGOVCOMPLIANCEITStorage:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "RJMaaGOVCOMPLITStorage-${Env}"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DynamoDb
+            Effect: Allow
+            Action:
+              - dynamodb:CreateTable
+              - dynamodb:UpdateTable
+              - dynamodb:DeleteTable
+              - dynamodb:DescribeTable
+              - dynamodb:CreateBackup
+              - dynamodb:DescribeContinuousBackups
+              - dynamodb:UpdateContinuousBackups
+              - dynamodb:DescribeTimeToLive
+              - dynamodb:UpdateTimeToLive
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:Scan
+              - dynamodb:TagResource
+              - dynamodb:UntagResource
+              - dynamodb:ListTagsOfResource
+            Resource:
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/silverton-tf-lock-${AWS::AccountId}
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/maa-*
+          - Sid: Alarms
+            Effect: Allow
+            Action:
+              - cloudwatch:PutMetricAlarm
+              - cloudwatch:DescribeAlarms
+              - cloudwatch:DeleteAlarms
+              - cloudwatch:PutMetricData
+              - cloudwatch:ListMetrics
+              - cloudwatch:GetMetricStatistics
+              - cloudwatch:ListTagsForResource
+              - cloudwatch:TagResource
+              - cloudwatch:UntagResource
+            Resource:
+              - !Sub arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*
+          - Sid: AlarmState
+            Effect: Allow
+            Action:
+              - cloudwatch:SetAlarmState
+            Resource:
+              - !Sub arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:maa-*
+              - !Sub arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:compliance-*
+          - Sid: MetricData
+            Effect: Allow
+            Action:
+              - cloudwatch:GetMetricData
+            Resource: "*"
+          - Sid: Dashboards
+            Effect: Allow
+            Action:
+              - cloudwatch:PutDashboard
+              - cloudwatch:GetDashboard
+              - cloudwatch:DeleteDashboards
+            Resource:
+              - !Sub arn:aws:cloudwatch::${AWS::AccountId}:dashboard/maa*
+              - !Sub arn:aws:cloudwatch::${AWS::AccountId}:dashboard/compliance*
+          - Sid: AppLogGroups
+            Effect: Allow
+            Action:
+              - logs:Create*
+              - logs:Put*
+              - logs:FilterLogEvents
+              - logs:DeleteMetricFilter
+              - logs:AssociateKmsKey
+            Resource:
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:maa*
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:compliance*
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/maa*
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/compliance*
+          - Sid: Buckets
+            Effect: Allow
+            Action:
+              - s3:List*
+              - s3:Get*
+              - s3:Put*
+              - s3:Delete*
+              - s3:Head*
+            Resource:
+              - arn:aws:s3:::silverton*
+              - arn:aws:s3:::compliance*
+          - Sid: KmsAccount
+            Effect: Allow
+            Action:
+              - kms:Create*
+              - kms:ListKeys
+              - kms:ListAliases
+              - kms:ListGrants
+              - kms:ListResourceTags
+              - kms:TagResource
+              - kms:RevokeGrant
+            Resource: "*"
+          - Sid: KmsKeys
+            Effect: Allow
+            Action:
+              - kms:Describe*
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey
+              - kms:GetKeyPolicy
+              - kms:PutKeyPolicy
+              - kms:GetKeyRotationStatus
+              - kms:EnableKeyRotation
+              - kms:UpdateKeyDescription
+              - kms:UpdateAlias
+              - kms:UntagResource
+              - kms:RetireGrant
+              - kms:ScheduleKeyDeletion
+              - kms:Delete*
+            Resource:
+              - !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*
+              - !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/*
+          - Sid: Certificates
+            Effect: Allow
+            Action:
+              - acm:RequestCertificate
+              - acm:AddTagsToCertificate
+              - acm:DescribeCertificate
+              - acm:GetCertificate
+              - acm:ListCertificates
+              - acm:ListTagsForCertificate
+              - cloudfront:List*
+            Resource: "*"
+          - Sid: CertificateDelete
+            Effect: Allow
+            Action:
+              - acm:DeleteCertificate
+            Resource:
+              - !Sub arn:aws:acm:${AWS::Region}:${AWS::AccountId}:certificate/*
+          - Sid: AccessPoints
+            Effect: Allow
+            Action:
+              - s3:CreateAccessPoint
+              - s3:DeleteAccessPoint
+              - s3:GetAccessPointPolicy
+              - s3:GetAccessPointPolicyStatus
+              - s3:PutAccessPointPolicy
+              - s3:DeleteAccessPointPolicy
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:Head*
+            Resource:
+              - !Sub arn:aws:s3:${AWS::Region}:${AWS::AccountId}:accesspoint/maa-*
+          - Sid: AccessPointRead
+            Effect: Allow
+            Action:
+              - s3:GetAccessPoint
+              - s3:ListAccessPoints
+            Resource: "*"
+          - Sid: Rds
+            Effect: Allow
+            Action:
+              - rds:Create*
+              - rds:ModifyDB*
+              - rds:Delete*
+              - rds:DescribeOptionGroups
+              - rds:ModifyOptionGroup
+              - rds:ResetDBClusterParameterGroup
+              - rds:EnableHttpEndpoint
+              - rds:DisableHttpEndpoint
+              - rds:ListTagsForResource
+              - rds:AddTagsToResource
+              - rds:RemoveTagsFromResource
+            Resource:
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:subgrp:maa-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:maa-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:maa-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:og:maa-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:pg:maa-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:es:maa-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-pg:maa-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:maa-*
+          - Sid: RdsDescribe
+            Effect: Allow
+            Action:
+              - rds:DescribeDB*
+            Resource:
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:pg:maa-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:maa-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:subgrp:maa-*
+              - !Sub arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-pg:maa-*
+          - Sid: RdsGlobalClusters
+            Effect: Allow
+            Action:
+              - rds:DescribeGlobalClusters
+            Resource:
+              - !Sub arn:aws:rds::${AWS::AccountId}:global-cluster:*
+          - Sid: Secrets
+            Effect: Allow
+            Action:
+              - secretsmanager:Get*
+              - secretsmanager:List*
+              - secretsmanager:DescribeSecret
+              - secretsmanager:Put*
+              - secretsmanager:Update*
+              - secretsmanager:Delete*
+              - secretsmanager:RestoreSecret
+              - secretsmanager:RotateSecret
+              - secretsmanager:CancelRotateSecret
+              - secretsmanager:ValidateResourcePolicy
+              - secretsmanager:UntagResource
+            Resource:
+              - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:maa-*
+              - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:maa_*
+              - !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rds!*
+          - Sid: SecretsCreate
+            Effect: Allow
+            Action:
+              - secretsmanager:Create*
+              - secretsmanager:TagResource
+              - secretsmanager:PutSecretValue
+            Resource: "*"
+          - Sid: Backup
+            Effect: Allow
+            Action:
+              - backup:CreateBackupPlan
+              - backup:CreateBackupSelection
+              - backup:DeleteBackup*
+              - backup:TagResource
+            Resource: "*"
+
+  MaaGOVCOMPLIANCEITIAM:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "RJMaaGOVCOMPLITIAM"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ServiceLinkedRoles
+            Effect: Allow
+            Action:
+              - iam:DeleteServiceLinkedRole
+              - iam:GetServiceLinkedRoleDeletionStatus
+              - iam:ListOpenIDConnectProviders
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/maa*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/MAA*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ENTERPRISE/MAA*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/compliance*
+          - Sid: Roles
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:UpdateRole
+              - iam:UpdateRoleDescription
+              - iam:UpdateAssumeRolePolicy
+              - iam:PutRolePolicy
+              - iam:GetRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:ListRolePolicies
+              - iam:ListAttachedRolePolicies
+              - iam:ListInstanceProfilesForRole
+              - iam:PassRole
+              - iam:TagRole
+              - iam:UntagRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/maa*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/MAA*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/compliance*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ENTERPRISE/maa*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ENTERPRISE/MAA*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ENTERPRISE/compliance*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/golden-vpc-flow-logs*
+          - Sid: RolePolicies
+            Effect: Allow
+            Action:
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/maa*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/MAA*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/compliance*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ENTERPRISE/MAA*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ENTERPRISE/compliance*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/golden-vpc-flow-logs*
+          - Sid: GetAndPassRoles
+            Effect: Allow
+            Action:
+              - iam:GetRole
+              - iam:PassRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/maa*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/MAA*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/*compliance*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/Enterprise/maa*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/Enterprise/MAA*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/ENTERPRISE/MAA*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/golden-vpc-flow-logs*
+          - Sid: ListRoles
+            Effect: Allow
+            Action:
+              - iam:ListRoles
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/*
+          - Sid: ManagedPolicies
+            Effect: Allow
+            Action:
+              - iam:CreatePolicy
+              - iam:GetPolicy
+              - iam:UpdatePolicy
+              - iam:DeletePolicy
+              - iam:CreatePolicyVersion
+              - iam:GetPolicyVersion
+              - iam:ListPolicyVersions
+              - iam:DeletePolicyVersion
+              - iam:ListPolicyTags
+              - iam:TagPolicy
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:policy/maa-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:policy/MAA*
+              - !Sub arn:aws:iam::${AWS::AccountId}:policy/Glue*
+              - !Sub arn:aws:iam::${AWS::AccountId}:policy/compliance*
+          - Sid: PolicyEntities
+            Effect: Allow
+            Action:
+              - iam:ListEntitiesForPolicy
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:policy/maa-*
+          - Sid: InstanceProfiles
+            Effect: Allow
+            Action:
+              - iam:CreateInstanceProfile
+              - iam:GetInstanceProfile
+              - iam:DeleteInstanceProfile
+              - iam:AddRoleToInstanceProfile
+              - iam:RemoveRoleFromInstanceProfile
+              - iam:TagInstanceProfile
+              - iam:UntagInstanceProfile
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/maa*
+              - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/MAA*
+              - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/compliance*
+          - Sid: AccountAliases
+            Effect: Allow
+            Action:
+              - iam:ListAccountAliases
+            Resource: "*"
+          - Sid: SsmParameters
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:PutParameter
+              - ssm:DeleteParameter
+            Resource:
+              - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/compliance/*
+              - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/usmis/*
+
+  MaaGOVCOMPLIANCEITSNS:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "RJMaaGOVCOMPLITSNS"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Topics
+            Effect: Allow
+            Action:
+              - sns:CreateTopic
+              - sns:DeleteTopic
+              - sns:ListTopics
+              - sns:GetTopicAttributes
+              - sns:SetTopicAttributes
+              - sns:GetDataProtectionPolicy
+              - sns:PutDataProtectionPolicy
+              - sns:AddPermission
+              - sns:RemovePermission
+              - sns:Subscribe
+              - sns:Unsubscribe
+              - sns:GetSubscriptionAttributes
+              - sns:ListSubscriptionsByTopic
+              - sns:Publish
+              - sns:ListTagsForResource
+              - sns:TagResource
+              - sns:UntagResource
+            Resource:
+              - !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:maa-*
+              - !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:usmis-*
+              - !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:*mrr*
+              - !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:compliance*
+            Condition:
+              ForAnyValue:StringEquals:
+                aws:ResourceAccount:
+                  - !Sub ${AWS::AccountId}
+          - Sid: EventRulesRemove
+            Effect: Allow
+            Action:
+              - events:Delete*
+              - events:Remove*
+              - events:UnTag*
+            Resource:
+              - !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/maa-*
+              - !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/maa_*
+              - !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/compliance*
+          - Sid: ApiGateway
+            Effect: Allow
+            Action:
+              - apigateway:GET
+              - apigateway:PUT
+              - apigateway:POST
+              - apigateway:PATCH
+              - apigateway:DELETE
+              - apigateway:UpdateRestApiPolicy
+              - apigateway:SetWebACL
+              - apigateway:UpdateAccount
+            Resource:
+              - !Sub "arn:aws:apigateway:*::/*"
+          - Sid: PassRoleToApiGatewayAndAirflow
+            Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource: "*"
+            Condition:
+              ForAnyValue:StringEquals:
+                iam:PassedToService:
+                  - apigateway.amazonaws.com
+                  - airflow.amazonaws.com
+          - Sid: Waf
+            Effect: Allow
+            Action:
+              - wafv2:AssociateWebACL
+            Resource: "*"
+          - Sid: Airflow
+            Effect: Allow
+            Action:
+              - airflow:GetEnvironment
+            Resource:
+              - !Sub arn:aws:airflow:${AWS::Region}:${AWS::AccountId}:environment/*
+
+  MaaGOVCOMPLIANCEITProcess:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "RJMaaGOVCOMPLITProcess"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Lambda
+            Effect: Allow
+            Action:
+              - lambda:Create*
+              - lambda:Get*
+              - lambda:List*
+              - lambda:Update*
+              - lambda:Put*
+              - lambda:Delete*
+              - lambda:Publish*
+              - lambda:InvokeFunction
+              - lambda:AddPermission
+              - lambda:RemovePermission
+              - lambda:EnableReplication*
+              - lambda:DisableReplication*
+              - lambda:TagResource*
+              - lambda:UntagResource*
+            Resource:
+              - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:maa-*
+              - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:compliance*
+              - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:layer:maa-*
+              - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:layer:compliance*
+          - Sid: LambdaEventSources
+            Effect: Allow
+            Action:
+              - lambda:CreateEventSourceMapping
+              - lambda:UpdateEventSourceMapping
+              - lambda:DeleteEventSourceMapping
+              - lambda:GetEventSourceMapping
+              - lambda:GetLayerVersion
+            Resource: "*"
+          - Sid: StateMachines
+            Effect: Allow
+            Action:
+              - states:CreateStateMachine
+              - states:UpdateStateMachine
+              - states:DeleteStateMachine
+              - states:DescribeStateMachine
+              - states:ListStateMachines
+              - states:TagResource
+              - states:UntagResource
+            Resource:
+              - !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:compliance*
+
+  MaaGOVCOMPLIANCEITGlue:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "RJMaaGOVCOMPLITGlue"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Glue
+            Effect: Allow
+            Action:
+              - glue:Create*
+              - glue:Update*
+              - glue:Delete*
+              - glue:Put*
+              - glue:Write*
+              - glue:Batch*
+              - glue:Start*
+              - glue:Run*
+              - glue:Stop*
+              - glue:GetConnection
+              - glue:ImportCatalogToGlue
+              - glue:TagResource
+              - glue:UntagResource
+            Resource:
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/oss*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/*maa*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:trigger/maa*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:workflow/maa*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/maa*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:userDefinedFunction/maa*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*compliance*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*compliance*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/*compliance*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/*compliance*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:trigger/*compliance*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:workflow/*compliance*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/*compliance*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:userDefinedFunction/*compliance*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/*usmis*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:trigger/*usmis*
+              - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:workflow/*usmis*
+          - Sid: GlueSecurityConfigurations
+            Effect: Allow
+            Action:
+              - glue:CreateSecurityConfiguration
+            Resource: "*"
+          - Sid: EventRules
+            Effect: Allow
+            Action:
+              - events:PutRule
+              - events:PutTargets
+              - events:TagResource
+            Resource:
+              - !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/maa*
+              - !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/compliance*
+
+  MaaGOVCOMPLIANCEITScheduler:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "RJMaaGOVCOMPLITScheduler"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ScheduleGroups
+            Effect: Allow
+            Action:
+              - scheduler:CreateScheduleGroup
+              - scheduler:DeleteScheduleGroup
+              - scheduler:GetScheduleGroup
+              - scheduler:TagResource
+              - scheduler:UntagResource
+              - scheduler:ListTagsForResource
+            Resource:
+              - !Sub arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/compliance*
+          - Sid: Schedules
+            Effect: Allow
+            Action:
+              - scheduler:CreateSchedule
+              - scheduler:UpdateSchedule
+              - scheduler:DeleteSchedule
+              - scheduler:GetSchedule
+            Resource:
+              - !Sub arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/compliance*/*
+          - Sid: ScheduleLists
+            Effect: Allow
+            Action:
+              - scheduler:ListScheduleGroups
+              - scheduler:ListSchedules
+            Resource: "*"
+          - Sid: Queues
+            Effect: Allow
+            Action:
+              - sqs:CreateQueue
+              - sqs:DeleteQueue
+              - sqs:GetQueueUrl
+              - sqs:GetQueueAttributes
+              - sqs:SetQueueAttributes
+              - sqs:ListQueueTags
+              - sqs:TagQueue
+              - sqs:UntagQueue
+            Resource:
+              - !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:compliance*
+          - Sid: StepFunctionsLogDelivery
+            Effect: Allow
+            Action:
+              - logs:CreateLogDelivery
+              - logs:GetLogDelivery
+              - logs:UpdateLogDelivery
+              - logs:DeleteLogDelivery
+              - logs:ListLogDeliveries
+            Resource: "*"

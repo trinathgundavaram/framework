@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cms-compliance-framework"
+version = "0.3.32"
+description = "Project-agnostic, filename-driven CMS compliance file ingestion, validation and promotion framework"
+requires-python = ">=3.9"
+dependencies = [
+  "psycopg[binary]>=3.1",
+  "tzdata>=2023.3",
+]
+
+[project.optional-dependencies]
+aws   = ["boto3>=1.28"]
+spark = ["pyspark>=3.3"]
+
+[project.scripts]
+framework = "framework.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["framework*"]
+
+[tool.setuptools.package-data]
+framework = ["sql/*.sql"]

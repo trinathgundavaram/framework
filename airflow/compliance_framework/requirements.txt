@@ -1,0 +1,4 @@
+# Installed into the Airflow workers' environment (not Airflow's own dependencies). Python >= 3.9.
+teradatasql>=17.20.0.0
+tzdata>=2023.3
+smbprotocol>=1.10    # NAS file paths over SMB (smbclient)

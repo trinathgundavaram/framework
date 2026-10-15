@@ -1,5 +1,0 @@
-project_cd,table_nm,src_id,run_ty,effective_start_dt_key,cmplnc_vrsn,active_ind
-UNIVERSE,ODAG1,210,CMS,2026-01-01,2026,1
-ODR,ROPENS,50,DAILY,2026-01-01,2026,1
-ODR,ROPENS,51,DAILY,2026-01-01,2026,1
-ODR,ROPENS,64,DAILY,2026-01-01,2026,1

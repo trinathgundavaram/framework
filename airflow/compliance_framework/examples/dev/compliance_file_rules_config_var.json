@@ -1,0 +1,43 @@
+{
+  "td_conn_var": "DEV",
+  "meta_db": "HSABC_dev",
+  "load_env": "DEV",
+  "email_recipient": "compliance-dev@example.com",
+  "owner": "oss",
+  "snow_assignment_group": "D&AE - EDE Govt Compliance",
+  "tags": [
+    "Compliance",
+    "Compliance_Batch_Framework"
+  ],
+  "schedule_timezone": "America/Chicago",
+  "log_level": "INFO",
+  "schedule_interval": null,
+  "project": "CMS_UNIVERSE",
+  "gre": {
+    "connection_type": "teradata",
+    "connection_id": "DEV",
+    "environment": "DEV",
+    "meta_db": "HSABC_dev",
+    "meta_connection": "teradata",
+    "project_name": "CMS_UNIVERSE",
+    "run_params": {},
+    "text_params": {
+      "RUNTYPE": "MNT"
+    },
+    "extra_filters": {
+      "run_ty": "MNT"
+    },
+    "log_level": "INFO",
+    "max_parallel_rules": 1
+  },
+  "settings": {
+    "BUSINESS_TZ": "America/Chicago",
+    "LOCK_TTL_MINUTES": 240,
+    "RULE_ENGINE": "gre",
+    "GRE_ENTRYPOINT": "compliance_framework.gre_bridge:run_gre",
+    "FILE_RULES_MODE": "GATE"
+  },
+  "trigger_dags": [
+    "OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"
+  ]
+}

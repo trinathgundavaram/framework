@@ -1,0 +1,763 @@
+# Compliance Batch Framework: Airflow + Teradata
+
+A self-contained copy of the compliance batch framework that runs from Airflow DAGs with its metadata,
+staging and core tables in **Teradata**. Nothing outside `airflow/` is used or changed. It follows the
+layout and connection style of the GRE rules engine's Airflow package (`DQ_COMPLETE_REPO/airflow`) and
+the team's DAG conventions (one DAG file, one DAG id, one `<name>_config_var` Variable).
+
+```
+airflow/
+  osstd_core_cms_compliance_batch_creation.py      one DAG file per step ...
+  osstd_core_cms_compliance_file_load.py
+  osstd_core_cms_compliance_file_rules.py
+  osstd_core_cms_compliance_override_decisions.py
+  osstd_core_cms_compliance_batch_close.py
+  osstd_core_cms_compliance_notify.py
+  osstd_core_cms_compliance_run_module.py          ... one generic DAG that runs any step
+  osstd_core_cms_compliance_admin.py               ... and one for validate-config, health, locks
+  compliance_framework/
+    dag_factory.py                builds the DAGs (schedule, tasks, triggers, emails, ServiceNow callback)
+    compliance_task.py            Variable + Connections -> the framework
+    run_framework.py              run_step() / run_command(): the framework in-process, no Airflow
+    connection_factory.py         Teradata connection (TERADATA_*) and NAS / SMB settings (NAS_*)
+    db.py                         Teradata layer: transactions, lock table
+    gre_bridge.py                 file rules through the GRE rules engine
+    batches.py ingest.py load.py rules.py overrides.py closing.py audit.py config.py modules.py
+    adapters.py app.py cli.py common.py settings.py
+    sql/schema.sql                Teradata DDL ({{META_DB}} template)
+    sql/approvals.sql             manual override templates
+    examples/dev, examples/prod   one example Variable per DAG
+    examples/trigger_configurations.json
+    requirements.txt
+    .airflowignore                keeps Airflow from parsing the package as DAG files
+```
+
+## How it fits together
+
+1. **Each step has its own DAG and its own Airflow Variable.** The DAG file only names the two; the
+   schedule, connections, scope and settings all come from the Variable.
+
+   | Step | DAG id | Variable |
+   |---|---|---|
+   | `BATCH_CREATION` | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CREATION` | `compliance_batch_creation_config_var` |
+   | `FILE_CHECK` (optional) | `OSSTD_CORE_CMS_COMPLIANCE_FILE_CHECK` | `compliance_file_check_config_var` |
+   | `FILE_LOAD` | `OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD` | `compliance_file_load_config_var` |
+   | `FILE_RULES` | `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` | `compliance_file_rules_config_var` |
+   | `OVERRIDE_DECISIONS` | `OSSTD_CORE_CMS_COMPLIANCE_OVERRIDE_DECISIONS` | `compliance_override_decisions_config_var` |
+   | `BATCH_CLOSE` | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CLOSE` | `compliance_batch_close_config_var` |
+   | `NOTIFY` | `OSSTD_CORE_CMS_COMPLIANCE_NOTIFY` | `compliance_notify_config_var` |
+   | any step (generic) | `OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE` | `compliance_run_module_config_var` |
+   | admin commands | `OSSTD_CORE_CMS_COMPLIANCE_ADMIN` | `compliance_admin_config_var` |
+
+2. **Two Airflow Connections**, both named in the Variables: Teradata (`td_conn_var`) and the NAS file
+   server (`wdc_comp_oper_nas_var`, only needed by the DAGs that load files). The bridge exports them as
+   `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD` / `TERADATA_LOGMECH` and `NAS_HOST` /
+   `NAS_USER` / `NAS_PASSWORD` / `NAS_PORT`.
+3. **DAGs start each other** through `trigger_dags` in the Variable (`TriggerDagRunOperator`, not
+   waiting): in the examples `FILE_LOAD` starts `FILE_RULES`, `OVERRIDE_DECISIONS` and `NOTIFY`; the
+   others start `NOTIFY`. Each DAG can also have its own `schedule_interval`.
+4. A task runs one step in-process. It fails on a framework error (exit code 2), and on "completed
+   with problems" (exit code 1) where the step is configured that way; otherwise the outcome is the
+   task's XCom.
+
+No `.env` file and no AWS Secrets Manager: credentials come from the Airflow Connections only.
+
+## Deploying
+
+1. Copy the `osstd_core_cms_compliance_*.py` files and the `compliance_framework/` folder into the DAGs
+   folder, side by side.
+2. Install `compliance_framework/requirements.txt` in the workers' environment. Airflow 2.4+, Python 3.9+.
+3. Create the two Connections and one Variable per DAG (below; ready-made in `examples/dev` and
+   `examples/prod`, file name = Variable name).
+4. The framework tables already exist: they are created separately from `sql/schema.sql` (replace
+   `{{META_DB}}` with the metadata database). The framework never creates or alters tables.
+5. Load the configuration tables, then trigger `OSSTD_CORE_CMS_COMPLIANCE_ADMIN` with
+   `{"command": "validate-config"}`.
+
+To add another DAG for a step (another project, or another cadence), copy that step's DAG file, give
+the copy its own `dag_id` and `variable_key`, and create that Variable.
+
+### Airflow Connections
+
+**Teradata** — the Connection named by the Variable's `td_conn_var` (default `compliance_teradata`):
+
+| Field | Value |
+|---|---|
+| Connection Type | Teradata, or Generic |
+| Host / Login / Password | the Teradata system and the framework's service account |
+| Extra (optional) | `{"logmech": "LDAP"}` (default LDAP) |
+
+**NAS file server (SMB)** — the Connection named by the Variable's `wdc_comp_oper_nas_var`:
+
+| Field | Value |
+|---|---|
+| Connection Type | Samba, or Generic |
+| Host | the file server, e.g. `nas01.corp.example` |
+| Login / Password | the service account that can read, write and delete in the inbound folders (`DOMAIN\user` or `user@domain` where a domain is needed) |
+| Port (optional) | default 445 |
+
+The NAS account needs read, write, create-folder and delete on every inbound folder: files are read from
+it and then moved into its `Archive` or `Error` subfolder.
+
+The account needs, on the metadata database: SELECT / INSERT / UPDATE / DELETE (no CREATE); on each project's staging and core databases: SELECT / INSERT / UPDATE / DELETE; and SELECT on
+`DBC.TablesV` and `DBC.ColumnsV`.
+
+### Airflow Variables (`compliance_<step>_config_var`)
+
+One per DAG. Paste the matching file from [`examples/dev`](examples/dev) or [`examples/prod`](examples/prod)
+as the Variable's value (Admin → Variables) and replace the `REPLACE_WITH_...` values. Example,
+`compliance_file_load_config_var`:
+
+```json
+{
+  "td_conn_var": "DEV",
+  "wdc_comp_oper_nas_var": "wdc_comp_oper_nas_dev",
+  "meta_db": "HSABC_dev",
+  "load_env": "DEV",
+  "schedule_interval": "*/15 * * * *",
+  "email_recipient": "compliance-dev@example.com",
+  "project": "CMS_UNIVERSE",
+  "settings": {"FILE_STORE": "nas", "ARCHIVE_FOLDER": "Archive", "ERROR_FOLDER": "Error"},
+  "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES", "OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"]
+}
+```
+
+Keys every Variable can have:
+
+| Key | Meaning |
+|---|---|
+| `meta_db` (required) | Teradata database holding the framework tables |
+| `td_conn_var` | Airflow Connection of Teradata. Falls back to `connection_id`, then `gre.connection_id`, then `compliance_teradata` |
+| `wdc_comp_oper_nas_var` | Airflow Connection of the NAS file server. Required where files are loaded (`FILE_LOAD`, and the generic and admin DAGs when they touch files) |
+| `load_env` | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); falls back to `environment`, then `gre.environment`, else `DEV` |
+| `schedule_interval` | Cron expression of the DAG; leave out for a DAG that is only triggered |
+| `schedule_timezone` | Time zone of the schedule (default `America/Chicago`; follows daylight saving) |
+| `trigger_dags` | DAG ids to start when the step succeeds; `project` and `as_of` given to this run are passed on |
+| `email_recipient` | Who gets the DAG's success / failure emails (`success_email`, `fail_email` tasks). Without it the DAG has no email tasks |
+| `snow_assignment_group` | ServiceNow assignment group of the incident opened when a task fails (default `D&AE - EDE Govt Compliance`) |
+| `owner`, `tags` | DAG owner (default `oss`) and tags |
+| `settings` | Framework settings by name. Common: `BUSINESS_TZ`, `LOCK_TIMEOUT_SECONDS` (300), `LOCK_TTL_MINUTES` (240); plus the step's own, below |
+| `fail_on_problems` | `true` / `false`: whether "completed with problems" (exit code 1) fails the task. Default: true, except `OVERRIDE_DECISIONS`. `FILE_LOAD` processes every file first and then fails the task when any file was not loaded (rejected, or a technical failure); the DAGs it triggers are then not started |
+| `runs` | Optional list of scopes: one task per entry, each with its own `project` / `run_type` / `period` / ... (and `settings`, `gre`). Without it the DAG has one task, scoped by the Variable's own keys |
+| `log_level` | `INFO` (default), `DEBUG`, ... |
+| `execution_timeout_minutes` | Time limit of the step's task. Default: `BATCH_CREATION` and `FILE_CHECK` 60, `FILE_LOAD` and `FILE_RULES` 120, the others 30 |
+| `dagrun_timeout_minutes` | Time limit of a whole DAG run (default 480) |
+
+Keys by step:
+
+| Step | Scope keys | Settings worth setting |
+|---|---|---|
+| `BATCH_CREATION` | `project` (required). When batches are due and their report dates come from the metadata (`Batch_Schedule_Sql_Txt`, `Rpt_Dt_Sql_Txt`; below). Optional for one run: `run_type`, `table`, `period`, `lookback_days`, `lookback_weeks` | — |
+| `FILE_CHECK` | `project` (leave out for every project), the NAS connection as for `FILE_LOAD` | `CHECK_CONTENT` and the file settings of `FILE_LOAD`; which checks a file gets is in `ComplianceFileCheckConfig` |
+| `FILE_LOAD` | `project` (leave out for every project) | `FILE_STORE` (`nas`), `ARCHIVE_FOLDER`, `ERROR_FOLDER`, `CONTROL_REPORT_FOLDER`, `ERROR_LOG_FOLDER`, `NAS_MIN_AGE_SECONDS`; for large files `INSERT_BATCH_ROWS` (2000), `INSERT_BATCH_BYTES` (500000), `LOAD_ENGINE` (`BATCH`, or `FASTLOAD`), `CHECK_ON_LOAD` (`false`) — see "Large files" |
+| `FILE_RULES` | `project`; `gre` (the GRE's own Airflow Variable, as it is: `connection_type`, `connection_id`, `environment`, `meta_db`, `meta_connection`, `project_name`, `run_params`, `text_params`, `extra_filters`, `log_level`, `max_parallel_rules`; plus `package_dir`, the folder holding the GRE's `run_rules.py`, default `<dags>/rules_engine`) | `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `FILE_RULES_MODE` |
+| `OVERRIDE_DECISIONS` | `project` | — |
+| `BATCH_CLOSE` | `project`, `table`, `run_type` | — |
+| `NOTIFY` | `project` (leave out to send every pending event, including those of no project) | `NOTIFY_BACKEND` (`airflow` = Airflow's email backend, `log` = write to the task log), `DEFAULT_NOTIFY_EMAILS` |
+
+A trigger's configuration overrides the Variable for that run: any scope key above, `as_of` (an ISO
+date or timestamp used as "now", for a missed day), `settings` and `gre`.
+
+## DAGs
+
+- **Step DAGs** — one task named after the step (or one per `runs` entry), then a `trigger_<dag id>`
+  task per `trigger_dags` entry, then `success_email` / `fail_email`. `max_active_runs` is 1 and tasks
+  do not retry (`retries: 0`); every step is idempotent, so the next run picks up. DAGs that overlap are
+  safe (locks, below).
+- **`OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE`** — the generic DAG. Its `module` parameter names the step
+  and the other parameters are that step's (`project`, `run_type`, `period`, `table`, `lookback_days`,
+  `lookback_weeks`, `as_of`). A parameter the module does not take is refused. Its
+  Variable holds the connections, `meta_db` and the settings of every step; nothing about a step is
+  fixed in it. Examples:
+  - `{"module": "BATCH_CREATION", "project": "CMS_UNIVERSE", "run_type": "MNT", "period": "PREV_CALENDAR_MONTH"}`
+  - `{"module": "FILE_LOAD", "project": "CMS_UNIVERSE"}`
+  - `{"module": "FILE_RULES"}`, `{"module": "BATCH_CLOSE", "project": "CMS_UNIVERSE"}`, `{"module": "NOTIFY"}`
+- **`OSSTD_CORE_CMS_COMPLIANCE_ADMIN`** — `validate-config`, `health`, `test-connection`, `show-config`,
+  `locks`, `release-lock`, `close-batch`:
+  `{"command": "close-batch", "args": ["--btch-id", "<Btch_ID>", "--closed-by", "jdoe"]}`.
+- A missing or invalid Variable never breaks parsing: the DAG is still there, unscheduled, and its task
+  fails with the reason when run.
+- More trigger examples: [`examples/trigger_configurations.json`](examples/trigger_configurations.json).
+
+## Files on the NAS
+
+Files are read from the NAS over SMB (`FILE_STORE` = `nas`, the default; library `smbprotocol`).
+
+**Inbound folder** — `ComplianceSourceFileConfig.Src_File_Path` holds the folder:
+
+| Written as | Server | Share | Folder |
+|---|---|---|---|
+| `\\nas01\Compliance\odr\in` or `//nas01/Compliance/odr/in` | `nas01` | `Compliance` | `odr/in` |
+| `smb://nas01.corp.example/Compliance/odr/in` | `nas01.corp.example` | `Compliance` | `odr/in` |
+| `nas://Compliance/odr/in` | the NAS Connection's host | `Compliance` | `odr/in` |
+
+A path with its own server uses that server with the NAS Connection's login. `$env` works in the path.
+
+**Where files go after a run** — into a subfolder of the folder they arrived in:
+
+| Outcome | Moves to |
+|---|---|
+| Loaded to core | `<inbound folder>\Archive\` |
+| Not loaded: unknown name, no batch or a closed batch, wrong column count, bad characters, an empty file where one is not allowed | `<inbound folder>\Error\` |
+| Technical failure | stays in place and is retried by the next sweep |
+
+- **Every pickup is a new load.** Each time FILE_LOAD finds a file in the inbound folder it gets a new row in
+  `ComplianceFileLoad` (a new `Load_ID`) and is processed from the start, whatever happened to a file of the same
+  name before: the same name and path may come back with updated data, after a rejection or after a load. For an
+  open batch it replaces the batch's data; a closed batch still needs the usual override. Earlier rows stay as
+  history. A load of the same file left unfinished by a run that stopped is closed as `FAILED_TECHNICAL`.
+- There is no quarantine path and no archive path to configure. The subfolders are created when first
+  needed and are never swept. Their names are the `ARCHIVE_FOLDER` / `ERROR_FOLDER` settings; with
+  `ARCHIVE_BY_YEAR = true` a loaded file goes to `Archive/<year>/`.
+- A file moved into `Archive` / `Error` never replaces one already there: the name gets `_1`, `_2`, ... before
+  the extension (`X_1.txt`); its error log follows (`ErrorLog/X_1_errors.txt`).
+- **Files still being copied:** a file changed in the last `NAS_MIN_AGE_SECONDS` (default 120) is left
+  for the next sweep, so a half-written file is not loaded. The check compares the file's modified time
+  on the NAS with the worker's clock.
+- A file is identified by its path, size and modified time: delivering the same name again is a new
+  load; a sweep that sees an untouched file again (one whose move failed) does not reload it.
+- `ComplianceFileLoad.File_Share` holds `<server>/<share>`, `File_Path` the path inside the share and
+  `File_Version` the size and modified time that identify one delivery of the file; audit
+  rows show the file as `//server/share/path`.
+- There is no S3 in this version: no bucket, key or object-version columns and no AWS file store.
+  `FILE_STORE` = `local` (a folder on the worker) exists for development only.
+
+## Sample metadata
+
+A complete worked example - every metadata row for one project (three FDR and two internal sources; daily,
+monthly and ad-hoc run types; file checks; an existing table layout) - is in `examples/`:
+`cmsuniv_odag3_sample_metadata.xlsx` (one tab per table, in DDL order) and `cmsuniv_odag3_sample_metadata.sql`
+(the same rows as Teradata `INSERT` statements).
+
+## File names (`Src_File_Nm_Tmplt`)
+
+How a project's files are named is not in the code: each `ComplianceSourceFileConfig` row describes its
+file name in `Src_File_Nm_Tmplt`, as fixed text plus tokens. `FILE_LOAD` and `FILE_CHECK` use the same rule.
+
+| Token | Meaning |
+|---|---|
+| `{RUNTY}` | The run type of the file; must be a run type configured for the table and source. Required, once |
+| `{RPTSTART}`, `{RPTEND}` | The report dates, `YYYYMMDD` unless a format is given. Required, once each |
+| `{RPTMONTH}` | Instead of the two dates: one report month (`YYYYMM`), meaning its first to its last day |
+| `{TS}` | The file's timestamp, 12 or 14 digits (`YYYYMMDDHHMM[SS]`) unless a format is given. Optional |
+| `{VERSION}` | Must equal the row's `File_Vrsn_Cd` (the version code as it is written in file names) |
+| `{PROJECT}`, `{TABLE}`, `{SRC}` | The row's `Project_Cd`, `Table_Nm`, `Src_ID` |
+| `{ANY}` | Any text, ignored (a sequence number, a vendor reference) |
+
+- **Other date formats:** write the format after the token: `{RPTSTART:MMDDYYYY}`, `{RPTEND:YYYY-MM-DD}`,
+  `{RPTMONTH:MMYYYY}`, `{TS:YYYYMMDD}`. Formats are built from `YYYY`, `YY`, `MM`, `DD`, `HH`, `MI`, `SS`
+  and separators such as `-` or `.` (`MM` after `HH` means minutes).
+- Two tokens that are read from the name must have fixed text between them, and the template ends with
+  the file extension, which is the file type.
+- Report dates and the run type are always required; a file is matched to its batch by them.
+- A name that fits a row except for the version is rejected with
+  `version '17' in the file name is not the configured version (19)`.
+
+Examples:
+
+| File name | `Src_File_Nm_Tmplt` | `File_Vrsn_Cd` |
+|---|---|---|
+| `CMSAuth_MedHOK_CD_19_MNT_20181226_20190124_201901171024.txt` | `CMSAuth_MedHOK_CD_{VERSION}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt` | `19` |
+| `CLAIMS_WKL_01052026_01112026.csv` | `CLAIMS_{RUNTY}_{RPTSTART:MMDDYYYY}_{RPTEND:MMDDYYYY}.csv` | |
+| `ENR_MNT_202602_batch-7.txt` | `ENR_{RUNTY}_{RPTMONTH}_{ANY}.txt` | |
+
+`validate-config` reports a template that is not valid (`TEMPLATE`) and two rows whose templates can
+match the same name (`TEMPLATE_OVERLAP`).
+
+## Optional file check before the load (`FILE_CHECK`)
+
+`FILE_CHECK` looks at the files that are waiting in the inbound NAS folders and reports **every** problem of
+each file in one pass, before anything is loaded. It reads each file where it is: no table is loaded, no
+load is registered and no batch changes (a failed file is moved only with `CHECK_MOVE_FAILED`). `FILE_LOAD` does not depend on it and makes
+its own checks; a project uses `FILE_CHECK` only when it wants the full list of problems up front, or
+wants to hold the load until the files are clean.
+
+| Check | Finding | What is checked |
+|---|---|---|
+| File name | `FILE_NAME` | Matches exactly one `Src_File_Nm_Tmplt`; version, report dates and `{TS}` are valid; the file is in that config's inbound folder |
+| Batch | `BATCH` | A batch exists for the table, source, run type and report dates, and is open (or has an approved override) |
+| Encoding | `ENCODING` | The file is valid `FILE_ENCODING`; the first bad line is named |
+| Structure | `MALFORMED`, `BLANK_LINE` | Quoting is well formed; no blank lines inside the file (blank lines at the end are ignored) |
+| Header | `HEADER` | Present when `Src_File_Has_Hdr_Ind = 1`; the expected number of fields (see `COLUMN_COUNT`); the names, with a `HEADER_NAMES` row |
+| Record types | `RECORD_TYPE` | With a `RECORD_TYPE` row (for example `H,D,T`): the first field of the header, of every data row and of the trailer |
+| Columns | `COLUMN_COUNT` | Every data row has the expected number of fields: the `COLUMN_COUNT` row, or else the number of names in the `HEADER_NAMES` row; with neither row the count is not checked. The first lines are named |
+| Trailer | `TRAILER` | Present when `Src_File_Has_Trlr_Ind = 1`; with a `TRAILER` row: field count, file name, row count, timestamp |
+| Rows | `ZERO_RECORDS` | At least one data row, unless `Allow_Zero_Rcd_Ind = 1` |
+| Source | `SOURCE` | The file's source is in `ComplianceSourceSystem` and active |
+
+A file belongs to the batch of its project, table, source, run type and report dates. Nothing else is looked at: not `ComplianceDataSetSourceXwalk`, not its effective dates and not the day the batch was requested, so a file for an ad hoc batch or for a batch requested on another day matches the same way.
+
+Only problems of the file are findings. A setup problem (staging table missing, wrong delimiter, a wrong `ComplianceFileCheckConfig` or `ComplianceTargetColumnConfig` row) is reported as an error of the step: the files of that source are not checked, get no error file and are not moved. `validate-config` lists the same problems.
+
+`FILE_CHECK` does not read the staging or core table: what a file must look like comes from `ComplianceFileCheckConfig` only. The one exception is `COLUMN_VALUES`, which compares values with the staging columns and therefore reads the table when (and only when) that row is present.
+
+**Which content checks a file gets** is in its own table, `ComplianceFileCheckConfig`, one row per check.
+`ComplianceSourceFileConfig` only describes the file and where it loads.
+
+| Column | Meaning |
+|---|---|
+| `Project_Cd` | The project of the files |
+| `Table_Nm`, `Src_ID` | The file the row applies to; `*` = every table / every source of the project |
+| `Check_Cd` | `RECORD_TYPE`, `HEADER_NAMES`, `COLUMN_COUNT`, `TARGET_COLUMNS`, `TRAILER`, `CHARACTER_SET` or `COLUMN_VALUES` |
+| `Check_Val_Txt` | The value of the check (below) |
+| `Include_Ind` | 1 = the check applies to the files the row covers; 0 = those files are excluded from the check |
+| `Active_Ind` | 1 = the row is in use; 0 = the row is ignored, as if it were not there |
+
+| `Check_Cd` | `Check_Val_Txt` | What is checked |
+|---|---|---|
+| `RECORD_TYPE` | `H,D,T` | Three codes: header, detail, trailer. The first field of each line must be the code of its position. Without this check the first line is the header and the last line the trailer by position (`Src_File_Has_Hdr_Ind`, `Src_File_Has_Trlr_Ind`) |
+| `HEADER_NAMES` | `Member Id\|Paid Amount\|Member Name` | The expected header line (with the file's delimiter, or comma separated). Names are compared in order, ignoring upper / lower case and surrounding spaces. Without this check only the number of header columns is compared with the staging table |
+| `COLUMN_COUNT` | `23` | The number of fields in the header and in every data row, counted as delimiters + 1, so a record type field (`H` / `D`) counts. The trailer is not counted here (see `TRAILER`). |
+| `TARGET_COLUMNS` | `MemberFirstName\|MemberID\|SourceUnique_ID` | Not a check: the staging column of each field of the file, in file order (the old `TargetColumnList`, without the derived columns). Use it when a source's file skips table columns or is in a different order. Field n goes to the n-th listed column; columns not listed and not in `ComplianceTargetColumnConfig` are loaded as NULL. A listed column must be a staging column the file can fill (not a column of `ComplianceTargetColumnConfig`, not `Btch_ID`). With `*` and per-source rows each source can have its own layout; `Include_Ind = 0` makes a source use the table order |
+| `TRAILER` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | What each trailer field holds, in order: `RECORD_TYPE`, `FILE_NAME` (must equal the file's name), `DATA_ROW_COUNT` (data rows) or `TOTAL_ROW_COUNT` (every line, header and trailer included), `TIMESTAMP` (`YYYYMMDD`, `YYYYMMDDHHMM` or `YYYYMMDDHHMMSS`), `SKIP` |
+| `CHARACTER_SET` | `latin-1` | Every line must only contain characters of that character set (`latin-1`, `ascii`, `cp1252`, ...) and no control characters (tab is allowed). Use it when the target columns cannot hold every character: each offending line is reported with the character and the record |
+| `COLUMN_VALUES` | `ALL`, or any of `LENGTH,NUMBER,REQUIRED` | Every value of every data row against its target staging column: `LENGTH` = not longer than a character column, `NUMBER` = a number for a numeric column, `REQUIRED` = not empty for a `NOT NULL` column. Every offending value is reported with its line, column and record, so all bad records are listed before the load |
+
+- **Inactive rows are ignored.** `Active_Ind` only says whether a row is in use.
+- **The most specific active row wins** for each check, whether it includes or excludes: the file's table and
+  source, then its table (any source), then its source (any table), then `*`. So a row for one source always
+  overrides a `*` row, in either direction: exclude one source from a check every other source gets, or include
+  one source in a check the others do not get.
+- Two active rows cannot collide at the same level, because a table, source and check can have only one row.
+- **To exclude one file from a check**, add a row for that table and source with `Include_Ind = 0`.
+- A file with no row for a check does not get that check. The name, batch, source, encoding, blank-line,
+  column-count and zero-row checks always run and need no row.
+
+Example: every file of the project must have the standard header; only the FDR source `51` has record
+types and a trailer; source `20` has a different layout, so its header check is off.
+
+| `Project_Cd` | `Table_Nm` | `Src_ID` | `Check_Cd` | `Check_Val_Txt` | `Include_Ind` | `Active_Ind` |
+|---|---|---|---|---|---|---|
+| `CMSUNIV` | `*` | `*` | `HEADER_NAMES` | `Enrollee ID\|Contract ID\|Plan ID` | 1 | 1 |
+| `CMSUNIV` | `ODAG3` | `51` | `RECORD_TYPE` | `H,D,T` | 1 | 1 |
+| `CMSUNIV` | `ODAG3` | `51` | `TRAILER` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | 1 | 1 |
+| `CMSUNIV` | `ODAG3` | `20` | `HEADER_NAMES` | | 0 | 1 |
+
+The load checks the trailer against the same `TRAILER` row (and the trailer record type of `RECORD_TYPE`); a
+wrong count rejects the file as `FILE_TRAILER_COUNT_MISMATCH`. Without a `TRAILER` row the trailer is not checked.
+`CHECK_CONTENT = false` checks names and batches only and does not open the files. `validate-config`
+reports a row that is not valid (`FILE_CHECK_CONFIG`) and a row that matches no file (`FILE_CHECK_NO_FILE`).
+
+**Large files.** The load streams the file: it is read once (its SHA-256 is computed while it is copied from the
+NAS) and sent to the staging table in batches.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `INSERT_BATCH_ROWS`, `INSERT_BATCH_BYTES` | `2000`, `500000` | Rows sent to Teradata per batch: a batch ends at either limit. Larger batches mean fewer round trips; try e.g. `10000` / `4000000` with your largest file in DEV before raising them in PROD |
+| `LOAD_ENGINE` | `BATCH` | `FASTLOAD` loads the file with Teradata FastLoad into a work table of the load (`<staging table>_W<Load_ID>`, in the staging database), then copies it into the staging table with one `INSERT ... SELECT` and drops the work table. The database account needs CREATE TABLE and DROP TABLE in the staging database. The driver falls back to ordinary batches when FastLoad is not possible. Worth it for files of several hundred thousand rows and more; measure in DEV first. A value that does not fit is reported without its line number |
+| `CHECK_ON_LOAD` | `false` | `true` runs the `FILE_CHECK` content checks inside `FILE_LOAD` on the file the load has already downloaded, so a big file is not downloaded and read twice. A file with a problem is rejected as `FILE_CONTENT_CHECK_FAILED`, every problem goes to its error log, and it moves to `Error/`. The separate `FILE_CHECK` step still works as before |
+
+**Control report and error log.** Every `FILE_LOAD` run writes one control report for the files it handled,
+`<inbound folder>/ControlReport/ControlReport_<YYYYMMDD_HHMMSS>.txt`, pipe-delimited, one line per file:
+
+| Column | Value |
+|---|---|
+| `Source_System` | `ComplianceSourceSystem.Src_Nm` of the file's source (MHK, Advocate, WellMed ...) |
+| `File_Name` | The file |
+| `Status` | `ACCEPTED` (loaded), `REJECTED` (not loaded, moved to `Error/`), `FAILED` (a technical failure; the file stays and is tried again) |
+| `Total_Rows_In_File` | Data rows read from the file; empty when the file was rejected before it was read |
+| `Total_Rows_Loaded` | Rows loaded to the core table; `0` unless accepted |
+| `File_Submitted_Date` | The date part of the timestamp in the file name |
+| `File_Processed_Date` | When the load finished, in `BUSINESS_TZ` |
+| `Error_Message` | Why the file was not loaded, in plain language for the business (for example "No request exists for this run type and reporting period." or "The file contains data that is not in the expected format (first at line 3)."); empty when accepted. Database and system errors never appear here: they are in the error log, the audit table and the support email |
+
+A run that covers several inbound folders writes one report in each. A run that handled no file writes none.
+
+The detail of a rejection (the check, the line number, the message and the record) is in its own file,
+`<inbound folder>/ErrorLog/<file name without extension>_errors.txt` (`X.txt` -> `X_errors.txt`), written by `FILE_LOAD` and by `FILE_CHECK`. The rejected file itself
+still moves to `Error/`.
+
+The two folder names are the settings `CONTROL_REPORT_FOLDER` (default `ControlReport`) and `ERROR_LOG_FOLDER`
+(default `ErrorLog`); `WRITE_CONTROL_REPORT = false` and `WRITE_ERROR_FILE = false` switch them off.
+
+**Error file and failed files.** For every file that fails, `FILE_CHECK` writes
+`<inbound folder>/ErrorLog/<file name without extension>_errors.txt` (`X.txt` -> `X_errors.txt`) (settings `WRITE_ERROR_FILE`, on by default, and
+`ERROR_LOG_FOLDER`): pipe-delimited,
+one line per problem, with the check, the line number, the message and **the record itself**
+(`File_Name|Check_Cd|Line_No|Message|Record`). With `CHECK_MOVE_FAILED = true` the failed file is also moved
+to `Error/`, so the files that passed can be loaded. The audit row and the email only carry the number of
+problems, the first one and the path of the error file.
+
+`FILE_LOAD` writes the same file when it rejects a file, for example for bytes that are not valid in
+`FILE_ENCODING` or a value the database refuses (a character the column cannot hold, a value that is too
+long, a bad number or date): one line with the reason, the line number and the record.
+
+**Result.** The step's outcome lists every file with `result` (`PASSED` / `FAILED`), its `findings`, and
+what the name resolved to: `config` (project / table / source), `run_type`, `version`, `rpt_start`,
+`rpt_end`, `batch` and `req_id`. `notes` holds remarks that are not failures, such as a batch that already
+has data and would be replaced by the file. The step ends with exit code 1 when a file failed or a folder
+could not be read. Each file also gets one row in the framework's audit table,
+`CMS_ComplianceExceptionsAudit`: `FILE_CHECK_FAILED` (emailed by `NOTIFY` to `DEFAULT_NOTIFY_EMAILS`) or
+`FILE_CHECK_PASSED`. A run that finds the same result for the same
+file again adds no new row.
+
+- **Airflow:** its own DAG, `OSSTD_CORE_CMS_COMPLIANCE_FILE_CHECK`, with its own Variable
+  `compliance_file_check_config_var` (the same keys as the file load Variable). It is unscheduled in the
+  examples. A project that wants the check gives it the schedule and lists
+  `OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD` in its `trigger_dags`, so the load starts only when the check
+  succeeded; `"fail_on_problems": false` in the Variable starts the load anyway and keeps the check as a
+  report. A project that does not want it leaves the DAG unscheduled and schedules the file load DAG.
+  One run by hand: trigger the DAG, or `OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE` with `{"module": "FILE_CHECK", "project": "..."}`.
+
+## File rules run after the load
+
+The rules engine is not part of the load. `FILE_LOAD` validates the file, stages it and loads it to
+core; it never calls the rules engine and never waits for it.
+
+`FILE_RULES` is a separate step. It takes every file that is loaded to core and has not had its rules
+yet (`ComplianceFileLoad.Load_Stat = PROMOTED`, `Rules_Stat = NOT_RUN`), runs the rules bound to it in
+`ComplianceRuleBinding`, and records the outcome:
+
+| Outcome | `Rules_Stat` | What else happens |
+|---|---|---|
+| All rules pass | `PASSED` (`PASSED_WITH_WARNINGS` under `FILE_RULES_MODE` = `ANNOTATE`) | `FILE_RULES_PASSED` on the batch timeline |
+| A rule fails | `FAILED` | `FILE_RULES_FAILED` on the timeline, `RULES_VALIDATION_FAILED` audit event, emailed by `NOTIFY` |
+| No binding for the file | `SKIPPED` | nothing |
+| The engine could not run | `ERROR` | audited once, the step exits 1, the file is tried again on the next run |
+
+- A rule failure changes nothing else: the data stays in core, the file stays in `Archive`, the batch
+  keeps its status and closes as usual. Acting on a failed rule is a decision for the project.
+- Only the batch's current load is checked; a load replaced by a newer file is not. A file loaded again
+  is checked again.
+- The engine is given the staging and the core table of the file (`stg_schema_nm`, `stg_table_nm`,
+  `core_schema_nm`, `core_table_nm`) with the batch and load ids.
+- **Airflow:** the rules have their own DAG, `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES`, with its own
+  Variable. The file-load DAG starts it after each load through `trigger_dags` (without waiting for
+  it); it can also be triggered by hand (`{"project": "CMS_UNIVERSE"}`, or `{}` for every project) or
+  given its own `schedule_interval` as a safety net for a missed trigger. It starts the notify DAG when
+  it is done, so a failed rule is emailed.
+
+
+## Failure tickets and emails
+
+- Every task has `on_failure_callback`: a failed task opens a ServiceNow incident through
+  `snow.snow_integrations.create_incident(context, assignment_group)`. If the `snow` package is not
+  installed on the workers, a warning is logged instead.
+- With `email_recipient` set, each DAG ends with `success_email` (no step failed) and `fail_email` (a
+  step failed), subjects `Airflow EDEG-Compliance <load_env> Success|Failure: <dag id> DAG`. They use
+  Airflow's own email settings.
+- These are about the DAG run. Business events (a rejected file, a missing source, an override) are
+  emailed by the `NOTIFY` step to the addresses in its `DEFAULT_NOTIFY_EMAILS` setting. The file
+  config holds no recipients or subjects; a project that sends its own notifications leaves `NOTIFY` unscheduled.
+
+## Scheduled batches: when they are created and for which dates (metadata)
+
+Scheduled batch creation is configured in the metadata with two SQL statements. Nothing about it is in
+the DAG, the Airflow Variable, the Glue job or the code. The scheduler only starts `BATCH_CREATION` for a
+project, normally once a day, and a run started by hand behaves the same way.
+
+| Question | Table (one statement per ...) | Column |
+|---|---|---|
+| **When** are batches created? | `ComplianceRunType` (run type) | `Batch_Schedule_Sql_Txt` |
+| **Which report dates** does a batch get? | `ComplianceDataSetSourceXwalk` (project, table, source, run type) | `Rpt_Dt_Sql_Txt` |
+
+Which tables and sources get batches of a run type is the crosswalk itself, as before: one active,
+effective row per project, table, source and run type. A table with weekly and monthly batches has a row
+under each run type; a source with only monthly batches has no row under the weekly run type.
+
+### When: `ComplianceRunType.Batch_Schedule_Sql_Txt`
+
+A single `SELECT` that returns **one row on a day batches are due and no row on any other day**.
+
+- `{run_date}` is the run date (today in `BUSINESS_TZ`, or `as_of`); `{project_cd}` and `{run_ty}` are
+  the project and run type of the run. Use `{run_date}`, not `CURRENT_DATE`, so a re-run for a missed day works.
+- What the row contains is up to you, and **every column it returns can be used by name in the report
+  date statements** — for example a `period_dt` the dates are counted from.
+- A run type without a statement gets no scheduled batches (only a run that passes `period`, below).
+
+Examples (Teradata):
+
+| Batches are due | `Batch_Schedule_Sql_Txt` |
+|---|---|
+| Every day | `SELECT 1 AS due` |
+| Every Monday | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE TD_DAY_OF_WEEK(d) = 2` |
+| First 5 days of the month | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE EXTRACT(DAY FROM d) <= 5` |
+| Only the Sunday before the 3rd Tuesday of the month | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE TD_DAY_OF_WEEK(d) = 1 AND EXTRACT(DAY FROM d + 2) BETWEEN 15 AND 21` |
+| Any day of the 4th quarter | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE EXTRACT(MONTH FROM d) >= 10` |
+| Any day of the second month of the second quarter (May) | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE EXTRACT(MONTH FROM d) = 5` |
+
+### Which dates: `ComplianceDataSetSourceXwalk.Rpt_Dt_Sql_Txt`
+
+A single `SELECT` that returns **one row with `rpt_start` and `rpt_end`** for that table, source and run
+type. It only runs on a day the run type is due.
+
+- It can use `{run_date}`, `{project_cd}`, `{run_ty}`, `{table_nm}`, `{src_id}` and every column of the
+  schedule row (`{period_dt}` in the example below).
+- **No row** = this table has no batch this time (the other tables of the run type are not affected).
+- A crosswalk row **without** a statement uses `rpt_start` / `rpt_end` of the schedule row when the
+  schedule statement returns them (one default for the run type); otherwise the run reports it as an error.
+
+For example "the day before the run": `SELECT CAST({run_date} AS DATE) - 1 AS rpt_start, CAST({run_date} AS DATE) - 1 AS rpt_end`
+
+### How a run uses them
+
+1. For every scheduled run type of the project, the schedule statement runs for the run date. No row:
+   every crosswalk row of that run type is reported as `not due`.
+2. Otherwise each effective crosswalk row's date statement runs and the batch is created with those dates.
+3. **One batch per window** — a stretch of consecutive due days with the same report dates gets one
+   batch: the first run inside it creates the batch, later runs find it, and a missed first day is caught
+   up on any later day of the stretch. The next stretch gets a new batch, even when its report dates are
+   the same as last time. (A stretch longer than 366 days starts a new batch.)
+4. A statement that fails, returns more than one row, or returns dates that are not valid is reported for
+   that crosswalk row; the other rows are still processed and the step ends with exit code 1.
+
+Both statements must be a single `SELECT` (or `WITH ... SELECT`) and runs with the framework's database account. Placeholders are bound as
+parameters, so write `CAST({run_date} AS DATE)`; a placeholder the run does not have is an error that
+lists the available ones. Do not put a literal `?` in the text: Teradata reads it as a parameter. `validate-config` runs the schedule statements for today (or `as_of`)
+and, when a run type is due, every date statement (`BATCH_SCHEDULE_SQL`, `RPT_DT_SQL`).
+
+A run that passes `period` (a built-in period, below) creates one batch for that period and ignores both
+statements for that run.
+
+### Example: weekly and monthly submissions around a Tuesday
+
+This reproduces a typical requirement; none of it is in the code. Two run types (any codes; here `MNT`
+monthly and `WKL` weekly), both due from the Sunday before a Tuesday through the Thursday after it:
+`MNT` in the week of the **3rd Tuesday** of the month, `WKL` in every other Tuesday week. The schedule
+row returns that Tuesday as `period_dt`, so every day of a window gives the same dates, also when the
+week straddles two months.
+
+`Batch_Schedule_Sql_Txt` of `MNT` (`WKL` is the same statement with `<> 3`):
+
+```sql
+SELECT tue AS period_dt
+FROM (SELECT CAST({run_date} AS DATE) + (3 - TD_DAY_OF_WEEK(CAST({run_date} AS DATE))) AS tue) x
+WHERE TD_DAY_OF_WEEK(CAST({run_date} AS DATE)) <= 5
+  AND (EXTRACT(DAY FROM tue) - 1) / 7 + 1 = 3
+```
+
+`Rpt_Dt_Sql_Txt` of the crosswalk rows:
+
+| Crosswalk rows | Report dates | `Rpt_Dt_Sql_Txt` |
+|---|---|---|
+| CDAG / ODAG tables, `MNT` | previous calendar month | `SELECT ADD_MONTHS(p - EXTRACT(DAY FROM p) + 1, -1) AS rpt_start, p - EXTRACT(DAY FROM p) AS rpt_end FROM (SELECT CAST({period_dt} AS DATE) AS p) d` |
+| CDAG / ODAG tables, `WKL` | 60 days ending the last Saturday | `SELECT p - 62 AS rpt_start, p - 3 AS rpt_end FROM (SELECT CAST({period_dt} AS DATE) AS p) d` |
+| `SNPCC1`, `MNT` and `WKL` | last day of the previous month | `SELECT p - EXTRACT(DAY FROM p) AS rpt_start, p - EXTRACT(DAY FROM p) AS rpt_end FROM (SELECT CAST({period_dt} AS DATE) AS p) d` |
+| `FA1`, `MNT` | last 14 days of the previous month | `SELECT p - EXTRACT(DAY FROM p) - 13 AS rpt_start, p - EXTRACT(DAY FROM p) AS rpt_end FROM (SELECT CAST({period_dt} AS DATE) AS p) d` |
+| `FA2`, `MNT` | Jan 1 → Jan 31 | `SELECT CAST(TRIM(yr) || '-01-01' AS DATE) AS rpt_start, CAST(TRIM(yr) || '-01-31' AS DATE) AS rpt_end FROM (SELECT EXTRACT(YEAR FROM ADD_MONTHS(CAST({period_dt} AS DATE), -1)) AS yr) d` |
+| `FA3`, `MNT` | Nov 1 → Dec 31 of the year before | `SELECT CAST(TRIM(yr - 1) || '-11-01' AS DATE) AS rpt_start, CAST(TRIM(yr - 1) || '-12-31' AS DATE) AS rpt_end FROM (SELECT EXTRACT(YEAR FROM ADD_MONTHS(CAST({period_dt} AS DATE), -1)) AS yr) d` |
+| `FA4`, `MNT` and `WKL` | Nov 1 of the year before → Jan 31 | `SELECT CAST(TRIM(yr - 1) || '-11-01' AS DATE) AS rpt_start, CAST(TRIM(yr) || '-01-31' AS DATE) AS rpt_end FROM (SELECT EXTRACT(YEAR FROM ADD_MONTHS(CAST({period_dt} AS DATE), -1)) AS yr) d` |
+
+`FA1`, `FA2` and `FA3` have no crosswalk row under `WKL`, so they get no weekly batches. The yearly FA
+dates move to the next year in February (a January run still uses the previous cycle). A daily run
+creates the `MNT` batches on 2026-10-18 (ODAG 2026-09-01 → 2026-09-30, FA1 2026-09-17 → 2026-09-30, ...),
+finds them on 2026-10-19 to 2026-10-22, and creates nothing on 2026-10-23 and 2026-10-24.
+
+### Built-in periods for a run that passes `period`
+
+`SAME_DAY`, `PREV_DAY`, `PREV_N_DAYS(n)`, `PREV_WEEK_SAME_DAY(n)`, `PREV_CALENDAR_WEEK`,
+`CURRENT_CALENDAR_MONTH`, `PREV_CALENDAR_MONTH`, `ROLLING_1_MONTH`, `PREV_CALENDAR_QUARTER`,
+`PREV_CALENDAR_YEAR`, `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])` (the same dates every year; moves to the next
+year on the third date, by default the day after the window ends). Example, one batch by hand:
+`BATCH_CREATION` with `run_type`, `table` and `period = PREV_CALENDAR_MONTH`.
+
+## Stage and core table layout (`ComplianceTargetColumnConfig`)
+
+The staging and core tables of a file can have any layout. Which of their columns the framework fills,
+and with what, is in `ComplianceTargetColumnConfig`; **every other column of the staging table is a column
+of the file, in table order.**
+
+| Column | Meaning |
+|---|---|
+| `Project_Cd` | The project |
+| `Table_Nm` | The dataset (`Table_Nm` of the file config); `*` = every table of the project |
+| `Column_Nm` | The column in the staging and / or core table |
+| `Value_Cd` | What fills it (below) |
+| `Value_Txt` | Only for `CONSTANT` (the value) and `SQL` (the statement) |
+| `Active_Ind` | 1 = the row is in use; 0 = the row is ignored, as if it were not there |
+
+| `Value_Cd` | Value |
+|---|---|
+| `RUN_TYPE`, `VERSION`, `SOURCE_ID` | The batch's run type, the compliance version the batch was created with (the version part of `Btch_ID`), the batch's `Src_ID` |
+| `FILE_NAME` | The name of the file |
+| `LOAD_TIMESTAMP` | When the file was loaded: a timestamp, or text `YYYY-MM-DD HH:MM:SS` (business time zone) in a character column |
+| `ROW_SEQUENCE` | A running row number, continuing from the highest value in the staging and core tables |
+| `CURRENT_FLAG` | Optional, core only: always 1 (the core table holds only the latest load of a batch) |
+| `END_TIMESTAMP` | Optional, core only: always empty |
+| `LOAD_ID`, `REQ_ID`, `PROJECT`, `TABLE`, `RPT_START`, `RPT_END` | The framework's load number, the batch's request ID, project, dataset and report dates |
+| `LOAD_DATE` | The date of the load (business time zone): a date, or text `YYYY-MM-DD` in a character column |
+| `CONSTANT` | The fixed value in `Value_Txt`, on every row (for example `Y`, `N`, `0`, a label) |
+| `SQL` | The one value returned by the statement in `Value_Txt`, on every row of the load (below) |
+
+Rules:
+
+- The batch column is always named `Btch_ID` and is in both tables; it needs no row.
+- The rows need no order. Where a column sits in the table decides its place: derived columns can be at the
+  start, at the end or between file columns, and the file's values fill the remaining columns left to right.
+- A row for one table wins over the project's `*` row for the same column.
+- **How the file's fields reach the table.** The columns in `ComplianceTargetColumnConfig` (and `Btch_ID`) are
+  filled by the framework wherever they are in the table. The file's fields fill the other columns, decided by the
+  first of these that applies to the file's source:
+  1. a `TARGET_COLUMNS` row in `ComplianceFileCheckConfig`: field n goes to the n-th listed column;
+  2. a `HEADER_NAMES` row whose names are all column names: by name;
+  3. a `COLUMN_COUNT` row: the first columns in table order;
+  4. otherwise every column in table order, from the first one on.
+
+  Columns not filled from the file are loaded as NULL. Example: one table, two layouts. MHK files send all 25
+  columns in table order; the other sources send 22 and skip `ExRMNumber`, `Filler2` and `Filler3`:
+
+  | Project_Cd | Table_Nm | Src_ID | Check_Cd | Check_Val_Txt | Include_Ind |
+  |---|---|---|---|---|---|
+  | CMSUNIV | ODAG3 | `*` | `TARGET_COLUMNS` | `MemberFirstName\|MemberLastName\|...\|WasTheInitOrgDetReqtDeniedForLackOfMediNecessity\|SourceUnique_ID` | 1 |
+  | CMSUNIV | ODAG3 | `51` (MHK) | `TARGET_COLUMNS` | | 0 |
+- **Columns the file does not have (fillers).** A `HEADER_NAMES` row is the list
+  of columns the file has, in file order; the file must have exactly that many fields. When every name in the
+  list is a column of the staging table (upper and lower case do not matter), each field goes to the column
+  of its name. Otherwise the fields fill the staging columns left to right. Without `HEADER_NAMES`, a
+  `COLUMN_COUNT` row gives the number of fields (record type included): they fill the first staging columns in
+  table order. Every staging or core column that is neither filled from the file nor in
+  `ComplianceTargetColumnConfig` is loaded as NULL, so it must allow NULL. With neither row every such column is
+  expected in the file. The load skips the header line; it never counts or compares it (that is `FILE_CHECK`).
+- **Core holds one load per batch.** When a file is loaded for a batch that already has rows in the core
+  table, those rows are deleted by `Btch_ID` and the new rows are inserted, in one transaction. The core table
+  needs no flag or end-date column; rows of other batches are not touched.
+- **Staging is cleared before a load by run type**: every staging row of the file's run type is removed,
+  then the file is loaded (the staging table needs a `RUN_TYPE` column for this, as in the example below).
+  Rows of other run types are not touched. A staging table without a run type column is cleared by batch.
+- **`SQL` columns.** `Value_Txt` is a single `SELECT` that returns one row with one column, for example
+  `SELECT CURRENT_DATE` or a lookup such as `SELECT Audit_ID FROM <db>.Audit_Run WHERE Btch_ID = {btch_id}`.
+  It runs once per load, before the file is staged, with the framework's database account; its value goes
+  on every row of that load. It can use `{btch_id}`, `{run_ty}`, `{version}`, `{src_id}`, `{file_name}`,
+  `{project_cd}`, `{table_nm}`, `{load_id}`, `{req_id}`, `{rpt_start}`, `{rpt_end}` and `{load_date}`, bound as
+  parameters (write `CAST({run_ty} AS VARCHAR(20))` where the database needs a type). A statement that fails,
+  or returns no row or more than one, stops that load and leaves the file in place. A `CONSTANT` is always
+  taken literally: `CURRENT_DATE` as a constant is the text, not today's date.
+- A derived column of the core table must also be in the staging table (it is copied), except
+  `CURRENT_FLAG`, `END_TIMESTAMP` and `LOAD_TIMESTAMP`.
+- A file with record types (a `RECORD_TYPE` row in `ComplianceFileCheckConfig`) has that first field
+  dropped at load: it is not a column of the tables.
+- **A project with no rows for a table** uses the framework's own column names: staging `btch_id`,
+  `load_id`, `src_file_nm`, `stg_load_dtts`; core `btch_id`, `load_id`, `current_ind`, `load_dtts`, `end_dtts`.
+
+Example: tables that end with `StagingCreateDate, Btch_ID, Universe_Vrsn, Run_Ty, FileName, Src_Data_Key,
+Load_Dtts` and start with a row ID:
+
+| `Project_Cd` | `Table_Nm` | `Column_Nm` | `Value_Cd` |
+|---|---|---|---|
+| `CMSUNIV` | `*` | `StagingCreateDate` | `LOAD_TIMESTAMP` |
+| `CMSUNIV` | `*` | `Universe_Vrsn` | `VERSION` |
+| `CMSUNIV` | `*` | `Run_Ty` | `RUN_TYPE` |
+| `CMSUNIV` | `*` | `FileName` | `FILE_NAME` |
+| `CMSUNIV` | `*` | `Src_Data_Key` | `SOURCE_ID` |
+| `CMSUNIV` | `*` | `Load_Dtts` | `LOAD_TIMESTAMP` |
+| `CMSUNIV` | `ODAG3` | `ODAG_DE_Table3_2022_ID` | `ROW_SEQUENCE` |
+
+`validate-config` reports a row that is not valid (`TARGET_COLUMN`), a table that does not fit its rows
+(`TARGET_TABLE`).
+
+## The core table and the delimiter
+
+`ComplianceSourceFileConfig.Delmtr_Cd` holds the delimiter character itself: `|`, `,`, `*`, `;` ... and `\t` for a
+tab. It is one character; empty means a comma. Words such as `PIPE` or `COMMA` are not accepted, and
+`validate-config` reports them (`DELIMITER`).
+
+`ComplianceSourceFileConfig.Core_Table_Nm` (required) names the core table in `Core_Schema_Nm`, the way
+`Stg_Table_Nm` names the staging table. It can differ from `Table_Nm`.
+
+## Upper and lower case
+
+Codes and values that people type are compared without regard to case, everywhere:
+
+- project, table, source, run type and run category codes in every configuration table, in the
+  intake requests, in job parameters (`--project`, `--run-type`, `--table`, a Variable's `project`, ...);
+- override type and approval status in `ComplianceBatchOverride`, and a `Reuse_Btch_ID` or `--btch-id`;
+- file names against their templates (`FILENAME_CASE_SENSITIVE` now defaults to false), the run-type
+  token in a file name, and the template placeholders (`{RunTy}` = `{RUNTY}`);
+- step and module names, admin commands, period names and the choice settings (`FILE_RULES_MODE`,
+  `NOTIFY_BACKEND`, `RULE_ENGINE`, ...).
+
+The framework keeps codes upper case in what it writes (batch rows, `Btch_ID`, audit rows), so
+`odr`, `Odr` and `ODR` are one project. `validate-config` reports `CODE_CASE_DUPLICATE` when two rows of
+`ComplianceProject`, `ComplianceSourceSystem` or `ComplianceRunType` differ only in case.
+
+The run categories are `SCHEDULED` (batches created on a schedule for a period; was `ROUTINE`) and
+`ADHOC` (batches requested through `ComplianceRequestInTake`).
+
+## Environment in database names (`$env`)
+
+The staging and core database names and the inbound path of `ComplianceSourceFileConfig` can carry
+a `$env` token, so one set of configuration rows works in every environment (the GRE convention):
+
+| Authored | DEV | TEST | QA | PROD / UAT |
+|---|---|---|---|---|
+| `CMS_$ENV_STG` | `CMS_DEV_STG` | `CMS_TEST_STG` | `CMS_QA_STG` | `CMS_STG` |
+| `cms_core_$env_t` | `cms_core_dev_t` | `cms_core_test_t` | `cms_core_qa_t` | `cms_core_t` |
+| `//nas01/Compliance/$env/odr/in` | `//nas01/Compliance/dev/odr/in` | `//nas01/Compliance/test/odr/in` | `//nas01/Compliance/qa/odr/in` | `//nas01/Compliance/odr/in` |
+
+- Columns: `Stg_Schema_Nm`, `Core_Schema_Nm`, `Src_File_Path`.
+- The token matches in any casing and is replaced in its own casing (`$env` → `dev`, `$ENV` → `DEV`,
+  `$Env` → `Dev`). PROD and UAT replace it with nothing; a doubled underscore left in a database name
+  collapses (paths are left as they are, so prefer a database-style name where PROD has no suffix).
+- Keep the token in the middle of a database name: at the very end or start it leaves the underscore
+  behind in PROD and UAT (`CMS_STG_$ENV` → `CMS_STG_`), exactly as GRE does.
+- The environment is the `ENVIRONMENT` setting (the Variable's `load_env`); `ENV_VALUE` overrides the replacement text for
+  that environment (e.g. `ENV_VALUE=uat` where UAT databases do carry a suffix).
+
+## Teradata specifics
+
+**Tables.** `sql/schema.sql` defines 15 MULTISET tables for `meta_db`, created separately: the 14 framework tables plus
+`ComplianceLock`. Identity columns are `GENERATED ALWAYS AS IDENTITY`; there are no foreign keys or
+CHECK constraints (the validator checks references).
+
+**Staging and core tables** are created by each project, in the databases named in
+`ComplianceSourceFileConfig` (`Stg_Schema_Nm` / `Core_Schema_Nm` are Teradata database names):
+
+Their layout is free when it is described in `ComplianceTargetColumnConfig` (above). Without rows there, they
+follow the framework's own column names:
+
+- Staging: the business columns in file order, then `btch_id VARCHAR(250)`, `load_id BIGINT`,
+  `src_file_nm VARCHAR(1024)`, `stg_load_dtts TIMESTAMP(6) WITH TIME ZONE`. File values arrive as
+  text: declare business columns VARCHAR, or types Teradata converts from text implicitly (a value that
+  does not convert quarantines the file as `FILE_PARSE_ERROR`).
+- Rejected rows: the `FILE_PARSE_ERROR` message names the file line, both for bytes that are not valid
+  in `FILE_ENCODING` and for a value Teradata refuses (untranslatable character, bad number or date,
+  overflow). Teradata does not say which row of a batch failed, so the framework re-sends parts of the
+  failed batch (about a dozen trial inserts, each rolled back) to find it.
+- Core: the business columns, then `btch_id`, `load_id`, `current_ind SMALLINT`,
+  `load_dtts TIMESTAMP(6) WITH TIME ZONE`, `end_dtts TIMESTAMP(6) WITH TIME ZONE`.
+
+**Differences from the PostgreSQL version**
+
+| PostgreSQL | Teradata |
+|---|---|
+| Session advisory locks | Rows in `ComplianceLock` (insert = acquire, delete = release) |
+| A crashed run's locks vanish with its session | They stay until they expire (`LOCK_TTL_MINUTES`, default 240). `locks` lists them, `release-lock --key` removes one, `health` shows them. Keep the TTL above the longest step. |
+| `FOR UPDATE SKIP LOCKED` row claims | Each notification / intake request is claimed with its own lock row |
+| Partial unique indexes (one open override per batch and type; one active file config per source) | Reported by `validate-config` (`OVERRIDE_DUPLICATE`, `FILE_CONFIG_DUPLICATE`); the approval templates refuse a duplicate |
+| `COPY` into staging | Batched parameterised inserts |
+| Report periods as SQL | Computed in Python (`batches.PERIODS`); `--period-file` still takes Teradata SQL |
+| Spark load engine | Not included |
+| Files in S3 (`S3_Src_File_Path`, `S3_Bucket`, `S3_Key`, `S3_Version_Id`, `S3_ETag`) | Files on the NAS (`Src_File_Path`, `File_Share`, `File_Path`, `File_Version`); `FILE_LOAD` is scoped by `--share` / `--folder` / `--file` |
+
+Reads use `LOCKING ROW FOR ACCESS`; every change to a batch is made under that batch's lock row.
+String comparisons follow the session's transaction mode (Teradata mode is not case specific).
+
+## File rules through the GRE
+
+With `RULE_ENGINE=gre` and `GRE_ENTRYPOINT=compliance_framework.gre_bridge:run_gre`, each
+`ComplianceRuleBinding` of a file runs that GRE `rule_group` (and `rule_variant`; `*` = all) through the
+GRE's `run_rules()`, with `run_key = CBF_LOAD_<Load_ID>` and the file's context as `run_params`
+(`{btch_id}`, `{load_id}`, `{stg_schema_nm}`, `{stg_table_nm}`, `{core_schema_nm}`, `{core_table_nm}`, `{project_cd}`, `{table_nm}`, `{src_id}`,
+`{run_ty}`, `{rpt_start_dt_key}`, `{rpt_end_dt_key}`, `{req_dt_key}`). The verdict of each rule is read
+from `<gre meta_db>.gre_results`: `PASS` / `WARN` pass, `FAIL` marks the file's rules as failed (or as
+warnings under ANNOTATE), anything else is a technical failure that is retried. This happens in the
+`OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` DAG, after the core load (above). Use `RULE_ENGINE=none` to run no rules.
+
+The `gre` section of `compliance_file_rules_config_var` is passed on to `run_rules()`: `project_name`, `text_params` and
+`extra_filters` as written, and `run_params` merged with the file's context (the file's values win).
+`text_params` and `extra_filters` are the same for every file of the Variable: where they name a run type
+(e.g. `{"RUNTYPE": "MNT"}`, `{"run_ty": "MNT"}`), use a `runs` entry per project with its own `gre`
+values, or a second rules DAG with its own Variable. The rules run on the framework's Teradata connection.
+
+## Validation status
+
+- The framework logic (batch creation, intake, file load, promotion, overrides, close, notifications,
+  locks) and the GRE bridge pass the framework's test suite when run against a stand-in for the
+  `teradatasql` driver backed by PostgreSQL, and the DAGs run end to end in Airflow 2.10.
+- It has **not** been run against a real Teradata system. Before production, on a development Teradata
+  system: create the tables from `sql/schema.sql`, run `validate-config`, then one full cycle (`BATCH_CREATION`, `FILE_LOAD` of a good
+  and a bad file, `BATCH_CLOSE`, `NOTIFY`) with the step DAGs or `OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE`, and check the tables.
+- The NAS store was checked against a local SMB test server for connect, list, read and download only,
+  and with a stand-in for the rest. Moving files (`Archive` / `Error`), creating the subfolders and the
+  modified-time check have **not** been run against your NAS: verify them with one good and one bad file.
+- The ServiceNow callback and the email tasks ran with stand-ins for `snow` and the email backend.

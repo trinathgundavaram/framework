@@ -1,0 +1,47 @@
+{
+  "td_conn_var": "DEV",
+  "meta_db": "HSABC_dev",
+  "load_env": "DEV",
+  "email_recipient": "compliance-dev@example.com",
+  "owner": "oss",
+  "snow_assignment_group": "D&AE - EDE Govt Compliance",
+  "tags": [
+    "Compliance",
+    "Compliance_Batch_Framework"
+  ],
+  "schedule_timezone": "America/Chicago",
+  "log_level": "INFO",
+  "wdc_comp_oper_nas_var": "wdc_comp_oper_nas_dev",
+  "settings": {
+    "BUSINESS_TZ": "America/Chicago",
+    "LOCK_TTL_MINUTES": 240,
+    "FILE_STORE": "nas",
+    "ARCHIVE_FOLDER": "Archive",
+    "ERROR_FOLDER": "Error",
+    "CONTROL_REPORT_FOLDER": "ControlReport",
+    "ERROR_LOG_FOLDER": "ErrorLog",
+    "NAS_MIN_AGE_SECONDS": 120,
+    "RULE_ENGINE": "gre",
+    "GRE_ENTRYPOINT": "compliance_framework.gre_bridge:run_gre",
+    "FILE_RULES_MODE": "GATE",
+    "NOTIFY_BACKEND": "log",
+    "DEFAULT_NOTIFY_EMAILS": "compliance-dev@example.com"
+  },
+  "gre": {
+    "connection_type": "teradata",
+    "connection_id": "DEV",
+    "environment": "DEV",
+    "meta_db": "HSABC_dev",
+    "meta_connection": "teradata",
+    "project_name": "CMS_UNIVERSE",
+    "run_params": {},
+    "text_params": {
+      "RUNTYPE": "MNT"
+    },
+    "extra_filters": {
+      "run_ty": "MNT"
+    },
+    "log_level": "INFO",
+    "max_parallel_rules": 1
+  }
+}

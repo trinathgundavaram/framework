@@ -1,0 +1,18 @@
+required_common_tags = {
+    "BusinessDataCategory"   = "DataAnalytics"
+    #"ComplianceDataCategory" = "phi:hipaa"
+    "DataClassification"     = "restricted"
+    "DataSubjectArea"        = "Government"
+    "CostCenter"             = "00790520"
+    "AssetOwner"             = "trinath_gundavaram@hcsc.com"
+    #"ServiceNowBA"           = "BA16929"
+    #"ServiceNowAS"           = "AS040309"
+    #"P2P"                    = "RITM10438523"
+    #"AsaqId"                 = "RITM9304408"
+    #"SecurityReviewID"       = "RITM10142718"
+    "BusinessEntity"         = "Compliance"
+    "LineOfBusiness"         = "Government"
+    "AppName"                = "EDE GOVT Complaince"
+    "AssetName"              = "Compliance Batch Framework"
+    "Version"                = "1.0.0"
+    }

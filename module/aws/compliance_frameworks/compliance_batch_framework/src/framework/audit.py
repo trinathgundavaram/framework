@@ -1,0 +1,131 @@
+"""Audit trail and email notifications (design §5.3, P13, D-54)."""
+from __future__ import annotations
+
+import logging
+from typing import NamedTuple, Optional
+
+import psycopg
+
+from .adapters import Channel, Message
+from .common import Clock, ConfigError, code
+from .settings import Settings
+
+log = logging.getLogger(__name__)
+
+BATCH_EVENTS = frozenset({
+    "BATCH_CREATED", "BATCH_CLOSED", "FILE_RECEIVED", "FILE_REPLACED_BEFORE_CLOSE", "FILE_PROMOTED",
+    "FILE_RULES_FAILED", "FILE_RULES_PASSED", "LATE_ARRIVAL_PROMOTED", "CORRECTION_PROMOTED", "CARRY_FORWARD_APPLIED",
+    "CARRY_FORWARD_REMOVED",
+})
+
+
+class AuditEvent(NamedTuple):
+    category: str
+    severity: str
+    notify: bool
+
+
+_EXC_ERROR, _EXC_WARN = AuditEvent("EXCEPTION", "ERROR", True), AuditEvent("EXCEPTION", "WARNING", True)
+AUDIT_EVENTS: dict[str, AuditEvent] = {
+    "INTAKE_FAILED": _EXC_ERROR,
+    **dict.fromkeys(("FILE_REJECTED_UNPARSEABLE", "FILE_REJECTED_AMBIGUOUS_TEMPLATE", "FILE_REJECTED_INVALID_TOKEN",
+                     "FILE_REJECTED_NO_BATCH", "FILE_REJECTED_BATCH_CLOSED",
+                     "FILE_PARSE_ERROR", "FILE_COLUMN_COUNT_MISMATCH", "FILE_TRAILER_COUNT_MISMATCH",
+                     "FILE_ZERO_RECORDS_REJECTED", "FILE_TYPE_NOT_SUPPORTED"), _EXC_ERROR),
+    "FILE_CONTENT_CHECK_FAILED": _EXC_ERROR,
+    "FILE_SAME_CONTENT_OTHER_BATCH": _EXC_WARN,
+    "FILE_CHECK_FAILED": _EXC_WARN,
+    "FILE_CHECK_PASSED": AuditEvent("AUDIT", "INFO", False),
+    "FILE_MOVE_FAILED": AuditEvent("EXCEPTION", "WARNING", False),
+    "RULES_VALIDATION_FAILED": _EXC_ERROR,
+    "RULES_ENGINE_TECHNICAL_FAILURE": _EXC_ERROR,
+    "CORE_LOAD_ROWCOUNT_MISMATCH": _EXC_ERROR,
+    "FILE_TECHNICAL_FAILURE": _EXC_ERROR,
+    "OVERRIDE_APPROVED": AuditEvent("AUDIT", "WARNING", True),
+    "OVERRIDE_INVALID_DETECTED": _EXC_ERROR,
+    "OVERRIDE_EXPIRED": AuditEvent("AUDIT", "WARNING", True),
+    "BATCH_CLOSE_BLOCKED": AuditEvent("AUDIT", "WARNING", False),
+    "BATCH_CLOSE_DEFERRED_LOCKED": AuditEvent("AUDIT", "INFO", False),
+    "SOURCE_MISSING_AT_CLOSE": _EXC_WARN,
+    "CONFIG_VALIDATION_FAILED": _EXC_ERROR,
+}
+
+
+class EventLogger:
+    def __init__(self, conn: psycopg.Connection, clock: Clock):
+        self.conn = conn
+        self.clock = clock
+
+    def batch_event(self, event_ty: str, *, req_id: int, btch_id: str, actor: str = "SYSTEM",
+                    load_id: Optional[int] = None, ovrd_id: Optional[int] = None, intake_id: Optional[int] = None,
+                    detail: Optional[str] = None) -> None:
+        if event_ty not in BATCH_EVENTS:
+            raise ConfigError(f"{event_ty} is not a batch timeline event")
+        self.conn.execute(
+            """INSERT INTO ComplianceRequestFileDetail (Req_ID, Btch_ID, Load_ID, Ovrd_ID, Intake_ID, Event_Ty, Actor,
+                 Event_Txt, Event_Dtts) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (req_id, btch_id, load_id, ovrd_id, intake_id, event_ty, actor, detail, self.clock.now()))
+        log.info("batch_event %s req_id=%s btch_id=%s load_id=%s %s", event_ty, req_id, btch_id, load_id, detail or "")
+
+    def audit(self, event_ty: str, *, actor: str = "SYSTEM", severity: Optional[str] = None,
+              description: Optional[str] = None, project_cd: Optional[str] = None,
+              table_nm: Optional[str] = None, src_id: Optional[str] = None, run_ty: Optional[str] = None,
+              req_id: Optional[int] = None, load_id: Optional[int] = None, ovrd_id: Optional[int] = None,
+              intake_id: Optional[int] = None,
+              btch_id: Optional[str] = None, file_ref: Optional[str] = None) -> None:
+        et = AUDIT_EVENTS.get(event_ty)
+        if et is None:
+            raise ConfigError(f"{event_ty} is not an exceptions-audit event")
+        sev = severity or et.severity
+        self.conn.execute(
+            """INSERT INTO CMS_ComplianceExceptionsAudit (Event_Ty, Sevrty, Project_Cd, Table_Nm, Src_ID, Run_Ty,
+                 Req_ID, Load_ID, Ovrd_ID, Intake_ID, Btch_ID, File_Ref, Actor, Event_Txt, Event_Dtts, Notified_Ind)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (event_ty, sev, project_cd, table_nm, src_id, run_ty, req_id, load_id, ovrd_id, intake_id,
+             btch_id, file_ref, actor, description, self.clock.now(), 0 if et.notify else 1))
+        level = logging.ERROR if sev == "ERROR" else logging.WARNING if sev == "WARNING" else logging.INFO
+        log.log(level, "audit %s req=%s load=%s %s", event_ty, req_id, load_id, description or "")
+
+
+_BODY_KEYS = ("event_id", "event_ty", "event_dtts", "project_cd", "table_nm", "src_id", "run_ty", "btch_id",
+              "req_id", "load_id", "ovrd_id", "intake_id", "file_ref", "actor", "event_txt")
+
+
+class NotificationDispatcher:
+    """Emails unsent exceptions-audit events (ids, codes and counts only)."""
+
+    def __init__(self, conn: psycopg.Connection, settings: Settings, channel: Channel):
+        self.conn, self.settings, self.channel = conn, settings, channel
+        self.failed: list[int] = []
+
+    def run(self, limit: int = 500, project_cd: Optional[str] = None) -> int:
+        """Send up to `limit` events - of one project, or of every project (and none) when project_cd is None."""
+        sent, self.failed = 0, []
+        for _ in range(limit):
+            with self.conn.transaction():
+                r = self.conn.execute(
+                    """SELECT * FROM CMS_ComplianceExceptionsAudit
+                        WHERE Notified_Ind = 0 AND (%(p)s::text IS NULL OR Project_Cd = %(p)s)
+                          AND NOT (Event_ID = ANY(%(failed)s))
+                        ORDER BY Event_ID LIMIT 1 FOR UPDATE SKIP LOCKED""",
+                    {"p": code(project_cd), "failed": self.failed}).fetchone()
+                if r is None:
+                    break
+                if self._send(r):
+                    self.conn.execute("UPDATE CMS_ComplianceExceptionsAudit SET Notified_Ind = 1 WHERE Event_ID=%s",
+                                      (r["event_id"],))
+                    sent += 1
+                else:
+                    self.failed.append(r["event_id"])
+        return sent
+
+    def _send(self, r: dict) -> bool:
+        msg = Message(f"[{r['sevrty']}] {r['event_ty']}",
+                      "\n".join(f"{k}: {r[k]}" for k in _BODY_KEYS if r.get(k) is not None),
+                      list(self.settings.default_notify_emails))
+        try:
+            self.channel.send(msg)
+        except Exception:  # noqa: BLE001 - never roll back pipeline state for a notification
+            log.exception("notification for event %s failed", r["event_id"])
+            return False
+        return True
