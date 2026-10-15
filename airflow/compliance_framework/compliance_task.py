@@ -9,11 +9,12 @@ DEFAULT_CONNECTION_ID = "compliance_teradata"
 TD_CONN_KEY = "td_conn_var"
 NAS_CONN_KEY = "wdc_comp_oper_nas_var"
 DEFAULT_TIMEZONE = "America/Chicago"
-STEPS = ("BATCH_CREATION", "FILE_CHECK", "FILE_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BATCH_CLOSE", "NOTIFY")
-FAIL_ON_PROBLEMS = {"BATCH_CREATION": True, "FILE_CHECK": True, "FILE_LOAD": True, "FILE_RULES": True, "OVERRIDE_DECISIONS": False,
+STEPS = ("BATCH_CREATION", "FILE_CHECK", "FILE_LOAD", "SOURCE_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BATCH_CLOSE",
+         "NOTIFY")
+FAIL_ON_PROBLEMS = {"BATCH_CREATION": True, "FILE_CHECK": True, "FILE_LOAD": True, "SOURCE_LOAD": True, "FILE_RULES": True, "OVERRIDE_DECISIONS": False,
                     "BATCH_CLOSE": True, "NOTIFY": True}
 SCOPE_KEYS = ("project", "table_group", "run_type", "period", "table", "period_file", "lookback_days", "lookback_weeks",
-              "share", "file", "folder")
+              "share", "file", "folder", "batch")
 _GRE_ENV = {"environment": "GRE_ENVIRONMENT", "meta_db": "GRE_META_DB", "log_level": "GRE_LOG_LEVEL",
             "log_dir": "GRE_LOG_DIR", "max_parallel_rules": "GRE_MAX_PARALLEL_RULES",
             "package_dir": "GRE_PACKAGE_DIR", "project_name": "GRE_PROJECT_NAME"}

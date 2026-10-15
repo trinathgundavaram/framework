@@ -25,6 +25,26 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceTable (
 )
 UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm);
 
+-- Optional: internal sources pulled with a query (SOURCE_LOAD), one row per project / table / source.
+CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceQueryConfig (
+  Project_Cd      VARCHAR(30)    NOT NULL,
+  Table_Nm        VARCHAR(63)    NOT NULL,
+  Src_ID          VARCHAR(30)    NOT NULL,
+  Src_Db_Ty       VARCHAR(20)    NOT NULL,
+  Src_Conn_Cd     VARCHAR(100),
+  Src_Sql_Txt     VARCHAR(32000) NOT NULL,
+  Stg_Schema_Nm   VARCHAR(128)   NOT NULL,
+  Stg_Table_Nm    VARCHAR(63)    NOT NULL,
+  Core_Schema_Nm  VARCHAR(128)   NOT NULL,
+  Core_Table_Nm   VARCHAR(63)    NOT NULL,
+  Active_Ind      SMALLINT       DEFAULT 1 NOT NULL,
+  Created_Dtts    TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Created_By      VARCHAR(100)   DEFAULT USER NOT NULL,
+  Updated_Dtts    TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Updated_By      VARCHAR(100)   DEFAULT USER NOT NULL
+)
+UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Src_ID);
+
 CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceSystem (
   Src_ID        VARCHAR(30)  NOT NULL,
   Src_Nm        VARCHAR(100) NOT NULL,

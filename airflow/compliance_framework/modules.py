@@ -104,6 +104,16 @@ def report(out: ModuleOutcome) -> dict:
                 "control_reports": r.reports,
                 "files": [{k: v for k, v in f.items() if k not in ("share", "folder") and v is not None} for f in r.files],
                 "problems": r.errors}
+    if out.module == "SOURCE_LOAD":
+        counts = _summary(r.files)
+        not_loaded = counts["rejected"] + counts["failed"]
+        return {"step": "SOURCE_LOAD", "result": ("NO BATCHES TO PULL" if not r.files and not r.errors
+                                                   else f"{not_loaded or len(r.errors)} BATCH(ES) NOT LOADED"
+                                                   if not_loaded or r.errors else "ALL BATCHES LOADED"),
+                "sources": r.locations, "batches_found": r.scanned, **counts,
+                "loads": [{("rows_read" if k == "rows_in_file" else k): v for k, v in f.items()
+                           if k not in ("file", "share", "folder", "file_date") and v is not None} for f in r.files],
+                "problems": r.errors}
     if out.module == "FILE_CHECK":
         return {"step": "FILE_CHECK", "result": ("NO FILES" if not r.files and not r.errors
                                                   else f"{r.failed} FILE(S) WITH PROBLEMS" if r.failed or r.errors
@@ -144,6 +154,13 @@ def _file_load(app, p: dict) -> ModuleOutcome:
         return ModuleOutcome("FILE_LOAD", s, 1 if s.quarantined or s.rejected else 0)
     s = app.pipeline.process_path(share, folder, _scope(app, p))
     return ModuleOutcome("FILE_LOAD", s, 1 if s.errors or s.quarantined or s.rejected else 0)
+
+
+def _source_load(app, p: dict) -> ModuleOutcome:
+    """Pull internal sources by batch; exit 1 when a batch could not be pulled or loaded (after all were tried)."""
+    names = [n.strip() for n in (p.get("batch") or "").split(",") if n.strip()]
+    s = app.source_loader.run(_scope(app, p), names or None)
+    return ModuleOutcome("SOURCE_LOAD", s, 1 if s.errors or s.quarantined or s.rejected else 0)
 
 
 def _file_check(app, p: dict) -> ModuleOutcome:
@@ -191,6 +208,11 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
                      "one project's configured folders (--project) or every configured folder (no arguments)",
         required=(), optional=(Param("share"), Param("file"), Param("folder"), Param("project"), *SCOPE),
         handler=_file_load),
+    ModuleSpec(
+        "SOURCE_LOAD", "pull internal sources (ComplianceSourceQueryConfig) by batch: the open batches of the scope "
+                       "that have no data yet, or the batches named in --batch (comma separated; a new pull replaces "
+                       "the batch's rows)",
+        required=(), optional=(Param("project"), *SCOPE, Param("batch")), handler=_source_load),
     ModuleSpec(
         "FILE_CHECK", "optional check of the files waiting in the inbound folders, before FILE_LOAD: name, batch, "
                       "header, trailer, record types and column counts. It loads nothing, moves no file and changes "

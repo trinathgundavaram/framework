@@ -42,6 +42,7 @@ airflow/
    | `BATCH_CREATION` | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CREATION` | `compliance_batch_creation_config_var` |
    | `FILE_CHECK` (optional) | `OSSTD_CORE_CMS_COMPLIANCE_FILE_CHECK` | `compliance_file_check_config_var` |
    | `FILE_LOAD` | `OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD` | `compliance_file_load_config_var` |
+   | `SOURCE_LOAD` (internal sources) | `OSSTD_CORE_CMS_COMPLIANCE_SOURCE_LOAD` | `compliance_source_load_config_var` |
    | `FILE_RULES` | `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` | `compliance_file_rules_config_var` |
    | `OVERRIDE_DECISIONS` | `OSSTD_CORE_CMS_COMPLIANCE_OVERRIDE_DECISIONS` | `compliance_override_decisions_config_var` |
    | `BATCH_CLOSE` | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CLOSE` | `compliance_batch_close_config_var` |
@@ -178,6 +179,42 @@ date or timestamp used as "now", for a missed day), `settings` and `gre`.
 - A missing or invalid Variable never breaks parsing: the DAG is still there, unscheduled, and its task
   fails with the reason when run.
 - More trigger examples: [`examples/trigger_configurations.json`](examples/trigger_configurations.json).
+
+## Internal sources: table to table (`SOURCE_LOAD`)
+
+Sources that are tables (on the framework's own Teradata system, on another Teradata system or on a SQL Server)
+are pulled by batch with their own `SELECT`, instead of being delivered as files. Everything after the pull is the
+same as for a file: the same staging and core tables, column mapping (`ComplianceTargetColumnConfig`,
+`TARGET_COLUMNS`), batch status, rules, close, audit, emails and step report.
+
+**One row per source in `ComplianceSourceQueryConfig`** (DDL in `sql/schema.sql`; optional, only for internal
+sources):
+
+| Column | Meaning |
+|---|---|
+| `Project_Cd`, `Table_Nm`, `Src_ID` | The source, as in the crosswalk (the source needs no file config) |
+| `Src_Db_Ty` | `TERADATA` or `SQLSERVER` |
+| `Src_Conn_Cd` | The Airflow Connection of the source's server. Empty for a source on the framework's own Teradata system: its rows are then copied with one `INSERT ... SELECT` and never pass through Airflow (the framework's account needs SELECT on the source tables). `$env` is replaced as in database names |
+| `Src_Sql_Txt` | One `SELECT` in the source's own dialect. It can use `{btch_id}`, `{rpt_start}`, `{rpt_end}`, `{run_ty}`, `{version}`, `{src_id}`, `{req_id}`, `{project_cd}`, `{table_nm}`, `{load_id}`, `{load_date}`, bound as parameters. Its column names fill the staging columns of the same name (else in table order, or by `TARGET_COLUMNS`) |
+| `Stg_Schema_Nm`, `Stg_Table_Nm`, `Core_Schema_Nm`, `Core_Table_Nm` | As in the file config |
+
+**Connections.** One Airflow Connection per server (or per login); many sources can share one. SQL Server:
+host (or `server\instance`), port, schema = default database, login and password, and Extra such as
+`{"driver": "ODBC Driver 18 for SQL Server", "encrypt": "yes", "trust_server_certificate": "yes"}`
+(`"authentication"` for Azure AD logins, `"login_timeout"` in seconds). Teradata: host, login, password, Extra
+`{"logmech": "LDAP"}`. Credentials stay in Airflow; the log shows only the Connection id, host and database. SQL
+Server needs `pyodbc` and the Microsoft ODBC driver on the workers. Check a connection with the admin DAG:
+`{"command": "test-connection", "args": ["--source", "<Src_Conn_Cd>", "--db-type", "SQLSERVER"]}`.
+
+**Which batches are pulled.** With the scope (`project`, `table_group` or `table`, `run_type`): every open batch
+of a query source that has no data yet (`REQUEST_CREATED`, request date reached). With `batch` (one `Btch_ID`, or
+several separated by commas): exactly those batches, whatever their data; the new pull replaces the batch's rows
+(a closed batch still needs its override). A query that returns no rows means the source had no data
+(`SOURCE_DATA_READY_NO_DATA`). Each pull is a row of `ComplianceFileLoad` (`File_Share` = `QUERY:<Src_Conn_Cd>`
+or `QUERY:LOCAL`, `File_Path` = project/table/source/batch), so FILE_RULES, the step report and the history work
+as for files; no control report file is written for pulls. A query that fails or a value that does not fit
+rejects that pull (`SOURCE_QUERY_FAILED` / `SOURCE_DATA_REJECTED`, emailed); the other batches are still pulled
+and the task fails at the end. Sources on another server are read in batches of `INSERT_BATCH_ROWS`.
 
 ## Scope of a run: project, table group, table, run type
 

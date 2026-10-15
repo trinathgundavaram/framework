@@ -136,9 +136,10 @@ def _batches(rows: Iterable[Sequence], batch_rows: int, batch_bytes: int) -> Ite
 
 
 class Result:
-    def __init__(self, rows: Optional[list[dict]], rowcount: int):
+    def __init__(self, rows: Optional[list[dict]], rowcount: int, columns: Optional[list[str]] = None):
         self._rows = rows
         self.rowcount = rowcount
+        self.columns = columns or []
 
     def fetchone(self) -> Optional[dict]:
         return self._rows[0] if self._rows else None
@@ -177,7 +178,7 @@ class Connection:
                 return Result(None, cur.rowcount)
             names = [c[0].lower() for c in cur.description]
             rows = [dict(zip(names, map(_clean, r))) for r in cur.fetchall()]
-            return Result(rows, len(rows))
+            return Result(rows, len(rows), [c[0] for c in cur.description])
         finally:
             cur.close()
 

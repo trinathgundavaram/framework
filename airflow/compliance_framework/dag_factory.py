@@ -14,7 +14,7 @@ from .compliance_task import (DEFAULT_TIMEZONE, STEPS, load_dag_config, run_comp
 
 logger = logging.getLogger(__name__)
 
-STEP_TIMEOUT = {"BATCH_CREATION": timedelta(hours=1), "FILE_CHECK": timedelta(hours=1), "FILE_LOAD": timedelta(hours=2), "FILE_RULES": timedelta(hours=2),
+STEP_TIMEOUT = {"BATCH_CREATION": timedelta(hours=1), "FILE_CHECK": timedelta(hours=1), "FILE_LOAD": timedelta(hours=2), "SOURCE_LOAD": timedelta(hours=2), "FILE_RULES": timedelta(hours=2),
                 "OVERRIDE_DECISIONS": timedelta(minutes=30), "BATCH_CLOSE": timedelta(minutes=30),
                 "NOTIFY": timedelta(minutes=30)}
 SCOPE = ("project", "table_group", "table", "run_type")
@@ -22,6 +22,7 @@ STEP_PARAMS = {
     "BATCH_CREATION": (*SCOPE, "period", "lookback_days", "lookback_weeks", "as_of"),
     "FILE_CHECK": (*SCOPE, "as_of"),
     "FILE_LOAD": (*SCOPE, "as_of"),
+    "SOURCE_LOAD": (*SCOPE, "batch", "as_of"),
     "FILE_RULES": (*SCOPE, "as_of"),
     "OVERRIDE_DECISIONS": (*SCOPE, "as_of"),
     "BATCH_CLOSE": (*SCOPE, "as_of"),

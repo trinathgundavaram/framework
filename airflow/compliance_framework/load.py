@@ -314,6 +314,85 @@ def stage(conn: Connection, settings: "Settings", *, file_path: str, cfg: "FileC
     return count
 
 
+def stage_rows(conn: Connection, settings: "Settings", *, cfg, layout: Layout, ctx: LoadContext, records: Rows) -> int:
+    """Clear the staging rows (of the batch, or of its run type) and insert `records` (rows already read from a
+    source); returns the row count. A value that does not fit is reported with its row number."""
+    table = _table(cfg.stg_schema_nm, cfg.stg_table_nm)
+    cols = [c.name for c in layout.stage]
+    insert = f"INSERT INTO {table} ({', '.join(db.ident(c) for c in cols)}) VALUES ({', '.join(['%s'] * len(cols))})"
+    resolved = sql_values(conn, layout, ctx)
+    try:
+        with conn.transaction():
+            start = next_sequence(conn, cfg, layout)
+            _clean_stage(conn, table, cfg, layout, ctx)
+            return conn.executemany(insert, layout.stage_rows(records, ctx, start, resolved),
+                                    settings.insert_batch_rows, settings.insert_batch_bytes)
+    except FileRejected:
+        raise
+    except Exception as e:  # noqa: BLE001
+        if not db.is_data_error(e):
+            raise
+        row = _rejected_row(conn, insert, e)
+        raise FileRejected("SOURCE_DATA_REJECTED", f"value does not fit staging column types{f' at data row {row}' if row else ''}: "
+                                                   f"{sanitize_db_error(db.error_line(e))}")
+
+
+def _cast(c: Column, value) -> tuple[str, list]:
+    """A select-list expression for a value that is the same on every row, typed for its column."""
+    if value is None:
+        return "NULL", []
+    if c.text:
+        return f"CAST(? AS VARCHAR({c.length or 4000}))", [str(value)]
+    kind = {"DATE": "DATE", "TIMESTAMP": "TIMESTAMP(0)", "TIMESTAMP_TZ": "TIMESTAMP(0) WITH TIME ZONE"}.get(c.temporal or "")
+    if kind:
+        return f"CAST(? AS {kind})", [value]
+    return ("CAST(? AS BIGINT)", [value]) if isinstance(value, int) else ("CAST(? AS DECIMAL(38,10))", [value])
+
+
+def stage_query(conn: Connection, *, cfg, layout_for, ctx: LoadContext, sql: str) -> tuple[int, Layout]:
+    """Same-system source: clear the staging rows and copy the query's rows with one INSERT ... SELECT on Teradata.
+
+    `layout_for(names)` = the layout for the query's column names. No row passes through this process; returns
+    (rows copied, layout).
+    """
+    body = sql_body(f"{cfg.label}: Src_Sql_Txt", sql)
+    order = [n.lower() for n in PLACEHOLDER.findall(body)]
+    params = ctx.sql_params()
+    query, values = PLACEHOLDER.sub("?", body), [params[n] for n in order]
+    names = conn.execute_qmark(f"SELECT * FROM ({query}) AS q WHERE 1 = 0", values).columns
+    layout = layout_for(names)
+    resolved = sql_values(conn, layout, ctx)
+    position = {stage_col: names[i] for i, stage_col in enumerate(layout.file_cols)}
+    table = _table(cfg.stg_schema_nm, cfg.stg_table_nm)
+    with conn.transaction():
+        start = next_sequence(conn, cfg, layout)
+        exprs, head = [], []
+        for c in layout.stage:
+            value_cd = "BATCH_ID" if c.name == BATCH_COLUMN else layout.mapping.get(c.name)
+            if c.name in position:
+                exprs.append(f'q."{position[c.name]}"')
+            elif value_cd == "ROW_SEQUENCE":
+                number = f'{start - 1} + ROW_NUMBER() OVER (ORDER BY q."{names[0]}")'
+                exprs.append(f"CAST({number} AS VARCHAR(20))" if c.text else number)
+            elif value_cd is None:
+                exprs.append("NULL")
+            else:
+                expr, v = _cast(c, layout.fixed_value(c, ctx, resolved))
+                exprs.append(expr)
+                head.extend(v)
+        _clean_stage(conn, table, cfg, layout, ctx)
+        insert = (f"INSERT INTO {table} ({', '.join(db.ident(c.name) for c in layout.stage)}) "
+                  f"SELECT {', '.join(exprs)} FROM ({query}) AS q")
+        try:
+            count = conn.execute_qmark(insert, [*head, *values]).rowcount
+        except Exception as e:  # noqa: BLE001
+            if not db.is_data_error(e):
+                raise
+            raise FileRejected("SOURCE_DATA_REJECTED", "value does not fit staging column types: "
+                                                       f"{sanitize_db_error(db.error_line(e))}")
+    return count, layout
+
+
 def _stage_fastload(conn: Connection, settings: "Settings", cfg: "FileConfig", layout: Layout, ctx: LoadContext,
                     records: Rows, resolved: dict, table: str, names: str, width: int) -> int:
     """LOAD_ENGINE=FASTLOAD: FastLoad into a work table of this load, then one INSERT ... SELECT into staging.

@@ -32,6 +32,43 @@ def build_teradata_connection(database: str = None):
     return teradatasql.connect(**kwargs)
 
 
+SOURCE_OPENERS: dict = {}
+
+
+def _odbc_value(value) -> str:
+    text = str(value)
+    return "{" + text.replace("}", "}}") + "}" if any(c in text for c in ";{}=") else text
+
+
+def source_connection(conn_cd: str, db_ty: str):
+    """A DB-API connection to an internal source, from its Airflow Connection `conn_cd` (no credential is logged)."""
+    if conn_cd in SOURCE_OPENERS:
+        return SOURCE_OPENERS[conn_cd]()
+    from airflow.hooks.base import BaseHook
+
+    c = BaseHook.get_connection(conn_cd)
+    extra = c.extra_dejson or {}
+    logger.info("Connecting to source %s: %s host=%s database=%s", conn_cd, db_ty, c.host, c.schema or "-")
+    if db_ty == "SQLSERVER":
+        try:
+            import pyodbc
+        except ImportError:
+            raise ImportError("pyodbc is required for SQL Server sources. Install with: pip install pyodbc")
+        parts = {"DRIVER": "{" + extra.get("driver", "ODBC Driver 18 for SQL Server") + "}",
+                 "SERVER": f"{c.host},{c.port}" if c.port else c.host, "DATABASE": c.schema, "UID": c.login,
+                 "PWD": c.password, "Encrypt": extra.get("encrypt", "yes"),
+                 "TrustServerCertificate": extra.get("trust_server_certificate", "no"),
+                 "Authentication": extra.get("authentication")}
+        text = ";".join(f"{k}={v if k == 'DRIVER' else _odbc_value(v)}" for k, v in parts.items() if v not in (None, ""))
+        return pyodbc.connect(text, autocommit=True, timeout=int(extra.get("login_timeout", 30)))
+    if not _TERADATA_AVAILABLE:
+        raise ImportError("teradatasql is required. Install with: pip install teradatasql")
+    kwargs = {"host": c.host, "user": c.login, "password": c.password, "logmech": extra.get("logmech", "LDAP")}
+    if c.schema:
+        kwargs["database"] = c.schema
+    return teradatasql.connect(**kwargs)
+
+
 def nas_settings() -> dict:
     """SMB server and credentials of the NAS connection."""
     return {"server": _require("NAS_HOST").lower(), "username": _require("NAS_USER"),

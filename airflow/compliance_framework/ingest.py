@@ -405,11 +405,11 @@ class IngestPipeline:
         self._archive(info, load_id, rejected=result.result not in PROMOTED_RESULTS)
         return result
 
-    def _resolve(self, load_id, info, cfg, req_id, rows: int) -> IngestOutcome:
+    def _resolve(self, load_id, info, cfg, req_id, rows: int, ref: Optional[str] = None) -> IngestOutcome:
         """Promote the staged file (an empty file is the source's delivery too: it had no data), or reject it when
         its batch is closed without an override."""
         now = self.clock.now()
-        ref = self.store.uri(info.share, info.path)
+        ref = ref or self.store.uri(info.share, info.path)
         today = self.clock.today(self.settings.business_tz)
         with self.conn.transaction():
             b = get_batch(self.conn, req_id)

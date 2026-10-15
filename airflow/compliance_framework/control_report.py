@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 HEADER = ("Source_System", "File_Name", "Status", "Total_Rows_In_File", "Total_Rows_Loaded", "File_Submitted_Date",
           "File_Processed_Date", "Error_Message")
 ACCEPTED = ("PROMOTED", "SUPERSEDED")
+QUERY_PREFIX = "QUERY:"
 REJECTED = ("QUARANTINED", "RULES_FAILED")
 FAILED = ("FAILED_TECHNICAL",)
 MESSAGES = {
@@ -33,6 +34,8 @@ MESSAGES = {
     "FILE_TRAILER_COUNT_MISMATCH": "The record count in the trailer does not match the records in the file.",
     "FILE_PARSE_ERROR": "The file contains data that is not in the expected format.",
     "FILE_CONTENT_CHECK_FAILED": "The file did not pass the file checks.",
+    "SOURCE_QUERY_FAILED": "The data could not be read from the source system.",
+    "SOURCE_DATA_REJECTED": "The source data is not in the expected format.",
     "RULES_FAILED": "The file did not pass the data quality rules.",
     "FAILED_TECHNICAL": "The file could not be processed because of a system issue. It will be tried again automatically.",
 }
@@ -121,6 +124,8 @@ def write_reports(store, settings, clock, details: list) -> list[str]:
         return []
     by_folder: dict = {}
     for d in details:
+        if str(d["share"]).startswith(QUERY_PREFIX):
+            continue
         by_folder.setdefault((d["share"], d["folder"]), []).append(
             [d["source"], d["file"], d["status"], d["rows_in_file"], d["rows_loaded"], d["file_date"], d["processed"],
              d["reason"]])

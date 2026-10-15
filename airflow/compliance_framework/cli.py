@@ -68,8 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--share", help="FILE_LOAD: NAS share, as <server>/<share> or <share>")
     sp.add_argument("--file", help="FILE_LOAD: one file, its path inside the share (with --share)")
     sp.add_argument("--folder", help="FILE_LOAD: one folder inside the share (with --share)")
+    sp.add_argument("--batch", help="SOURCE_LOAD: Btch_ID(s) to pull, comma separated")
     add("show-config", "print resolved settings (with their source) and the database target")
-    add("test-connection", "connect to the database and check the schema")
+    sp = add("test-connection", "connect to the database and check the schema; with --source, an internal source")
+    sp.add_argument("--source", help="Airflow Connection id of an internal source (Src_Conn_Cd)")
+    sp.add_argument("--db-type", default="SQLSERVER", help="TERADATA or SQLSERVER (with --source)")
     add("validate-config", "validate the configuration tables and target tables")
     add("process-decisions", "apply approved reuse overrides and remove expired ones")
     scope(add("close-batches", "close the batches past their SLA hold that have data or are in exception"))
@@ -106,6 +109,21 @@ def _no_app(args, settings: Settings) -> int:
     if args.cmd == "show-config":
         _print({"database": target, "settings": settings.describe()})
         return 0
+    if getattr(args, "source", None):
+        from .connection_factory import source_connection
+
+        try:
+            src = source_connection(args.source, args.db_type.strip().upper())
+            cur = src.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchall()
+            cur.close()
+            src.close()
+        except Exception as e:  # noqa: BLE001
+            _print({"source": args.source, "ok": False, "error": f"{type(e).__name__}: {str(e).splitlines()[0][:300]}"})
+            return 1
+        _print({"source": args.source, "ok": True, "error": None})
+        return 0
     with settings.connect() as conn:
         ok = schema_exists(conn, settings.metadata_schema)
         _print({"database": target, "ok": ok, "error": None if ok else "framework tables not found (created separately from sql/schema.sql)"})
@@ -126,7 +144,7 @@ def _dispatch(app: App, args) -> int:
         return 1 if errors else 0
     if c == "run":
         params = {k: getattr(args, k) for k in ("project", "table_group", "table", "run_type", "period", "period_file",
-                                                "lookback_days", "lookback_weeks", "share", "file", "folder")}
+                                                "lookback_days", "lookback_weeks", "share", "file", "folder", "batch")}
         out = run_module(app, args.module, params)
         _print(report(out))
         return out.exit_code

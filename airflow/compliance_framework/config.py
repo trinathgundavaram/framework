@@ -178,6 +178,54 @@ def effective_sources(conn, project_cd, table_nm, run_ty, on_date: date) -> list
             if x.effective_on(on_date)]
 
 
+SOURCE_DB_TYPES = ("TERADATA", "SQLSERVER")
+
+
+@dataclass(frozen=True)
+class QueryConfig:
+    """One ComplianceSourceQueryConfig row: an internal source pulled with its own SELECT (SOURCE_LOAD).
+
+    No Src_Conn_Cd = the source is on the framework's own Teradata system: the rows move with INSERT ... SELECT.
+    """
+    project_cd: str
+    table_nm: str
+    src_id: str
+    db_ty: str
+    conn_cd: Optional[str]
+    sql: str
+    stg_schema_nm: str
+    stg_table_nm: str
+    core_schema_nm: str
+    core_table_nm: str
+    active: bool = True
+    delmtr_cd = None
+    cfg_id = None
+
+    @property
+    def label(self) -> str:
+        return f"ComplianceSourceQueryConfig {self.project_cd}/{self.table_nm}/{self.src_id}"
+
+    @property
+    def same_system(self) -> bool:
+        return self.db_ty == "TERADATA" and not self.conn_cd
+
+    @classmethod
+    def from_row(cls, r: dict, settings=None) -> "QueryConfig":
+        name = settings.resolve_env if settings else (lambda text, identifier=True: text)
+        return cls(code(r["project_cd"]), code(r["table_nm"]), code(r["src_id"]), code(r["src_db_ty"]),
+                   name(_text(r.get("src_conn_cd")), False), r["src_sql_txt"], name(r["stg_schema_nm"]),
+                   r["stg_table_nm"], name(r["core_schema_nm"]), r["core_table_nm"], r["active_ind"] == 1)
+
+
+def active_query_configs(conn: Connection, settings=None) -> list[QueryConfig]:
+    """The active internal query sources; none when ComplianceSourceQueryConfig does not exist."""
+    if not db.table_exists(conn, conn.schema, "ComplianceSourceQueryConfig"):
+        return []
+    rows = conn.execute("SELECT * FROM ComplianceSourceQueryConfig WHERE Active_Ind = 1 "
+                        "ORDER BY Project_Cd, Table_Nm, Src_ID").fetchall()
+    return [QueryConfig.from_row(r, settings) for r in rows]
+
+
 def active_file_configs(conn: Connection, settings=None) -> list[FileConfig]:
     rows = conn.execute("SELECT * FROM ComplianceSourceFileConfig WHERE Active_Ind = 1 ORDER BY Cfg_ID").fetchall()
     return [FileConfig.from_row(r, settings) for r in rows]
@@ -532,6 +580,8 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
                               GROUP BY Req_ID, UPPER(Override_Ty) HAVING count(*) > 1""").fetchall():
         add("OVERRIDE_DUPLICATE", f"batch {r['req_id']} has {r['n']} open {r['override_ty']} overrides")
     cfg_sources = {(c.project_cd, c.table_nm, c.src_id) for c in cfgs}
+    queries = active_query_configs(conn, settings)
+    query_sources = {(q.project_cd, q.table_nm, q.src_id) for q in queries}
     xw_by_source: dict[tuple, list[XwalkRow]] = defaultdict(list)
     for x in xw:
         xw_by_source[(x.project_cd, x.table_nm, x.src_id)].append(x)
@@ -546,8 +596,8 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             add("XWALK_PROJECT", f"{label}: project {x.project_cd} is inactive", "WARNING")
         if x.src_id not in sources:
             add("XWALK_SOURCE", f"{label}: source {x.src_id} is not in ComplianceSourceSystem")
-        if (x.project_cd, x.table_nm, x.src_id) not in cfg_sources:
-            add("XWALK_NO_FILE_CONFIG", f"{label}: no active ComplianceSourceFileConfig")
+        if (x.project_cd, x.table_nm, x.src_id) not in cfg_sources | query_sources:
+            add("XWALK_NO_FILE_CONFIG", f"{label}: no active ComplianceSourceFileConfig or ComplianceSourceQueryConfig")
     for rows in xw_by_source.values():
         for a, b in combinations(rows, 2):
             if (a.run_ty == b.run_ty
@@ -589,6 +639,30 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             opts = None
         try:
             file_layout(conn, c, targets, opts)
+        except (LookupError, ConfigError) as e:
+            add("TARGET_TABLE", f"{label}: {e}")
+
+    from .layout import sql_body
+    for q in queries:
+        label = q.label
+        if q.db_ty not in SOURCE_DB_TYPES:
+            add("SOURCE_QUERY", f"{label}: Src_Db_Ty {q.db_ty!r}; accepted: {', '.join(SOURCE_DB_TYPES)}")
+        if q.db_ty == "SQLSERVER" and not q.conn_cd:
+            add("SOURCE_QUERY", f"{label}: a SQLSERVER source needs Src_Conn_Cd (the Airflow Connection of its server)")
+        if q.project_cd not in projects:
+            add("SOURCE_QUERY", f"{label}: project {q.project_cd} is not in ComplianceProject")
+        if q.src_id not in sources:
+            add("SOURCE_QUERY", f"{label}: source {q.src_id} is not in ComplianceSourceSystem")
+        if (q.project_cd, q.table_nm, q.src_id) not in xw_by_source:
+            add("SOURCE_QUERY", f"{label}: no active crosswalk row")
+        if (q.project_cd, q.table_nm, q.src_id) in cfg_sources:
+            add("SOURCE_QUERY", f"{label}: the source also has an active file config")
+        try:
+            sql_body(label, q.sql)
+        except ConfigError as e:
+            add("SOURCE_QUERY", str(e))
+        try:
+            file_layout(conn, q, targets, check_options(q, checks))
         except (LookupError, ConfigError) as e:
             add("TARGET_TABLE", f"{label}: {e}")
 

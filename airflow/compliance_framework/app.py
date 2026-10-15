@@ -62,6 +62,11 @@ class App:
         return FileChecker(self.conn, self.clock, self.settings, self.store, self.pipeline)
 
     @cached_property
+    def source_loader(self):
+        from .source_load import SourceLoader
+        return SourceLoader(self.conn, self.clock, self.settings, self.pipeline)
+
+    @cached_property
     def rules_runner(self) -> RulesRunner:
         return RulesRunner(self.conn, self.clock, self.settings, self.rules)
 
