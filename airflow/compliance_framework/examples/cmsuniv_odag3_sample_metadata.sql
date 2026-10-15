@@ -222,12 +222,12 @@ VALUES
 INSERT INTO HSABC_DEV.ComplianceSourceQueryConfig
   (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '30', 'TERADATA', NULL, 'SELECT a.Mbr_First_Nm AS MemberFirstName, a.Mbr_Last_Nm AS MemberLastName, a.Mbr_ID AS MemberID, a.Contract_ID AS ContractID, a.Auth_Nbr AS AuthorizationorClaimNumber, a.Rcvd_Dt AS Datetherequestwasreceived FROM CMSUNIV_SRC_DEV_V.UM_AUTH a WHERE a.Rcvd_Dt BETWEEN {rpt_start} AND {rpt_end}', 'CMSUNIV_FILELAND_$ENV_T', 'ODAG_DE_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', 1);
+  ('CMSUNIV', 'ODAG3', '30', 'TERADATA', NULL, 'SELECT a.Mbr_First_Nm AS MemberFirstName, a.Mbr_Last_Nm AS MemberLastName, a.Mbr_ID AS MemberID, a.Contract_ID AS ContractID, a.Auth_Nbr AS AuthorizationorClaimNumber, a.Rcvd_Dt AS Datetherequestwasreceived FROM CMSUNIV_SRC_DEV_V.UM_AUTH a WHERE a.Btch_ID = {btch_id}', 'CMSUNIV_FILELAND_$ENV_T', 'ODAG_DE_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', 1);
 
 INSERT INTO HSABC_DEV.ComplianceSourceQueryConfig
   (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '40', 'SQLSERVER', 'cms_src_appeals_sqlsrv', 'SELECT m.FirstName AS MemberFirstName, m.LastName AS MemberLastName, m.MemberNumber AS MemberID, a.ContractId AS ContractID, a.AppealNumber AS AuthorizationorClaimNumber, CONVERT(varchar(10), a.ReceivedDate, 23) AS Datetherequestwasreceived FROM dbo.Appeal a JOIN dbo.Member m ON m.MemberKey = a.MemberKey WHERE a.ReceivedDate >= {rpt_start} AND a.ReceivedDate < DATEADD(day, 1, {rpt_end})', 'CMSUNIV_FILELAND_$ENV_T', 'ODAG_DE_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', 1);
+  ('CMSUNIV', 'ODAG3', '40', 'SQLSERVER', 'cms_src_appeals_sqlsrv', 'SELECT m.FirstName AS MemberFirstName, m.LastName AS MemberLastName, m.MemberNumber AS MemberID, a.ContractId AS ContractID, a.AppealNumber AS AuthorizationorClaimNumber, CONVERT(varchar(10), a.ReceivedDate, 23) AS Datetherequestwasreceived FROM dbo.Appeal a JOIN dbo.Member m ON m.MemberKey = a.MemberKey WHERE a.Btch_ID = {btch_id}', 'CMSUNIV_FILELAND_$ENV_T', 'ODAG_DE_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', 1);
 
 
 -- ----------------------------------------------------------------------------------------------------
