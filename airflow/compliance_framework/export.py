@@ -1,25 +1,25 @@
-"""EXPORT_LOAD: copy each batch whose data changed from core into its export table (ComplianceExportConfig).
-
-The export keeps the latest batch with data per source, run type and report dates: its rows replace the rows of
-the other batches of that period, except the batches it reuses. Every export row also carries its export batch (Exp_Btch_ID: request date, project, table and run type,
-common to every source of the run type). A carried-forward batch gets a copy of the reused
-batch's core rows under its own batch (batch ID, run type, version, request and report dates of the new batch; every other column, the
-row ID included, as in core), so the old and the new batch each have their rows. Rows move on Teradata only.
-"""
+"""EXPORT_LOAD, FILE_RULES and the bridge to the GRE rules engine."""
 from __future__ import annotations
 
+import json
 import logging
+import os
+import sys
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Optional
 
-from . import config as cfgmod
-from . import db
+from . import config as cfgmod, db
+from .adapters import ERROR, RuleEngine
 from .audit import EventLogger
-from .common import ConfigError, code
-from .layout import BATCH_COLUMN, LoadContext, column_mapping
-from .load import _cast, columns
-from .release import Releases
-from .scope import Scope
+from .batches import Releases, get_batch
+from .common import Clock, ConfigError, code
+from .config import Scope
+from .db import Settings, ident
+from .load import BATCH_COLUMN, LoadContext, _cast, column_mapping, columns, sanitize_db_error
+
+
+# export: EXPORT_LOAD: copy each batch whose data changed from core into its export table (ComplianceExportConfig).
 
 log = logging.getLogger(__name__)
 
@@ -253,3 +253,184 @@ class ExportLoader:
     def _done(self, b: dict, detail: str) -> None:
         with self.conn.transaction():
             self.logger.batch_event("EXPORT_LOADED", req_id=b["req_id"], btch_id=b["btch_id"], detail=detail)
+
+
+# rules: File rules, run after the core load (design §9.4); they never block or undo a load.
+
+PENDING_RULES_STATS = ("NOT_RUN", "ERROR")
+PROMOTIONS = ("FILE_PROMOTED", "LATE_ARRIVAL_PROMOTED", "CORRECTION_PROMOTED")
+
+
+@dataclass
+class RulesSummary:
+    """Result of one FILE_RULES run: Load_IDs by outcome."""
+    evaluated: int = 0
+    passed: list[int] = field(default_factory=list)
+    warned: list[int] = field(default_factory=list)
+    failed: list[int] = field(default_factory=list)
+    skipped: list[int] = field(default_factory=list)
+    deferred: list[int] = field(default_factory=list)
+    waiting_for_export: list[int] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+class RulesRunner:
+    """Runs the bound rules for every loaded file that has not had them yet."""
+
+    def __init__(self, conn, clock: Clock, settings: Settings, rule_engine: RuleEngine):
+        self.conn, self.clock, self.settings, self.rules = conn, clock, settings, rule_engine
+        self.logger = EventLogger(conn, clock)
+        self._exports: dict = {}
+
+    def run(self, scope: Optional[Scope] = None) -> RulesSummary:
+        """The loaded files of a scope (a project, a table group or table, a run type), or of every project."""
+        s = RulesSummary()
+        where, params = (scope or Scope()).sql("c")
+        rows = self.conn.execute(
+            "SELECT f.Load_ID, f.Req_ID, f.Btch_ID, c.Project_Cd, c.Table_Nm FROM ComplianceFileLoad f "
+            "JOIN ComplianceRequestControl c ON c.Req_ID = f.Req_ID "
+            "WHERE f.Load_Stat = 'PROMOTED' AND f.Rules_Stat IN ('NOT_RUN', 'ERROR')" + where + " ORDER BY f.Load_ID",
+            params).fetchall()
+        self._exports = {(e.project_cd, e.table_nm): e for e in cfgmod.active_export_configs(self.conn, self.settings)}
+        waiting = self._not_exported([r["load_id"] for r in rows
+                                      if (r["project_cd"], r["table_nm"]) in self._exports])
+        for r in rows:
+            if r["load_id"] in waiting:
+                s.waiting_for_export.append(r["load_id"])
+                continue
+            key = db.req_key(r)
+            if not db.try_lock(self.conn, key):
+                s.deferred.append(r["load_id"])
+                continue
+            try:
+                self._run_load(r["load_id"], s)
+            except Exception as e:  # noqa: BLE001
+                log.exception("rules for load %s failed", r["load_id"])
+                s.errors.append(f"load {r['load_id']}: {db.error_text(e)}")
+            finally:
+                db.unlock(self.conn, key)
+        return s
+
+    def _not_exported(self, load_ids: list[int]) -> set:
+        """Loads of tables with an export table whose batch has not been exported since the load (EXPORT_LOAD)."""
+        out = set()
+        marks, promotions = db.in_list(PROMOTIONS)
+        for i in range(0, len(load_ids), 500):
+            ids, chunk = db.in_list(load_ids[i:i + 500])
+            out.update(r["load_id"] for r in self.conn.execute(
+                f"""SELECT f.Load_ID FROM ComplianceFileLoad f
+                      LEFT JOIN (SELECT Load_ID, MAX(Event_Dtts) AS promoted_at FROM ComplianceRequestFileDetail
+                                  WHERE Event_Ty IN ({marks}) AND Load_ID IN ({ids}) GROUP BY Load_ID) p
+                             ON p.Load_ID = f.Load_ID
+                      LEFT JOIN (SELECT Req_ID, MAX(Event_Dtts) AS exported_at FROM ComplianceRequestFileDetail
+                                  WHERE Event_Ty = 'EXPORT_LOADED' GROUP BY Req_ID) e ON e.Req_ID = f.Req_ID
+                     WHERE f.Load_ID IN ({ids}) AND (e.exported_at IS NULL OR e.exported_at < p.promoted_at)""",
+                [*promotions, *chunk, *chunk]).fetchall())
+        return out
+
+    def _run_load(self, load_id: int, s: RulesSummary) -> None:
+        load = self.conn.execute("SELECT * FROM ComplianceFileLoad WHERE Load_ID=%s", (load_id,)).fetchone()
+        if load["load_stat"] != "PROMOTED" or load["rules_stat"] not in PENDING_RULES_STATS:
+            return
+        s.evaluated += 1
+        b = get_batch(self.conn, load["req_id"])
+        ctx = dict(project_cd=b["project_cd"], table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"],
+                   req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id)
+        bindings = cfgmod.rule_bindings(self.conn, b["project_cd"], b["table_nm"], b["src_id"], b["run_ty"])
+        cfg = cfgmod.target_tables(self.conn, b["project_cd"], b["table_nm"], b["src_id"], settings=self.settings)
+        if not bindings or cfg is None:
+            self._set(load_id, "SKIPPED")
+            s.skipped.append(load_id)
+            return
+        exp = self._exports.get((b["project_cd"], b["table_nm"]))
+        outcome = self.rules.run(self.conn, bindings, {
+            "scope": "FILE_LEVEL", "btch_id": b["btch_id"], "load_id": load_id,
+            "project_cd": b["project_cd"], "table_nm": b["table_nm"], "src_id": b["src_id"], "run_ty": b["run_ty"],
+            "rpt_start_dt_key": b["rpt_start_dt_key"], "rpt_end_dt_key": b["rpt_end_dt_key"],
+            "req_dt_key": b["req_dt_key"], "stg_schema_nm": cfg.stg_schema_nm, "stg_table_nm": cfg.stg_table_nm,
+            "core_schema_nm": cfg.core_schema_nm, "core_table_nm": cfg.core_table_nm,
+            "exp_schema_nm": exp.exp_schema_nm if exp else None, "exp_table_nm": exp.exp_table_nm if exp else None,
+            "exp_btch_id": b["btch_id"] if exp else None},
+            self.settings.file_rules_mode)
+        with self.conn.transaction():
+            self._set(load_id, outcome.status)
+            if outcome.status == ERROR:
+                detail = sanitize_db_error(outcome.error or "")
+                if load["rules_stat"] != ERROR:
+                    self.logger.audit("RULES_ENGINE_TECHNICAL_FAILURE", description=detail, **ctx)
+                s.errors.append(f"load {load_id}: {detail}")
+            elif not outcome.passed:
+                detail = "failed rules: " + ", ".join(outcome.failed_rules)
+                self.logger.batch_event("FILE_RULES_FAILED", req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id,
+                                        detail=detail)
+                self.logger.audit("RULES_VALIDATION_FAILED", description=detail, **ctx)
+                s.failed.append(load_id)
+            else:
+                detail = "warnings: " + ", ".join(outcome.warned_rules) if outcome.warned_rules else None
+                self.logger.batch_event("FILE_RULES_PASSED", req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id,
+                                        detail=detail)
+                (s.warned if outcome.warned_rules else s.passed).append(load_id)
+
+    def _set(self, load_id: int, rules_stat: str) -> None:
+        self.conn.execute("UPDATE ComplianceFileLoad SET Rules_Stat=%s, Updated_Dtts=%s WHERE Load_ID=%s",
+                          (rules_stat, self.clock.now(), load_id))
+
+
+# gre_bridge: File rules through the GRE rules engine: GRE_ENTRYPOINT=compliance_framework.export:run_gre.
+
+logger = logging.getLogger(__name__)
+
+PASSING = ("PASS", "WARN")
+
+
+def _run_rules():
+    package_dir = os.environ.get("GRE_PACKAGE_DIR") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rules_engine")
+    if not os.path.isfile(os.path.join(package_dir, "run_rules.py")):
+        raise RuntimeError(f"GRE run_rules.py not found in {package_dir}; set GRE_PACKAGE_DIR")
+    if package_dir not in sys.path:
+        sys.path.insert(0, package_dir)
+    from run_rules import run_rules
+
+    return run_rules
+
+
+def _text(value) -> str:
+    return value.isoformat() if isinstance(value, (date, datetime)) else str(value)
+
+
+def _configured(env_key: str) -> dict:
+    """run_params / text_params / extra_filters of the Variable's gre section."""
+    return json.loads(os.environ.get(env_key) or "{}")
+
+
+def run_gre(conn, rule_group: str, rule_variant: str, run_params: dict) -> list:
+    """One GRE rule_group for one staged file -> [{"rule_ref", "passed"}]; raises on a technical failure."""
+    meta_db = os.environ.get("GRE_META_DB")
+    if not meta_db:
+        raise RuntimeError("GRE_META_DB is not set")
+    run_key = f"CBF_LOAD_{run_params['load_id']}"
+    params = {**_configured("GRE_RUN_PARAMS"), **{k: _text(v) for k, v in run_params.items() if v is not None}}
+    variant = None if rule_variant in (None, "", "*") else rule_variant
+    outcome, exit_code = _run_rules()(project_name=os.environ.get("GRE_PROJECT_NAME") or None, rule_group=rule_group,
+                                      rule_variant=variant, run_key=run_key, run_params=params,
+                                      extra_filters=_configured("GRE_EXTRA_FILTERS"),
+                                      text_params=_configured("GRE_TEXT_PARAMS"),
+                                      log_level=os.environ.get("GRE_LOG_LEVEL") or "ERROR")
+    summary = (outcome or {}).get("rule_groups", {}).get(rule_group)
+    if summary is None:
+        raise RuntimeError(f"GRE returned nothing for rule_group {rule_group} (exit_code={exit_code})")
+    if summary["status"] == "NO_RULES":
+        logger.warning("GRE rule_group %s (variant %s) has no active rules", rule_group, variant)
+        return []
+    if summary["status"] != "COMPLETED" or summary.get("errored"):
+        raise RuntimeError(f"GRE rule_group {rule_group} did not complete: status={summary['status']} "
+                           f"errored={summary.get('errored')}")
+    rows = conn.execute(f"SELECT rule_id, status FROM {ident(meta_db)}.gre_results WHERE run_id = %s",
+                        (summary["run_id"],)).fetchall()
+    if not rows:
+        raise RuntimeError(f"GRE run {summary['run_id']} wrote no gre_results rows")
+    errors = [r["rule_id"] for r in rows if r["status"] not in (*PASSING, "FAIL")]
+    if errors:
+        raise RuntimeError(f"GRE rule_group {rule_group}: rule(s) {errors} ended in error")
+    return [{"rule_ref": f"{rule_group}:{r['rule_id']}", "passed": r["status"] in PASSING} for r in rows]

@@ -160,6 +160,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceFileCheckConfig (
   Table_Nm         VARCHAR(63)  DEFAULT '*' NOT NULL,
   Src_ID           VARCHAR(30)  DEFAULT '*' NOT NULL,
   Check_Cd         VARCHAR(30)  NOT NULL,
+  Check_Field_Nm   VARCHAR(128) DEFAULT '*' NOT NULL,
   Check_Val_Txt    VARCHAR(8000),
   Include_Ind      SMALLINT     DEFAULT 1 NOT NULL,
   Active_Ind       SMALLINT     DEFAULT 1 NOT NULL,
@@ -168,7 +169,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceFileCheckConfig (
   Updated_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Updated_By       VARCHAR(100) DEFAULT USER NOT NULL
 )
-UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Src_ID, Check_Cd);
+UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm);
 
 CREATE MULTISET TABLE {{META_DB}}.ComplianceTargetColumnConfig (
   Project_Cd       VARCHAR(30)  NOT NULL,

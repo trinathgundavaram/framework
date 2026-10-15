@@ -5,7 +5,7 @@
   "email_recipient": "compliance-dev@example.com",
   "wdc_comp_oper_nas_var": "wdc_comp_oper_nas_dev",
   "settings": {
-    "GRE_ENTRYPOINT": "compliance_framework.gre_bridge:run_gre",
+    "GRE_ENTRYPOINT": "compliance_framework.export:run_gre",
     "DEFAULT_NOTIFY_EMAILS": "compliance-dev@example.com"
   },
   "gre": {

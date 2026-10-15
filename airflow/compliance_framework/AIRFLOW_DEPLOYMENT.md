@@ -8,7 +8,10 @@ the team's DAG conventions (one DAG file, one DAG id, one `<name>_config_var` Va
 ```
 airflow/
   osstd_core_cms_compliance_batch_creation.py      one DAG file per step ...
+  osstd_core_cms_compliance_file_check.py
   osstd_core_cms_compliance_file_load.py
+  osstd_core_cms_compliance_source_load.py
+  osstd_core_cms_compliance_export_load.py
   osstd_core_cms_compliance_file_rules.py
   osstd_core_cms_compliance_override_decisions.py
   osstd_core_cms_compliance_batch_close.py
@@ -16,14 +19,20 @@ airflow/
   osstd_core_cms_compliance_run_module.py          ... one generic DAG that runs any step
   osstd_core_cms_compliance_admin.py               ... and one for validate-config, health, locks
   compliance_framework/
-    dag_factory.py                builds the DAGs (schedule, tasks, triggers, emails, ServiceNow callback)
-    compliance_task.py            Variable + Connections -> the framework
-    run_framework.py              run_step() / run_command(): the framework in-process, no Airflow
-    connection_factory.py         Teradata connection (TERADATA_*) and NAS / SMB settings (NAS_*)
-    db.py                         Teradata layer: transactions, lock table
-    gre_bridge.py                 file rules through the GRE rules engine
-    batches.py ingest.py load.py rules.py overrides.py closing.py audit.py config.py modules.py
-    adapters.py app.py cli.py common.py settings.py
+    dags.py        the DAGs (schedule, tasks, triggers, emails, ServiceNow callback), Variable + Connections ->
+                   the framework, run_step() / run_command() in-process
+    app.py         the application and its steps (modules, step reports)
+    batches.py     batch creation (schedule codes, calendar, intake), release / hold, overrides, close
+    ingest.py      FILE_LOAD and SOURCE_LOAD
+    filecheck.py   FILE_CHECK
+    load.py        staging / core layout, staging load, core swap, control report and error log
+    export.py      EXPORT_LOAD, FILE_RULES and the GRE bridge
+    config.py      metadata rows and validate-config, scope of a run, file check options
+    db.py          Teradata layer (transactions, locks), connections (Teradata, NAS, source servers), settings
+    audit.py       batch timeline, exceptions audit, notifications
+    adapters.py    file stores (NAS, local), email channel, rules engine
+    common.py      codes, statuses, dates, clock
+    cli.py         command line
     sql/schema.sql                Teradata DDL ({{META_DB}} template)
     sql/approvals.sql             manual override templates
     examples/dev, examples/prod   one example Variable per DAG
@@ -69,7 +78,9 @@ No `.env` file and no AWS Secrets Manager: credentials come from the Airflow Con
 
 1. Copy the `osstd_core_cms_compliance_*.py` files and the `compliance_framework/` folder into the DAGs
    folder, side by side.
-2. Install `compliance_framework/requirements.txt` in the workers' environment. Airflow 2.4+, Python 3.9+.
+2. Install `compliance_framework/requirements.txt` in the workers' environment. **Airflow 3** (Task SDK
+   `airflow.sdk`, the `standard` and `smtp` providers; no Airflow 2 or deprecated imports), on a Python version your
+   Airflow 3 release supports. The email tasks and `NOTIFY_BACKEND=airflow` send through the Airflow Connection `smtp_default`.
 3. Create the two Connections and one Variable per DAG (below; ready-made in `examples/dev` and
    `examples/prod`, file name = Variable name).
 4. The framework tables already exist: they are created separately from `sql/schema.sql` (replace
@@ -150,16 +161,38 @@ Keys by step:
 
 | Step | Scope keys | Settings worth setting |
 |---|---|---|
-| `BATCH_CREATION` | `project` (required). When batches are due and their report dates come from the metadata (`Batch_Schedule_Sql_Txt`, `Rpt_Dt_Sql_Txt`; below). Optional: `table_group`, `run_type`, `table`, `period`, `lookback_days`, `lookback_weeks` | — |
+| `BATCH_CREATION` | `project` (required). When batches are due and their report dates come from the metadata (schedule codes, `Rpt_Period_Cd`, `ComplianceBatchCalendar`; below). Optional: `table_group`, `run_type`, `table`, `period`, `lookback_days`, `lookback_weeks` | — |
 | `FILE_CHECK` | the scope (`project`, `table_group` or `table`, `run_type`; see "Scope of a run"), the NAS connection as for `FILE_LOAD` | `CHECK_CONTENT` and the file settings of `FILE_LOAD`; which checks a file gets is in `ComplianceFileCheckConfig` |
 | `FILE_LOAD` | the scope (`project`, `table_group` or `table`, `run_type`) | `FILE_STORE` (`nas`), `ARCHIVE_FOLDER` (`Archive`), `ERROR_FOLDER` (`Error`), `CONTROL_REPORT_FOLDER` (`ControlReport`), `ERROR_LOG_FOLDER` (`ErrorLog`), `NAS_MIN_AGE_SECONDS` (120), `ARCHIVE_BY_YEAR` (`false`); for large files `INSERT_BATCH_ROWS` (2000), `INSERT_BATCH_BYTES` (500000), `LOAD_ENGINE` (`BATCH`, or `FASTLOAD`), `CHECK_ON_LOAD` (`false`) — see "Large files" |
 | `FILE_RULES` | the scope; `gre` (the GRE's own Airflow Variable; every key optional: `meta_db` (default the Variable's `meta_db`), `environment` (`load_env`), `project_name` (`project`), `log_level` (the Variable's, `INFO`), `max_parallel_rules` (1), `connection_type` / `meta_connection` (`teradata`), `run_params` / `text_params` / `extra_filters` (none); plus `package_dir`, the folder holding the GRE's `run_rules.py`, default `<dags>/rules_engine`) | `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `FILE_RULES_MODE` (`GATE`) |
 | `OVERRIDE_DECISIONS` | the scope | — |
 | `BATCH_CLOSE` | the scope | — |
-| `NOTIFY` | the scope (no `project`: every pending event, including those of no project) | `NOTIFY_BACKEND` (`airflow` = Airflow's email backend, `log` = write to the task log, the default), `DEFAULT_NOTIFY_EMAILS` |
+| `NOTIFY` | the scope (no `project`: every pending event, including those of no project) | `NOTIFY_BACKEND` (`airflow` = email through the Airflow SMTP connection `smtp_default`, `log` = write to the task log, the default), `NOTIFY_FROM_EMAIL`, `DEFAULT_NOTIFY_EMAILS` |
 
 A trigger's configuration overrides the Variable for that run: any scope key above, `as_of` (an ISO
 date or timestamp used as "now", for a missed day), `settings` and `gre`.
+
+**One DAG, several times (timed runs).** When entries of `runs` have their own `schedule_interval` (and a `name`),
+the DAG runs at every one of those times (and at its own `schedule_interval`, if set), with one task. Each run
+works with the entry scheduled at its time, e.g. EXPORT_LOAD for MNT at 06:00 and for DAILY at 20:00:
+
+```json
+{"meta_db": "HSABC_DEV", "td_conn_var": "DEV", "load_env": "DEV", "project": "CMS_UNIVERSE", "schedule_interval": null,
+ "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES"],
+ "runs": [{"name": "DAILY", "run_type": "DAILY", "schedule_interval": "0 20 * * *", "settings": {"RELEASE_TIME": "20:00"}},
+          {"name": "MNT", "run_type": "MNT", "schedule_interval": "0 6 * * *"}]}
+```
+
+| Run | Works with |
+|---|---|
+| Scheduled | The entry (or entries, one after the other) whose `schedule_interval` is the run's time |
+| Manual with `"run": "MNT"` (or `"DAILY,MNT"`) | Those entries, plus what the trigger gives (`batch`, `release`, `settings`, ...) |
+| Manual without `run`, or started by another DAG | The Variable's own scope, plus what the trigger gives |
+
+A DAG never runs twice at the same time (`max_active_runs` 1): a run that is due, or triggered, while another is
+running waits and starts after it. Different DAGs can run at the same time; the framework's batch and table locks
+keep them off the same batch, staging or export table (the later one waits up to `LOCK_TIMEOUT_SECONDS`). `runs`
+entries without `schedule_interval` work as before: one task each, all in every run.
 
 ## DAGs
 
@@ -560,9 +593,10 @@ Only problems of the file are findings. A setup problem (staging table missing, 
 |---|---|
 | `Project_Cd` | The project of the files |
 | `Table_Nm`, `Src_ID` | The file the row applies to; `*` = every table / every source of the project |
-| `Check_Cd` | `RECORD_TYPE`, `HEADER_NAMES`, `COLUMN_COUNT`, `TARGET_COLUMNS`, `TRAILER`, `CHARACTER_SET` or `COLUMN_VALUES` |
+| `Check_Cd` | The check (below) |
+| `Check_Field_Nm` | For a field check: the field it checks (a name of `HEADER_NAMES`, else a staging column of the file); `*` (default) for the other checks |
 | `Check_Val_Txt` | The value of the check (below) |
-| `Include_Ind` | 1 = the check applies to the files the row covers; 0 = those files are excluded from the check |
+| `Include_Ind` | 1 = the check applies to the files the row covers; 0 = the check is switched off for them |
 | `Active_Ind` | 1 = the row is in use; 0 = the row is ignored, as if it were not there |
 
 | `Check_Cd` | `Check_Val_Txt` | What is checked |
@@ -574,14 +608,39 @@ Only problems of the file are findings. A setup problem (staging table missing, 
 | `TRAILER` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | What each trailer field holds, in order: `RECORD_TYPE`, `FILE_NAME` (must equal the file's name), `DATA_ROW_COUNT` (data rows) or `TOTAL_ROW_COUNT` (every line, header and trailer included), `TIMESTAMP` (`YYYYMMDD`, `YYYYMMDDHHMM` or `YYYYMMDDHHMMSS`), `SKIP` |
 | `CHARACTER_SET` | `latin-1` | Every line must only contain characters of that character set (`latin-1`, `ascii`, `cp1252`, ...) and no control characters (tab is allowed). Use it when the target columns cannot hold every character: each offending line is reported with the character and the record |
 | `COLUMN_VALUES` | `ALL`, or any of `LENGTH,NUMBER,REQUIRED` | Every value of every data row against its target staging column: `LENGTH` = not longer than a character column, `NUMBER` = a number for a numeric column, `REQUIRED` = not empty for a `NOT NULL` column. Every offending value is reported with its line, column and record, so all bad records are listed before the load |
+| `MIN_RECORD_LENGTH`, `MAX_RECORD_LENGTH` | `250` | Every data line has at least / at most that many characters (fields and delimiters, without quotes) |
+| `MIN_ROWS`, `MAX_ROWS` | `100` | The file has at least / at most that many data rows |
+| `MIN_LENGTH`, `MAX_LENGTH` (field) | `9` | The field's value has at least / at most that many characters |
+| `MIN_VALUE`, `MAX_VALUE` (field) | `0`, `999999.99` | The field's value is a number not below / not above that value |
+| `VALUE_IN` (field) | `Y\|N` (or `Y,N`) | The field's value is one of the listed values |
+| `PATTERN` (field) | `[A-Z][0-9]{8}` | The field's whole value matches the regular expression |
+| `DATE_FORMAT` (field) | `YYYYMMDD`, `MM/DD/YYYY`, `YYYY-MM-DD HH:MI:SS` | The field's value is a valid date / timestamp in that format |
+
+The field checks need `Check_Field_Nm`; empty values are not field-checked (that is `COLUMN_VALUES REQUIRED`).
 
 - **Inactive rows are ignored.** `Active_Ind` only says whether a row is in use.
-- **The most specific active row wins** for each check, whether it includes or excludes: the file's table and
-  source, then its table (any source), then its source (any table), then `*`. So a row for one source always
-  overrides a `*` row, in either direction: exclude one source from a check every other source gets, or include
-  one source in a check the others do not get.
-- Two active rows cannot collide at the same level, because a table, source and check can have only one row.
-- **To exclude one file from a check**, add a row for that table and source with `Include_Ind = 0`.
+- **Rows add up.** Every check set for the project (`*`), the table or the source applies to a file, so a source
+  can get extra checks on top of the shared ones (e.g. `LENGTH` for every source and `MIN_LENGTH` on `MemberID`
+  for source `140`).
+- **The same check is replaced by its most specific row.** A check is its `Check_Cd` and `Check_Field_Nm`; for the
+  same check the most specific active row wins: the file's table and source, then its table (any source), then its
+  source (any table), then `*`. So a source can have its own `HEADER_NAMES` instead of the shared one, or its own
+  limit for a field.
+- **To switch a check off for one source**, add a row for that table, source and check (and field) with
+  `Include_Ind = 0`.
+- Two active rows cannot collide at the same level: a table, source, check and field have only one row.
+
+Existing installations (from 0.3.39; the primary index gets `Check_Field_Nm`, so the table is rebuilt):
+
+```sql
+RENAME TABLE <META_DB>.ComplianceFileCheckConfig TO <META_DB>.ComplianceFileCheckConfig_Old;
+-- create ComplianceFileCheckConfig from sql/schema.sql, then
+INSERT INTO <META_DB>.ComplianceFileCheckConfig (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt,
+       Include_Ind, Active_Ind, Created_Dtts, Created_By, Updated_Dtts, Updated_By)
+SELECT Project_Cd, Table_Nm, Src_ID, Check_Cd, '*', Check_Val_Txt, Include_Ind, Active_Ind, Created_Dtts, Created_By,
+       Updated_Dtts, Updated_By FROM <META_DB>.ComplianceFileCheckConfig_Old;
+DROP TABLE <META_DB>.ComplianceFileCheckConfig_Old;
+```
 - A file with no row for a check does not get that check. The name, batch, source, encoding, blank-line,
   column-count and zero-row checks always run and need no row.
 
@@ -1056,7 +1115,7 @@ String comparisons follow the session's transaction mode (Teradata mode is not c
 
 ## File rules through the GRE
 
-With `RULE_ENGINE=gre` and `GRE_ENTRYPOINT=compliance_framework.gre_bridge:run_gre`, each
+With `RULE_ENGINE=gre` and `GRE_ENTRYPOINT=compliance_framework.export:run_gre`, each
 `ComplianceRuleBinding` of a file runs that GRE `rule_group` (and `rule_variant`; `*` = all) through the
 GRE's `run_rules()`, with `run_key = CBF_LOAD_<Load_ID>` and the file's context as `run_params`
 (`{btch_id}`, `{load_id}`, `{stg_schema_nm}`, `{stg_table_nm}`, `{core_schema_nm}`, `{core_table_nm}`, `{exp_schema_nm}`, `{exp_table_nm}`, `{exp_btch_id}` (only with an export table), `{project_cd}`, `{table_nm}`, `{src_id}`,
@@ -1075,7 +1134,10 @@ values, or a second rules DAG with its own Variable. The rules run on the framew
 
 - The framework logic (batch creation, intake, file load, promotion, overrides, close, notifications,
   locks) and the GRE bridge pass the framework's test suite when run against a stand-in for the
-  `teradatasql` driver backed by PostgreSQL, and the DAGs run end to end in Airflow 2.10.
+  `teradatasql` driver backed by PostgreSQL. With Airflow 3.3.2 (Task SDK 1.3.2, standard provider 1.20.1, smtp
+  provider 3.1.1) every DAG file parses without import errors or deprecation warnings, and the admin DAG ran with
+  `dag.test()` (Variable and Connections read through `airflow.sdk`). The step DAGs need Teradata and were not run
+  end to end in Airflow 3.
 - It has **not** been run against a real Teradata system. Before production, on a development Teradata
   system: create the tables from `sql/schema.sql`, run `validate-config`, then one full cycle (`BATCH_CREATION`, `FILE_LOAD` of a good
   and a bad file, `BATCH_CLOSE`, `NOTIFY`) with the step DAGs or `OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE`, and check the tables.

@@ -7,8 +7,7 @@ from typing import NamedTuple, Optional
 from . import db
 from .adapters import Channel, Message
 from .common import Clock, ConfigError
-from .db import Connection
-from .settings import Settings
+from .db import Connection, Settings
 
 log = logging.getLogger(__name__)
 

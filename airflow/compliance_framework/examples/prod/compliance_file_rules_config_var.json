@@ -7,7 +7,7 @@
     "meta_db": "REPLACE_WITH_PROD_GRE_META_DB"
   },
   "settings": {
-    "GRE_ENTRYPOINT": "compliance_framework.gre_bridge:run_gre"
+    "GRE_ENTRYPOINT": "compliance_framework.export:run_gre"
   },
   "trigger_dags": [
     "OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"

@@ -302,43 +302,48 @@ VALUES
 
 
 -- ----------------------------------------------------------------------------------------------------
--- 7. The checks FILE_CHECK applies. Include_Ind = 0 excludes the files the row covers
+-- 7. The checks FILE_CHECK applies (rows add up; Include_Ind = 0 switches a check off)
 -- ----------------------------------------------------------------------------------------------------
 
 INSERT INTO HSABC_DEV.ComplianceFileCheckConfig
-  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Val_Txt, Include_Ind, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '*', 'HEADER_NAMES', 'MemberFirstName|MemberLastName|MemberID|ContractID|PlanBenefitPackage|FirstTierDownstreamandRelatedEntity|AuthorizationorClaimNumber|Datetherequestwasreceived|AORReceiptDate|WaiverofLiabilityReceiptDate|WasItaCleanClaim|WasTheRequestProcessedasanODorRecon|RequestDetermination|DateofDetermination|DateClaimReconsiderationwasPaid|DateWrittenNotificationprovidedToMember|DateWrittenNotificationProvidedtoProvider|DateForwardedtoIRE|Whomadetherequest|Issuedescriptionandtypeofservice|WasTheInitOrgDetReqtDeniedForLackOfMediNecessity|ExRMNumber|SourceUnique_ID|Filler2|Filler3', 1, 1);
+  ('CMSUNIV', 'ODAG3', '*', 'HEADER_NAMES', '*', 'MemberFirstName|MemberLastName|MemberID|ContractID|PlanBenefitPackage|FirstTierDownstreamandRelatedEntity|AuthorizationorClaimNumber|Datetherequestwasreceived|AORReceiptDate|WaiverofLiabilityReceiptDate|WasItaCleanClaim|WasTheRequestProcessedasanODorRecon|RequestDetermination|DateofDetermination|DateClaimReconsiderationwasPaid|DateWrittenNotificationprovidedToMember|DateWrittenNotificationProvidedtoProvider|DateForwardedtoIRE|Whomadetherequest|Issuedescriptionandtypeofservice|WasTheInitOrgDetReqtDeniedForLackOfMediNecessity|ExRMNumber|SourceUnique_ID|Filler2|Filler3', 1, 1);
 
 INSERT INTO HSABC_DEV.ComplianceFileCheckConfig
-  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Val_Txt, Include_Ind, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '*', 'RECORD_TYPE', 'H,D,T', 1, 1);
+  ('CMSUNIV', 'ODAG3', '*', 'RECORD_TYPE', '*', 'H,D,T', 1, 1);
 
 INSERT INTO HSABC_DEV.ComplianceFileCheckConfig
-  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Val_Txt, Include_Ind, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '*', 'TRAILER', 'RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP', 1, 1);
+  ('CMSUNIV', 'ODAG3', '*', 'TRAILER', '*', 'RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP', 1, 1);
 
 INSERT INTO HSABC_DEV.ComplianceFileCheckConfig
-  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Val_Txt, Include_Ind, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', '*', '*', 'CHARACTER_SET', 'latin-1', 1, 1);
+  ('CMSUNIV', '*', '*', 'CHARACTER_SET', '*', 'latin-1', 1, 1);
 
 INSERT INTO HSABC_DEV.ComplianceFileCheckConfig
-  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Val_Txt, Include_Ind, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', '*', '*', 'COLUMN_VALUES', 'ALL', 1, 1);
+  ('CMSUNIV', '*', '*', 'COLUMN_VALUES', '*', 'ALL', 1, 1);
 
 INSERT INTO HSABC_DEV.ComplianceFileCheckConfig
-  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Val_Txt, Include_Ind, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '10', 'RECORD_TYPE', NULL, 0, 1);
+  ('CMSUNIV', 'ODAG3', '10', 'RECORD_TYPE', '*', NULL, 0, 1);
 
 INSERT INTO HSABC_DEV.ComplianceFileCheckConfig
-  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Val_Txt, Include_Ind, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '20', 'RECORD_TYPE', NULL, 0, 1);
+  ('CMSUNIV', 'ODAG3', '20', 'RECORD_TYPE', '*', NULL, 0, 1);
+
+INSERT INTO HSABC_DEV.ComplianceFileCheckConfig
+  (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
+VALUES
+  ('CMSUNIV', 'ODAG3', '140', 'MIN_LENGTH', 'MemberID', '3', 1, 1);
 
 
 -- ----------------------------------------------------------------------------------------------------

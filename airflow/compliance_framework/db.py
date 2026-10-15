@@ -1,18 +1,25 @@
-"""Teradata database layer: connection wrapper, transactions, table-based locks."""
+"""Teradata connection, locks and helpers; connections to the NAS and to source servers; runtime settings."""
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
+import os
 import re
 import time
+import typing
 import uuid
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 
-from .common import BUSINESS_TZ, ConfigError, LockTimeout
+from .common import BUSINESS_TZ, ConfigError, LockTimeout, resolve_env
+
+
+# db: Teradata database layer: connection wrapper, transactions, table-based locks.
 
 log = logging.getLogger(__name__)
 BUSINESS_ZONE = ZoneInfo(BUSINESS_TZ)
@@ -430,3 +437,303 @@ def held_all(conn: Connection, keys: Iterable[str], timeout_seconds: Optional[fl
 def as_date(value) -> Optional[date]:
     """DATE columns come back as date (or datetime on some driver versions)."""
     return value.date() if isinstance(value, datetime) else value
+
+
+# connection_factory: Teradata connection (TERADATA_*) and NAS / SMB session settings (NAS_*) from environment variables.
+
+logger = logging.getLogger(__name__)
+
+try:
+    import teradatasql
+    _TERADATA_AVAILABLE = True
+except ImportError:
+    _TERADATA_AVAILABLE = False
+
+
+def _require(key: str) -> str:
+    val = os.getenv(key)
+    if not val:
+        raise EnvironmentError(f"Required env var '{key}' is not set.")
+    return val
+
+
+def build_teradata_connection(database: str = None):
+    """A new teradatasql connection; `database` becomes the session's default database."""
+    if not _TERADATA_AVAILABLE:
+        raise ImportError("teradatasql is required. Install with: pip install teradatasql")
+    host = _require("TERADATA_HOST")
+    user = _require("TERADATA_USER")
+    logmech = os.getenv("TERADATA_LOGMECH", "LDAP")
+    logger.info("Connecting to Teradata: host=%s user=%s logmech=%s database=%s", host, user, logmech, database)
+    kwargs = {"host": host, "user": user, "password": _require("TERADATA_PASSWORD"), "logmech": logmech}
+    if database:
+        kwargs["database"] = database
+    return teradatasql.connect(**kwargs)
+
+
+SOURCE_OPENERS: dict = {}
+
+
+def _odbc_value(value) -> str:
+    text = str(value)
+    return "{" + text.replace("}", "}}") + "}" if any(c in text for c in ";{}=") else text
+
+
+def source_connection(conn_cd: str, db_ty: str):
+    """A DB-API connection to an internal source, from its Airflow Connection `conn_cd` (no credential is logged)."""
+    if conn_cd in SOURCE_OPENERS:
+        return SOURCE_OPENERS[conn_cd]()
+    from airflow.sdk import Connection
+
+    c = Connection.get(conn_cd)
+    extra = c.extra_dejson or {}
+    logger.info("Connecting to source %s: %s host=%s database=%s", conn_cd, db_ty, c.host, c.schema or "-")
+    if db_ty == "SQLSERVER":
+        try:
+            import pyodbc
+        except ImportError:
+            raise ImportError("pyodbc is required for SQL Server sources. Install with: pip install pyodbc")
+        parts = {"DRIVER": "{" + extra.get("driver", "ODBC Driver 18 for SQL Server") + "}",
+                 "SERVER": f"{c.host},{c.port}" if c.port else c.host, "DATABASE": c.schema, "UID": c.login,
+                 "PWD": c.password, "Encrypt": extra.get("encrypt", "yes"),
+                 "TrustServerCertificate": extra.get("trust_server_certificate", "no"),
+                 "Authentication": extra.get("authentication")}
+        text = ";".join(f"{k}={v if k == 'DRIVER' else _odbc_value(v)}" for k, v in parts.items() if v not in (None, ""))
+        return pyodbc.connect(text, autocommit=True, timeout=int(extra.get("login_timeout", 30)))
+    if not _TERADATA_AVAILABLE:
+        raise ImportError("teradatasql is required. Install with: pip install teradatasql")
+    kwargs = {"host": c.host, "user": c.login, "password": c.password, "logmech": extra.get("logmech", "LDAP")}
+    if c.schema:
+        kwargs["database"] = c.schema
+    return teradatasql.connect(**kwargs)
+
+
+def nas_settings() -> dict:
+    """SMB server and credentials of the NAS connection."""
+    return {"server": _require("NAS_HOST").lower(), "username": _require("NAS_USER"),
+            "password": _require("NAS_PASSWORD"), "port": int(os.getenv("NAS_PORT") or 445)}
+
+
+def smb_client():
+    """The smbclient module (smbprotocol)."""
+    try:
+        import smbclient
+    except ImportError:
+        raise ImportError("smbprotocol is required for NAS file paths. Install with: pip install smbprotocol")
+    return smbclient
+
+
+# settings: Runtime settings and the Teradata connection - no metadata tables involved.
+
+PREFIX = "FRAMEWORK_"
+_SCHEMA_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+
+
+@dataclass
+class Settings:
+    metadata_schema: str = "cms_compliance"
+    environment: str = "DEV"
+    env_value: Optional[str] = None
+    business_tz: str = "America/Chicago"
+
+    file_store: str = "nas"
+    local_store_root: str = "./.local_store"
+    archive_folder: str = "Archive"
+    error_folder: str = "Error"
+    control_report_folder: str = "ControlReport"
+    error_log_folder: str = "ErrorLog"
+    nas_min_age_seconds: int = 120
+
+    filename_case_sensitive: bool = False
+    supported_file_types: list[str] = field(default_factory=lambda: [".txt", ".csv"])
+    file_encoding: str = "utf-8"
+    quote_char: str = '"'
+    empty_as_null: bool = True
+    check_content: bool = True
+    write_error_file: bool = True
+    write_control_report: bool = True
+    check_move_failed: bool = False
+    archive_by_year: bool = False
+    check_on_load: bool = False
+
+    load_engine: str = "BATCH"
+    insert_batch_rows: int = 2000
+    insert_batch_bytes: int = 500000
+
+    file_rules_mode: str = "GATE"
+    rule_engine: str = "gre"
+    gre_entrypoint: Optional[str] = None
+
+    release_time: Optional[str] = None
+
+    lock_timeout_seconds: int = 300
+    lock_ttl_minutes: int = 240
+    heartbeat_stale_minutes: int = 30
+
+    notify_backend: str = "log"
+    notify_from_email: Optional[str] = None
+    default_notify_emails: list[str] = field(default_factory=list)
+
+    sources: dict = field(default_factory=dict, repr=False, compare=False)
+
+    @classmethod
+    def names(cls) -> list[str]:
+        return [f.name for f in fields(cls) if f.name != "sources"]
+
+    @classmethod
+    def load(cls, env: Optional[Mapping[str, str]] = None, overrides: Optional[Mapping[str, str]] = None,
+             env_file: Optional[str] = None) -> "Settings":
+        env = merged_env(env, env_file)
+        s = cls()
+        for name in cls.names():
+            key = PREFIX + name.upper()
+            if key in env:
+                s.set(name, env[key], env.source(key))
+        for raw, value in (overrides or {}).items():
+            name = raw.lower().removeprefix("framework_").replace("-", "_")
+            if name not in cls.names():
+                raise ConfigError(f"unknown setting {raw!r}")
+            s.set(name, value, "argument")
+        s.validate()
+        s.env = env
+        return s
+
+    def set(self, name: str, raw: Any, source: str = "code") -> None:
+        try:
+            setattr(self, name, _coerce(name, raw))
+        except (ValueError, TypeError) as e:
+            raise ConfigError(f"setting {name}: {e}") from e
+        self.sources[name] = source
+
+    def validate(self) -> None:
+        if not _SCHEMA_IDENT.match(self.metadata_schema or ""):
+            raise ConfigError(f"METADATA_SCHEMA {self.metadata_schema!r} is not a valid identifier")
+        self.environment = (self.environment or "").strip().upper()
+        if not re.match(r"^[A-Z0-9_]{1,20}$", self.environment):
+            raise ConfigError(f"ENVIRONMENT {self.environment!r} must be letters, digits or _ (e.g. DEV, TEST, PROD)")
+        if self.env_value is not None and not re.match(r"^[A-Za-z0-9_]{0,20}$", self.env_value):
+            raise ConfigError(f"ENV_VALUE {self.env_value!r} must be letters, digits or _")
+        for name in ("file_rules_mode", "load_engine"):
+            if isinstance(getattr(self, name, None), str):
+                setattr(self, name, getattr(self, name).strip().upper())
+        for name in ("notify_backend", "file_store"):
+            if isinstance(getattr(self, name, None), str):
+                setattr(self, name, getattr(self, name).strip().lower())
+        if self.rule_engine.strip().lower() in ("gre", "none"):
+            self.rule_engine = self.rule_engine.strip().lower()
+        for name, allowed in (("file_rules_mode", ("GATE", "ANNOTATE")),
+                              ("load_engine", ("BATCH", "FASTLOAD")),
+                              ("notify_backend", ("log", "airflow")), ("file_store", ("nas", "local"))):
+            if getattr(self, name) not in allowed:
+                raise ConfigError(f"{name.upper()} must be one of {allowed}, got {getattr(self, name)!r}")
+        for name in ("archive_folder", "error_folder", "control_report_folder", "error_log_folder"):
+            if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_ .-]{0,99}$", getattr(self, name) or ""):
+                raise ConfigError(f"{name.upper()} {getattr(self, name)!r} must be a plain folder name")
+        if self.nas_min_age_seconds < 0:
+            raise ConfigError("NAS_MIN_AGE_SECONDS must be >= 0")
+        if self.insert_batch_rows < 1 or self.insert_batch_bytes < 1:
+            raise ConfigError("INSERT_BATCH_ROWS and INSERT_BATCH_BYTES must be >= 1")
+        if self.lock_ttl_minutes < 1:
+            raise ConfigError("LOCK_TTL_MINUTES must be >= 1")
+        if self.release_time and not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", str(self.release_time).strip()):
+            raise ConfigError(f"RELEASE_TIME must be HH:MM (24 hours), got {self.release_time!r}")
+
+    def db_target(self) -> dict:
+        """Where this run connects (no credentials)."""
+        return {"host": os.environ.get("TERADATA_HOST"), "user": os.environ.get("TERADATA_USER"),
+                "logmech": os.environ.get("TERADATA_LOGMECH", "LDAP"), "database": self.metadata_schema}
+
+    def connect(self) -> Connection:
+        """Teradata connection whose default database is the metadata database."""
+        try:
+            raw = build_teradata_connection(self.metadata_schema)
+        except (EnvironmentError, ImportError) as e:
+            raise ConfigError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise ConfigError(f"cannot connect to {self.db_target()}: {str(e).strip().splitlines()[0]}") from e
+        return Connection(raw, self.metadata_schema, self.lock_ttl_minutes * 60)
+
+    def resolve_env(self, text: Optional[str], identifier: bool = True) -> Optional[str]:
+        """$env tokens of a configured name -> this environment's value."""
+        return resolve_env(text, self.environment, self.env_value, identifier)
+
+    def describe(self) -> dict:
+        return {n: {"value": getattr(self, n), "source": self.sources.get(n, "default")} for n in self.names()}
+
+
+class _Env(dict):
+    """Environment merged with the .env file; remembers where each value came from."""
+
+    def __init__(self):
+        super().__init__()
+        self.origin: dict[str, str] = {}
+
+    def source(self, key: str) -> str:
+        return self.origin.get(key, "env")
+
+
+def merged_env(env: Optional[Mapping[str, str]] = None, env_file: Optional[str] = None) -> _Env:
+    if isinstance(env, _Env):
+        return env
+    base = os.environ if env is None else env
+    out = _Env()
+    path = env_file or base.get(PREFIX + "ENV_FILE") or ".env"
+    if os.path.isfile(path):
+        for k, v in read_env_file(path).items():
+            out[k], out.origin[k] = v, ".env"
+    elif env_file or base.get(PREFIX + "ENV_FILE"):
+        raise ConfigError(f"env file {path} does not exist")
+    for k, v in base.items():
+        out[k], out.origin[k] = v, "env"
+    return out
+
+
+def read_env_file(path: str) -> dict[str, str]:
+    """Minimal .env reader."""
+    out = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.removeprefix("export ").split("=", 1)
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+                v = v[1:-1]
+            elif " #" in v:
+                v = v.split(" #", 1)[0].rstrip()
+            out[k.strip()] = v
+    return out
+
+
+@functools.cache
+def _type_hints() -> dict[str, Any]:
+    return typing.get_type_hints(Settings)
+
+
+def _coerce(name: str, raw: Any) -> Any:
+    """Convert a text value to the declared type of setting `name`."""
+    if not isinstance(raw, str):
+        return raw
+    typ = _type_hints()[name]
+    text = raw.strip()
+    if typing.get_origin(typ) is typing.Union:
+        if text == "" or text.lower() in ("none", "null"):
+            return None
+        typ = next(a for a in typing.get_args(typ) if a is not type(None))
+    if typ is bool:
+        if text.lower() in ("1", "true", "yes", "y", "on"):
+            return True
+        if text.lower() in ("0", "false", "no", "n", "off"):
+            return False
+        raise ValueError(f"{raw!r} is not a boolean")
+    if typ is int:
+        return int(text)
+    if typing.get_origin(typ) is list:
+        items = [x.strip() for x in text.split(",") if x.strip()]
+        return [i.lower() for i in items] if name == "supported_file_types" else items
+    if name == "quote_char":
+        return raw
+    if name.endswith(("_mode", "_engine")) and name != "rule_engine":
+        return text.upper()
+    return text

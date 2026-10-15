@@ -8,14 +8,11 @@ import sys
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 
-from .app import App
+from .app import App, describe_modules, report, run_module
 from .audit import EventLogger
 from .common import FrameworkError, parse_as_of
-from .config import validate_all
-from .db import held_locks, release_lock, schema_exists
-from .modules import describe_modules, report, run_module
-from .settings import Settings
-from .scope import resolve_scope
+from .config import resolve_scope, validate_all
+from .db import Settings, held_locks, release_lock, schema_exists
 
 log = logging.getLogger(__package__)
 
@@ -112,7 +109,7 @@ def _no_app(args, settings: Settings) -> int:
         _print({"database": target, "settings": settings.describe()})
         return 0
     if getattr(args, "source", None):
-        from .connection_factory import source_connection
+        from .db import source_connection
 
         try:
             src = source_connection(args.source, args.db_type.strip().upper())

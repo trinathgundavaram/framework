@@ -1,21 +1,24 @@
-"""Configuration rows, filename templates and the validator."""
+"""Metadata tables: the configuration rows and their validation, the scope of a run, the file check options."""
 from __future__ import annotations
 
+import codecs
+import logging
 import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from itertools import combinations
 from typing import Iterable, Mapping, Optional, Sequence
 
 from . import db
 from .adapters import parse_uri
+from .common import ADHOC, ConfigError, SCHEDULED, code
 from .db import Connection
-from .common import ADHOC, SCHEDULED, ConfigError, code
-from .layout import VALUE_CODES
 
 
+# config: Configuration rows, filename templates and the validator.
 
 def _text(value) -> Optional[str]:
     return value.strip() or None if isinstance(value, str) else None
@@ -144,15 +147,18 @@ class FileCheck:
     check_val_txt: Optional[str]
     active: bool
     include: bool = True
+    field_nm: str = "*"
 
     @classmethod
     def from_row(cls, r: dict) -> "FileCheck":
         return cls(code(r["project_cd"]), code(r["table_nm"]), code(r["src_id"]), code(r["check_cd"]),
-                   _text(r["check_val_txt"]), r["active_ind"] == 1, r["include_ind"] == 1)
+                   _text(r["check_val_txt"]), r["active_ind"] == 1, r["include_ind"] == 1,
+                   (_text(r.get("check_field_nm")) or "*").lower())
 
     @property
     def label(self) -> str:
-        return f"ComplianceFileCheckConfig {self.project_cd}/{self.table_nm}/{self.src_id}/{self.check_cd}"
+        field = "" if self.field_nm == "*" else f"/{self.field_nm}"
+        return f"ComplianceFileCheckConfig {self.project_cd}/{self.table_nm}/{self.src_id}/{self.check_cd}{field}"
 
 
 @dataclass(frozen=True)
@@ -597,6 +603,7 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             add("CODE_CASE_DUPLICATE", f"{table}: {r['n']} rows have {column} {r['cd']} in different upper / lower case")
     rts = run_types(conn)
     from .batches import batch_due, check_period, check_schedule, report_dates, scheduled
+    from .load import VALUE_CODES
     for rt in rts.values():
         if not rt.run_ty.isalnum():
             add("RUN_TYPE", f"run type {rt.run_ty!r} must be letters and digits only (it is the {{RUNTY}} token)")
@@ -646,7 +653,6 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             if c.rpt_end < c.rpt_start:
                 add("BATCH_CALENDAR", f"{label}: Rpt_End_Dt_Key is before Rpt_Start_Dt_Key")
     cfgs = active_file_configs(conn, settings)
-    from .filecheck_options import CHECKS, check_options
 
     checks = file_checks(conn)
     from .load import header_columns
@@ -753,7 +759,7 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
         except (LookupError, ConfigError) as e:
             add("TARGET_TABLE", f"{label}: {e}")
 
-    from .layout import sql_body
+    from .load import sql_body
     for q in queries:
         label = q.label
         if q.db_ty not in SOURCE_DB_TYPES:
@@ -777,7 +783,7 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
         except (LookupError, ConfigError) as e:
             add("TARGET_TABLE", f"{label}: {e}")
 
-    from .layout import BATCH_COLUMN
+    from .load import BATCH_COLUMN
     from .load import columns
     cores = {(c.project_cd, c.table_nm): c for c in [*cfgs, *queries]}
     for e in active_export_configs(conn, settings):
@@ -824,3 +830,277 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             if others:
                 add("TEMPLATE_OVERLAP", f"file config {c.cfg_id}: sample name {name} also matches {others}")
     return issues
+
+
+# scope: What a step works on: a project, one table group or one table of it, and optionally one run type.
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Scope:
+    """`tables` = the tables of the table group (or the one table); None = every table of the project(s)."""
+    project_cd: Optional[str] = None
+    table_group: Optional[str] = None
+    table_nm: Optional[str] = None
+    run_ty: Optional[str] = None
+    tables: Optional[tuple] = None
+
+    @property
+    def narrowed(self) -> bool:
+        """Only part of a project's files belong to this run."""
+        return self.tables is not None or self.run_ty is not None
+
+    def covers(self, project_cd: Optional[str], table_nm: Optional[str] = None, run_ty: Optional[str] = None) -> bool:
+        if self.project_cd and code(project_cd) != self.project_cd:
+            return False
+        if self.tables is not None and table_nm is not None and code(table_nm) not in self.tables:
+            return False
+        return not (self.run_ty and run_ty is not None and code(run_ty) != self.run_ty)
+
+    def sql(self, alias: str = "", run_type: bool = True) -> tuple[str, list]:
+        """(' AND ...' conditions, parameters) on Project_Cd / Table_Nm / Run_Ty of a table or alias."""
+        a = f"{alias}." if alias else ""
+        parts, params = [], []
+        if self.project_cd:
+            parts.append(f"{a}Project_Cd = %s")
+            params.append(self.project_cd)
+        if self.tables is not None:
+            if self.tables:
+                parts.append(f"{a}Table_Nm IN ({', '.join(['%s'] * len(self.tables))})")
+                params.extend(self.tables)
+            else:
+                parts.append("1 = 0")
+        if run_type and self.run_ty:
+            parts.append(f"{a}Run_Ty = %s")
+            params.append(self.run_ty)
+        return "".join(f" AND {p}" for p in parts), params
+
+    def label(self) -> str:
+        parts = [f"project {self.project_cd}" if self.project_cd else "every project"]
+        if self.table_group:
+            parts.append(f"table group {self.table_group} ({', '.join(self.tables) or 'no active table'})")
+        if self.table_nm:
+            parts.append(f"table {self.table_nm}")
+        if self.run_ty:
+            parts.append(f"run type {self.run_ty}")
+        return ", ".join(parts)
+
+
+def resolve_scope(conn, project: Optional[str] = None, table_group: Optional[str] = None,
+                  table: Optional[str] = None, run_type: Optional[str] = None) -> Scope:
+    """The scope of a run. A table group is looked up in ComplianceTable only when one is given."""
+    project, table_group, table, run_type = (code(v) or None for v in (project, table_group, table, run_type))
+    if (table_group or table) and not project:
+        raise ConfigError("a table group or a table needs its project")
+    if table_group and table:
+        raise ConfigError("give a table group or a table, not both")
+    tables = None
+    if table:
+        tables = (table,)
+    elif table_group:
+        try:
+            rows = conn.execute("SELECT Table_Nm FROM ComplianceTable WHERE UPPER(Project_Cd) = %s "
+                                "AND UPPER(Table_Grp_Cd) = %s AND Active_Ind = 1", (project, table_group)).fetchall()
+        except Exception as e:  # noqa: BLE001
+            raise ConfigError(f"table group {table_group}: ComplianceTable could not be read: {db.error_line(e)}") from None
+        tables = tuple(sorted({code(r["table_nm"]) for r in rows}))
+        if not tables:
+            log.warning("table group %s of project %s has no active table in ComplianceTable: nothing to do",
+                        table_group, project)
+    return Scope(project, table_group, table, run_type, tables)
+
+
+# filecheck_options: Which content checks a file gets (ComplianceFileCheckConfig); read by FILE_CHECK and by the load.
+
+TRAILER_FIELDS = ("RECORD_TYPE", "FILE_NAME", "DATA_ROW_COUNT", "TOTAL_ROW_COUNT", "TIMESTAMP", "SKIP")
+FIELD_CHECKS = ("MIN_LENGTH", "MAX_LENGTH", "MIN_VALUE", "MAX_VALUE", "VALUE_IN", "PATTERN", "DATE_FORMAT")
+LIMIT_CHECKS = ("MIN_RECORD_LENGTH", "MAX_RECORD_LENGTH", "MIN_ROWS", "MAX_ROWS")
+CHECKS = ("RECORD_TYPE", "HEADER_NAMES", "COLUMN_COUNT", "TARGET_COLUMNS", "TRAILER", "CHARACTER_SET", "COLUMN_VALUES",
+          *LIMIT_CHECKS, *FIELD_CHECKS)
+_DATE_TOKENS = (("YYYY", "%Y"), ("MM", "%m"), ("DD", "%d"), ("HH", "%H"), ("MI", "%M"), ("SS", "%S"))
+VALUE_RULES = ("LENGTH", "NUMBER", "REQUIRED")
+COUNT_FIELDS = ("DATA_ROW_COUNT", "TOTAL_ROW_COUNT")
+_TIMESTAMP_FORMATS = {8: "%Y%m%d", 12: "%Y%m%d%H%M", 14: "%Y%m%d%H%M%S"}
+
+
+@dataclass(frozen=True)
+class CheckOptions:
+    record_types: Optional[tuple[str, str, str]] = None
+    trailer_fields: tuple[str, ...] = ()
+    header: Optional[str] = None
+    charset: Optional[str] = None
+    value_rules: tuple = ()
+    column_count: Optional[int] = None
+    target_columns: tuple = ()
+    limits: tuple = ()
+    field_rules: tuple = ()
+
+    def limit(self, check_cd: str) -> Optional[int]:
+        return next((v for c, v in self.limits if c == check_cd), None)
+
+
+@dataclass(frozen=True)
+class FieldRule:
+    """A check on one field of every data row: check code, field name, the parsed value and its text."""
+    check_cd: str
+    field: str
+    value: object
+    text: str
+    label: str
+
+
+def _field_rule(k: "FileCheck") -> FieldRule:
+    text = k.check_val_txt.strip()
+    try:
+        if k.check_cd in ("MIN_LENGTH", "MAX_LENGTH"):
+            value = int(text)
+            if value < 0:
+                raise ValueError
+        elif k.check_cd in ("MIN_VALUE", "MAX_VALUE"):
+            value = Decimal(text)
+        elif k.check_cd == "VALUE_IN":
+            value = frozenset(v.strip() for v in text.split("|" if "|" in text else ","))
+        elif k.check_cd == "PATTERN":
+            value = re.compile(text)
+        else:
+            value = text
+            for token, directive in _DATE_TOKENS:
+                value = value.replace(token, directive)
+            datetime.strptime(datetime(2026, 1, 31, 23, 59, 58).strftime(value), value)
+    except (ValueError, InvalidOperation, re.error):
+        raise ConfigError(f"{k.label}: Check_Val_Txt {text!r} is not valid for {k.check_cd}") from None
+    return FieldRule(k.check_cd, k.field_nm, value, text, k.label)
+
+def _names(value) -> list[str]:
+    if value is None:
+        return []
+    items = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    return [str(i).strip() for i in items if str(i).strip()]
+
+
+def check_options(cfg, checks) -> CheckOptions:
+    """The content checks of a file config, from the ComplianceFileCheckConfig rows.
+
+    Inactive rows are ignored. The rows add up: every check (Check_Cd and Check_Field_Nm; '*' = the whole file or
+    row) set for the project, the table or the source applies. For the same check the most specific active row
+    wins: its table and source, then its table, then its source, then '*'. Include_Ind of that row says whether the
+    check applies (1) or is switched off (0) for the file.
+    """
+    chosen: dict = {}
+    for k in checks:
+        if (not k.active or k.project_cd != cfg.project_cd or k.table_nm not in ("*", cfg.table_nm)
+                or k.src_id not in ("*", cfg.src_id)):
+            continue
+        rank = 2 * (k.table_nm != "*") + (k.src_id != "*")
+        key = (k.check_cd, k.field_nm)
+        if key not in chosen or rank > chosen[key][0]:
+            chosen[key] = (rank, k)
+    values, field_rules, limits = {}, [], []
+    for (check_cd, field), (_, k) in sorted(chosen.items()):
+        if not k.include or check_cd not in CHECKS:
+            continue
+        if not k.check_val_txt:
+            raise ConfigError(f"{k.label}: Check_Val_Txt is empty")
+        if (check_cd in FIELD_CHECKS) != (field != "*"):
+            raise ConfigError(f"{k.label}: {check_cd} " + ("needs Check_Field_Nm (the field it checks)"
+                                                          if check_cd in FIELD_CHECKS else "takes no Check_Field_Nm"))
+        if check_cd in FIELD_CHECKS:
+            field_rules.append(_field_rule(k))
+        elif check_cd in LIMIT_CHECKS:
+            text = k.check_val_txt.strip()
+            if not text.isdigit():
+                raise ConfigError(f"{k.label}: Check_Val_Txt must be a whole number")
+            limits.append((check_cd, int(text)))
+        else:
+            values[check_cd] = k
+    types = _names(values["RECORD_TYPE"].check_val_txt) if "RECORD_TYPE" in values else []
+    if types and len(types) != 3:
+        raise ConfigError(f"{values['RECORD_TYPE'].label}: Check_Val_Txt must be three values: header, detail, trailer "
+                          "(for example H,D,T)")
+    fields = tuple(f.upper() for f in _names(values["TRAILER"].check_val_txt)) if "TRAILER" in values else ()
+    bad = [f for f in fields if f not in TRAILER_FIELDS]
+    if bad:
+        raise ConfigError(f"{values['TRAILER'].label}: Check_Val_Txt has unknown value {bad[0]!r}; "
+                          f"accepted: {', '.join(TRAILER_FIELDS)}")
+    header = values["HEADER_NAMES"].check_val_txt.strip() if "HEADER_NAMES" in values else None
+    charset = values["CHARACTER_SET"].check_val_txt.strip() if "CHARACTER_SET" in values else None
+    if charset:
+        try:
+            codecs.lookup(charset)
+        except LookupError:
+            raise ConfigError(f"{values['CHARACTER_SET'].label}: Check_Val_Txt {charset!r} is not a character set "
+                              "(for example latin-1, ascii, cp1252)") from None
+    rules = tuple(r.upper() for r in _names(values["COLUMN_VALUES"].check_val_txt)) if "COLUMN_VALUES" in values else ()
+    if rules == ("ALL",):
+        rules = VALUE_RULES
+    bad = [r for r in rules if r not in VALUE_RULES]
+    if bad:
+        raise ConfigError(f"{values['COLUMN_VALUES'].label}: Check_Val_Txt has unknown value {bad[0]!r}; "
+                          f"accepted: ALL, {', '.join(VALUE_RULES)}")
+    count = None
+    if "COLUMN_COUNT" in values:
+        text = values["COLUMN_COUNT"].check_val_txt.strip()
+        if not text.isdigit() or int(text) < 1:
+            raise ConfigError(f"{values['COLUMN_COUNT'].label}: Check_Val_Txt must be the number of fields in a row "
+                              "(for example 23)")
+        count = int(text)
+    targets = ()
+    if "TARGET_COLUMNS" in values:
+        text = values["TARGET_COLUMNS"].check_val_txt
+        targets = tuple(n.strip().lower() for n in text.split("|" if "|" in text else ",") if n.strip())
+        if len(set(targets)) != len(targets):
+            raise ConfigError(f"{values['TARGET_COLUMNS'].label}: Check_Val_Txt names a column twice")
+    return CheckOptions(tuple(types) if types else None, fields, header, charset, rules, count, targets, tuple(limits),
+                        tuple(field_rules))
+
+
+def data_fields(opts: CheckOptions, names: tuple) -> Optional[int]:
+    """Fields per row the file must have (record type included): COLUMN_COUNT, else TARGET_COLUMNS, else
+    HEADER_NAMES; None = not set."""
+    if opts.column_count:
+        return opts.column_count
+    listed = opts.target_columns or names
+    return len(listed) + (1 if opts.record_types else 0) if listed else None
+
+
+def _is_timestamp(value: str) -> bool:
+    fmt = _TIMESTAMP_FORMATS.get(len(value))
+    if not fmt or not value.isdigit():
+        return False
+    try:
+        datetime.strptime(value, fmt)
+    except ValueError:
+        return False
+    return True
+
+
+def trailer_problems(rec: list, line_no: int, name: str, opts: CheckOptions, case_sensitive: bool, data_rows: int,
+                     lines: int) -> list[tuple[str, str]]:
+    """[(check, message)] of a trailer record against the file's TRAILER and RECORD_TYPE rows.
+
+    `data_rows` = detail records, `lines` = every non-blank line including the header and the trailer.
+    """
+    out = []
+    trailer_code = opts.record_types[2] if opts.record_types else None
+    if trailer_code and rec[0] != trailer_code:
+        out.append(("RECORD_TYPE", f"line {line_no}: trailer record type {rec[0]!r}, expected {trailer_code!r}"))
+    if not opts.trailer_fields:
+        return out
+    if len(rec) != len(opts.trailer_fields):
+        out.append(("TRAILER", f"line {line_no}: trailer has {len(rec)} fields, expected "
+                               f"{len(opts.trailer_fields)} ({', '.join(opts.trailer_fields)})"))
+    for value, kind in zip(rec, opts.trailer_fields):
+        value = value.strip()
+        if kind == "FILE_NAME":
+            same = value == name if case_sensitive else value.casefold() == name.casefold()
+            if not same:
+                out.append(("TRAILER", f"line {line_no}: trailer file name {value!r} is not the name of the file"))
+        elif kind in COUNT_FIELDS:
+            actual, unit = (data_rows, "data rows") if kind == "DATA_ROW_COUNT" else (lines, "lines")
+            if not value.isdigit() or int(value) != actual:
+                out.append(("TRAILER", f"line {line_no}: trailer count {value!r}, the file has {actual} {unit}"))
+        elif kind == "TIMESTAMP" and not _is_timestamp(value):
+            out.append(("TRAILER", f"line {line_no}: trailer timestamp {value!r} is not a valid "
+                                   "YYYYMMDD, YYYYMMDDHHMM or YYYYMMDDHHMMSS"))
+    return out

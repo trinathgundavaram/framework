@@ -18,8 +18,7 @@ from typing import Callable, Optional, Sequence
 from urllib.parse import urlparse
 
 from .common import ConfigError, RuleEngineNotConfigured
-from .connection_factory import nas_settings, smb_client
-from .settings import Settings
+from .db import Settings, nas_settings, smb_client
 
 log = logging.getLogger(__name__)
 
@@ -401,19 +400,23 @@ class LogChannel(Channel):
 
 
 class AirflowEmailChannel(Channel):
-    """Sends through Airflow's configured email backend (SMTP / SES)."""
+    """Sends through the Airflow SMTP connection (`smtp_default`, as the DAGs' email tasks)."""
+
+    def __init__(self, from_email: Optional[str] = None):
+        self.from_email = from_email
 
     def send(self, msg):
-        from airflow.utils.email import send_email
+        from airflow.providers.smtp.hooks.smtp import SmtpHook
 
         if not msg.recipients:
             log.warning("no recipients for %r; not sent", msg.subject)
             return
-        send_email(to=msg.recipients, subject=msg.subject[:200],
-                   html_content="<pre>" + html.escape(msg.body) + "</pre>")
+        with SmtpHook(smtp_conn_id="smtp_default") as hook:
+            hook.send_email_smtp(to=msg.recipients, subject=msg.subject[:200], from_email=self.from_email,
+                                 html_content="<pre>" + html.escape(msg.body) + "</pre>")
 
 
 def build_channel(settings: Settings) -> Channel:
     if settings.notify_backend == "airflow":
-        return AirflowEmailChannel()
+        return AirflowEmailChannel(settings.notify_from_email)
     return LogChannel()
