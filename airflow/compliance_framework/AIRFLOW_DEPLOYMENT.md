@@ -454,8 +454,9 @@ A path with its own server uses that server with the NAS Connection's login. `$e
 
 ## Sample metadata
 
-A complete worked example - every metadata row for one project (three FDR and two internal sources; daily,
-monthly and ad-hoc run types; file checks; an existing table layout) - is in `examples/`:
+A complete worked example - every metadata row for one project (three FDR sources, two internal sources that send
+files and two pulled with a query; daily, monthly and ad-hoc run types; file checks; an existing table layout; the
+export table; REUSE and REOPEN overrides) - is in `examples/`:
 `cmsuniv_odag3_sample_metadata.xlsx` (one tab per table, in DDL order) and `cmsuniv_odag3_sample_metadata.sql`
 (the same rows as Teradata `INSERT` statements).
 

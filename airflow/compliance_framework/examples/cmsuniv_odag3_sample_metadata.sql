@@ -28,7 +28,7 @@ VALUES
 
 
 -- ----------------------------------------------------------------------------------------------------
--- 2. Sources: three FDR sources and two internal sources
+-- 2. Sources: three FDR sources, two internal sources with files, two internal sources pulled with a query
 -- ----------------------------------------------------------------------------------------------------
 
 INSERT INTO HSABC_DEV.ComplianceSourceSystem
@@ -55,6 +55,16 @@ INSERT INTO HSABC_DEV.ComplianceSourceSystem
   (Src_ID, Src_Nm, Src_Ty, Active_Ind)
 VALUES
   ('20', 'Appeals', 'INTERNAL', 1);
+
+INSERT INTO HSABC_DEV.ComplianceSourceSystem
+  (Src_ID, Src_Nm, Src_Ty, Active_Ind)
+VALUES
+  ('30', 'UMAuth', 'INTERNAL', 1);
+
+INSERT INTO HSABC_DEV.ComplianceSourceSystem
+  (Src_ID, Src_Nm, Src_Ty, Active_Ind)
+VALUES
+  ('40', 'AppealsDB', 'INTERNAL', 1);
 
 
 -- ----------------------------------------------------------------------------------------------------
@@ -117,6 +127,36 @@ VALUES
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
   (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Active_Ind)
 VALUES
+  ('CMSUNIV', 'ODAG3', '30', 'DAILY', DATE '2026-01-01', NULL, '2200', 'SELECT CAST({run_date} AS DATE) - 1 AS rpt_start, CAST({run_date} AS DATE) - 1 AS rpt_end', 1);
+
+INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Active_Ind)
+VALUES
+  ('CMSUNIV', 'ODAG3', '30', 'MNT', DATE '2026-01-01', NULL, '2200', 'SELECT ADD_MONTHS(p - EXTRACT(DAY FROM p) + 1, -1) AS rpt_start, p - EXTRACT(DAY FROM p) AS rpt_end FROM (SELECT CAST({period_dt} AS DATE) AS p) d', 1);
+
+INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Active_Ind)
+VALUES
+  ('CMSUNIV', 'ODAG3', '30', 'CMS', DATE '2026-01-01', NULL, '2200', NULL, 1);
+
+INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Active_Ind)
+VALUES
+  ('CMSUNIV', 'ODAG3', '40', 'DAILY', DATE '2026-01-01', NULL, '2200', 'SELECT CAST({run_date} AS DATE) - 1 AS rpt_start, CAST({run_date} AS DATE) - 1 AS rpt_end', 1);
+
+INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Active_Ind)
+VALUES
+  ('CMSUNIV', 'ODAG3', '40', 'MNT', DATE '2026-01-01', NULL, '2200', 'SELECT ADD_MONTHS(p - EXTRACT(DAY FROM p) + 1, -1) AS rpt_start, p - EXTRACT(DAY FROM p) AS rpt_end FROM (SELECT CAST({period_dt} AS DATE) AS p) d', 1);
+
+INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Active_Ind)
+VALUES
+  ('CMSUNIV', 'ODAG3', '40', 'CMS', DATE '2026-01-01', NULL, '2200', NULL, 1);
+
+INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Active_Ind)
+VALUES
   ('CMSUNIV', 'ODAG3', '51', 'MNT', DATE '2026-01-01', NULL, '2200', 'SELECT ADD_MONTHS(p - EXTRACT(DAY FROM p) + 1, -1) AS rpt_start, p - EXTRACT(DAY FROM p) AS rpt_end FROM (SELECT CAST({period_dt} AS DATE) AS p) d', 1);
 
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
@@ -146,7 +186,7 @@ VALUES
 
 
 -- ----------------------------------------------------------------------------------------------------
--- 5. One row per source: file name, delimiter, folder, staging and core table
+-- 5. One row per file source: file name, delimiter, folder, staging and core table
 -- ----------------------------------------------------------------------------------------------------
 
 INSERT INTO HSABC_DEV.ComplianceSourceFileConfig
@@ -173,6 +213,21 @@ INSERT INTO HSABC_DEV.ComplianceSourceFileConfig
   (Project_Cd, Table_Nm, Src_ID, Src_File_Nm_Tmplt, Delmtr_Cd, Src_File_Has_Hdr_Ind, Src_File_Has_Trlr_Ind, Allow_Zero_Rcd_Ind, Src_File_Path, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, File_Vrsn_Cd, Active_Ind)
 VALUES
   ('CMSUNIV', 'ODAG3', '20', 'CMSAuth_Appeals_PYMT_C_{VERSION}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt', '|', 1, 0, 1, '\\nas01\Compliance\$env\cmsuniv\internal\PYMT_C', 'CMSUNIV_FILELAND_$ENV_T', 'ODAG_DE_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', '22', 1);
+
+
+-- ----------------------------------------------------------------------------------------------------
+-- 5a. Optional: internal sources pulled with a query (SOURCE_LOAD); Src_Conn_Cd empty = same Teradata
+-- ----------------------------------------------------------------------------------------------------
+
+INSERT INTO HSABC_DEV.ComplianceSourceQueryConfig
+  (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
+VALUES
+  ('CMSUNIV', 'ODAG3', '30', 'TERADATA', NULL, 'SELECT a.Mbr_First_Nm AS MemberFirstName, a.Mbr_Last_Nm AS MemberLastName, a.Mbr_ID AS MemberID, a.Contract_ID AS ContractID, a.Auth_Nbr AS AuthorizationorClaimNumber, a.Rcvd_Dt AS Datetherequestwasreceived FROM CMSUNIV_SRC_DEV_V.UM_AUTH a WHERE a.Rcvd_Dt BETWEEN {rpt_start} AND {rpt_end}', 'CMSUNIV_FILELAND_$ENV_T', 'ODAG_DE_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', 1);
+
+INSERT INTO HSABC_DEV.ComplianceSourceQueryConfig
+  (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
+VALUES
+  ('CMSUNIV', 'ODAG3', '40', 'SQLSERVER', 'cms_src_appeals_sqlsrv', 'SELECT m.FirstName AS MemberFirstName, m.LastName AS MemberLastName, m.MemberNumber AS MemberID, a.ContractId AS ContractID, a.AppealNumber AS AuthorizationorClaimNumber, CONVERT(varchar(10), a.ReceivedDate, 23) AS Datetherequestwasreceived FROM dbo.Appeal a JOIN dbo.Member m ON m.MemberKey = a.MemberKey WHERE a.ReceivedDate >= {rpt_start} AND a.ReceivedDate < DATEADD(day, 1, {rpt_end})', 'CMSUNIV_FILELAND_$ENV_T', 'ODAG_DE_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', 1);
 
 
 -- ----------------------------------------------------------------------------------------------------
@@ -213,6 +268,29 @@ INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig
   (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES
   ('CMSUNIV', 'ODAG3', 'ODAG_DE_Table3_2022_ID', 'ROW_SEQUENCE', NULL, 1);
+
+
+-- ----------------------------------------------------------------------------------------------------
+-- 6a. Optional: the export table of a core table (EXPORT_LOAD)
+-- ----------------------------------------------------------------------------------------------------
+
+INSERT INTO HSABC_DEV.ComplianceExportConfig
+  (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES
+  ('CMSUNIV', 'ODAG3', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG_DE_TABLE3_2022_EXP', NULL, NULL, NULL, 1);
+
+-- The export table: the core table's columns plus Exp_Btch_ID (the export batch), for example:
+--   CREATE MULTISET TABLE CMSUNIV_EXPORT_DEV_T.ODAG_DE_TABLE3_2022_EXP AS CMSUNIV_CORE_DEV_T.ODAG_DE_TABLE3_2022 WITH NO DATA;
+--   ALTER TABLE CMSUNIV_EXPORT_DEV_T.ODAG_DE_TABLE3_2022_EXP ADD Exp_Btch_ID VARCHAR(100);
+--
+-- Optional: export through a procedure instead of the framework's delete and INSERT ... SELECT. The procedure deletes
+-- and inserts the batch's export rows itself; Exp_Proc_Parm_Txt lists its parameters in order ({btch_id},
+-- {data_btch_id}, {exp_btch_id}, {reused_btch_ids}, {project_cd}, {table_nm}, {src_id}, {run_ty}, {version},
+-- {req_id}, {req_dt}, {rpt_start}, {rpt_end}; empty = {btch_id}, {data_btch_id}, {exp_btch_id}):
+--   UPDATE HSABC_DEV.ComplianceExportConfig
+--      SET Exp_Proc_Nm = 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_ODAG3',
+--          Exp_Proc_Parm_Txt = '{btch_id}, {data_btch_id}, {exp_btch_id}, {reused_btch_ids}'
+--    WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'ODAG3';
 
 
 -- ----------------------------------------------------------------------------------------------------
@@ -291,3 +369,17 @@ SELECT 'REUSE', Req_ID, Btch_ID, '20261019_CMSUNIV_ODAG3_140_CMS_2200_1', 'APPRO
        'ESI confirmed no change since the previous CMS request', 'approver_id', CURRENT_TIMESTAMP(6)
 FROM HSABC_DEV.ComplianceRequestControl
 WHERE Btch_ID = '20261021_CMSUNIV_ODAG3_140_CMS_2200_1';
+
+
+-- ----------------------------------------------------------------------------------------------------
+-- 11. Only to open a closed batch again (e.g. for a late or corrected file): an approved REOPEN override.
+--     OVERRIDE_DECISIONS applies it once; the batch stays open until new data arrives, then BATCH_CLOSE closes it.
+--     (A LATE_ARRIVAL / CORRECTION override loads the file into the closed batch without reopening it.)
+-- ----------------------------------------------------------------------------------------------------
+
+INSERT INTO HSABC_DEV.ComplianceBatchOverride
+  (Override_Ty, Req_ID, Btch_ID, Apprvl_Stat, Valid_Thru_Dt_Key, Rsn_Txt, Reviewed_By, Reviewed_Dtts)
+SELECT 'REOPEN', Req_ID, Btch_ID, 'APPROVED', DATE '2026-10-31',
+       'ESI resends corrected data for the closed CMS request', 'approver_id', CURRENT_TIMESTAMP(6)
+FROM HSABC_DEV.ComplianceRequestControl
+WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_140_CMS_2200_1';
