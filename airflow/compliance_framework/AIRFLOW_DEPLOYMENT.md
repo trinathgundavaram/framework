@@ -1104,8 +1104,12 @@ Codes and values that people type are compared without regard to case, everywher
 - project, table, source, run type and run category codes in every configuration table, in the
   intake requests, in job parameters (`--project`, `--run-type`, `--table`, a Variable's `project`, ...);
 - override type and approval status in `ComplianceBatchOverride`, and a `Reuse_Btch_ID` or `--btch-id`;
-- file names against their templates (`FILENAME_CASE_SENSITIVE` now defaults to false), the run-type
-  token in a file name, and the template placeholders (`{RunTy}` = `{RUNTY}`);
+- file names against their templates (always; the earlier `FILENAME_CASE_SENSITIVE` setting is gone), the
+  run-type token in a file name, the template placeholders (`{RunTy}` = `{RUNTY}`) and the file name in a trailer;
+- file content checks: record types (`h` = `H`), `VALUE_IN` values, `PATTERN` (matched ignoring case), the
+  `DATE_FORMAT` tokens (`yyyymmdd` = `YYYYMMDD`), header names and `TARGET_COLUMNS` names, check and trailer codes;
+- column names in `ComplianceTargetColumnConfig`, `Check_Field_Nm`, staging / core / export table and database
+  names, SQL placeholders (`{BTCH_ID}` = `{btch_id}`), period and schedule codes (`range(week,1,1)`);
 - step and module names, admin commands, period names and the choice settings (`FILE_RULES_MODE`,
   `NOTIFY_BACKEND`, `RULE_ENGINE`, ...).
 

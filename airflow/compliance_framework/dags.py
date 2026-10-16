@@ -76,12 +76,26 @@ def _load_nas_connection(conn_id: str) -> None:
     logger.info("Loaded NAS connection '%s': host=%s user=%s (password not logged)", conn_id, conn.host, conn.login)
 
 
+def _keys(value: Optional[dict]) -> dict:
+    """A Variable / trigger object with its keys in lower case (keys are not case sensitive)."""
+    return {str(k).lower(): v for k, v in (value or {}).items()}
+
+
+def conf_value(dag_run, params, key: str):
+    """A trigger value by key in any case, else the form's parameter (passed on to the next DAG)."""
+    value = _keys(getattr(dag_run, "conf", None)).get(key)
+    return value if value not in (None, "", []) else (params or {}).get(key) or ""
+
+
 def _load_variable(variable_key: str) -> dict:
     config = Variable.get(variable_key, default=None, deserialize_json=True)
     if config is None:
         raise ValueError(f"Airflow Variable '{variable_key}' is not set")
     if not isinstance(config, dict):
         raise ValueError(f"Airflow Variable '{variable_key}' must be a JSON object, got {type(config).__name__}")
+    config = _keys(config)
+    if isinstance(config.get("runs"), list):
+        config["runs"] = [_keys(r) if isinstance(r, dict) else r for r in config["runs"]]
     return config
 
 
@@ -119,7 +133,7 @@ def chosen_runs(variable: dict, dag_run) -> list:
     whose schedule_interval is its scheduled time, and a manual or triggered run the Variable's own scope.
     """
     runs = step_scopes(variable)
-    names = [n.strip().upper() for n in str((dag_run.conf or {}).get("run") or "").split(",") if n.strip()]
+    names = [n.strip().upper() for n in str(_keys(dag_run.conf).get("run") or "").split(",") if n.strip()]
     if names:
         by_name = {str(r.get("name") or "").upper(): i for i, r in enumerate(runs)}
         unknown = [n for n in names if n not in by_name]
@@ -142,7 +156,7 @@ def resolve_config(variable_key: str, overrides: dict = None, scope_index: int =
     """(configuration, framework settings): the Variable, then one entry of its `runs`, then the trigger's values."""
     variable = _load_variable(variable_key)
     scope = dict(step_scopes(variable)[scope_index]) if scope_index is not None else {}
-    overrides = {k: v for k, v in (overrides or {}).items() if v not in (None, "", [])}
+    overrides = {k: v for k, v in _keys(overrides).items() if v not in (None, "", [])}
     layers = (variable, scope, overrides)
     merged = {key: {k: v for layer in layers for k, v in (layer.get(key) or {}).items()} for key in _MERGED}
     config = {k: v for layer in layers for k, v in layer.items() if k not in (*_MERGED, "runs")}
@@ -347,12 +361,12 @@ def _dag(dag_id: str, dag_config: dict, description: str, params: dict, tag: str
     return DAG(dag_id=dag_id, description=description, default_args=default_args,
                schedule=_schedule(dag_config, tz), catchup=False, max_active_runs=1,
                dagrun_timeout=_minutes(dag_config, "dagrun_timeout_minutes", timedelta(hours=8)), params=params,
-               tags=[*(dag_config.get("tags") or DEFAULT_TAGS), tag])
+               user_defined_macros={"conf_value": conf_value}, tags=[*(dag_config.get("tags") or DEFAULT_TAGS), tag])
 
 
 def _overrides(context, names) -> dict:
     """What the trigger gave (its configuration, else the form's parameters); empty values are left out."""
-    conf = dict(context["dag_run"].conf or {}) if context.get("dag_run") else {}
+    conf = _keys(context["dag_run"].conf) if context.get("dag_run") else {}
     for name in names:
         if name not in conf and context["params"].get(name) not in (None, "", []):
             conf[name] = context["params"][name]
@@ -437,9 +451,9 @@ def build_step_dag(dag_id: str, step: str, variable_key: str) -> DAG:
                                 op_kwargs={"scope_index": i if dag_config.get("runs") else None},
                                 execution_timeout=timeout, show_return_value_in_logs=False)
                  for i, scope in enumerate(scopes)]
-    given = "{{ (dag_run.conf or {}).get('%s') or params.get('%s') or '' }}"
+    given = "{{ conf_value(dag_run, params, '%s') }}"
     triggers = [TriggerDagRunOperator(task_id=f"trigger_{str(target).lower()}", dag=dag, trigger_dag_id=str(target),
-                                      trigger_rule="all_success", conf={k: given % (k, k) for k in PASSED_ON})
+                                      trigger_rule="all_success", conf={k: given % k for k in PASSED_ON})
                 for target in dag_config.get("trigger_dags") or []]
     for trigger in triggers:
         tasks >> trigger

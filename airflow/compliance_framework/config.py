@@ -546,9 +546,8 @@ def _pattern(parsed: list[tuple]) -> str:
     return out
 
 
-def compile_template(template: str, case_sensitive: bool = True,
-                     parts: Optional[Mapping[str, Optional[str]]] = None) -> re.Pattern:
-    return re.compile(_pattern(_parse(template, parts)), 0 if case_sensitive else re.IGNORECASE)
+def compile_template(template: str, parts: Optional[Mapping[str, Optional[str]]] = None) -> re.Pattern:
+    return re.compile(_pattern(_parse(template, parts)), re.IGNORECASE)
 
 
 def render(template: str, *, runty: str, rpt_start: date, rpt_end: date, ts: datetime,
@@ -562,11 +561,11 @@ def render(template: str, *, runty: str, rpt_start: date, rpt_end: date, ts: dat
 
 
 class TemplateMatcher:
-    def __init__(self, configs: Iterable[FileConfig], case_sensitive: bool = True):
+    def __init__(self, configs: Iterable[FileConfig]):
         self._compiled: list[tuple[FileConfig, re.Pattern, dict]] = []
         self._any_version: list[tuple[FileConfig, re.Pattern]] = []
         self.invalid: list[tuple[FileConfig, str]] = []
-        flags = 0 if case_sensitive else re.IGNORECASE
+        flags = re.IGNORECASE
         for c in configs:
             try:
                 parsed = _parse(c.src_file_nm_tmplt, c.name_parts)
@@ -639,8 +638,7 @@ class Issue:
     severity: str = "ERROR"
 
 
-def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
-                 run_date: Optional[date] = None) -> list[Issue]:
+def validate_all(conn: Connection, settings=None, run_date: Optional[date] = None) -> list[Issue]:
     """Validate the configuration tables and the target tables they point to."""
     issues: list[Issue] = []
 
@@ -806,7 +804,7 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
     for c in cfgs:
         label = f"file config {c.cfg_id} ({c.project_cd}/{c.table_nm}/{c.src_id})"
         try:
-            compile_template(c.src_file_nm_tmplt, case_sensitive, c.name_parts)
+            compile_template(c.src_file_nm_tmplt, c.name_parts)
         except TemplateError as e:
             add("TEMPLATE", f"{label}: {e}")
         try:
@@ -902,7 +900,7 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
                    and code(r["src_id"]) in ("*", x.src_id) and code(r["run_ty"]) in ("*", x.run_ty) for x in xw):
             add("RULE_BINDING_NO_XWALK", f"{label}: matches no active crosswalk row")
 
-    matcher = TemplateMatcher(cfgs, case_sensitive)
+    matcher = TemplateMatcher(cfgs)
     for c in matcher.configs:
         for rt in sorted({x.run_ty for x in xw_by_source.get((c.project_cd, c.table_nm, c.src_id), ())}) or ["X1"]:
             name = render(c.src_file_nm_tmplt, runty=rt, rpt_start=date(2026, 1, 1), rpt_end=date(2026, 1, 31),
@@ -1041,11 +1039,11 @@ def _field_rule(k: "FileCheck") -> FieldRule:
         elif k.check_cd in ("MIN_VALUE", "MAX_VALUE"):
             value = Decimal(text)
         elif k.check_cd == "VALUE_IN":
-            value = frozenset(v.strip() for v in text.split("|" if "|" in text else ","))
+            value = frozenset(v.strip().casefold() for v in text.split("|" if "|" in text else ","))
         elif k.check_cd == "PATTERN":
-            value = re.compile(text)
+            value = re.compile(text, re.IGNORECASE)
         else:
-            value = text
+            value = text.upper()
             for token, directive in _DATE_TOKENS:
                 value = value.replace(token, directive)
             datetime.strptime(datetime(2026, 1, 31, 23, 59, 58).strftime(value), value)
@@ -1095,7 +1093,7 @@ def check_options(cfg, checks) -> CheckOptions:
             limits.append((check_cd, int(text)))
         else:
             values[check_cd] = k
-    types = _names(values["RECORD_TYPE"].check_val_txt) if "RECORD_TYPE" in values else []
+    types = [t.upper() for t in _names(values["RECORD_TYPE"].check_val_txt)] if "RECORD_TYPE" in values else []
     if types and len(types) != 3:
         raise ConfigError(f"{values['RECORD_TYPE'].label}: Check_Val_Txt must be three values: header, detail, trailer "
                           "(for example H,D,T)")
@@ -1156,7 +1154,7 @@ def _is_timestamp(value: str) -> bool:
     return True
 
 
-def trailer_problems(rec: list, line_no: int, name: str, opts: CheckOptions, case_sensitive: bool, data_rows: int,
+def trailer_problems(rec: list, line_no: int, name: str, opts: CheckOptions, data_rows: int,
                      lines: int) -> list[tuple[str, str]]:
     """[(check, message)] of a trailer record against the file's TRAILER and RECORD_TYPE rows.
 
@@ -1164,7 +1162,7 @@ def trailer_problems(rec: list, line_no: int, name: str, opts: CheckOptions, cas
     """
     out = []
     trailer_code = opts.record_types[2] if opts.record_types else None
-    if trailer_code and rec[0] != trailer_code:
+    if trailer_code and rec[0].strip().upper() != trailer_code:
         out.append(("RECORD_TYPE", f"line {line_no}: trailer record type {rec[0]!r}, expected {trailer_code!r}"))
     if not opts.trailer_fields:
         return out
@@ -1174,8 +1172,7 @@ def trailer_problems(rec: list, line_no: int, name: str, opts: CheckOptions, cas
     for value, kind in zip(rec, opts.trailer_fields):
         value = value.strip()
         if kind == "FILE_NAME":
-            same = value == name if case_sensitive else value.casefold() == name.casefold()
-            if not same:
+            if value.casefold() != name.casefold():
                 out.append(("TRAILER", f"line {line_no}: trailer file name {value!r} is not the name of the file"))
         elif kind in COUNT_FIELDS:
             actual, unit = (data_rows, "data rows") if kind == "DATA_ROW_COUNT" else (lines, "lines")

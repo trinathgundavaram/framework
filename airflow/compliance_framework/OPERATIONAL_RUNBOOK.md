@@ -1,15 +1,18 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.46 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.47 (Airflow 3 / Teradata).
 
 **How to use this page**
 
 - Every SQL block can be copied as it is. Replace the placeholders before running:
   `HSABC_DEV` = your metadata database, `CMSUNIV` = your project code, `ODAG3` = your table (dataset) code, and the
   sample source IDs, names, folders and schemas with yours.
-- Codes (project, table, source, run type, check, value and status codes) are compared without regard to case; the
-  framework stores them in upper case. Write them in upper case to avoid confusion.
+- Nothing is case sensitive: codes (project, table, source, run type, check, value and status codes), column, table
+  and database names, file names against their templates, record types, `VALUE_IN` values, `PATTERN`s,
+  `DATE_FORMAT`s, period codes, SQL placeholders, Airflow Variable and trigger keys. The framework stores codes in
+  upper case; write them in upper case to avoid confusion. (Airflow Connection ids are Airflow's own and keep their
+  case.)
 - `*` in a code column means "every" (every table, every source, every run type, every field), where the table says
   it is allowed.
 - `Active_Ind = 1` means the row is in use; `0` means the row is ignored as if it did not exist. Use `0` instead of
@@ -1061,7 +1064,6 @@ A DAG never runs twice at the same time; a run that is due while another runs wa
 | `FILE_ENCODING` | `utf-8` | File encoding |
 | `QUOTE_CHAR` | `"` | Quote character |
 | `EMPTY_AS_NULL` | true | Empty field = NULL |
-| `FILENAME_CASE_SENSITIVE` | false | Match file names with case |
 | `SUPPORTED_FILE_TYPES` | `.txt,.csv` | Accepted extensions |
 | `LOAD_ENGINE` | `BATCH` | `BATCH` or `FASTLOAD` (large files; test first) |
 | `INSERT_BATCH_ROWS`, `INSERT_BATCH_BYTES` | 2000, 500000 | Insert batch size |

@@ -207,7 +207,7 @@ class IngestPipeline:
         mine = [c for c in cfgs if scope.covers(c.project_cd, c.table_nm)]
         locations = sorted({parse_uri(c.src_file_path) for c in mine})
         shared = {parse_uri(c.src_file_path) for c in cfgs if c not in mine} & set(locations)
-        return locations, shared, TemplateMatcher(mine, self.settings.filename_case_sensitive)
+        return locations, shared, TemplateMatcher(mine)
 
     @staticmethod
     def belongs(name: str, location: tuple, shared: set, own: Optional[TemplateMatcher], scope: Scope) -> bool:
@@ -252,7 +252,7 @@ class IngestPipeline:
 
     def _load_config(self) -> TemplateMatcher:
         """The compiled filename templates of every active file config."""
-        return TemplateMatcher(cfgmod.active_file_configs(self.conn, self.settings), self.settings.filename_case_sensitive)
+        return TemplateMatcher(cfgmod.active_file_configs(self.conn, self.settings))
 
     def _configured_locations(self) -> list[tuple[str, str]]:
         """The distinct (share, folder) inbound locations of every active file config."""

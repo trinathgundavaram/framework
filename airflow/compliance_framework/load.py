@@ -321,7 +321,7 @@ def header_columns(cfg: "FileConfig", opts) -> tuple:
     except ConfigError:
         delim = ","
     names = [v.strip() for v in opts.header.split(delim if delim in opts.header else ",")]
-    if opts.record_types and names[0] == opts.record_types[0]:
+    if opts.record_types and names[0].upper() == opts.record_types[0]:
         names = names[1:]
     return tuple(names)
 
@@ -491,8 +491,7 @@ def read_delimited(path: str, cfg: "FileConfig", expected_cols: int, settings: "
     if cfg.has_trailer:
         if held is None:
             raise FileRejected("FILE_PARSE_ERROR", "trailer expected but not found")
-        problems = trailer_problems(held[1], held[0], os.path.basename(path), opts, settings.filename_case_sensitive,
-                                    data_rows, lines)
+        problems = trailer_problems(held[1], held[0], os.path.basename(path), opts, data_rows, lines)
         if problems:
             counts = [m for _, m in problems if "trailer count" in m]
             raise FileRejected("FILE_TRAILER_COUNT_MISMATCH" if counts else "FILE_PARSE_ERROR", (counts or [problems[0][1]])[0])

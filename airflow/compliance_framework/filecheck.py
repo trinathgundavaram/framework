@@ -109,7 +109,7 @@ def _field_problem(value: str, r: FieldRule) -> Optional[str]:
             return f"{r.field}: {value} is below {r.text}"
         if c == "MAX_VALUE" and number > r.value:
             return f"{r.field}: {value} is above {r.text}"
-    if c == "VALUE_IN" and value.strip() not in r.value:
+    if c == "VALUE_IN" and value.strip().casefold() not in r.value:
         return f"{r.field}: {value!r} is not one of {r.text}"
     if c == "PATTERN" and not r.value.fullmatch(value):
         return f"{r.field}: {value!r} does not match {r.text}"
@@ -206,7 +206,7 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
 
     def detail(line_no: int, rec: list[str]) -> None:
         counts["data"] += 1
-        if detail_code and rec[0] != detail_code:
+        if detail_code and rec[0].strip().upper() != detail_code:
             wrong_type.add(line_no, repr(rec[0]))
             note("RECORD_TYPE", line_no, f"record type {rec[0]!r}, expected {detail_code!r}", rec)
         if expected_cols is not None and len(rec) != expected_cols:
@@ -261,7 +261,7 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
     elif header:
         line_no, rec = header
         before = len(out)
-        if header_code and rec[0] != header_code:
+        if header_code and rec[0].strip().upper() != header_code:
             out.append(("RECORD_TYPE", f"line {line_no}: header record type {rec[0]!r}, expected {header_code!r}"))
         if expected_cols is not None and len(rec) != expected_cols:
             out.append(("HEADER", f"line {line_no}: header has {len(rec)} columns, expected {expected_cols}"))
@@ -296,7 +296,7 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
     if cfg.has_trailer and trailer is None:
         out.append(("TRAILER", "trailer expected but not found"))
     elif trailer:
-        found = trailer_problems(trailer[1], trailer[0], name, opts, settings.filename_case_sensitive, counts["data"],
+        found = trailer_problems(trailer[1], trailer[0], name, opts, counts["data"],
                                  counts["content"])
         for check, text in found:
             note(check, trailer[0], text.split(": ", 1)[1], trailer[1])
