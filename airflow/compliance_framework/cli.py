@@ -72,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--db-type", default="SQLSERVER", help="TERADATA or SQLSERVER (with --source)")
     add("validate-config", "validate the configuration tables and target tables")
     add("process-decisions", "apply approved reuse overrides and remove expired ones")
-    scope(add("close-batches", "close the batches past their SLA hold that have data or are in exception"))
+    scope(add("close-batches", "close the batches past their SLA hold, with or without data"))
     sp = add("close-batch", "close a batch past its SLA hold, with or without data (manual): every open source of it, "
                             "or the one in --src-id")
     sp.add_argument("--btch-id", required=True)
