@@ -1,4 +1,4 @@
-"""Compliance batch framework - BATCH_CREATION. See compliance_framework/AIRFLOW_DEPLOYMENT.md."""
+"""Compliance batch framework - BATCH_CREATION. See airflow_resources/docs/AIRFLOW_DEPLOYMENT.md."""
 import os
 import sys
 

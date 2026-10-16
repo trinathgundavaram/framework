@@ -34,7 +34,7 @@ class App:
         try:
             if not schema_exists(conn, settings.metadata_schema):
                 raise ConfigError(f"the framework tables were not found in {settings.metadata_schema!r}; "
-                                  "they are created separately from sql/schema.sql")
+                                  "they are created separately from airflow_resources/sql/schema.sql")
             return cls(conn, clock or Clock(), settings, build_file_store(settings), build_rule_engine(settings))
         except BaseException:
             conn.close()

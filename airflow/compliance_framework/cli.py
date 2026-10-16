@@ -125,7 +125,7 @@ def _no_app(args, settings: Settings) -> int:
         return 0
     with settings.connect() as conn:
         ok = schema_exists(conn, settings.metadata_schema)
-        _print({"database": target, "ok": ok, "error": None if ok else "framework tables not found (created separately from sql/schema.sql)"})
+        _print({"database": target, "ok": ok, "error": None if ok else "framework tables not found (created separately from airflow_resources/sql/schema.sql)"})
         return 0 if ok else 1
 
 

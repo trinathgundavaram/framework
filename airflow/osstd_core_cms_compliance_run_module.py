@@ -1,4 +1,4 @@
-"""Compliance batch framework - any step, by module name. See compliance_framework/AIRFLOW_DEPLOYMENT.md."""
+"""Compliance batch framework - any step, by module name. See airflow_resources/docs/AIRFLOW_DEPLOYMENT.md."""
 import os
 import sys
 

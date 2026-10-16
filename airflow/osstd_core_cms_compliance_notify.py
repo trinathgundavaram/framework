@@ -1,4 +1,4 @@
-"""Compliance batch framework - NOTIFY. See compliance_framework/AIRFLOW_DEPLOYMENT.md."""
+"""Compliance batch framework - NOTIFY. See airflow_resources/docs/AIRFLOW_DEPLOYMENT.md."""
 import os
 import sys
 

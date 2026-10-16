@@ -33,12 +33,18 @@ airflow/
     adapters.py    file stores (NAS, local), email channel, rules engine
     common.py      codes, statuses, dates, clock
     cli.py         command line
-    sql/schema.sql                Teradata DDL ({{META_DB}} template)
-    sql/approvals.sql             manual override templates
-    examples/dev, examples/prod   one example Variable per DAG
-    examples/trigger_configurations.json
-    requirements.txt
-    .airflowignore                keeps Airflow from parsing the package as DAG files
+    .airflowignore keeps Airflow from parsing the package as DAG files
+
+airflow_resources/                (not deployed with the DAGs)
+  docs/AIRFLOW_DEPLOYMENT.md      this guide
+  docs/OPERATIONAL_RUNBOOK.md     metadata tables, values and procedures (Confluence)
+  sql/schema.sql                  Teradata DDL ({{META_DB}} template)
+  sql/approvals.sql               manual override templates
+  examples/dev, examples/prod     one example Variable per DAG
+  examples/cmsuniv_dev            the CMSUNIV project's Variables
+  examples/*.sql, *.xlsx          sample and CMSUNIV metadata, CMSUNIV export feed
+  examples/trigger_configurations.json
+  requirements.txt                Python packages for the workers
 ```
 
 ## How it fits together
@@ -78,12 +84,12 @@ No `.env` file and no AWS Secrets Manager: credentials come from the Airflow Con
 
 1. Copy the `osstd_core_cms_compliance_*.py` files and the `compliance_framework/` folder into the DAGs
    folder, side by side.
-2. Install `compliance_framework/requirements.txt` in the workers' environment. **Airflow 3** (Task SDK
+2. Install `airflow_resources/requirements.txt` in the workers' environment. **Airflow 3** (Task SDK
    `airflow.sdk`, the `standard` and `smtp` providers; no Airflow 2 or deprecated imports), on a Python version your
    Airflow 3 release supports. The email tasks and `NOTIFY_BACKEND=airflow` send through the Airflow Connection `smtp_default`.
-3. Create the two Connections and one Variable per DAG (below; ready-made in `examples/dev` and
-   `examples/prod`, file name = Variable name).
-4. The framework tables already exist: they are created separately from `sql/schema.sql` (replace
+3. Create the two Connections and one Variable per DAG (below; ready-made in `airflow_resources/examples/dev` and
+   `airflow_resources/examples/prod`, file name = Variable name).
+4. The framework tables already exist: they are created separately from `airflow_resources/sql/schema.sql` (replace
    `{{META_DB}}` with the metadata database). The framework never creates or alters tables.
 5. Load the configuration tables, then trigger `OSSTD_CORE_CMS_COMPLIANCE_ADMIN` with
    `{"command": "validate-config"}`.
@@ -118,7 +124,7 @@ The account needs, on the metadata database: SELECT / INSERT / UPDATE / DELETE (
 
 ### Airflow Variables (`compliance_<step>_config_var`)
 
-One per DAG. Paste the matching file from [`examples/dev`](examples/dev) or [`examples/prod`](examples/prod)
+One per DAG. Paste the matching file from [`examples/dev`](../examples/dev) or [`examples/prod`](../examples/prod)
 as the Variable's value (Admin → Variables) and replace the `REPLACE_WITH_...` values. Example,
 `compliance_file_load_config_var`:
 
@@ -214,7 +220,7 @@ entries without `schedule_interval` work as before: one task each, all in every 
   of the batch; add `"--src-id", "<Src_ID>"` to close one source.
 - A missing or invalid Variable never breaks parsing: the DAG is still there, unscheduled, and its task
   fails with the reason when run.
-- More trigger examples: [`examples/trigger_configurations.json`](examples/trigger_configurations.json).
+- More trigger examples: [`examples/trigger_configurations.json`](../examples/trigger_configurations.json).
 
 ## Internal sources: table to table (`SOURCE_LOAD`)
 
@@ -223,7 +229,7 @@ are pulled by batch with their own `SELECT`, instead of being delivered as files
 same as for a file: the same staging and core tables, column mapping (`ComplianceTargetColumnConfig`,
 `TARGET_COLUMNS`), batch status, rules, close, audit, emails and step report.
 
-**One row per source in `ComplianceInternalSourceConfig`** (DDL in `sql/schema.sql`; optional, only for internal
+**One row per source in `ComplianceInternalSourceConfig`** (DDL in `airflow_resources/sql/schema.sql`; optional, only for internal
 sources). An installation that has the table under its earlier name renames it once:
 `RENAME TABLE <META_DB>.ComplianceSourceQueryConfig TO <META_DB>.ComplianceInternalSourceConfig;`
 
@@ -263,7 +269,7 @@ Optional step between the load (FILE_LOAD / SOURCE_LOAD) and FILE_RULES: it copi
 the table's export table, so the rules (and downstream feeds) read the export. Without `ComplianceExportConfig`
 rows (or without the table) the step finds nothing to do.
 
-**One row per core table in `ComplianceExportConfig`** (DDL in `sql/schema.sql`): `Project_Cd`, `Table_Nm`,
+**One row per core table in `ComplianceExportConfig`** (DDL in `airflow_resources/sql/schema.sql`): `Project_Cd`, `Table_Nm`,
 `Exp_Schema_Nm` (`$env` replaced as in database names), `Exp_Table_Nm`, `Active_Ind`. The export table has the
 core table's columns (it may have fewer, and its own identity column); `Btch_ID` is required. Columns of the export
 that are not in core are left NULL (`validate-config` warns). The core row ID column is copied as it is, so an
@@ -852,7 +858,7 @@ first / last days of the unit `back` units before (units `WEEK`, `MONTH`, `QUART
 gets 09-01 to 09-30.
 
 Existing installations: `Run_Ty` is in the crosswalk's primary index, so it cannot be widened in place; the table
-is copied once. First run the `ComplianceDataSetSourceXwalk` CREATE TABLE of `sql/schema.sql` with the name
+is copied once. First run the `ComplianceDataSetSourceXwalk` CREATE TABLE of `airflow_resources/sql/schema.sql` with the name
 `ComplianceDataSetSourceXwalk_N`, then:
 
 ```sql
@@ -1157,7 +1163,7 @@ a `$env` token, so one set of configuration rows works in every environment (the
 
 ## Teradata specifics
 
-**Tables.** `sql/schema.sql` defines 15 MULTISET tables for `meta_db`, created separately: the 14 framework tables plus
+**Tables.** `airflow_resources/sql/schema.sql` defines 15 MULTISET tables for `meta_db`, created separately: the 14 framework tables plus
 `ComplianceLock`. Identity columns are `GENERATED ALWAYS AS IDENTITY`; there are no foreign keys or
 CHECK constraints (the validator checks references).
 
@@ -1220,7 +1226,7 @@ values, or a second rules DAG with its own Variable. The rules run on the framew
   `dag.test()` (Variable and Connections read through `airflow.sdk`). The step DAGs need Teradata and were not run
   end to end in Airflow 3.
 - It has **not** been run against a real Teradata system. Before production, on a development Teradata
-  system: create the tables from `sql/schema.sql`, run `validate-config`, then one full cycle (`BATCH_CREATION`, `FILE_LOAD` of a good
+  system: create the tables from `airflow_resources/sql/schema.sql`, run `validate-config`, then one full cycle (`BATCH_CREATION`, `FILE_LOAD` of a good
   and a bad file, `BATCH_CLOSE`, `NOTIFY`) with the step DAGs or `OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE`, and check the tables.
 - The NAS store was checked against a local SMB test server for connect, list, read and download only,
   and with a stand-in for the rest. Moving files (`Archive` / `Error`), creating the subfolders and the

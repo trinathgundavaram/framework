@@ -1132,7 +1132,7 @@ scope) plus what the trigger gives.
  10 validate-config ──► 11 First cycle in DEV ──► 12 Production
 ```
 
-1. **Metadata tables** (once per environment): run `sql/schema.sql` with `{{META_DB}}` replaced.
+1. **Metadata tables** (once per environment): run `airflow_resources/sql/schema.sql` with `{{META_DB}}` replaced.
 2. **Project, sources, run types**: sections 5.1 to 5.4 (and 5.2 for table groups).
 3. **Report dates and crosswalk**: one `ComplianceRunTypePeriod` row per scheduled run type (5.5), then one crosswalk
    row per table + source listing its run types (5.6), plus rows for one run type where a source differs.
