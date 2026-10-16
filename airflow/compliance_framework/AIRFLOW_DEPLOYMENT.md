@@ -805,7 +805,8 @@ date. Between -31 and 31.
 
 `Sched_Window_Days` (default 1): the batch can still be created that many days from its scheduled date, for the
 same report dates, so a missed run catches up (e.g. `5` for the 3rd Tuesday: Tuesday to Saturday). One batch is
-made per scheduled date, never one per day of the window.
+made per scheduled date, never one per day of the window, and every scheduled date gets its batch even when its
+report dates are the previous one's (DAILY with `ANNUAL_WINDOW(01-01,01-31)` = a batch every day for January).
 
 ### Which sources: one crosswalk row per table and source
 

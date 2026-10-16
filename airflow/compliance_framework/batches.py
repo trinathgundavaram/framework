@@ -439,7 +439,8 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
                     s.not_due += 1
                     s.batches.append(f"{label}: not due")
                     continue
-                if _already_created(conn, x, dates, s.run_date, lambda day: dates_on(x, day)):
+                if (_made_since(conn, x, dates, batch_due(conn, rt, s.run_date, x.project_cd, cache)["period_dt"], s.run_date)
+                        if rt.sched_cd else _already_created(conn, x, dates, s.run_date, lambda day: dates_on(x, day))):
                     s.existing += 1
                     s.batches.append(f"{label} {dates[0]}..{dates[1]}: exists")
                     continue
@@ -482,6 +483,16 @@ def _from_calendar(conn, clock, settings, logger, s, project_cd, run_ty, table_n
             else:
                 s.existing += 1
             s.batches.append(f"{label} {c.rpt_start}..{c.rpt_end}: {'created' if res.created else 'exists'} (calendar)")
+
+
+def _made_since(conn, x: XwalkRow, dates: tuple, scheduled: date, run_date: date) -> bool:
+    """Whether the batch of this scheduled date exists (made on it or a later day of its window): with schedule codes
+    every scheduled date gets its own batch, also when its report dates are the previous date's (e.g. DAILY with
+    fixed report dates)."""
+    return conn.execute(
+        """SELECT 1 AS ok FROM ComplianceRequestControl WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s AND Run_Ty=%s
+              AND Rpt_Start_Dt_Key=%s AND Rpt_End_Dt_Key=%s AND Req_Dt_Key BETWEEN %s AND %s""",
+        (x.project_cd, x.table_nm, x.src_id, x.run_ty, dates[0], dates[1], db.as_date(scheduled), run_date)).fetchone() is not None
 
 
 def _already_created(conn, x: XwalkRow, dates: tuple, run_date: date, period_on) -> bool:

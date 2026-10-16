@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.47 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.48 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -745,7 +745,9 @@ locks until they expire (`LOCK_TTL_MINUTES`, default 240) or are released (secti
 3rd Tuesday.
 
 `Sched_Window_Days` (≥ 1): the batch can still be created up to that many days from its scheduled date (missed
-run). One batch per scheduled date, never one per day of the window.
+run). One batch per scheduled date, never one per day of the window. Every scheduled date gets its batch, also when
+its report dates are the same as the previous one's (a DAILY run type with fixed dates, e.g. `ANNUAL_WINDOW`, gets a
+batch every day).
 
 ### 8.3 SQL fallbacks for schedule and report dates
 
