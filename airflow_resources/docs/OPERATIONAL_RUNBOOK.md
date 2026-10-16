@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.48 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.49 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -97,10 +97,6 @@ starts the next one (configured in its Variable, `trigger_dags`).
                    core → export table (when due / released)
                        │
                        ▼
-                 FILE_RULES
-                   GRE data quality rules on each new load
-                       │
-                       ▼
                  NOTIFY  ◄──── also triggered by the other steps
                    emails the open audit events
 
@@ -110,8 +106,8 @@ starts the next one (configured in its Variable, `trigger_dags`).
  BATCH_CLOSE  (nightly, e.g. 22:00)
    closes every batch past its close date (with or without data)
 
- ADMIN (by hand)        validate-config, health, locks, close-batch …
- RUN_MODULE (by hand)   runs any step with any parameters
+ Command line (by hand)  validate-config, health, locks, close-batch … (9.5)
+ FILE_RULES              data quality rules: no DAG yet (added when the rules are set up)
 ```
 
 ---
@@ -1012,12 +1008,9 @@ Emailed by NOTIFY unless marked "no".
 | FILE_LOAD | `OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD` | `compliance_file_load_config_var` |
 | SOURCE_LOAD | `OSSTD_CORE_CMS_COMPLIANCE_SOURCE_LOAD` | `compliance_source_load_config_var` |
 | EXPORT_LOAD | `OSSTD_CORE_CMS_COMPLIANCE_EXPORT_LOAD` | `compliance_export_load_config_var` |
-| FILE_RULES | `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` | `compliance_file_rules_config_var` |
 | OVERRIDE_DECISIONS | `OSSTD_CORE_CMS_COMPLIANCE_OVERRIDE_DECISIONS` | `compliance_override_decisions_config_var` |
 | BATCH_CLOSE | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CLOSE` | `compliance_batch_close_config_var` |
 | NOTIFY | `OSSTD_CORE_CMS_COMPLIANCE_NOTIFY` | `compliance_notify_config_var` |
-| any step | `OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE` | `compliance_run_module_config_var` |
-| admin commands | `OSSTD_CORE_CMS_COMPLIANCE_ADMIN` | `compliance_admin_config_var` |
 
 A DAG never runs twice at the same time; a run that is due while another runs waits.
 
@@ -1099,17 +1092,30 @@ Any key overrides the Variable for that run:
 {"project": "CMSUNIV", "run_type": "CMS", "batch": "20261019_CMSUNIV_ODAG3_CMS", "release": "true"}
 ```
 
-Admin DAG: `{"command": "validate-config"}`, `{"command": "health"}`, `{"command": "locks"}`,
-`{"command": "release-lock", "args": ["--key", "<Lock_Key>"]}`,
-`{"command": "close-batch", "args": ["--btch-id", "<Btch_ID>", "--src-id", "<Src_ID>", "--closed-by", "jdoe"]}`,
-`{"command": "test-connection", "args": ["--source", "<Src_Conn_Cd>", "--db-type", "SQLSERVER"]}`,
-`{"command": "show-config"}`.
+**Admin commands** run from the command line on an Airflow worker, in the DAGs folder. The Teradata login is set in
+that shell only (never saved in a file):
+
+```bash
+export TERADATA_HOST=<host> TERADATA_USER=<login> TERADATA_PASSWORD=<password> TERADATA_LOGMECH=LDAP
+export FRAMEWORK_METADATA_SCHEMA=HSABC_DEV FRAMEWORK_ENVIRONMENT=DEV
+```
+
+| Command | What it does |
+|---|---|
+| `python -m compliance_framework.cli validate-config` | Checks every configuration table (section 11.1) |
+| `python -m compliance_framework.cli health` | Open batches past their close date and other health checks |
+| `python -m compliance_framework.cli locks` | Locks held by running (or crashed) steps |
+| `python -m compliance_framework.cli release-lock --key <Lock_Key>` | Removes a lock left by a run that no longer exists |
+| `python -m compliance_framework.cli close-batch --btch-id <Btch_ID> --closed-by <you> [--src-id <Src_ID>]` | Closes a batch (or one source of it) by hand |
+| `python -m compliance_framework.cli test-connection --source <Src_Conn_Cd> --db-type SQLSERVER` | Tests an internal source's connection (the Airflow Connection must be available, e.g. `AIRFLOW_CONN_<ID>`) |
+| `python -m compliance_framework.cli show-config` | The settings in effect and where each came from |
+| `python -m compliance_framework.cli run --module <STEP> --project CMSUNIV [--as-of <date>]` | Runs any step by hand, also `FILE_RULES` |
 
 ### 9.6 One DAG at several times (timed runs)
 
 ```json
 {"meta_db": "HSABC_DEV", "td_conn_var": "DEV", "load_env": "DEV", "project": "CMSUNIV", "schedule_interval": null,
- "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES"],
+ "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"],
  "runs": [{"name": "DAILY", "run_type": "DAILY", "schedule_interval": "0 20 * * *", "settings": {"RELEASE_TIME": "20:00"}},
           {"name": "MNT", "run_type": "MNT", "schedule_interval": "0 6 * * *"}]}
 ```
@@ -1143,19 +1149,19 @@ scope) plus what the trigger gives.
    `LOAD_TIMESTAMP`, `ROW_SEQUENCE`.
 7. **File checks**: section 5.9 – header names, record types / trailer, value checks.
 8. **Optional**: export (5.11), rules (5.12), calendar (5.6a).
-9. **Airflow**: Connections (9.1); clone the 11 DAG files with project names (e.g. `OSSTD_CORE_PRJB_COMPLIANCE_*`)
+9. **Airflow**: Connections (9.1); clone the 8 DAG files with project names (e.g. `OSSTD_CORE_PRJB_COMPLIANCE_*`)
    and their Variables (9.3): every Variable sets `project`; `trigger_dags` names the project's own clones; NOTIFY
    sets `DEFAULT_NOTIFY_EMAILS`. Keep one NOTIFY without `project` for events of no project.
-10. **Validate**: admin DAG `{"command": "validate-config"}`; fix every ERROR.
+10. **Validate**: `validate-config` from the command line (9.5); fix every ERROR.
 11. **First cycle in DEV**: BATCH_CREATION → put a test file / source rows → FILE_LOAD / SOURCE_LOAD → EXPORT_LOAD
-    → FILE_RULES → BATCH_CLOSE → NOTIFY; check with section 12. Try a bad file, a missing source, a late file.
+    → BATCH_CLOSE → NOTIFY; check with section 12. Try a bad file, a missing source, a late file.
 12. **Production**: same rows in the PROD metadata DB (`$env` makes database names and paths follow).
 
 ---
 
 ## 11. Operating procedures (how to …)
 
-**11.1 Check the configuration.** Admin DAG `{"command": "validate-config"}`. ERRORs must be fixed; WARNINGs explain
+**11.1 Check the configuration.** `python -m compliance_framework.cli validate-config` (9.5). ERRORs must be fixed; WARNINGs explain
 something to look at.
 
 **11.2 Create batches for a missed day.** Trigger BATCH_CREATION with `{"project": "CMSUNIV", "as_of": "2026-10-19"}`.
@@ -1188,7 +1194,7 @@ batch needs its override).
 
 **11.11 Re-export a batch.** Trigger EXPORT_LOAD with `{"batch": "<Btch_ID>"}`.
 
-**11.12 Close a batch by hand.** Admin DAG `close-batch` (9.5); every open source of the batch, or `--src-id` for
+**11.12 Close a batch by hand.** `close-batch` from the command line (9.5); every open source of the batch, or `--src-id` for
 one. Refused before the close date unless released.
 
 **11.13 Run the step for one table group / table / run type.** Trigger with `table_group` or `table`, and/or
@@ -1196,8 +1202,8 @@ one. Refused before the close date unless released.
 
 **11.14 An alert email arrived.** Look up the event in 8.15 and the batch in 12.1 / 12.2.
 
-**11.15 A step waits or says "locked".** Admin DAG `{"command": "locks"}`; if the owner run no longer exists:
-`{"command": "release-lock", "args": ["--key", "<Lock_Key>"]}`.
+**11.15 A step waits or says "locked".** `locks` from the command line (9.5); if the owner run no longer exists:
+`release-lock --key <Lock_Key>`.
 
 **11.16 Change a version.** For every run type of the source: end the crosswalk row (`Effective_End_Dt_Key`) and
 add a new row with the new `Cmplnc_Vrsn` from the next day. For one run type only: add a row for that run type with

@@ -6,7 +6,7 @@
   "schedule_interval": "0 20 * * *",
   "project": "CMS_UNIVERSE",
   "trigger_dags": [
-    "OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES"
+    "OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"
   ],
   "settings": {
     "RELEASE_TIME": "20:00"

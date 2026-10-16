@@ -19,12 +19,11 @@ BATCH_EVENTS = frozenset({
 
 
 class AuditEvent(NamedTuple):
-    category: str
     severity: str
     notify: bool
 
 
-_EXC_ERROR, _EXC_WARN = AuditEvent("EXCEPTION", "ERROR", True), AuditEvent("EXCEPTION", "WARNING", True)
+_EXC_ERROR, _EXC_WARN = AuditEvent("ERROR", True), AuditEvent("WARNING", True)
 AUDIT_EVENTS: dict[str, AuditEvent] = {
     "INTAKE_FAILED": _EXC_ERROR,
     **dict.fromkeys(("FILE_REJECTED_UNPARSEABLE", "FILE_REJECTED_AMBIGUOUS_TEMPLATE", "FILE_REJECTED_INVALID_TOKEN",
@@ -34,8 +33,8 @@ AUDIT_EVENTS: dict[str, AuditEvent] = {
     "FILE_CONTENT_CHECK_FAILED": _EXC_ERROR,
     "FILE_SAME_CONTENT_OTHER_BATCH": _EXC_WARN,
     "FILE_CHECK_FAILED": _EXC_WARN,
-    "FILE_CHECK_PASSED": AuditEvent("AUDIT", "INFO", False),
-    "FILE_MOVE_FAILED": AuditEvent("EXCEPTION", "WARNING", False),
+    "FILE_CHECK_PASSED": AuditEvent("INFO", False),
+    "FILE_MOVE_FAILED": AuditEvent("WARNING", False),
     "RULES_VALIDATION_FAILED": _EXC_ERROR,
     "RULES_ENGINE_TECHNICAL_FAILURE": _EXC_ERROR,
     "CORE_LOAD_ROWCOUNT_MISMATCH": _EXC_ERROR,
@@ -43,12 +42,12 @@ AUDIT_EVENTS: dict[str, AuditEvent] = {
     "SOURCE_QUERY_FAILED": _EXC_ERROR,
     "EXPORT_LOAD_FAILED": _EXC_ERROR,
     "SOURCE_DATA_REJECTED": _EXC_ERROR,
-    "OVERRIDE_APPROVED": AuditEvent("AUDIT", "WARNING", True),
+    "OVERRIDE_APPROVED": AuditEvent("WARNING", True),
     "OVERRIDE_INVALID_DETECTED": _EXC_ERROR,
-    "OVERRIDE_EXPIRED": AuditEvent("AUDIT", "WARNING", True),
-    "BATCH_REOPENED": AuditEvent("AUDIT", "WARNING", True),
-    "BATCH_CLOSE_BLOCKED": AuditEvent("AUDIT", "WARNING", False),
-    "BATCH_CLOSE_DEFERRED_LOCKED": AuditEvent("AUDIT", "INFO", False),
+    "OVERRIDE_EXPIRED": AuditEvent("WARNING", True),
+    "BATCH_REOPENED": AuditEvent("WARNING", True),
+    "BATCH_CLOSE_BLOCKED": AuditEvent("WARNING", False),
+    "BATCH_CLOSE_DEFERRED_LOCKED": AuditEvent("INFO", False),
     "SOURCE_MISSING_AT_CLOSE": _EXC_WARN,
     "CONFIG_VALIDATION_FAILED": _EXC_ERROR,
 }

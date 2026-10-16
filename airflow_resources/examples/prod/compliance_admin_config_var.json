@@ -1,7 +1,0 @@
-{
-  "td_conn_var": "PROD",
-  "meta_db": "REPLACE_WITH_PROD_META_DB",
-  "load_env": "PROD",
-  "email_recipient": "compliance-ops@example.com",
-  "wdc_comp_oper_nas_var": "wdc_comp_oper_nas"
-}

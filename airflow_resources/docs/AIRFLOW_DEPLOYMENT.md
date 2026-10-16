@@ -12,12 +12,9 @@ airflow/
   osstd_core_cms_compliance_file_load.py
   osstd_core_cms_compliance_source_load.py
   osstd_core_cms_compliance_export_load.py
-  osstd_core_cms_compliance_file_rules.py
   osstd_core_cms_compliance_override_decisions.py
   osstd_core_cms_compliance_batch_close.py
   osstd_core_cms_compliance_notify.py
-  osstd_core_cms_compliance_run_module.py          ... one generic DAG that runs any step
-  osstd_core_cms_compliance_admin.py               ... and one for validate-config, health, locks
   compliance_framework/
     dags.py        the DAGs (schedule, tasks, triggers, emails, ServiceNow callback), Variable + Connections ->
                    the framework, run_step() / run_command() in-process
@@ -26,13 +23,13 @@ airflow/
     ingest.py      FILE_LOAD and SOURCE_LOAD
     filecheck.py   FILE_CHECK
     load.py        staging / core layout, staging load, core swap, control report and error log
-    export.py      EXPORT_LOAD, FILE_RULES and the GRE bridge
+    export.py      EXPORT_LOAD, FILE_RULES (data quality rules, no DAG yet) and the GRE bridge
     config.py      metadata rows and validate-config, scope of a run, file check options
     db.py          Teradata layer (transactions, locks), connections (Teradata, NAS, source servers), settings
     audit.py       batch timeline, exceptions audit, notifications
     adapters.py    file stores (NAS, local), email channel, rules engine
     common.py      codes, statuses, dates, clock
-    cli.py         command line
+    cli.py         command line: the admin commands (validate-config, health, locks, close-batch, ...) and any step
     .airflowignore keeps Airflow from parsing the package as DAG files
 
 airflow_resources/                (not deployed with the DAGs)
@@ -59,21 +56,21 @@ airflow_resources/                (not deployed with the DAGs)
    | `FILE_LOAD` | `OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD` | `compliance_file_load_config_var` |
    | `SOURCE_LOAD` (internal sources) | `OSSTD_CORE_CMS_COMPLIANCE_SOURCE_LOAD` | `compliance_source_load_config_var` |
    | `EXPORT_LOAD` (optional) | `OSSTD_CORE_CMS_COMPLIANCE_EXPORT_LOAD` | `compliance_export_load_config_var` |
-   | `FILE_RULES` | `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` | `compliance_file_rules_config_var` |
    | `OVERRIDE_DECISIONS` | `OSSTD_CORE_CMS_COMPLIANCE_OVERRIDE_DECISIONS` | `compliance_override_decisions_config_var` |
    | `BATCH_CLOSE` | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CLOSE` | `compliance_batch_close_config_var` |
    | `NOTIFY` | `OSSTD_CORE_CMS_COMPLIANCE_NOTIFY` | `compliance_notify_config_var` |
-   | any step (generic) | `OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE` | `compliance_run_module_config_var` |
-   | admin commands | `OSSTD_CORE_CMS_COMPLIANCE_ADMIN` | `compliance_admin_config_var` |
+
+   The data quality step (`FILE_RULES`) has no DAG for now: add one when the rules are set up (copy a step DAG file
+   with step `FILE_RULES`, below). The admin commands run from the command line (below).
 
 2. **Two Airflow Connections**, both named in the Variables: Teradata (`td_conn_var`) and the NAS file
    server (`wdc_comp_oper_nas_var`, only needed by the DAGs that load files). The bridge exports them as
    `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD` / `TERADATA_LOGMECH` and `NAS_HOST` /
    `NAS_USER` / `NAS_PASSWORD` / `NAS_PORT`.
 3. **DAGs start each other** through `trigger_dags` in the Variable (`TriggerDagRunOperator`, not
-   waiting): in the examples `FILE_LOAD` and `SOURCE_LOAD` start `EXPORT_LOAD` (which starts `FILE_RULES`),
-   `FILE_LOAD` also `OVERRIDE_DECISIONS`, and the others start `NOTIFY`. Without export tables, point
-   `FILE_LOAD` / `SOURCE_LOAD` at `FILE_RULES` as before. Each DAG can also have its own `schedule_interval`.
+   waiting): in the examples `FILE_CHECK` starts `FILE_LOAD`, `FILE_LOAD` and `SOURCE_LOAD` start `EXPORT_LOAD`,
+   `FILE_LOAD` also `OVERRIDE_DECISIONS`, and the others start `NOTIFY`. Each DAG can also have its own
+   `schedule_interval`.
 4. A task runs one step in-process. It fails on a framework error (exit code 2), and on "completed
    with problems" (exit code 1) where the step is configured that way; otherwise the outcome is the
    task's XCom.
@@ -91,8 +88,7 @@ No `.env` file and no AWS Secrets Manager: credentials come from the Airflow Con
    `airflow_resources/examples/prod`, file name = Variable name).
 4. The framework tables already exist: they are created separately from `airflow_resources/sql/schema.sql` (replace
    `{{META_DB}}` with the metadata database). The framework never creates or alters tables.
-5. Load the configuration tables, then trigger `OSSTD_CORE_CMS_COMPLIANCE_ADMIN` with
-   `{"command": "validate-config"}`.
+5. Load the configuration tables, then run `validate-config` from the command line (below).
 
 To add another DAG for a step (another project, or another cadence), copy that step's DAG file, give
 the copy its own `dag_id` and `variable_key`, and create that Variable.
@@ -148,7 +144,7 @@ default is right (the examples carry only what differs: connections, `load_env`,
 |---|---|
 | `meta_db` (required) | Teradata database holding the framework tables |
 | `td_conn_var` | Airflow Connection of Teradata. Falls back to `connection_id`, then `gre.connection_id`, then `compliance_teradata` |
-| `wdc_comp_oper_nas_var` | Airflow Connection of the NAS file server. Required where files are loaded (`FILE_LOAD`, and the generic and admin DAGs when they touch files) |
+| `wdc_comp_oper_nas_var` | Airflow Connection of the NAS file server. Required where files are checked or loaded (`FILE_CHECK`, `FILE_LOAD`) |
 | `load_env` | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); falls back to `environment`, then `gre.environment`, else `DEV` |
 | `schedule_interval` | Cron expression of the DAG; leave out for a DAG that is only triggered |
 | `schedule_timezone` | Optional; schedules run in Central time (`America/Chicago`, with daylight saving) |
@@ -184,7 +180,7 @@ works with the entry scheduled at its time, e.g. EXPORT_LOAD for MNT at 06:00 an
 
 ```json
 {"meta_db": "HSABC_DEV", "td_conn_var": "DEV", "load_env": "DEV", "project": "CMS_UNIVERSE", "schedule_interval": null,
- "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES"],
+ "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"],
  "runs": [{"name": "DAILY", "run_type": "DAILY", "schedule_interval": "0 20 * * *", "settings": {"RELEASE_TIME": "20:00"}},
           {"name": "MNT", "run_type": "MNT", "schedule_interval": "0 6 * * *"}]}
 ```
@@ -206,20 +202,29 @@ entries without `schedule_interval` work as before: one task each, all in every 
   task per `trigger_dags` entry, then `success_email` / `fail_email`. `max_active_runs` is 1 and tasks
   do not retry (`retries: 0`); every step is idempotent, so the next run picks up. DAGs that overlap are
   safe (locks, below).
-- **`OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE`** — the generic DAG. Its `module` parameter names the step
-  and the other parameters are that step's (`project`, `run_type`, `period`, `table`, `lookback_days`,
-  `lookback_weeks`, `as_of`). A parameter the module does not take is refused. Its
-  Variable holds the connections, `meta_db` and the settings of every step; nothing about a step is
-  fixed in it. Examples:
-  - `{"module": "BATCH_CREATION", "project": "CMS_UNIVERSE", "run_type": "MNT", "period": "PREV_CALENDAR_MONTH"}`
-  - `{"module": "FILE_LOAD", "project": "CMS_UNIVERSE"}`
-  - `{"module": "FILE_RULES"}`, `{"module": "BATCH_CLOSE", "project": "CMS_UNIVERSE"}`, `{"module": "NOTIFY"}`
-- **`OSSTD_CORE_CMS_COMPLIANCE_ADMIN`** — `validate-config`, `health`, `test-connection`, `show-config`,
-  `locks`, `release-lock`, `close-batch`:
-  `{"command": "close-batch", "args": ["--btch-id", "<Btch_ID>", "--closed-by", "jdoe"]}` closes every open source
-  of the batch; add `"--src-id", "<Src_ID>"` to close one source.
 - A missing or invalid Variable never breaks parsing: the DAG is still there, unscheduled, and its task
   fails with the reason when run.
+
+### Admin commands (command line)
+
+`validate-config`, `health`, `show-config`, `test-connection`, `locks`, `release-lock`, `close-batch`,
+`close-batches`, `process-decisions`, `notify`, `list-modules` and `run --module <STEP>` (any step, also
+`FILE_RULES`) run from the command line on a worker, from the DAGs folder. The Teradata login comes from the
+environment of that shell (never from a file in the repository):
+
+```bash
+export TERADATA_HOST=<host> TERADATA_USER=<login> TERADATA_PASSWORD=<password> TERADATA_LOGMECH=LDAP
+export FRAMEWORK_METADATA_SCHEMA=HSABC_DEV FRAMEWORK_ENVIRONMENT=DEV
+python -m compliance_framework.cli validate-config
+python -m compliance_framework.cli close-batch --btch-id <Btch_ID> --closed-by jdoe [--src-id <Src_ID>]
+python -m compliance_framework.cli locks
+python -m compliance_framework.cli release-lock --key <Lock_Key>
+python -m compliance_framework.cli run --module BATCH_CREATION --project CMSUNIV --as-of 2026-10-18
+```
+
+`--set NAME=value` sets a framework setting for the command (e.g. `--set NOTIFY_BACKEND=airflow`); files on the NAS
+also need `NAS_HOST`, `NAS_USER`, `NAS_PASSWORD`. `test-connection --source <Src_Conn_Cd>` reads that Airflow
+Connection, so it runs where the Connection is available (e.g. as `AIRFLOW_CONN_<ID>` in the shell).
 - More trigger examples: [`examples/trigger_configurations.json`](../examples/trigger_configurations.json).
 
 ## Internal sources: table to table (`SOURCE_LOAD`)
@@ -246,8 +251,8 @@ host (or `server\instance`), port, schema = default database, login and password
 `{"driver": "ODBC Driver 18 for SQL Server", "encrypt": "yes", "trust_server_certificate": "yes"}`
 (`"authentication"` for Azure AD logins, `"login_timeout"` in seconds). Teradata: host, login, password, Extra
 `{"logmech": "LDAP"}`. Credentials stay in Airflow; the log shows only the Connection id, host and database. SQL
-Server needs `pyodbc` and the Microsoft ODBC driver on the workers. Check a connection with the admin DAG:
-`{"command": "test-connection", "args": ["--source", "<Src_Conn_Cd>", "--db-type", "SQLSERVER"]}`.
+Server needs `pyodbc` and the Microsoft ODBC driver on the workers. Check a connection from the command line:
+`python -m compliance_framework.cli test-connection --source <Src_Conn_Cd> --db-type SQLSERVER`.
 
 **Which batches are pulled.** With the scope (`project`, `table_group` or `table`, `run_type`): every open batch
 of a query source that has no data yet (`REQUEST_CREATED`, request date reached). With `batch` (one `Btch_ID`, or
@@ -736,7 +741,7 @@ file again adds no new row.
   `OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD` in its `trigger_dags`, so the load starts only when the check
   succeeded; `"fail_on_problems": false` in the Variable starts the load anyway and keeps the check as a
   report. A project that does not want it leaves the DAG unscheduled and schedules the file load DAG.
-  One run by hand: trigger the DAG, or `OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE` with `{"module": "FILE_CHECK", "project": "..."}`.
+  One run by hand: trigger the DAG with `{"project": "..."}`.
 
 ## File rules run after the load
 
@@ -761,11 +766,11 @@ yet (`ComplianceFileLoad.Load_Stat = PROMOTED`, `Rules_Stat = NOT_RUN`), runs th
 - The engine is given the staging and the core table of the file (`stg_schema_nm`, `stg_table_nm`,
   `core_schema_nm`, `core_table_nm`) with the batch and load ids, and its export table (`exp_schema_nm`,
   `exp_table_nm`) when the table has one (`EXPORT_LOAD`).
-- **Airflow:** the rules have their own DAG, `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES`, with its own
-  Variable. The file-load DAG starts it after each load through `trigger_dags` (without waiting for
-  it); it can also be triggered by hand (`{"project": "CMS_UNIVERSE"}`, or `{}` for every project) or
-  given its own `schedule_interval` as a safety net for a missed trigger. It starts the notify DAG when
-  it is done, so a failed rule is emailed.
+- **Airflow:** the rules have no DAG for now. When they are set up, add `osstd_core_cms_compliance_file_rules.py`
+  (a copy of a step DAG file with step `FILE_RULES`, `dag_id` `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` and Variable
+  `compliance_file_rules_config_var`), start it from `EXPORT_LOAD` (or `FILE_LOAD` / `SOURCE_LOAD`) through
+  `trigger_dags`, and let it start `NOTIFY` so a failed rule is emailed. Until then
+  `python -m compliance_framework.cli run --module FILE_RULES --project <project>` runs them by hand.
 
 
 ## Failure tickets and emails
@@ -1209,7 +1214,7 @@ GRE's `run_rules()`, with `run_key = CBF_LOAD_<Load_ID>` and the file's context 
 `{run_ty}`, `{rpt_start_dt_key}`, `{rpt_end_dt_key}`, `{req_dt_key}`). The verdict of each rule is read
 from `<gre meta_db>.gre_results`: `PASS` / `WARN` pass, `FAIL` marks the file's rules as failed (or as
 warnings under ANNOTATE), anything else is a technical failure that is retried. This happens in the
-`OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` DAG, after the core load (above). Use `RULE_ENGINE=none` to run no rules.
+`FILE_RULES` step, after the core load (above). Use `RULE_ENGINE=none` to run no rules.
 
 The `gre` section of `compliance_file_rules_config_var` is passed on to `run_rules()`: `project_name`, `text_params` and
 `extra_filters` as written, and `run_params` merged with the file's context (the file's values win).
@@ -1222,12 +1227,12 @@ values, or a second rules DAG with its own Variable. The rules run on the framew
 - The framework logic (batch creation, intake, file load, promotion, overrides, close, notifications,
   locks) and the GRE bridge pass the framework's test suite when run against a stand-in for the
   `teradatasql` driver backed by PostgreSQL. With Airflow 3.3.2 (Task SDK 1.3.2, standard provider 1.20.1, smtp
-  provider 3.1.1) every DAG file parses without import errors or deprecation warnings, and the admin DAG ran with
-  `dag.test()` (Variable and Connections read through `airflow.sdk`). The step DAGs need Teradata and were not run
+  provider 3.1.1) every DAG file parses without import errors or deprecation warnings (Variable and Connections read through
+  `airflow.sdk`). The step DAGs need Teradata and were not run
   end to end in Airflow 3.
 - It has **not** been run against a real Teradata system. Before production, on a development Teradata
   system: create the tables from `airflow_resources/sql/schema.sql`, run `validate-config`, then one full cycle (`BATCH_CREATION`, `FILE_LOAD` of a good
-  and a bad file, `BATCH_CLOSE`, `NOTIFY`) with the step DAGs or `OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE`, and check the tables.
+  and a bad file, `BATCH_CLOSE`, `NOTIFY`) with the step DAGs, and check the tables.
 - The NAS store was checked against a local SMB test server for connect, list, read and download only,
   and with a stand-in for the rest. Moving files (`Archive` / `Error`), creating the subfolders and the
   modified-time check have **not** been run against your NAS: verify them with one good and one bad file.

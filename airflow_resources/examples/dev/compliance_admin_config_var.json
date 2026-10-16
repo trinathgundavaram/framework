@@ -1,7 +1,0 @@
-{
-  "td_conn_var": "DEV",
-  "meta_db": "HSABC_dev",
-  "load_env": "DEV",
-  "email_recipient": "compliance-dev@example.com",
-  "wdc_comp_oper_nas_var": "wdc_comp_oper_nas_dev"
-}

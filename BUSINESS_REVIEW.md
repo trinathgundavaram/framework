@@ -45,7 +45,7 @@ production submission, P2 = before a second project goes live, P3 = when conveni
 ## 1. Readiness and risk
 
 **1. Not yet proven on the real platform (P1).** Everything has been tested against a PostgreSQL stand-in for
-Teradata, a local folder or SMB test server for the NAS, and an Airflow 3.3.2 install for parsing and the admin DAG.
+Teradata, a local folder or SMB test server for the NAS, and an Airflow 3.3.2 install for parsing the DAGs.
 The step DAGs have never run end to end on Teradata, the NAS move / archive steps have never touched the real NAS,
 and FASTLOAD, SQL Server sources, the SMTP connection and the GRE bridge have not run against the real systems.
 *Business risk*: the first submission cycle is also the first real test. *Recommendation*: one full dress

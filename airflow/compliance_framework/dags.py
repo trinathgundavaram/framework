@@ -1,8 +1,6 @@
 """Airflow: the DAGs of the steps, their tasks and Variables, and the in-process entry points."""
 from __future__ import annotations
 
-import contextlib
-import io
 import json
 import logging
 import os
@@ -217,29 +215,9 @@ def run_compliance_step(step: str, variable_key: str, overrides: dict = None, sc
     return outcome
 
 
-def run_compliance_command(command: str, variable_key: str, args: list = None, overrides: dict = None,
-                           connection_id: str = None):
-    """Run one framework command (validate-config, health, locks, release-lock, close-batch, ...)."""
-    config, settings = resolve_config(variable_key, overrides)
-    _connect_environment(config, connection_id)
-
-    outcome, exit_code = run_command(command, args=args, as_of=config.get("as_of") or None, settings=settings,
-                                     log_level=config.get("log_level") or "INFO")
-    text = json.dumps(outcome, indent=2, default=str)
-    if exit_code != 0:
-        logger.error("%s result:\n%s", command, text)
-        raise RuntimeError(f"{command} failed (exit code {exit_code}); the result is above")
-    logger.info("%s result:\n%s", command, text)
-    return outcome
-
-
 # run_framework: Run one framework step or command in-process (no Airflow imports); returns (outcome, exit code).
 
 log = logging.getLogger(__name__)
-
-COMMANDS = ("test-connection", "show-config", "validate-config", "health", "locks", "release-lock",
-            "close-batch", "close-batches", "process-decisions", "notify", "list-modules")
-
 
 def _plain(value: Any) -> Any:
     """A JSON-serialisable copy (dataclasses, dates and sets flattened) - safe to return as an XCom."""
@@ -269,28 +247,6 @@ def run_step(step: str, *, as_of: Optional[str] = None, settings: Optional[Mappi
     return _plain(report(out)), out.exit_code
 
 
-def run_command(command: str, *, args: Optional[list] = None, as_of: Optional[str] = None,
-                settings: Optional[Mapping[str, Any]] = None, log_level: str = "INFO") -> tuple[Any, int]:
-    """Run one CLI command (validate-config, health, close-batch, locks, release-lock, ...)."""
-    command = command.strip().lower()
-    if command not in COMMANDS:
-        raise ValueError(f"unknown command {command!r}; one of {', '.join(COMMANDS)}")
-    argv = [command, "--log-level", log_level]
-    for name, value in (settings or {}).items():
-        argv += ["--set", f"{name}={value}"]
-    if as_of:
-        argv += ["--as-of", str(as_of)]
-    argv += [str(a) for a in (args or [])]
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        code = cli_main(argv)
-    text = buf.getvalue().strip()
-    try:
-        return json.loads(text) if text else None, code
-    except ValueError:
-        return text, code
-
-
 if __name__ == "__main__":
     import sys
 
@@ -315,8 +271,6 @@ STEP_PARAMS = {
     "NOTIFY": (*SCOPE, "as_of"),
 }
 PASSED_ON = (*SCOPE, "as_of")
-ADMIN_COMMANDS = ["validate-config", "health", "test-connection", "show-config", "locks",
-                  "release-lock", "close-batch"]
 DEFAULT_ASSIGNMENT_GROUP = "D&AE - EDE Govt Compliance"
 DEFAULT_TAGS = ["Compliance", "Compliance_Batch_Framework"]
 _TEXT = ["null", "string"]
@@ -458,48 +412,4 @@ def build_step_dag(dag_id: str, step: str, variable_key: str) -> DAG:
     for trigger in triggers:
         tasks >> trigger
     _add_emails(dag, dag_config, [*tasks, *triggers])
-    return dag
-
-
-def build_module_dag(dag_id: str, variable_key: str) -> DAG:
-    """The generic DAG: runs whichever step its `module` parameter names, with the parameters given."""
-    dag_config = load_dag_config(variable_key)
-    names = sorted({name for step_names in STEP_PARAMS.values() for name in step_names})
-    params = {"module": Param(dag_config.get("module"), type=_TEXT, description="The step to run: " + ", ".join(STEPS)),
-              **{name: Param(None, type=_TEXT) for name in names}}
-    dag = _dag(dag_id, dag_config, "compliance batch framework - any step, named by the 'module' parameter",
-               params, "Run_Module")
-
-    def run_module(**context):
-        conf = _overrides(context, ("module", *names))
-        module = str(conf.pop("module", "") or "").strip().upper()
-        if module not in STEPS:
-            raise ValueError(f"'module' must be one of {', '.join(STEPS)}; got {module or 'nothing'!r}")
-        unused = sorted(k for k in conf if k in names and k not in STEP_PARAMS[module])
-        if unused:
-            raise ValueError(f"{module} does not take: {', '.join(unused)}; it takes: {', '.join(STEP_PARAMS[module])}")
-        return run_compliance_step(module, variable_key, overrides=conf)
-
-    task = PythonOperator(task_id="run_module", dag=dag, python_callable=run_module,
-                          execution_timeout=_minutes(dag_config, "execution_timeout_minutes",
-                                                     max(STEP_TIMEOUT.values())), show_return_value_in_logs=False)
-    _add_emails(dag, dag_config, [task])
-    return dag
-
-
-def build_admin_dag(dag_id: str, variable_key: str) -> DAG:
-    """validate-config, health, locks, release-lock, close-batch: run by hand."""
-    dag_config = {**load_dag_config(variable_key), "schedule_interval": None}
-    params = {"command": Param("validate-config", type="string", description=", ".join(ADMIN_COMMANDS)),
-              "args": Param([], type="array", description='e.g. ["--btch-id", "<Btch_ID>", "--closed-by", "jdoe"]')}
-    dag = _dag(dag_id, dag_config, "compliance batch framework - validate-config, health, locks, release-lock, "
-                                   "close-batch", params, "Admin")
-
-    def run_command(**context):
-        conf = _overrides(context, ("command", "args"))
-        command, args = str(conf.pop("command")).strip().lower(), conf.pop("args", [])
-        return run_compliance_command(command, variable_key, args=list(args), overrides=conf)
-
-    PythonOperator(task_id="run_command", dag=dag, python_callable=run_command, execution_timeout=timedelta(hours=1),
-                   show_return_value_in_logs=False)
     return dag

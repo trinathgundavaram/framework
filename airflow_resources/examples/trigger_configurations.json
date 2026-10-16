@@ -1,25 +1,4 @@
 {
-  "OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE: create batches": {
-    "module": "BATCH_CREATION",
-    "project": "CMS_UNIVERSE",
-    "run_type": "MNT",
-    "period": "PREV_CALENDAR_MONTH"
-  },
-  "OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE: load files": {
-    "module": "FILE_LOAD",
-    "project": "CMS_UNIVERSE"
-  },
-  "OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE: run the rules on loaded files": {
-    "module": "FILE_RULES",
-    "project": "CMS_UNIVERSE"
-  },
-  "OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE: close batches": {
-    "module": "BATCH_CLOSE",
-    "project": "CMS_UNIVERSE"
-  },
-  "OSSTD_CORE_CMS_COMPLIANCE_RUN_MODULE: send notifications": {
-    "module": "NOTIFY"
-  },
   "OSSTD_CORE_CMS_COMPLIANCE_BATCH_CREATION: another run type and period, once": {
     "project": "CMS_UNIVERSE",
     "run_type": "MNT",
@@ -31,43 +10,11 @@
   "OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD: one project": {
     "project": "CMS_UNIVERSE"
   },
-  "OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES: every project": {},
-  "OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES: one project, a setting for this run only": {
-    "project": "CMS_UNIVERSE",
-    "settings": {
-      "FILE_RULES_MODE": "ANNOTATE"
-    }
-  },
   "OSSTD_CORE_CMS_COMPLIANCE_BATCH_CLOSE: one project and run type": {
     "project": "CMS_UNIVERSE",
     "run_type": "MNT"
   },
   "OSSTD_CORE_CMS_COMPLIANCE_NOTIFY: one project": {
     "project": "CMS_UNIVERSE"
-  },
-  "OSSTD_CORE_CMS_COMPLIANCE_ADMIN: check the configuration": {
-    "command": "validate-config"
-  },
-  "OSSTD_CORE_CMS_COMPLIANCE_ADMIN: health report": {
-    "command": "health"
-  },
-  "OSSTD_CORE_CMS_COMPLIANCE_ADMIN: list locks": {
-    "command": "locks"
-  },
-  "OSSTD_CORE_CMS_COMPLIANCE_ADMIN: release a lock left by a crashed run": {
-    "command": "release-lock",
-    "args": [
-      "--key",
-      "BTCH:<Btch_ID>"
-    ]
-  },
-  "OSSTD_CORE_CMS_COMPLIANCE_ADMIN: close one batch by hand": {
-    "command": "close-batch",
-    "args": [
-      "--btch-id",
-      "<Btch_ID>",
-      "--closed-by",
-      "jdoe"
-    ]
   }
 }

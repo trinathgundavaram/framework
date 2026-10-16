@@ -934,7 +934,6 @@ class DecisionProcessor:
 # closing: Batch close (design §11).
 
 HAS_DATA = ("NEW_FILE", "CARRY_FORWARD")
-DELIVERED = (*HAS_DATA, "NO_DATA")
 
 
 def close_resolution(batch: dict) -> tuple[str, str]:
