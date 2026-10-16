@@ -22,6 +22,9 @@
     "ERROR_FOLDER": "Error",
     "NAS_MIN_AGE_SECONDS": 120,
     "CHECK_MOVE_FAILED": true,
-    "WRITE_ERROR_FILE": true
+    "WRITE_ERROR_FILE": true,
+    "NOTIFY_BACKEND": "airflow",
+    "NOTIFY_FROM_EMAIL": "TRINATH_gundavaram@example.com",
+    "DEFAULT_NOTIFY_EMAILS": "TRINATH_gundavaram@example.com"
   }
 }
