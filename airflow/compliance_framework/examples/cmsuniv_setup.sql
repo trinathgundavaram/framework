@@ -360,7 +360,8 @@ VALUES ('CMSUNIV', 'FA4', '*', 'HEADER_NAMES', '*', 'EnrolleeID|EnrolleeFirstNam
 -- 7a. File checks: the staging column of each field, in file order (TARGET_COLUMNS)
 -- From the TargetColumnList of each table (without the row ID and the columns the framework fills). '*' = the
 -- general layout (CMSDE2022), source 51 = the MedHOK layout (CMSDE2022_MHK), which has extra fields. CDAG1 - CDAG5 and
--- FA1 - FA4 follow when their target lists are known. Switched off for the internal sources (their SELECT column
+-- FA1 - FA4 have no list: their fields go to the staging columns of the same name when every header name is
+-- one, otherwise to the staging table's data columns in table order (as FA2, whose header lists RejectReasonCode6 twice). Switched off for the internal sources (their SELECT column
 -- names name the staging columns).
 -- ----------------------------------------------------------------------------------------------------
 INSERT INTO HSABC_DEV.ComplianceFileCheckConfig (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
