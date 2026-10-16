@@ -37,6 +37,7 @@ class RunType:
     sched_week: Optional[str] = None
     sched_months: tuple = ()
     sched_window_days: int = 1
+    sched_offset_days: int = 0
 
     @property
     def has_schedule(self) -> bool:
@@ -49,7 +50,7 @@ class RunType:
                    _text(r.get("batch_schedule_sql_txt")), code(_text(r.get("sched_cd"))), code(_text(r.get("sched_day_cd"))),
                    code(_text(r.get("sched_week_cd"))),
                    tuple(int(m) for m in months.replace(" ", "").split(",") if m.isdigit()) if months else (),
-                   int(r.get("sched_window_days") or 1))
+                   int(r.get("sched_window_days") or 1), int(r.get("sched_offset_days") or 0))
 
 
 @dataclass(frozen=True)

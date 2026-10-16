@@ -188,6 +188,26 @@ def range_period(spec: str, d: date) -> Optional[tuple[date, date]]:
     return start, _month_start(start, months * length) - timedelta(days=1)
 
 
+EDGE_MAX_DAYS = {"WEEK": 7, "MONTH": 28, "QUARTER": 90, "YEAR": 365}
+_EDGE_DAYS = re.compile(r"^(FIRST|LAST)_DAYS\(\s*(WEEK|MONTH|QUARTER|YEAR)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$", re.IGNORECASE)
+
+
+def edge_days_period(spec: str, d: date) -> Optional[tuple[date, date]]:
+    """FIRST_DAYS(unit, back, n) / LAST_DAYS(unit, back, n): the first / last n days of the unit `back` units before
+    D's unit. LAST_DAYS(MONTH,1,14) on 2026-07-05 = 06-17 to 06-30. None when `spec` is neither."""
+    head = (spec or "").strip().upper()
+    if not (head.startswith("FIRST_DAYS") or head.startswith("LAST_DAYS")):
+        return None
+    m = _EDGE_DAYS.match(spec.strip())
+    if not m or int(m.group(4)) < 1:
+        raise ConfigError(f"period {spec!r} must be FIRST_DAYS / LAST_DAYS(WEEK|MONTH|QUARTER|YEAR, back, days) with days >= 1")
+    edge, unit, back, n = m.group(1).upper(), m.group(2).upper(), m.group(3), int(m.group(4))
+    if n > EDGE_MAX_DAYS[unit]:
+        raise ConfigError(f"period {spec!r}: at most {EDGE_MAX_DAYS[unit]} days (the shortest {unit.lower()})")
+    start, end = range_period(f"RANGE({unit},{back},1)", d)
+    return (start, start + timedelta(days=n - 1)) if edge == "FIRST" else (end - timedelta(days=n - 1), end)
+
+
 def period_sql(name: str, period_file: str) -> str:
     """SQL text for `name` from a project file defining PERIOD_SQL (Teradata SQL, one statement)."""
     spec = importlib.util.spec_from_file_location("project_period_sql", period_file)
@@ -213,7 +233,7 @@ def period_sql(name: str, period_file: str) -> str:
 def compute_period(conn: Connection, name: str, sched_dt: date, lookback_days: Optional[int] = None,
                    lookback_weeks: Optional[int] = None, period_file: Optional[str] = None) -> tuple[date, date]:
     """Report period for a run date: a built-in name, an ANNUAL_WINDOW(...), or a statement from a period file."""
-    if window := annual_window(name, sched_dt) or range_period(name, sched_dt):
+    if window := annual_window(name, sched_dt) or range_period(name, sched_dt) or edge_days_period(name, sched_dt):
         return window
     name, days, weeks = period_lookback(name)
     lookback_days, lookback_weeks = days or lookback_days, weeks or lookback_weeks
@@ -301,14 +321,17 @@ def check_schedule(rt: RunType) -> Optional[str]:
             return "Sched_Months_Txt must list months 1 to 12"
     if rt.sched_window_days < 1:
         return "Sched_Window_Days must be 1 or more"
+    if abs(rt.sched_offset_days) > 31:
+        return "Sched_Offset_Days must be between -31 and 31"
     return None
 
 
 def batch_due(conn, rt: RunType, run_date: date, project_cd: str, cache: Optional[dict] = None) -> Optional[dict]:
     """Whether a batch of the run type is due on a run date: None, or a row whose period_dt is the scheduled date.
 
-    With schedule codes the batch is due on its scheduled date and the Sched_Window_Days - 1 days after it (a missed
-    day still gets it; same report dates, so one batch). Otherwise the row of Batch_Schedule_Sql_Txt; its columns
+    With schedule codes the batch is due on its scheduled date (the date the codes name, moved by Sched_Offset_Days:
+    -2 = two days before) and the Sched_Window_Days - 1 days after it (a missed day still gets it; same report
+    dates, so one batch). Otherwise the row of Batch_Schedule_Sql_Txt; its columns
     are available by name to the report date statements of the crosswalk.
     """
     if rt.sched_cd:
@@ -317,7 +340,7 @@ def batch_due(conn, rt: RunType, run_date: date, project_cd: str, cache: Optiona
             raise ConfigError(f"run type {rt.run_ty}: {problem}")
         for back in range(rt.sched_window_days):
             day = run_date - timedelta(days=back)
-            if _scheduled_on(rt, day):
+            if _scheduled_on(rt, day - timedelta(days=rt.sched_offset_days)):
                 return {"period_dt": day}
         return None
     what = f"run type {rt.run_ty}: Batch_Schedule_Sql_Txt"
@@ -592,12 +615,12 @@ KNOWN_PERIODS = frozenset(PERIODS)
 
 def check_period(spec: str) -> None:
     """Raise ConfigError when a period passed to a run is not a built-in one."""
-    if annual_window(spec, date.today()) or range_period(spec, date.today()):
+    if annual_window(spec, date.today()) or range_period(spec, date.today()) or edge_days_period(spec, date.today()):
         return
     name = period_lookback(spec)[0]
     if code(name) not in KNOWN_PERIODS:
         raise ConfigError(f"unknown period {spec!r}; built-in: {', '.join(sorted(KNOWN_PERIODS))}, ANNUAL_WINDOW(...), "
-                          "RANGE(unit,back,length)")
+                          "RANGE(unit,back,length), FIRST_DAYS / LAST_DAYS(unit,back,days)")
 
 
 # release: When a batch's data may be pulled from an internal source, exported and closed.

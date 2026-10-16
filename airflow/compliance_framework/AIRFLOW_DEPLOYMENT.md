@@ -797,6 +797,11 @@ cannot express. Nothing about it is in the DAG, the Airflow Variable or the code
 | The last day of each month | `MONTHLY` | `LAST` | | |
 | The 3rd Tuesday of each month | `MONTHLY` | `TUE` | `3` (`1` ... `4`, `LAST`) | |
 | The 1st of each quarter | `MONTHLY` | `1` | | `1,4,7,10` |
+| The Sunday before the 3rd Tuesday | `MONTHLY` | `TUE` | `3` | | 
+
+`Sched_Offset_Days` (default 0) moves the date the codes name: `-2` with the 3rd Tuesday = the Sunday before it
+(the 13th to the 19th, so sometimes the 2nd Sunday, sometimes the 3rd). Report dates are counted from the moved
+date. Between -31 and 31.
 
 `Sched_Window_Days` (default 1): the batch can still be created that many days from its scheduled date, for the
 same report dates, so a missed run catches up (e.g. `5` for the 3rd Tuesday: Tuesday to Saturday). One batch is
@@ -840,7 +845,9 @@ Codes, counted from the scheduled date: `PREV_DAY`, `SAME_DAY`, `PREV_CALENDAR_W
 `WEEK` (Monday to Sunday), `MONTH`, `QUARTER`, `YEAR`. Examples on Sunday 2026-10-18: `RANGE(DAY,1,1)` 10-17;
 `RANGE(DAY,35,7)` 09-13 to 09-19; `RANGE(WEEK,1,1)` 10-05 to 10-11; `RANGE(WEEK,5,1)` 09-07 to 09-13;
 `RANGE(MONTH,1,1)` September; `RANGE(MONTH,3,3)` July to September; `RANGE(MONTH,0,1)` October; `RANGE(QUARTER,1,1)`
-July to September; `RANGE(YEAR,1,1)` 2025. Example: MNT on the 3rd Tuesday of October with `PREV_CALENDAR_MONTH`
+July to September; `RANGE(YEAR,1,1)` 2025. `FIRST_DAYS(unit, back, days)` / `LAST_DAYS(unit, back, days)`: the
+first / last days of the unit `back` units before (units `WEEK`, `MONTH`, `QUARTER`, `YEAR`; at most 7 / 28 / 90 /
+365 days): `LAST_DAYS(MONTH,1,14)` on 2026-07-05 = 06-17 to 06-30, on 2026-04-12 = 03-18 to 03-31. Example: MNT on the 3rd Tuesday of October with `PREV_CALENDAR_MONTH`
 gets 09-01 to 09-30.
 
 Existing installations: `Run_Ty` is in the crosswalk's primary index, so it cannot be widened in place; the table
@@ -875,6 +882,7 @@ scheduled date). Existing installations add the columns:
 ```sql
 ALTER TABLE <META_DB>.ComplianceRunType ADD Sched_Cd VARCHAR(10), ADD Sched_Day_Cd VARCHAR(5), ADD Sched_Week_Cd VARCHAR(5),
   ADD Sched_Months_Txt VARCHAR(40), ADD Sched_Window_Days SMALLINT DEFAULT 1 NOT NULL;
+ALTER TABLE <META_DB>.ComplianceRunType ADD Sched_Offset_Days SMALLINT DEFAULT 0 NOT NULL;
 ALTER TABLE <META_DB>.ComplianceDataSetSourceXwalk ADD Rpt_Period_Cd VARCHAR(60);
 -- and ComplianceBatchCalendar from sql/schema.sql when it is used
 ```

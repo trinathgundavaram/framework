@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.43 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.44 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -314,6 +314,7 @@ One row per run type, shared by all projects. Decides **when** batches are creat
 | `Sched_Week_Cd` | MONTHLY on a weekday | `1`, `2`, `3`, `4`, `LAST` | The n-th weekday of the month |
 | `Sched_Months_Txt` | No | e.g. `1,4,7,10` | MONTHLY only in these months |
 | `Sched_Window_Days` | Default 1 | ≥ 1 | A missed run still creates the batch up to this many days from its scheduled date (same report dates) |
+| `Sched_Offset_Days` | Default 0 | −31 … 31 | Moves the date the codes name: `-2` with the 3rd Tuesday = the Sunday before it. Report dates count from the moved date |
 | `Batch_Schedule_Sql_Txt` | No | One `SELECT` | Fallback schedule when `Sched_Cd` is empty: returns one row on a due day, none otherwise (section 8.3) |
 | `Active_Ind` | Default 1 | `1`, `0` | `0` = no batches for this run type |
 
@@ -327,6 +328,9 @@ VALUES ('WEEKLY', 'Weekly, previous Monday to Sunday', 'SCHEDULED', 6, 0, 'WEEKL
 -- Monthly on the 3rd Tuesday, 5 days to catch up a missed run
 INSERT INTO HSABC_DEV.ComplianceRunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Sched_Cd, Sched_Day_Cd, Sched_Week_Cd, Sched_Window_Days, Active_Ind)
 VALUES ('MNT', 'Monthly submission', 'SCHEDULED', 10, 0, 'MONTHLY', 'TUE', '3', 5, 1);
+-- Monthly on the Sunday before the 3rd Tuesday
+INSERT INTO HSABC_DEV.ComplianceRunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Sched_Cd, Sched_Day_Cd, Sched_Week_Cd, Sched_Offset_Days, Sched_Window_Days, Active_Ind)
+VALUES ('MNT2', 'Monthly, Sunday before the 3rd Tuesday', 'SCHEDULED', 5, 0, 'MONTHLY', 'TUE', '3', -2, 1, 1);
 -- Quarterly on the 1st of Jan / Apr / Jul / Oct
 INSERT INTO HSABC_DEV.ComplianceRunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Sched_Cd, Sched_Day_Cd, Sched_Months_Txt, Sched_Window_Days, Active_Ind)
 VALUES ('QTR', 'Quarterly', 'SCHEDULED', 15, 0, 'MONTHLY', '1', '1,4,7,10', 3, 1);
@@ -732,6 +736,9 @@ locks until they expire (`LOCK_TTL_MINUTES`, default 240) or are released (secti
 | `MONTHLY` | `LAST` | | optional | The last day of the month |
 | `MONTHLY` | `MON` … `SUN` | `1` … `4`, `LAST` | optional | The n-th (or last) weekday of the month |
 
+`Sched_Offset_Days` (−31 … 31, default 0) moves the date: e.g. `MONTHLY`, `TUE`, `3`, `-2` = the Sunday before the
+3rd Tuesday.
+
 `Sched_Window_Days` (≥ 1): the batch can still be created up to that many days from its scheduled date (missed
 run). One batch per scheduled date, never one per day of the window.
 
@@ -770,6 +777,8 @@ Counted from the batch's scheduled date (D).
 | `PREV_CALENDAR_YEAR` | 1 Jan to 31 Dec of the year before D |
 | `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])` | The same dates every year (e.g. `12-01,01-31`); the optional third date is when it moves to the next window |
 | `RANGE(unit,back,length)` | Any other range: `length` units, starting `back` units before D's unit. Units: `DAY`, `WEEK` (Monday–Sunday), `MONTH`, `QUARTER`, `YEAR` |
+| `FIRST_DAYS(unit,back,days)` | The first `days` days of the unit `back` units before D's unit (`WEEK`, `MONTH`, `QUARTER`, `YEAR`; at most 7 / 28 / 90 / 365) |
+| `LAST_DAYS(unit,back,days)` | The last `days` days of that unit, e.g. `LAST_DAYS(MONTH,1,14)` = the last 14 days of last month |
 
 `RANGE` examples, for D = Sunday 2026-10-18:
 
@@ -788,6 +797,8 @@ Counted from the batch's scheduled date (D).
 | `RANGE(MONTH,3,3)` | 07-01 to 09-30 | the last 3 full months |
 | `RANGE(QUARTER,1,1)` | 07-01 to 09-30 | last quarter |
 | `RANGE(YEAR,1,1)` | 2025-01-01 to 2025-12-31 | last year |
+| `LAST_DAYS(MONTH,1,14)` | 09-17 to 09-30 | the last 14 days of last month |
+| `FIRST_DAYS(MONTH,0,10)` | 10-01 to 10-10 | the first 10 days of this month |
 
 Fixed dates that repeat every year: `ANNUAL_WINDOW`. One-off or irregular dates: `ComplianceBatchCalendar`.
 
