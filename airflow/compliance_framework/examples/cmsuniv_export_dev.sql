@@ -593,12 +593,86 @@ BEGIN
                       WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'FA4' AND Src_ID = :p_src_id AND Run_Ty = :p_run_ty
                         AND Rpt_Start_Dt_Key = :p_rpt_start AND Rpt_End_Dt_Key = :p_rpt_end);
   IF :p_data_btch_id IS NOT NULL THEN
-    -- source 10 (CMSUNIV_CORE_DEV_T.FA_HS_TABLE4_2022): to be added when the FA4 file layout (target column list) is known
-    IF :p_src_id = '10' THEN
-      SIGNAL SQLSTATE 'U0001' SET MESSAGE_TEXT = 'export of source 10 to FA4_EXPORT is not set up yet';
-    -- source 40 (CMSUNIV_CORE_DEV_T.FA_CIGNAAZ_TABLE4_2022): to be added when the FA4 file layout (target column list) is known
-    ELSEIF :p_src_id = '40' THEN
-      SIGNAL SQLSTATE 'U0001' SET MESSAGE_TEXT = 'export of source 40 to FA4_EXPORT is not set up yet';
+    IF :p_src_id = '10' THEN   -- FA_HS_TABLE4_2022: its columns by position
+      INSERT INTO CMSUNIV_EXPORT_DEV_T.FA4_EXPORT
+              (FA_DE_Table4_2022_ID,
+               EnrolleeID,
+               EnrolleeFirstName,
+               EnrolleeLastName,
+               DateofBirth,
+               EnrollmentEffectiveDate,
+               EffectiveDisenrollmentDate,
+               CardholderID,
+               ContractID,
+               PlanBenefitPackagePBP,
+               UniqueKey,
+               StagingCreateDate,
+               Universe_Vrsn,
+               Run_Ty,
+               AuditDataID,
+               Src_Data_Key,
+               Load_Dtts,
+               Btch_ID)
+        SELECT FA_Table4_ID,
+               EnrolleeID,
+               EnrolleeFirstName,
+               EnrolleeLastName,
+               DateofBirth,
+               EnrollmentEffectiveDate,
+               EffectiveDisenrollmentDate,
+               CardholderID,
+               ContractID,
+               PlanBenefitPackage,
+               SourceUnique_ID,
+               StagingCreateDate,
+               Universe_Version,
+               Run_Ty,
+               AuditDataID,
+               Source_ID,
+               Load_Dtts,
+               Batch_ID
+          FROM CMSUNIV_CORE_DEV_T.FA_HS_TABLE4_2022
+         WHERE Batch_ID = :p_data_btch_id AND CAST(Source_ID AS VARCHAR(30)) = :p_src_id;
+    ELSEIF :p_src_id = '40' THEN   -- FA_CIGNAAZ_TABLE4_2022: its columns by position
+      INSERT INTO CMSUNIV_EXPORT_DEV_T.FA4_EXPORT
+              (FA_DE_Table4_2022_ID,
+               EnrolleeID,
+               EnrolleeFirstName,
+               EnrolleeLastName,
+               DateofBirth,
+               EnrollmentEffectiveDate,
+               EffectiveDisenrollmentDate,
+               CardholderID,
+               ContractID,
+               PlanBenefitPackagePBP,
+               UniqueKey,
+               StagingCreateDate,
+               Universe_Vrsn,
+               Run_Ty,
+               AuditDataID,
+               Src_Data_Key,
+               Load_Dtts,
+               Btch_ID)
+        SELECT FA_CignaAZ_TABLE4_2022_ID,
+               EnrolleeID,
+               EnrolleeFirstName,
+               EnrolleeLastName,
+               DateofBirth,
+               EnrollmentEffectiveDate,
+               EffectiveDisenrollmentDate,
+               CardholderID,
+               ContractID,
+               PlanBenefitPackage,
+               SourceUnique_ID,
+               StagingCreateDate,
+               Universe_Version,
+               Run_Ty,
+               AuditDataID,
+               Source_ID,
+               Load_Dtts,
+               Batch_ID
+          FROM CMSUNIV_CORE_DEV_T.FA_CIGNAAZ_TABLE4_2022
+         WHERE Batch_ID = :p_data_btch_id AND CAST(Source_ID AS VARCHAR(30)) = :p_src_id;
     ELSE
       INSERT INTO CMSUNIV_EXPORT_DEV_T.FA4_EXPORT
         SELECT c.*, NULL
