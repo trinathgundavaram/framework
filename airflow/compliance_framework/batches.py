@@ -889,10 +889,6 @@ def close_resolution(batch: dict) -> tuple[str, str]:
     return DATA_NOT_PROVIDED, "MISSING"
 
 
-def closes_automatically(batch: dict) -> bool:
-    return batch["resolution_ty"] in DELIVERED or batch["req_stat"] == EXCEPTION_PENDING
-
-
 @dataclass
 class CloseOutcome:
     btch_id: str
@@ -926,15 +922,16 @@ class BatchCloser:
         for b in todo:
             if self._today() < b["hold_dt"] and not self._released(b):
                 self._blocked(b, closed_by, f"SLA hold until {b['hold_dt']}")
-        outs = [o for o in (self._close_locked(b, closed_by, automatic=False) for b in todo) if o is not None]
+        outs = [o for o in (self._close_locked(b, closed_by) for b in todo) if o is not None]
         if not outs:
             self._blocked(rows[0], closed_by, "batch is already closed")
         return outs
 
     def run(self, scope: Optional[Scope] = None, hold: tuple = ()) -> CloseSummary:
-        """Sweep the open batches of a scope (a project, a table group or table, a run type) whose hold has passed, and
-        the batches with data released early (BATCH_RELEASED). Batches of the run types in `hold` stay open unless
-        released."""
+        """Close the open batches of a scope (a project, a table group or table, a run type) whose hold has passed,
+        with or without data (no data: DATA_NOT_PROVIDED / MISSING and a SOURCE_MISSING_AT_CLOSE alert), and the
+        batches with data released early (BATCH_RELEASED). Batches of the run types in `hold` stay open unless
+        released; reopened batches stay open until new data arrives."""
         s = CloseSummary()
         rows = self._open_past_hold(scope or Scope(), sweep=True)
         done = released(self.conn, [b["req_id"] for b in rows if b["run_ty"] in hold]) if hold else set()
@@ -943,11 +940,8 @@ class BatchCloser:
                 s.on_hold.append(b["btch_id"])
                 continue
             s.evaluated += 1
-            if not closes_automatically(b):
-                s.waiting.append(b["btch_id"])
-                continue
             try:
-                out = self._close_locked(b, "SYSTEM", automatic=True)
+                out = self._close_locked(b, "SYSTEM")
             except CloseDeferred:
                 s.deferred.append(b["btch_id"])
                 continue
@@ -998,7 +992,7 @@ class BatchCloser:
             self.logger.audit("BATCH_CLOSE_BLOCKED", actor=closed_by, description=reason, **_ctx(b))
         raise CloseBlocked(reason)
 
-    def _close_locked(self, b: dict, closed_by: str, automatic: bool) -> Optional[CloseOutcome]:
+    def _close_locked(self, b: dict, closed_by: str) -> Optional[CloseOutcome]:
         """Close under the batch lock; None if there is nothing to close any more."""
         key = db.req_key(b)
         if not db.try_lock(self.conn, key):
@@ -1009,7 +1003,7 @@ class BatchCloser:
             with self.conn.transaction():
                 cur = self.conn.execute("SELECT * FROM ComplianceRequestControl WHERE Req_ID=%s",
                                         (b["req_id"],)).fetchone()
-                if cur["batch_close_ind"] == 1 or (automatic and not closes_automatically(cur)):
+                if cur["batch_close_ind"] == 1 or cur["req_stat"] not in OPEN_STATUSES:
                     return None
                 to_stat, resolution = close_resolution(cur)
                 check_transition(cur["req_stat"], to_stat)
@@ -1019,7 +1013,10 @@ class BatchCloser:
                 self.logger.batch_event("BATCH_CLOSED", req_id=cur["req_id"], btch_id=cur["btch_id"], actor=closed_by,
                                         detail=f"{to_stat} / {resolution}")
                 if resolution == "MISSING":
-                    self.logger.audit("SOURCE_MISSING_AT_CLOSE", actor=closed_by, **_ctx(cur))
+                    self.logger.audit("SOURCE_MISSING_AT_CLOSE", actor=closed_by, **_ctx(cur),
+                                      description=f"no data from source {cur['src_id']} for {db.as_date(cur['rpt_start_dt_key'])}"
+                                                  f" to {db.as_date(cur['rpt_end_dt_key'])} by the close date; closed as "
+                                                  f"{DATA_NOT_PROVIDED}")
                 return CloseOutcome(cur["btch_id"], to_stat, resolution)
         finally:
             db.unlock(self.conn, key)

@@ -441,11 +441,16 @@ UPDATE <META_DB>.ComplianceRequestInTake SET Last_Run_Dt_Key = NULL;
 | `EXCEPTION_PENDING` | Open | Older rows only: no step sets it any more |
 | `REQUEST_COMPLETE` | Closed | Closed with data (`NEW_FILE` or `CARRY_FORWARD`); also after a late or corrected file with an approved override |
 | `COMPLETED_WITH_EXCEPTION` | Closed | Closed while `EXCEPTION_PENDING` (older rows) |
-| `DATA_NOT_PROVIDED` | Closed | Closed without data: `Resolution_Ty = NO_DATA` (the source sent a file with no data rows; closed by BATCH_CLOSE) or `MISSING` (no file at all; closed by hand with `close-batch`, audit event `SOURCE_MISSING_AT_CLOSE`) |
+| `DATA_NOT_PROVIDED` | Closed | Closed without data: `Resolution_Ty = NO_DATA` (the source sent a file with no data rows; closed by BATCH_CLOSE) or `MISSING` (no data at all by the close date; closed by BATCH_CLOSE, alert `SOURCE_MISSING_AT_CLOSE`). A final status like `REQUEST_COMPLETE` |
 
-BATCH_CLOSE closes, once the SLA hold has passed, every batch that has a delivery: `SOURCE_DATA_READY` /
+BATCH_CLOSE closes, once the SLA hold has passed, every open batch, with or without data: `SOURCE_DATA_READY` /
 `SOURCE_DATA_CARRY_FORWARD` become `REQUEST_COMPLETE`, `SOURCE_DATA_READY_NO_DATA` becomes `DATA_NOT_PROVIDED`
-(`NO_DATA`). A batch still `REQUEST_CREATED` (no file) waits for `close-batch`. A file that is rejected does not
+(`NO_DATA`), and a batch still `REQUEST_CREATED` (nothing delivered, pulled or carried forward) becomes
+`DATA_NOT_PROVIDED` (`MISSING`) with the alert `SOURCE_MISSING_AT_CLOSE` (emailed by NOTIFY: source, report dates,
+batch). `DATA_NOT_PROVIDED` is a final status like `REQUEST_COMPLETE`. Not closed: batches of a run type in the
+`hold` input and reopened batches still waiting for new data. So decide before the close run: a carry-forward
+(`REUSE`) needs its override applied by OVERRIDE_DECISIONS before BATCH_CLOSE runs on the close date; after the
+close, data still comes in with a `LATE_ARRIVAL` override or a `REOPEN`. A file that is rejected does not
 change the batch status. `Allow_Zero_Rcd_Ind` is no longer used: a file with no data rows is always accepted as
 the source's delivery. The loads themselves keep their own status (`ComplianceFileLoad.Load_Stat`: `PROMOTED`,
 `SUPERSEDED`, `QUARANTINED`, ...).
