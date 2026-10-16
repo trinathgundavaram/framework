@@ -43,7 +43,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceExportConfig (
 UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm);
 
 -- Optional: internal sources pulled with a query (SOURCE_LOAD), one row per project / table / source.
-CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceQueryConfig (
+CREATE MULTISET TABLE {{META_DB}}.ComplianceInternalSourceConfig (
   Project_Cd      VARCHAR(30)    NOT NULL,
   Table_Nm        VARCHAR(63)    NOT NULL,
   Src_ID          VARCHAR(30)    NOT NULL,
@@ -110,16 +110,30 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceBatchCalendar (
 )
 UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Run_Ty, Req_Dt_Key, Rpt_Start_Dt_Key, Rpt_End_Dt_Key);
 
+CREATE MULTISET TABLE {{META_DB}}.ComplianceRunTypePeriod (
+  Project_Cd       VARCHAR(30)  NOT NULL,
+  Table_Nm         VARCHAR(63)  DEFAULT '*' NOT NULL,
+  Run_Ty           VARCHAR(20)  NOT NULL,
+  Rpt_Period_Cd    VARCHAR(60)  NOT NULL,
+  Active_Ind       SMALLINT     DEFAULT 1 NOT NULL,
+  Created_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Created_By       VARCHAR(100) DEFAULT USER NOT NULL,
+  Updated_Dtts     TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  Updated_By       VARCHAR(100) DEFAULT USER NOT NULL
+)
+UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Run_Ty);
+
 CREATE MULTISET TABLE {{META_DB}}.ComplianceDataSetSourceXwalk (
   Project_Cd             VARCHAR(30)  NOT NULL,
   Table_Nm               VARCHAR(63)  NOT NULL,
   Src_ID                 VARCHAR(30)  NOT NULL,
-  Run_Ty                 VARCHAR(20)  NOT NULL,
+  Run_Ty                 VARCHAR(200) NOT NULL,
   Effective_Start_Dt_Key DATE         NOT NULL,
   Effective_End_Dt_Key   DATE,
   Cmplnc_Vrsn            VARCHAR(10)  NOT NULL,
   Rpt_Dt_Sql_Txt         VARCHAR(8000),
   Rpt_Period_Cd          VARCHAR(60),
+  Include_Ind            SMALLINT     DEFAULT 1 NOT NULL,
   Active_Ind             SMALLINT     DEFAULT 1 NOT NULL,
   Created_Dtts           TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   Created_By             VARCHAR(100) DEFAULT USER NOT NULL,

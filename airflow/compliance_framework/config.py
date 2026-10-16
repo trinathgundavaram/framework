@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from itertools import combinations
@@ -64,15 +64,28 @@ class XwalkRow:
     active: bool
     rpt_dt_sql: Optional[str] = None
     rpt_period_cd: Optional[str] = None
+    include: bool = True
+    listed: bool = False
+    overridden: tuple = ()
 
     @classmethod
-    def from_row(cls, r: dict) -> "XwalkRow":
-        return cls(code(r["project_cd"]), code(r["table_nm"]), code(r["src_id"]), code(r["run_ty"]), db.as_date(r["effective_start_dt_key"]),
-                   db.as_date(r["effective_end_dt_key"]), code(r["cmplnc_vrsn"]), r["active_ind"] == 1,
-                   _text(r.get("rpt_dt_sql_txt")), code(_text(r.get("rpt_period_cd"))))
+    def from_row(cls, r: dict, run_ty: Optional[str] = None, listed: bool = False) -> "XwalkRow":
+        return cls(code(r["project_cd"]), code(r["table_nm"]), code(r["src_id"]), code(run_ty or r["run_ty"]),
+                   db.as_date(r["effective_start_dt_key"]), db.as_date(r["effective_end_dt_key"]), code(r["cmplnc_vrsn"]),
+                   r["active_ind"] == 1, _text(r.get("rpt_dt_sql_txt")), code(_text(r.get("rpt_period_cd"))),
+                   r.get("include_ind", 1) != 0, listed)
+
+    @property
+    def window(self) -> tuple:
+        return self.effective_start_dt, self.effective_end_dt
 
     def effective_on(self, d: date) -> bool:
-        return self.active and self.effective_start_dt <= d and (self.effective_end_dt is None or d <= self.effective_end_dt)
+        return (self.active and _within(d, self.window)
+                and not any(_within(d, w) for w in self.overridden))
+
+
+def _within(d: date, window: tuple) -> bool:
+    return window[0] <= d and (window[1] is None or d <= window[1])
 
 
 @dataclass(frozen=True)
@@ -180,17 +193,54 @@ def run_types(conn: Connection) -> dict[str, RunType]:
     return {code(r["run_ty"]): RunType.from_row(r) for r in conn.execute("SELECT * FROM ComplianceRunType").fetchall()}
 
 
+def xwalk_run_types(text) -> list[str]:
+    return [code(t) for t in str(text or "").split(",") if t.strip()]
+
+
 def xwalk_rows(conn: Connection, *, project_cd: Optional[str] = None, table_nm: Optional[str] = None,
-               src_id: Optional[str] = None, run_ty: Optional[str] = None) -> list[XwalkRow]:
-    """Active crosswalk rows, optionally filtered."""
+               src_id: Optional[str] = None, run_ty: Optional[str] = None, switched_off: bool = False) -> list[XwalkRow]:
+    """Active crosswalk rows, one per run type, optionally filtered.
+
+    Run_Ty may list run types (DAILY,WEEKLY,MNT). A row for one run type replaces a list's entry for that run type
+    while it is effective (Include_Ind = 0 switches it off). A row without Rpt_Period_Cd / Rpt_Dt_Sql_Txt takes the
+    project's ComplianceRunTypePeriod. `switched_off` also returns the Include_Ind = 0 rows (validation).
+    """
     where, params = ["Active_Ind = 1"], []
-    for col, val in (("Project_Cd", project_cd), ("Table_Nm", table_nm), ("Src_ID", src_id), ("Run_Ty", run_ty)):
+    for col, val in (("Project_Cd", project_cd), ("Table_Nm", table_nm), ("Src_ID", src_id)):
         if val is not None:
             where.append(f"UPPER({col}) = %s")
             params.append(code(val))
-    rows = conn.execute(f"SELECT * FROM ComplianceDataSetSourceXwalk WHERE {' AND '.join(where)} "
-                        "ORDER BY Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key", params).fetchall()
-    return [XwalkRow.from_row(r) for r in rows]
+    rows = []
+    for r in conn.execute(f"SELECT * FROM ComplianceDataSetSourceXwalk WHERE {' AND '.join(where)}", params).fetchall():
+        types = xwalk_run_types(r["run_ty"])
+        rows += [XwalkRow.from_row(r, t, len(types) > 1) for t in types if run_ty is None or t == code(run_ty)]
+    own: dict[tuple, list] = defaultdict(list)
+    for x in rows:
+        if not x.listed:
+            own[(x.project_cd, x.table_nm, x.src_id, x.run_ty)].append(x.window)
+    periods = run_type_periods(conn) if any(not (x.rpt_period_cd or x.rpt_dt_sql) for x in rows) else {}
+    out = []
+    for x in rows:
+        if x.listed and own.get(key := (x.project_cd, x.table_nm, x.src_id, x.run_ty)):
+            if any(_within(x.effective_start_dt, w) and (w[1] is None or x.effective_end_dt and x.effective_end_dt <= w[1])
+                   for w in own[key]):
+                continue
+            x = replace(x, overridden=tuple(own[key]))
+        if not (x.rpt_period_cd or x.rpt_dt_sql):
+            x = replace(x, rpt_period_cd=periods.get((x.project_cd, x.table_nm, x.run_ty))
+                        or periods.get((x.project_cd, "*", x.run_ty)))
+        if x.include or switched_off:
+            out.append(x)
+    return sorted(out, key=lambda x: (x.project_cd, x.table_nm, x.src_id, x.run_ty, x.effective_start_dt))
+
+
+def run_type_periods(conn: Connection) -> dict[tuple, str]:
+    """The active ComplianceRunTypePeriod rows: (project, table or '*', run type) -> Rpt_Period_Cd."""
+    if not db.table_exists(conn, conn.schema, "ComplianceRunTypePeriod"):
+        return {}
+    return {(code(r["project_cd"]), code(r["table_nm"] or "*"), code(r["run_ty"])): code(_text(r["rpt_period_cd"]))
+            for r in conn.execute("SELECT * FROM ComplianceRunTypePeriod WHERE Active_Ind = 1").fetchall()
+            if _text(r["rpt_period_cd"])}
 
 
 @dataclass(frozen=True)
@@ -228,7 +278,7 @@ SOURCE_DB_TYPES = ("TERADATA", "SQLSERVER")
 
 @dataclass(frozen=True)
 class QueryConfig:
-    """One ComplianceSourceQueryConfig row: an internal source pulled with its own SELECT (SOURCE_LOAD).
+    """One ComplianceInternalSourceConfig row: an internal source pulled with its own SELECT (SOURCE_LOAD).
 
     No Src_Conn_Cd = the source is on the framework's own Teradata system: the rows move with INSERT ... SELECT.
     """
@@ -248,7 +298,7 @@ class QueryConfig:
 
     @property
     def label(self) -> str:
-        return f"ComplianceSourceQueryConfig {self.project_cd}/{self.table_nm}/{self.src_id}"
+        return f"ComplianceInternalSourceConfig {self.project_cd}/{self.table_nm}/{self.src_id}"
 
     @property
     def same_system(self) -> bool:
@@ -263,10 +313,10 @@ class QueryConfig:
 
 
 def active_query_configs(conn: Connection, settings=None) -> list[QueryConfig]:
-    """The active internal query sources; none when ComplianceSourceQueryConfig does not exist."""
-    if not db.table_exists(conn, conn.schema, "ComplianceSourceQueryConfig"):
+    """The active internal query sources; none when ComplianceInternalSourceConfig does not exist."""
+    if not db.table_exists(conn, conn.schema, "ComplianceInternalSourceConfig"):
         return []
-    rows = conn.execute("SELECT * FROM ComplianceSourceQueryConfig WHERE Active_Ind = 1 "
+    rows = conn.execute("SELECT * FROM ComplianceInternalSourceConfig WHERE Active_Ind = 1 "
                         "ORDER BY Project_Cd, Table_Nm, Src_ID").fetchall()
     return [QueryConfig.from_row(r, settings) for r in rows]
 
@@ -615,11 +665,27 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
     projects = {code(r["project_cd"]): r["active_ind"] == 1
                 for r in conn.execute("SELECT Project_Cd, Active_Ind FROM ComplianceProject").fetchall()}
     sources = {code(r["src_id"]) for r in conn.execute("SELECT Src_ID FROM ComplianceSourceSystem").fetchall()}
-    xw = xwalk_rows(conn)
+    xw_all = xwalk_rows(conn, switched_off=True)
+    xw = [x for x in xw_all if x.include]
+
+    if db.table_exists(conn, conn.schema, "ComplianceRunTypePeriod"):
+        for r in conn.execute("SELECT * FROM ComplianceRunTypePeriod WHERE Active_Ind = 1").fetchall():
+            label = f"ComplianceRunTypePeriod {code(r['project_cd'])}/{code(r['table_nm'] or '*')}/{code(r['run_ty'])}"
+            if code(r["project_cd"]) not in projects:
+                add("RUN_TYPE_PERIOD", f"{label}: project {code(r['project_cd'])} is not in ComplianceProject")
+            if code(r["run_ty"]) not in rts:
+                add("RUN_TYPE_PERIOD", f"{label}: run type {code(r['run_ty'])} is not in ComplianceRunType")
+            try:
+                check_period(_text(r["rpt_period_cd"]) or "")
+            except ConfigError as e:
+                add("RUN_TYPE_PERIOD", f"{label}: {e}")
 
     run_date, cache, due = run_date or date.today(), {}, {}
     for x in xw:
         rt = rts.get(x.run_ty)
+        if rt and rt.active and rt.run_category_cd == SCHEDULED and rt.sched_cd and not (x.rpt_period_cd or x.rpt_dt_sql):
+            add("RPT_PERIOD", f"{x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty}: no report period (Rpt_Period_Cd on "
+                              "the crosswalk row or a ComplianceRunTypePeriod row)")
         if x.rpt_period_cd:
             try:
                 check_period(x.rpt_period_cd)
@@ -696,8 +762,9 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
     queries = active_query_configs(conn, settings)
     query_sources = {(q.project_cd, q.table_nm, q.src_id) for q in queries}
     xw_by_source: dict[tuple, list[XwalkRow]] = defaultdict(list)
-    for x in xw:
-        xw_by_source[(x.project_cd, x.table_nm, x.src_id)].append(x)
+    for x in xw_all:
+        if x.include:
+            xw_by_source[(x.project_cd, x.table_nm, x.src_id)].append(x)
         label = f"xwalk {x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty}@{x.effective_start_dt}"
         if x.run_ty not in rts:
             add("XWALK_RUN_TYPE", f"{label}: run type {x.run_ty} is not in ComplianceRunType")
@@ -709,11 +776,14 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             add("XWALK_PROJECT", f"{label}: project {x.project_cd} is inactive", "WARNING")
         if x.src_id not in sources:
             add("XWALK_SOURCE", f"{label}: source {x.src_id} is not in ComplianceSourceSystem")
-        if (x.project_cd, x.table_nm, x.src_id) not in cfg_sources | query_sources:
-            add("XWALK_NO_FILE_CONFIG", f"{label}: no active ComplianceSourceFileConfig or ComplianceSourceQueryConfig")
-    for rows in xw_by_source.values():
+        if x.include and (x.project_cd, x.table_nm, x.src_id) not in cfg_sources | query_sources:
+            add("XWALK_NO_FILE_CONFIG", f"{label}: no active ComplianceSourceFileConfig or ComplianceInternalSourceConfig")
+    by_source_all: dict[tuple, list[XwalkRow]] = defaultdict(list)
+    for x in xw_all:
+        by_source_all[(x.project_cd, x.table_nm, x.src_id)].append(x)
+    for rows in by_source_all.values():
         for a, b in combinations(rows, 2):
-            if (a.run_ty == b.run_ty
+            if (a.run_ty == b.run_ty and a.listed == b.listed
                     and (b.effective_end_dt is None or a.effective_start_dt <= b.effective_end_dt)
                     and (a.effective_end_dt is None or b.effective_start_dt <= a.effective_end_dt)):
                 add("XWALK_OVERLAP", f"xwalk {a.project_cd}/{a.table_nm}/{a.src_id}/{a.run_ty}: effective windows "

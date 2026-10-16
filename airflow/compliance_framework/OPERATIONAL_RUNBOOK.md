@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.42 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.43 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -57,10 +57,11 @@ What a business user controls, all in metadata tables (no code):
 | You want to … | Where |
 |---|---|
 | Add a project, its tables and sources | `ComplianceProject`, `ComplianceTable`, `ComplianceSourceSystem` |
-| Say which source sends which table for which run type, and from when | `ComplianceDataSetSourceXwalk` |
+| Say which source sends which table for which run types, and from when | `ComplianceDataSetSourceXwalk` |
 | Say when batches are created and their SLA | `ComplianceRunType` (and optionally `ComplianceBatchCalendar`) |
+| Say which report dates each run type's batches cover | `ComplianceRunTypePeriod` |
 | Describe a source's file (name, delimiter, folder, header / trailer) | `ComplianceSourceFileConfig` |
-| Pull an internal source with a query instead of a file | `ComplianceSourceQueryConfig` |
+| Pull an internal source with a query instead of a file | `ComplianceInternalSourceConfig` |
 | Check files before / while loading | `ComplianceFileCheckConfig` |
 | Fill derived columns (batch ID, version, load time, row ID …) | `ComplianceTargetColumnConfig` |
 | Copy data to an export table | `ComplianceExportConfig` |
@@ -161,25 +162,32 @@ A batch is one table + run type + report period + request date. Every **source**
             ┌───────────────────────┼──────────────────────────────┐
             │                       │                              │
             ▼                       ▼                              ▼
- ┌──────────────────┐  ┌───────────────────────────────┐  ┌──────────────────────┐
+ ┌──────────────────┐  ┌───────────────────────────────┐  ┌───────────────────────┐
  │ ComplianceTable  │  │ ComplianceDataSetSourceXwalk  │  │ComplianceBatchCalendar│
- │ (table groups,   │  │ Project+Table+Src+Run_Ty      │  │ Project+Table+Run_Ty  │
+ │ (table groups,   │  │ Project+Table+Src, Run_Ty list│  │ Project+Table+Run_Ty  │
  │  optional)       │  │ + effective dates + version   │  │ + dates (optional)    │
- └──────────────────┘  └───┬──────────────┬────────┬───┘  └──────────────────────┘
+ └──────────────────┘  └───┬──────────────┬────────┬───┘  └───────────────────────┘
                            │ Src_ID       │ Run_Ty │
-           ┌───────────────┘              │        └───────────────────┐
-           ▼                              ▼                            │
+           ┌───────────────┘              │        └────────────────────┐
+           ▼                              ▼                             │
  ┌───────────────────────┐   ┌───────────────────┐                      │
  │ComplianceSourceSystem │   │ ComplianceRunType │  schedule, SLA,      │
  │ Src_ID, name, type    │   │ Run_Ty            │  category            │
- └───────────────────────┘   └───────────────────┘                      │
+ └───────────────────────┘   └─────────┬─────────┘                      │
+                                       │ Project + Table (or *) + Run_Ty│
+                                       ▼                                │
+                             ┌─────────────────────────┐                │
+                             │ ComplianceRunTypePeriod │ report dates   │
+                             │ default period per      │ per project    │
+                             │ project / table         │                │
+                             └─────────────────────────┘                │
                                                                         │
  Per Project + Table + Src_ID (how the data arrives), one of:           │
- ┌───────────────────────────┐   ┌────────────────────────────┐         │
- │ComplianceSourceFileConfig │   │ComplianceSourceQueryConfig │         │
- │ file name, folder, stage  │   │ query, connection, stage   │         │
- │ and core tables           │   │ and core tables            │         │
- └─────────────┬─────────────┘   └────────────────────────────┘         │
+ ┌───────────────────────────┐   ┌───────────────────────────────┐      │
+ │ComplianceSourceFileConfig │   │ComplianceInternalSourceConfig │      │
+ │ file name, folder, stage  │   │ query, connection, stage      │      │
+ │ and core tables           │   │ and core tables               │      │
+ └─────────────┬─────────────┘   └───────────────────────────────┘      │
                │ Project+Table+Src                                      │
                ▼                                                        │
  ┌───────────────────────────┐   ┌──────────────────────────────┐       │
@@ -219,10 +227,11 @@ A batch is one table + run type + report period + request date. Every **source**
 | `ComplianceTable` | Table groups (optional) | You | When tables are grouped |
 | `ComplianceSourceSystem` | Sources | You | Once per source |
 | `ComplianceRunType` | Run types: schedule, SLA, category | You | Once per run type |
-| `ComplianceDataSetSourceXwalk` | Who sends what, from when | You | Per table, source, run type |
+| `ComplianceRunTypePeriod` | Report dates of each run type | You | Per project (and table, when different) |
+| `ComplianceDataSetSourceXwalk` | Who sends what, for which run types, from when | You | Per table and source |
 | `ComplianceBatchCalendar` | Extra batches on given dates (optional) | You | For irregular dates |
 | `ComplianceSourceFileConfig` | How a source's file looks and where it loads | You | Per file source |
-| `ComplianceSourceQueryConfig` | How an internal source is pulled (optional) | You | Per query source |
+| `ComplianceInternalSourceConfig` | How an internal source is pulled (optional) | You | Per query source |
 | `ComplianceFileCheckConfig` | File checks | You | As needed |
 | `ComplianceTargetColumnConfig` | Derived columns | You | Per project / table |
 | `ComplianceExportConfig` | Export table (optional) | You | Per table |
@@ -326,37 +335,79 @@ INSERT INTO HSABC_DEV.ComplianceRunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, S
 VALUES ('CMS', 'CMS ad-hoc request', 'ADHOC', 5, 1, 1);
 ```
 
-### 5.5 ComplianceDataSetSourceXwalk (crosswalk)
+### 5.5 ComplianceRunTypePeriod (report dates per run type)
 
-The heart of the setup: one row per **table + source + run type** that gets batches, with the period it is valid
-for, the compliance version and the report period.
+The report dates of each scheduled run type, set once per project instead of on every crosswalk row. A row for
+one table wins over the project's `*` row; `Rpt_Period_Cd` on a crosswalk row wins over both.
 
 | Column | Required | Values | Meaning |
 |---|---|---|---|
-| `Project_Cd`, `Table_Nm`, `Src_ID`, `Run_Ty` | Yes | Existing codes | This source sends this table for this run type |
+| `Project_Cd` | Yes | A project | |
+| `Table_Nm` | Default `*` | A table or `*` | `*` = every table of the project |
+| `Run_Ty` | Yes | A run type | |
+| `Rpt_Period_Cd` | Yes | Period code (section 8.4) | Report dates, counted from the batch's scheduled date |
+| `Active_Ind` | Default 1 | `1`, `0` | |
+
+Ad-hoc run types need no row (their dates come from the request). Careful: an ad-hoc run type that has a schedule
+creates scheduled batches for **every** source that finds a period; when only some sources are scheduled, give it
+no row here and put `Rpt_Period_Cd` on those sources' crosswalk rows.
+
+```sql
+INSERT INTO HSABC_DEV.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'DAILY', 'PREV_DAY', 1);
+INSERT INTO HSABC_DEV.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'WEEKLY', 'PREV_CALENDAR_WEEK', 1);
+INSERT INTO HSABC_DEV.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'MNT', 'PREV_CALENDAR_MONTH', 1);
+-- WEEKLY2: the Monday-Sunday week 5 weeks back
+INSERT INTO HSABC_DEV.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'WEEKLY2', 'RANGE(WEEK,5,1)', 1);
+-- ODAG5 reports the quarter for MNT instead of the month
+INSERT INTO HSABC_DEV.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', 'ODAG5', 'MNT', 'PREV_CALENDAR_QUARTER', 1);
+```
+
+### 5.6 ComplianceDataSetSourceXwalk (crosswalk)
+
+The heart of the setup: **one row per table + source**, listing the run types the source gets batches for, with
+the period the row is valid for and the compliance version.
+
+| Column | Required | Values | Meaning |
+|---|---|---|---|
+| `Project_Cd`, `Table_Nm`, `Src_ID` | Yes | Existing codes | This source sends this table |
+| `Run_Ty` | Yes | One run type, or a list `DAILY,WEEKLY,MNT` (up to 200 characters) | The run types it sends. Only the listed ones: a run type added later applies to no source until it is listed |
 | `Effective_Start_Dt_Key` | Yes | Date | First run date the row applies |
 | `Effective_End_Dt_Key` | No | Date | Last run date (empty = open ended). End a row and add a new one to change the version |
 | `Cmplnc_Vrsn` | Yes | Up to 10, e.g. `2200` | The compliance version; stored on each batch, written to the `VERSION` column |
-| `Rpt_Period_Cd` | Scheduled rows | Period code (section 8.4) | Report dates of a scheduled batch, counted from its scheduled date |
-| `Rpt_Dt_Sql_Txt` | No | One `SELECT` | Fallback when `Rpt_Period_Cd` is empty (section 8.3) |
+| `Rpt_Period_Cd` | No | Period code (section 8.4) | Only when this row's dates differ from `ComplianceRunTypePeriod` |
+| `Rpt_Dt_Sql_Txt` | No | One `SELECT` | Fallback for dates no code expresses (section 8.3) |
+| `Include_Ind` | Default 1 | `1`, `0` | On a row for one run type: `0` switches that run type off for the source |
 | `Active_Ind` | Default 1 | `1`, `0` | |
 
-Rows of an ADHOC run type need no period (the dates come from the request), unless the ad-hoc run type has a
-schedule and that source should get scheduled batches too.
+**Exceptions for one run type.** A row with a single run type, for a run type that is also in the source's list,
+**replaces** the list's entry for that run type while the single row is effective:
+
+- different version or dates for one run type: a row with its own `Cmplnc_Vrsn` / `Effective_*` / `Rpt_Period_Cd`;
+- the source does not send that run type: a row with `Include_Ind = 0`.
+
+The report dates of a batch come from the first that has them: the crosswalk row's `Rpt_Period_Cd`, its
+`Rpt_Dt_Sql_Txt`, the table's `ComplianceRunTypePeriod` row, the project's `*` row. Old style rows (one per run type,
+each with its own `Rpt_Period_Cd`) keep working.
 
 ```sql
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Period_Cd, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '51', 'MNT', DATE '2026-01-01', NULL, '2200', 'PREV_CALENDAR_MONTH', 1);
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Period_Cd, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '10', 'DAILY', DATE '2026-01-01', NULL, '2200', 'PREV_DAY', 1);
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Period_Cd, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '51', 'CMS', DATE '2026-01-01', NULL, '2200', NULL, 1);
+-- internal source 10: daily, monthly and ad hoc
+INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '10', 'DAILY,MNT,CMS', DATE '2026-01-01', NULL, '2200', 1, 1);
+-- FDR 51: weekly, monthly and ad hoc
+INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '51', 'WEEKLY,MNT,CMS', DATE '2026-01-01', NULL, '2200', 1, 1);
+-- ... but 51's MNT moves to version 2300 from November, with the last 3 months as report dates
+INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Period_Cd, Include_Ind, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '51', 'MNT', DATE '2026-11-01', NULL, '2300', 'RANGE(MONTH,3,3)', 1, 1);
+-- ESI 140 sends weekly, monthly and ad hoc ...
+INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '140', 'WEEKLY,MNT,CMS', DATE '2026-01-01', NULL, '2200', 1, 1);
+-- ... but stops its weekly batches from December (same as removing WEEKLY from the list, with a start date)
+INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '140', 'WEEKLY', DATE '2026-12-01', NULL, '2200', 0, 1);
 ```
 
-### 5.6 ComplianceBatchCalendar (optional)
+### 5.6a ComplianceBatchCalendar (optional)
 
 Batches on given dates with given report dates, next to the schedule: an extra or moved submission.
 
@@ -406,7 +457,7 @@ VALUES ('CMSUNIV', 'ODAG3', '51', 'CMSAuth_MedHOK_PYMT_C_{VERSION}_{RUNTY}_{RPTS
 a **source column** (e.g. `Src_Data_Key`) mapped to `SOURCE_ID` in `ComplianceTargetColumnConfig`; and the derived
 columns you map. A run-type column (mapped to `RUN_TYPE`) lets staging be cleared per run type.
 
-### 5.8 ComplianceSourceQueryConfig (internal sources, optional)
+### 5.8 ComplianceInternalSourceConfig (internal sources, optional)
 
 One row per internal source that is **pulled with a query** (SOURCE_LOAD) instead of sending a file. Such a source
 has no file config.
@@ -421,12 +472,12 @@ has no file config.
 | `Active_Ind` | Default 1 | | |
 
 ```sql
-INSERT INTO HSABC_DEV.ComplianceSourceQueryConfig
+INSERT INTO HSABC_DEV.ComplianceInternalSourceConfig
   (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
 VALUES ('CMSUNIV', 'ODAG3', '30', 'TERADATA', NULL,
         'SELECT a.Mbr_First_Nm AS MemberFirstName, a.Mbr_ID AS MemberID FROM CMSUNIV_SRC_DEV_V.UM_AUTH a WHERE a.Btch_ID = {btch_id} AND a.Src_ID = {src_id}',
         'CMSUNIV_FILELAND_$ENV_T', 'ODAG_DE_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', 1);
-INSERT INTO HSABC_DEV.ComplianceSourceQueryConfig
+INSERT INTO HSABC_DEV.ComplianceInternalSourceConfig
   (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
 VALUES ('CMSUNIV', 'ODAG3', '40', 'SQLSERVER', 'cms_src_appeals_sqlsrv',
         'SELECT m.FirstName AS MemberFirstName, m.MemberNumber AS MemberID FROM dbo.Appeal a JOIN dbo.Member m ON m.MemberKey = a.MemberKey WHERE a.ReceivedDate BETWEEN {rpt_start} AND {rpt_end}',
@@ -669,7 +720,7 @@ locks until they expire (`LOCK_TTL_MINUTES`, default 240) or are released (secti
 | Value | Batches created | Internal sources pulled | Exported |
 |---|---|---|---|
 | `SCHEDULED` | By the schedule (codes or SQL), the calendar, or an intake request | From the request date (empty before the close date = try again) | From the close date (from `RELEASE_TIME` on that day, if set), or when released |
-| `ADHOC` | By intake requests (and by a schedule if the run type has one, for crosswalk rows with a report period) | When released | When released |
+| `ADHOC` | By intake requests (and by a schedule if the run type has one, for crosswalk rows that find a report period) | When released | When released |
 
 ### 8.2 Schedule codes (`ComplianceRunType`)
 
@@ -701,7 +752,7 @@ SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE TD_DAY_OF
 SELECT CAST({run_date} AS DATE) - 1 AS rpt_start, CAST({run_date} AS DATE) - 1 AS rpt_end
 ```
 
-### 8.4 Report period codes (`ComplianceDataSetSourceXwalk.Rpt_Period_Cd`)
+### 8.4 Report period codes (`ComplianceRunTypePeriod.Rpt_Period_Cd`, `ComplianceDataSetSourceXwalk.Rpt_Period_Cd`)
 
 Counted from the batch's scheduled date (D).
 
@@ -718,6 +769,27 @@ Counted from the batch's scheduled date (D).
 | `PREV_CALENDAR_QUARTER` | The quarter before D's quarter |
 | `PREV_CALENDAR_YEAR` | 1 Jan to 31 Dec of the year before D |
 | `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])` | The same dates every year (e.g. `12-01,01-31`); the optional third date is when it moves to the next window |
+| `RANGE(unit,back,length)` | Any other range: `length` units, starting `back` units before D's unit. Units: `DAY`, `WEEK` (Monday–Sunday), `MONTH`, `QUARTER`, `YEAR` |
+
+`RANGE` examples, for D = Sunday 2026-10-18:
+
+| Code | Report dates | In words |
+|---|---|---|
+| `RANGE(DAY,1,1)` | 10-17 | the day before |
+| `RANGE(DAY,7,7)` | 10-11 to 10-17 | the last 7 days |
+| `RANGE(DAY,35,7)` | 09-13 to 09-19 | the same 7 days, 4 weeks earlier |
+| `RANGE(WEEK,0,1)` | 10-12 to 10-18 | this week |
+| `RANGE(WEEK,1,1)` | 10-05 to 10-11 | last week |
+| `RANGE(WEEK,5,1)` | 09-07 to 09-13 | the week 5 weeks back |
+| `RANGE(WEEK,2,2)` | 09-28 to 10-11 | the last 2 full weeks |
+| `RANGE(MONTH,0,1)` | 10-01 to 10-31 | this month |
+| `RANGE(MONTH,1,1)` | 09-01 to 09-30 | last month |
+| `RANGE(MONTH,2,1)` | 08-01 to 08-31 | the month before last |
+| `RANGE(MONTH,3,3)` | 07-01 to 09-30 | the last 3 full months |
+| `RANGE(QUARTER,1,1)` | 07-01 to 09-30 | last quarter |
+| `RANGE(YEAR,1,1)` | 2025-01-01 to 2025-12-31 | last year |
+
+Fixed dates that repeat every year: `ANNUAL_WINDOW`. One-off or irregular dates: `ComplianceBatchCalendar`.
 
 ### 8.5 File name tokens (`Src_File_Nm_Tmplt`)
 
@@ -1044,14 +1116,15 @@ scope) plus what the trigger gives.
 
 1. **Metadata tables** (once per environment): run `sql/schema.sql` with `{{META_DB}}` replaced.
 2. **Project, sources, run types**: sections 5.1 to 5.4 (and 5.2 for table groups).
-3. **Crosswalk**: section 5.5, one row per table + source + run type; scheduled rows with `Rpt_Period_Cd`.
+3. **Report dates and crosswalk**: one `ComplianceRunTypePeriod` row per scheduled run type (5.5), then one crosswalk
+   row per table + source listing its run types (5.6), plus rows for one run type where a source differs.
 4. **Staging, core, export tables** (DBA): file columns, `Btch_ID`, a source column, derived columns; export =
    core's columns + `Exp_Btch_ID` (optional).
 5. **How data arrives**: a file config per file source (5.7), a query config per internal source (5.8).
 6. **Derived columns**: section 5.10 – at least `SOURCE_ID`; usually `RUN_TYPE`, `VERSION`, `FILE_NAME`,
    `LOAD_TIMESTAMP`, `ROW_SEQUENCE`.
 7. **File checks**: section 5.9 – header names, record types / trailer, value checks.
-8. **Optional**: export (5.11), rules (5.12), calendar (5.6).
+8. **Optional**: export (5.11), rules (5.12), calendar (5.6a).
 9. **Airflow**: Connections (9.1); clone the 11 DAG files with project names (e.g. `OSSTD_CORE_PRJB_COMPLIANCE_*`)
    and their Variables (9.3): every Variable sets `project`; `trigger_dags` names the project's own clones; NOTIFY
    sets `DEFAULT_NOTIFY_EMAILS`. Keep one NOTIFY without `project` for events of no project.
@@ -1108,10 +1181,18 @@ one. Refused before the close date unless released.
 **11.15 A step waits or says "locked".** Admin DAG `{"command": "locks"}`; if the owner run no longer exists:
 `{"command": "release-lock", "args": ["--key", "<Lock_Key>"]}`.
 
-**11.16 Change a version.** End the crosswalk row (`Effective_End_Dt_Key`) and add a new row with the new
-`Cmplnc_Vrsn` from the next day; update `File_Vrsn_Cd` if file names change.
+**11.16 Change a version.** For every run type of the source: end the crosswalk row (`Effective_End_Dt_Key`) and
+add a new row with the new `Cmplnc_Vrsn` from the next day. For one run type only: add a row for that run type with
+the new version from its start date (it replaces the list's entry). Update `File_Vrsn_Cd` if file names change.
 
-**11.17 Stop a source or table.** Set `Active_Ind = 0` on its crosswalk rows (and file / query config).
+**11.17 Stop a source or table.** Set `Active_Ind = 0` on its crosswalk rows (and file / query config). To stop
+one run type of a source: remove it from the row's list, or add a row for that run type with `Include_Ind = 0`.
+
+**11.18 Add a run type to a source.** Add it to the `Run_Ty` list of the source's crosswalk row (and a
+`ComplianceRunTypePeriod` row if the run type is new for the project). Run validate-config.
+
+**11.19 Change the report dates of a run type.** Update `Rpt_Period_Cd` of its `ComplianceRunTypePeriod` row (the
+project's `*` row, or add a row for one table). Batches already created keep their dates.
 
 ---
 

@@ -164,6 +164,30 @@ PERIODS: dict[str, Callable[[date, Optional[int], Optional[int]], tuple[date, da
 }
 
 
+_RANGE = re.compile(r"^RANGE\(\s*(DAY|WEEK|MONTH|QUARTER|YEAR)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$", re.IGNORECASE)
+RANGE_MONTHS = {"MONTH": 1, "QUARTER": 3, "YEAR": 12}
+
+
+def range_period(spec: str, d: date) -> Optional[tuple[date, date]]:
+    """RANGE(unit, back, length): `length` units starting `back` units before D's unit (DAY, WEEK Mon-Sun, MONTH,
+    QUARTER, YEAR). RANGE(DAY,1,1) = the day before; RANGE(WEEK,5,1) = the week 5 weeks back; RANGE(MONTH,3,3) =
+    the 3 months ending last month. None when `spec` is not a RANGE."""
+    if not (spec or "").strip().upper().startswith("RANGE"):
+        return None
+    m = _RANGE.match(spec.strip())
+    if not m or int(m.group(3)) < 1:
+        raise ConfigError(f"period {spec!r} must be RANGE(DAY|WEEK|MONTH|QUARTER|YEAR, back, length) with length >= 1")
+    unit, back, length = m.group(1).upper(), int(m.group(2)), int(m.group(3))
+    if unit in ("DAY", "WEEK"):
+        days = 1 if unit == "DAY" else 7
+        start = (d if unit == "DAY" else d - timedelta(days=d.weekday())) - timedelta(days=days * back)
+        return start, start + timedelta(days=days * length - 1)
+    months = RANGE_MONTHS[unit]
+    base = _month_start(d) if unit == "MONTH" else _quarter_start(d) if unit == "QUARTER" else date(d.year, 1, 1)
+    start = _month_start(base, -months * back)
+    return start, _month_start(start, months * length) - timedelta(days=1)
+
+
 def period_sql(name: str, period_file: str) -> str:
     """SQL text for `name` from a project file defining PERIOD_SQL (Teradata SQL, one statement)."""
     spec = importlib.util.spec_from_file_location("project_period_sql", period_file)
@@ -189,7 +213,7 @@ def period_sql(name: str, period_file: str) -> str:
 def compute_period(conn: Connection, name: str, sched_dt: date, lookback_days: Optional[int] = None,
                    lookback_weeks: Optional[int] = None, period_file: Optional[str] = None) -> tuple[date, date]:
     """Report period for a run date: a built-in name, an ANNUAL_WINDOW(...), or a statement from a period file."""
-    if window := annual_window(name, sched_dt):
+    if window := annual_window(name, sched_dt) or range_period(name, sched_dt):
         return window
     name, days, weeks = period_lookback(name)
     lookback_days, lookback_weeks = days or lookback_days, weeks or lookback_weeks
@@ -568,11 +592,12 @@ KNOWN_PERIODS = frozenset(PERIODS)
 
 def check_period(spec: str) -> None:
     """Raise ConfigError when a period passed to a run is not a built-in one."""
-    if annual_window(spec, date.today()):
+    if annual_window(spec, date.today()) or range_period(spec, date.today()):
         return
     name = period_lookback(spec)[0]
     if code(name) not in KNOWN_PERIODS:
-        raise ConfigError(f"unknown period {spec!r}; built-in: {', '.join(sorted(KNOWN_PERIODS))}, ANNUAL_WINDOW(...)")
+        raise ConfigError(f"unknown period {spec!r}; built-in: {', '.join(sorted(KNOWN_PERIODS))}, ANNUAL_WINDOW(...), "
+                          "RANGE(unit,back,length)")
 
 
 # release: When a batch's data may be pulled from an internal source, exported and closed.

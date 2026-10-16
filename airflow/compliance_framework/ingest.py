@@ -565,7 +565,7 @@ class IngestPipeline:
                           description=sanitize_db_error(db.error_text(err))[:500])
 
 
-# source_load: SOURCE_LOAD: pull a batch's data from an internal source with its own SELECT (ComplianceSourceQueryConfig).
+# source_load: SOURCE_LOAD: pull a batch's data from an internal source with its own SELECT (ComplianceInternalSourceConfig).
 
 class SourceLoader:
     def __init__(self, conn, clock, settings, pipeline):

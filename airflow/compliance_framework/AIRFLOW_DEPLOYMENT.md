@@ -223,8 +223,9 @@ are pulled by batch with their own `SELECT`, instead of being delivered as files
 same as for a file: the same staging and core tables, column mapping (`ComplianceTargetColumnConfig`,
 `TARGET_COLUMNS`), batch status, rules, close, audit, emails and step report.
 
-**One row per source in `ComplianceSourceQueryConfig`** (DDL in `sql/schema.sql`; optional, only for internal
-sources):
+**One row per source in `ComplianceInternalSourceConfig`** (DDL in `sql/schema.sql`; optional, only for internal
+sources). An installation that has the table under its earlier name renames it once:
+`RENAME TABLE <META_DB>.ComplianceSourceQueryConfig TO <META_DB>.ComplianceInternalSourceConfig;`
 
 | Column | Meaning |
 |---|---|
@@ -782,7 +783,8 @@ cannot express. Nothing about it is in the DAG, the Airflow Variable or the code
 | Question | Table | Columns (codes) | Fallback |
 |---|---|---|---|
 | **When** are batches created? | `ComplianceRunType` (run type) | `Sched_Cd`, `Sched_Day_Cd`, `Sched_Week_Cd`, `Sched_Months_Txt`, `Sched_Window_Days` | `Batch_Schedule_Sql_Txt` |
-| **Which report dates** does a batch get? | `ComplianceDataSetSourceXwalk` (project, table, source, run type) | `Rpt_Period_Cd` | `Rpt_Dt_Sql_Txt` |
+| **Which sources** get batches of a run type? | `ComplianceDataSetSourceXwalk` (project, table, source; `Run_Ty` lists the run types) | — | — |
+| **Which report dates** does a batch get? | `ComplianceRunTypePeriod` (project, table or `*`, run type), or `Rpt_Period_Cd` on the crosswalk row | `Rpt_Period_Cd` | `Rpt_Dt_Sql_Txt` |
 | **Irregular dates** (an extra or moved submission) | `ComplianceBatchCalendar` (optional) | one row per date and report period | — |
 
 ### When: schedule codes on `ComplianceRunType`
@@ -800,12 +802,62 @@ cannot express. Nothing about it is in the DAG, the Airflow Variable or the code
 same report dates, so a missed run catches up (e.g. `5` for the 3rd Tuesday: Tuesday to Saturday). One batch is
 made per scheduled date, never one per day of the window.
 
-### Which dates: `Rpt_Period_Cd` on the crosswalk
+### Which sources: one crosswalk row per table and source
 
-Counted from the scheduled date: `PREV_DAY`, `SAME_DAY`, `PREV_CALENDAR_WEEK` (Monday to Sunday),
+`Run_Ty` lists the run types of the source, e.g. `DAILY,WEEKLY,MNT` (only the listed run types: a run type added
+later applies to no source until it is listed). The version and effective dates are on the row. A row for **one**
+run type replaces the list's entry for that run type while that row is effective: its own `Cmplnc_Vrsn`, effective
+dates or `Rpt_Period_Cd`; with `Include_Ind = 0` it switches that run type off for the source. A row with a single
+run type and no list is a normal row, so existing crosswalks keep working unchanged.
+
+```sql
+INSERT INTO <META_DB>.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Cmplnc_Vrsn)
+VALUES ('CMSUNIV', 'ODAG3', '51', 'DAILY,WEEKLY,MNT', DATE '2026-01-01', '2200');
+-- source 140 has no weekly batches
+INSERT INTO <META_DB>.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Cmplnc_Vrsn, Include_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '140', 'WEEKLY', DATE '2026-01-01', '2200', 0);
+```
+
+### Which dates: `ComplianceRunTypePeriod` (or `Rpt_Period_Cd` on the crosswalk)
+
+The report dates of a run type for a project: `Project_Cd`, `Table_Nm` (`*` = every table), `Run_Ty`,
+`Rpt_Period_Cd`. The period used for a batch is the first found of: the crosswalk row's `Rpt_Period_Cd`, its
+`Rpt_Dt_Sql_Txt`, the table's `ComplianceRunTypePeriod` row, the project's `*` row. A SCHEDULED run type with a
+schedule code and no period anywhere is a validate-config error. An ADHOC run type with a schedule gets scheduled
+batches for every crosswalk row that finds a period (set none for it when only some sources are scheduled, and put
+`Rpt_Period_Cd` on those rows).
+
+```sql
+INSERT INTO <META_DB>.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'DAILY', 'PREV_DAY');
+INSERT INTO <META_DB>.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'WEEKLY', 'PREV_CALENDAR_WEEK');
+INSERT INTO <META_DB>.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'WEEKLY2', 'RANGE(WEEK,5,1)');
+```
+
+Codes, counted from the scheduled date: `PREV_DAY`, `SAME_DAY`, `PREV_CALENDAR_WEEK` (Monday to Sunday),
 `PREV_CALENDAR_MONTH`, `CURRENT_CALENDAR_MONTH`, `ROLLING_1_MONTH`, `PREV_CALENDAR_QUARTER`, `PREV_CALENDAR_YEAR`,
-`PREV_N_DAYS(n)`, `PREV_WEEK_SAME_DAY(n)`, `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])`. Example: MNT on the 3rd Tuesday of
-October with `PREV_CALENDAR_MONTH` gets 09-01 to 09-30.
+`PREV_N_DAYS(n)`, `PREV_WEEK_SAME_DAY(n)`, `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])`, and for any other range
+`RANGE(unit, back, length)`: `length` units starting `back` units before the scheduled date's unit; units `DAY`,
+`WEEK` (Monday to Sunday), `MONTH`, `QUARTER`, `YEAR`. Examples on Sunday 2026-10-18: `RANGE(DAY,1,1)` 10-17;
+`RANGE(DAY,35,7)` 09-13 to 09-19; `RANGE(WEEK,1,1)` 10-05 to 10-11; `RANGE(WEEK,5,1)` 09-07 to 09-13;
+`RANGE(MONTH,1,1)` September; `RANGE(MONTH,3,3)` July to September; `RANGE(MONTH,0,1)` October; `RANGE(QUARTER,1,1)`
+July to September; `RANGE(YEAR,1,1)` 2025. Example: MNT on the 3rd Tuesday of October with `PREV_CALENDAR_MONTH`
+gets 09-01 to 09-30.
+
+Existing installations: `Run_Ty` is in the crosswalk's primary index, so it cannot be widened in place; the table
+is copied once. First run the `ComplianceDataSetSourceXwalk` CREATE TABLE of `sql/schema.sql` with the name
+`ComplianceDataSetSourceXwalk_N`, then:
+
+```sql
+INSERT INTO <META_DB>.ComplianceDataSetSourceXwalk_N
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt,
+   Rpt_Period_Cd, Include_Ind, Active_Ind, Created_Dtts, Created_By, Updated_Dtts, Updated_By)
+SELECT Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt,
+       Rpt_Period_Cd, 1, Active_Ind, Created_Dtts, Created_By, Updated_Dtts, Updated_By
+FROM <META_DB>.ComplianceDataSetSourceXwalk;
+RENAME TABLE <META_DB>.ComplianceDataSetSourceXwalk TO <META_DB>.ComplianceDataSetSourceXwalk_Old;
+RENAME TABLE <META_DB>.ComplianceDataSetSourceXwalk_N TO <META_DB>.ComplianceDataSetSourceXwalk;
+-- and ComplianceRunTypePeriod from sql/schema.sql
+```
 
 ### Irregular dates: `ComplianceBatchCalendar` (optional)
 
@@ -827,9 +879,8 @@ ALTER TABLE <META_DB>.ComplianceDataSetSourceXwalk ADD Rpt_Period_Cd VARCHAR(60)
 -- and ComplianceBatchCalendar from sql/schema.sql when it is used
 ```
 
-Which tables and sources get batches of a run type is the crosswalk itself, as before: one active,
-effective row per project, table, source and run type. A table with weekly and monthly batches has a row
-under each run type; a source with only monthly batches has no row under the weekly run type.
+Which tables and sources get batches of a run type is the crosswalk itself: a source gets batches of the run
+types its row lists (or of its row's single run type).
 
 ### SQL fallback for when: `ComplianceRunType.Batch_Schedule_Sql_Txt`
 

@@ -319,7 +319,7 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
         required=(), optional=(Param("share"), Param("file"), Param("folder"), Param("project"), *SCOPE),
         handler=_file_load),
     ModuleSpec(
-        "SOURCE_LOAD", "pull internal sources (ComplianceSourceQueryConfig) by batch: the open batches of the scope "
+        "SOURCE_LOAD", "pull internal sources (ComplianceInternalSourceConfig) by batch: the open batches of the scope "
                        "that have no data yet, or the batches named in --batch (comma separated; a new pull replaces "
                        "the batch's rows). Scheduled run types wait for their due date, ad-hoc ones for "
                        "--release true; --hold (run types) holds them until released",

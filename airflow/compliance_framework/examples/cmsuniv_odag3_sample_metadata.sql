@@ -88,98 +88,58 @@ VALUES
 
 
 -- ----------------------------------------------------------------------------------------------------
--- 4. Which source gets which run type. Rpt_Period_Cd gives the report dates of a scheduled batch
+-- 3a. The report dates of each scheduled run type for the project ('*' = every table)
+-- ----------------------------------------------------------------------------------------------------
+
+INSERT INTO HSABC_DEV.ComplianceRunTypePeriod
+  (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind)
+VALUES
+  ('CMSUNIV', '*', 'DAILY', 'PREV_DAY', 1);
+
+INSERT INTO HSABC_DEV.ComplianceRunTypePeriod
+  (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind)
+VALUES
+  ('CMSUNIV', '*', 'MNT', 'PREV_CALENDAR_MONTH', 1);
+
+
+-- ----------------------------------------------------------------------------------------------------
+-- 4. Which source gets which run types (one row per table and source, Run_Ty lists them)
 -- ----------------------------------------------------------------------------------------------------
 
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '10', 'DAILY', DATE '2026-01-01', NULL, '2200', NULL, 'PREV_DAY', 1);
+  ('CMSUNIV', 'ODAG3', '10', 'DAILY,MNT,CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1, 1);
 
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '10', 'MNT', DATE '2026-01-01', NULL, '2200', NULL, 'PREV_CALENDAR_MONTH', 1);
+  ('CMSUNIV', 'ODAG3', '20', 'DAILY,MNT,CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1, 1);
 
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '10', 'CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1);
+  ('CMSUNIV', 'ODAG3', '30', 'DAILY,MNT,CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1, 1);
 
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '20', 'DAILY', DATE '2026-01-01', NULL, '2200', NULL, 'PREV_DAY', 1);
+  ('CMSUNIV', 'ODAG3', '40', 'DAILY,MNT,CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1, 1);
 
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '20', 'MNT', DATE '2026-01-01', NULL, '2200', NULL, 'PREV_CALENDAR_MONTH', 1);
+  ('CMSUNIV', 'ODAG3', '51', 'MNT,CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1, 1);
 
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '20', 'CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1);
+  ('CMSUNIV', 'ODAG3', '130', 'MNT,CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1, 1);
 
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Include_Ind, Active_Ind)
 VALUES
-  ('CMSUNIV', 'ODAG3', '30', 'DAILY', DATE '2026-01-01', NULL, '2200', NULL, 'PREV_DAY', 1);
-
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
-VALUES
-  ('CMSUNIV', 'ODAG3', '30', 'MNT', DATE '2026-01-01', NULL, '2200', NULL, 'PREV_CALENDAR_MONTH', 1);
-
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
-VALUES
-  ('CMSUNIV', 'ODAG3', '30', 'CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1);
-
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
-VALUES
-  ('CMSUNIV', 'ODAG3', '40', 'DAILY', DATE '2026-01-01', NULL, '2200', NULL, 'PREV_DAY', 1);
-
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
-VALUES
-  ('CMSUNIV', 'ODAG3', '40', 'MNT', DATE '2026-01-01', NULL, '2200', NULL, 'PREV_CALENDAR_MONTH', 1);
-
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
-VALUES
-  ('CMSUNIV', 'ODAG3', '40', 'CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1);
-
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
-VALUES
-  ('CMSUNIV', 'ODAG3', '51', 'MNT', DATE '2026-01-01', NULL, '2200', NULL, 'PREV_CALENDAR_MONTH', 1);
-
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
-VALUES
-  ('CMSUNIV', 'ODAG3', '51', 'CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1);
-
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
-VALUES
-  ('CMSUNIV', 'ODAG3', '130', 'MNT', DATE '2026-01-01', NULL, '2200', NULL, 'PREV_CALENDAR_MONTH', 1);
-
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
-VALUES
-  ('CMSUNIV', 'ODAG3', '130', 'CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1);
-
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
-VALUES
-  ('CMSUNIV', 'ODAG3', '140', 'MNT', DATE '2026-01-01', NULL, '2200', NULL, 'PREV_CALENDAR_MONTH', 1);
-
-INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt, Rpt_Period_Cd, Active_Ind)
-VALUES
-  ('CMSUNIV', 'ODAG3', '140', 'CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1);
+  ('CMSUNIV', 'ODAG3', '140', 'MNT,CMS', DATE '2026-01-01', NULL, '2200', NULL, NULL, 1, 1);
 
 
 -- ----------------------------------------------------------------------------------------------------
@@ -226,12 +186,12 @@ VALUES
 -- 5a. Optional: internal sources pulled with a query (SOURCE_LOAD); Src_Conn_Cd empty = same Teradata
 -- ----------------------------------------------------------------------------------------------------
 
-INSERT INTO HSABC_DEV.ComplianceSourceQueryConfig
+INSERT INTO HSABC_DEV.ComplianceInternalSourceConfig
   (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
 VALUES
   ('CMSUNIV', 'ODAG3', '30', 'TERADATA', NULL, 'SELECT a.Mbr_First_Nm AS MemberFirstName, a.Mbr_Last_Nm AS MemberLastName, a.Mbr_ID AS MemberID, a.Contract_ID AS ContractID, a.Auth_Nbr AS AuthorizationorClaimNumber, a.Rcvd_Dt AS Datetherequestwasreceived FROM CMSUNIV_SRC_DEV_V.UM_AUTH a WHERE a.Btch_ID = {btch_id}', 'CMSUNIV_FILELAND_$ENV_T', 'ODAG_DE_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', 1);
 
-INSERT INTO HSABC_DEV.ComplianceSourceQueryConfig
+INSERT INTO HSABC_DEV.ComplianceInternalSourceConfig
   (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
 VALUES
   ('CMSUNIV', 'ODAG3', '40', 'SQLSERVER', 'cms_src_appeals_sqlsrv', 'SELECT m.FirstName AS MemberFirstName, m.LastName AS MemberLastName, m.MemberNumber AS MemberID, a.ContractId AS ContractID, a.AppealNumber AS AuthorizationorClaimNumber, CONVERT(varchar(10), a.ReceivedDate, 23) AS Datetherequestwasreceived FROM dbo.Appeal a JOIN dbo.Member m ON m.MemberKey = a.MemberKey WHERE a.Btch_ID = {btch_id}', 'CMSUNIV_FILELAND_$ENV_T', 'ODAG_DE_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', 1);
