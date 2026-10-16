@@ -549,7 +549,8 @@ VALUES ('CMSUNIV', 'CDAG7', '51', 'HEADER_NAMES', '*', NULL, 0, 1);
 -- Every other staging column is a file field (TARGET_COLUMNS) or a column of the internal source's SELECT.
 -- Btch_ID is always the batch ID (no row), Batch_ID (internal sources' staging and core tables) is mapped to it. AuditDataID = the load ID the framework gives every file / pull (the ID of
 -- the ComplianceFileLoad row, used in its audit reporting). Source_ID / Universe_Version are the names in the internal
--- sources' staging tables. <table>_ID = a running row number in the file staging and core tables.
+-- sources' staging tables. StagingCreateDate = the load date (Central), set in staging and copied unchanged to core
+-- and the export. <table>_ID = a running row number in the file staging and core tables.
 -- ----------------------------------------------------------------------------------------------------
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES ('CMSUNIV', '*', 'Src_Data_Key', 'SOURCE_ID', NULL, 1);
@@ -566,7 +567,7 @@ VALUES ('CMSUNIV', '*', 'FileName', 'FILE_NAME', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES ('CMSUNIV', '*', 'Load_Dtts', 'LOAD_TIMESTAMP', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
-VALUES ('CMSUNIV', '*', 'StagingCreateDate', 'LOAD_TIMESTAMP', NULL, 1);
+VALUES ('CMSUNIV', '*', 'StagingCreateDate', 'LOAD_DATE', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES ('CMSUNIV', '*', 'AuditDataID', 'LOAD_ID', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
