@@ -11,6 +11,46 @@ INSERT INTO HSABC_DEV.ComplianceProject (Project_Cd, Project_Desc, Active_Ind)
 VALUES ('CMSUNIV', 'CMS Universe submissions', 1);
 
 -- ----------------------------------------------------------------------------------------------------
+-- 1a. Table groups (a step can run for one group: table_group ODAG / CDAG / FA / SNPCC)
+-- ----------------------------------------------------------------------------------------------------
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG1', 'ODAG', 'ODAG table 1', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG2', 'ODAG', 'ODAG table 2', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', 'ODAG', 'ODAG table 3', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG4', 'ODAG', 'ODAG table 4', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG5', 'ODAG', 'ODAG table 5', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG6', 'ODAG', 'ODAG table 6', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG1', 'CDAG', 'CDAG table 1', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG2', 'CDAG', 'CDAG table 2', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG3', 'CDAG', 'CDAG table 3', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG4', 'CDAG', 'CDAG table 4', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG5', 'CDAG', 'CDAG table 5', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG6', 'CDAG', 'CDAG table 6', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG7', 'CDAG', 'CDAG table 7', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'FA1', 'FA', 'FA table 1', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'FA2', 'FA', 'FA table 2', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'FA3', 'FA', 'FA table 3', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'FA4', 'FA', 'FA table 4', 1);
+INSERT INTO HSABC_DEV.ComplianceTable (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind)
+VALUES ('CMSUNIV', 'SNPCC1', 'SNPCC', 'SNPCC table 1', 1);
+
+-- ----------------------------------------------------------------------------------------------------
 -- 2. Sources (all 55, a source without a crosswalk row gets no batches)
 -- ----------------------------------------------------------------------------------------------------
 INSERT INTO HSABC_DEV.ComplianceSourceSystem (Src_ID, Src_Nm, Src_Ty, Active_Ind)
@@ -583,3 +623,45 @@ INSERT INTO HSABC_DEV.ComplianceInternalSourceConfig (Project_Cd, Table_Nm, Src_
 VALUES ('CMSUNIV', 'FA4', '40', 'SQLSERVER', 'SQL_AZ', 'SELECT FA_CignaAZ_TABLE4_2022_ID,EnrolleeID,EnrolleeFirstName,EnrolleeLastName,DateofBirth,EnrollmentEffectiveDate,EffectiveDisenrollmentDate,CardholderID,ContractID,PlanBenefitPackage,SourceUnique_ID FROM AZCMS.dbo.FA_CignaAZ_TABLE4_2022 WHERE Batch_ID = {btch_id}', 'CMSUNIV_STAGE_$ENV_T', 'FA_CIGNAAZ_TABLE4_2022', 'CMSUNIV_CORE_$ENV_T', 'FA_CIGNAAZ_TABLE4_2022', 1);
 INSERT INTO HSABC_DEV.ComplianceInternalSourceConfig (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
 VALUES ('CMSUNIV', 'SNPCC1', '11', 'SQLSERVER', 'SQL_SNPCC', 'SELECT SNPCC_Table1_ID,EnrolleeFirstName,EnrolleeLastName,EnrolleeID,ContractID,PlanBenefitPackage,PlanType,EnrollmentEffectiveDate,MostRecentPlanChangeEffectiveDate,DateOfMostRecentHRA,DateOfPreviousHRA,DateInitialHRAWasCompleted,EnrolleeRiskStratificationAuditLetter,DateMostRecentIndividualizedCarePlan,WasICTCreatedIdentified,SourceUnique_ID FROM QUALITY.SNPMOC.Table1_cms2022 WHERE Batch_ID = {btch_id}', 'CMSUNIV_STAGE_$ENV_T', 'SNPCC_HS_TABLE1_2022', 'CMSUNIV_CORE_$ENV_T', 'SNPCC_HS_TABLE1_2022', 1);
+
+-- ----------------------------------------------------------------------------------------------------
+-- 8. Export feed: one export table and procedure per table (DDL and procedures in cmsuniv_export_dev.sql)
+-- EXPORT_LOAD calls the procedure for each batch and source that is due (or released). Exp_Proc_Parm_Txt lists
+-- the procedure's parameters in order.
+-- ----------------------------------------------------------------------------------------------------
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG1', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG1_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_ODAG1', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG2', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG2_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_ODAG2', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG3_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_ODAG3', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG4', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG4_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_ODAG4', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG5', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG5_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_ODAG5', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG6', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG6_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_ODAG6', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG1', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG1_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_CDAG1', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG2', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG2_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_CDAG2', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG3', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG3_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_CDAG3', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG4', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG4_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_CDAG4', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG5', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG5_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_CDAG5', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG6', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG6_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_CDAG6', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG7', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG7_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_CDAG7', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA1', 'CMSUNIV_EXPORT_$ENV_T', 'FA1_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_FA1', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA2', 'CMSUNIV_EXPORT_$ENV_T', 'FA2_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_FA2', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA3', 'CMSUNIV_EXPORT_$ENV_T', 'FA3_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_FA3', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA4', 'CMSUNIV_EXPORT_$ENV_T', 'FA4_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_FA4', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'SNPCC1', 'CMSUNIV_EXPORT_$ENV_T', 'SNPCC1_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_SNPCC1', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
