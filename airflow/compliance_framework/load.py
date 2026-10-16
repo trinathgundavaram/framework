@@ -8,7 +8,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Iterable, Iterator, Optional, TYPE_CHECKING
+from typing import Iterable, Iterator, Mapping, Optional, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from . import db
@@ -21,7 +21,7 @@ from .db import Connection
 # layout: Which columns of a file's staging and core tables the framework fills, and with what (ComplianceTargetColumnConfig).
 
 BATCH_COLUMN = "btch_id"
-VALUE_CODES = ("RUN_TYPE", "VERSION", "SOURCE_ID", "FILE_NAME", "LOAD_TIMESTAMP", "ROW_SEQUENCE", "LOAD_ID",
+VALUE_CODES = ("BATCH_ID", "RUN_TYPE", "VERSION", "SOURCE_ID", "FILE_NAME", "LOAD_TIMESTAMP", "ROW_SEQUENCE", "LOAD_ID",
                "CURRENT_FLAG", "END_TIMESTAMP", "PROJECT", "TABLE", "RPT_START", "RPT_END", "REQ_ID", "LOAD_DATE",
                "CONSTANT", "SQL")
 TEXT_CODES = ("CONSTANT", "SQL")
@@ -140,6 +140,12 @@ def column_mapping(cfg, rows: Iterable) -> ColumnMapping:
     return out
 
 
+def batch_column(names: Iterable[str], mapping: Mapping) -> Optional[str]:
+    """A table's batch column: the one mapped to BATCH_ID (e.g. Batch_ID), else Btch_ID; None when it has neither."""
+    names = list(names)
+    return next((n for n in names if mapping.get(n) == "BATCH_ID"), None) or (BATCH_COLUMN if BATCH_COLUMN in names else None)
+
+
 @dataclass(frozen=True)
 class Layout:
     """The staging and core columns of one file config and how each is filled."""
@@ -179,6 +185,14 @@ class Layout:
             return free[:len(self.names)]
         return free[:self.count] if self.count else free
 
+    @property
+    def stage_batch(self) -> str:
+        return batch_column((c.name for c in self.stage), self.mapping)
+
+    @property
+    def core_batch(self) -> str:
+        return batch_column((c.name for c in self.core), self.mapping)
+
     def column(self, value_cd: str, table: str = "stage") -> Optional[Column]:
         return next((c for c in getattr(self, table) if self.mapping.get(c.name) == value_cd), None)
 
@@ -192,6 +206,8 @@ class Layout:
                 continue
             if value_cd == "CURRENT_FLAG":
                 plan.append((c, "flag", None))
+            elif c.name not in staged and c.name == self.core_batch:
+                plan.append((c, "batch", None))
             elif c.name in staged:
                 plan.append((c, "copy", None))
             elif value_cd == "LOAD_TIMESTAMP":
@@ -241,16 +257,11 @@ def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], 
     stage = tuple(c for c in stage_cols if not c.auto)
     core = tuple(c for c in core_cols if not c.auto)
     for name, cols in ((stage_name, stage), (core_name, core)):
-        if BATCH_COLUMN not in {c.name for c in cols}:
-            raise LookupError(f"table {name} lacks the batch column {BATCH_COLUMN}")
+        if not batch_column((c.name for c in cols), mapping):
+            raise LookupError(f"table {name} lacks the batch column {BATCH_COLUMN} (or a column mapped to BATCH_ID)")
     layout = Layout(label, stage, core, {k: v for k, v in mapping.items()
                                          if k in {c.name for c in stage} | {c.name for c in core}},
                     dict(getattr(mapping, "texts", {})), tuple(names), count, tuple(targets))
-    if mapping is not DEFAULT_MAPPING and mapping != DEFAULT_MAPPING:
-        missing = sorted(k for k in mapping if k not in layout.mapping)
-        if missing:
-            raise LookupError(f"{label}: column {missing[0]} of ComplianceTargetColumnConfig is in neither {stage_name} "
-                              f"nor {core_name}")
     for side, name in (("stage", stage_name), ("core", core_name)):
         if not layout.column("SOURCE_ID", side):
             raise LookupError(f"{label}: table {name} needs a column mapped to SOURCE_ID in ComplianceTargetColumnConfig "
@@ -544,7 +555,7 @@ def _clean_stage(conn, table: str, cfg: "FileConfig", layout: Layout, ctx: LoadC
         conn.execute(f"DELETE FROM {table} WHERE {db.ident(col.name)} = %s", (ctx.value("RUN_TYPE", col.text),))
     else:
         src = layout.column("SOURCE_ID")
-        conn.execute(f"DELETE FROM {table} WHERE {db.ident(BATCH_COLUMN)} = %s AND {db.ident(src.name)} = %s",
+        conn.execute(f"DELETE FROM {table} WHERE {db.ident(layout.stage_batch)} = %s AND {db.ident(src.name)} = %s",
                      (ctx.btch_id, ctx.value("SOURCE_ID", src.text, src.temporal)))
 
 
@@ -718,13 +729,15 @@ def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_row
     """Delete the batch's core rows and insert the staged ones; runs inside the caller's transaction."""
     core, stg = _table(cfg.core_schema_nm, cfg.core_table_nm), _table(cfg.stg_schema_nm, cfg.stg_table_nm)
     core_src, stage_src = layout.column("SOURCE_ID", "core"), layout.column("SOURCE_ID")
-    deleted = conn.execute(f"DELETE FROM {core} WHERE {db.ident(BATCH_COLUMN)} = %s AND {db.ident(core_src.name)} = %s",
+    deleted = conn.execute(f"DELETE FROM {core} WHERE {db.ident(layout.core_batch)} = %s AND {db.ident(core_src.name)} = %s",
                            (ctx.btch_id, ctx.value("SOURCE_ID", core_src.text, core_src.temporal))).rowcount
     names, exprs, values = [], [], []
     for c, kind, _ in layout.core_plan():
         names.append(db.ident(c.name))
         if kind == "copy":
             exprs.append(db.ident(c.name))
+        elif kind == "batch":
+            exprs.append(db.ident(layout.stage_batch))
         elif kind == "flag":
             exprs.append("'1'" if c.text else "1")
         else:
@@ -732,7 +745,7 @@ def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_row
                          else "CAST(%s AS TIMESTAMP(0))" if c.temporal == "TIMESTAMP"
                          else "CAST(%s AS TIMESTAMP(0) WITH TIME ZONE)")
             values.append(ctx.value("LOAD_TIMESTAMP", c.text, c.temporal or "TIMESTAMP_TZ"))
-    where = f"{db.ident(BATCH_COLUMN)} = %s AND {db.ident(stage_src.name)} = %s"
+    where = f"{db.ident(layout.stage_batch)} = %s AND {db.ident(stage_src.name)} = %s"
     values.extend((ctx.btch_id, ctx.value("SOURCE_ID", stage_src.text, stage_src.temporal)))
     load_col = layout.column("LOAD_ID", "stage")
     if load_col:

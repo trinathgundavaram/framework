@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.44 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.46 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -539,7 +539,9 @@ table order (or as `TARGET_COLUMNS` / `HEADER_NAMES` say).
 | `Value_Txt` | For `CONSTANT`, `SQL` | The value or one `SELECT` | |
 | `Active_Ind` | Default 1 | | |
 
-`Btch_ID` needs no row (it is always the batch ID). A column mapped to `SOURCE_ID` is **required** in every staging,
+`Btch_ID` needs no row (it is always the batch ID). When the sources of a table have staging tables with different
+column names (e.g. `Src_Data_Key` for files, `Source_ID` for an internal source), add a row for each name: a mapped
+column a source's tables do not have is skipped for that source. A column mapped to `SOURCE_ID` is **required** in every staging,
 core and export table.
 
 ```sql
@@ -847,6 +849,7 @@ values (`COLUMN_VALUES REQUIRED` covers those).
 
 | `Value_Cd` | Filled with |
 |---|---|
+| `BATCH_ID` | The batch ID, in a table whose batch column is not called `Btch_ID` (e.g. `Batch_ID`, `BatchID`): that column is then the table's batch column |
 | `SOURCE_ID` | The batch row's `Src_ID` (**required** in every table) |
 | `RUN_TYPE` | The run type |
 | `VERSION` | The batch's compliance version (`Cmplnc_Vrsn`) |

@@ -992,6 +992,11 @@ The staging and core tables of a file can have any layout. Which of their column
 and with what, is in `ComplianceTargetColumnConfig`; **every other column of the staging table is a column
 of the file, in table order.**
 
+The sources of one table can have staging (and core) tables with different column names, e.g. `Src_Data_Key` in
+the file staging table and `Source_ID` in an internal source's: map both. A mapped column a source's tables do not
+have is skipped for that source; validate-config reports a mapped column that is in none of the table's staging or
+core tables (`TARGET_COLUMN`).
+
 | Column | Meaning |
 |---|---|
 | `Project_Cd` | The project |
@@ -1003,6 +1008,7 @@ of the file, in table order.**
 
 | `Value_Cd` | Value |
 |---|---|
+| `BATCH_ID` | The batch ID in a table whose batch column has another name than `Btch_ID` (e.g. `Batch_ID`, `BatchID`); that column is then the table's batch column (staging, core or export) |
 | `RUN_TYPE`, `VERSION`, `SOURCE_ID` | The batch's run type, the compliance version the batch was created with (`ComplianceRequestControl.Cmplnc_Vrsn`), the batch's `Src_ID` |
 | `FILE_NAME` | The name of the file |
 | `LOAD_TIMESTAMP` | When the file was loaded: a timestamp, or text `YYYY-MM-DD HH:MM:SS` (business time zone) in a character column |

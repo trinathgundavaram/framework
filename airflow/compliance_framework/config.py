@@ -853,9 +853,18 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
             file_layout(conn, q, targets, check_options(q, checks))
         except (LookupError, ConfigError) as e:
             add("TARGET_TABLE", f"{label}: {e}")
-
-    from .load import BATCH_COLUMN
     from .load import columns
+    table_cols: dict[tuple, set] = defaultdict(set)
+    for c in [*cfgs, *queries]:
+        for schema, table in ((c.stg_schema_nm, c.stg_table_nm), (c.core_schema_nm, c.core_table_nm)):
+            table_cols[(c.project_cd, c.table_nm)] |= {col.name for col in columns(conn, schema, table)}
+    for t in targets:
+        found = [cols for (p, tb), cols in table_cols.items() if p == t.project_cd and t.table_nm in ("*", tb)]
+        if found and not any(t.column_nm in cols for cols in found):
+            add("TARGET_COLUMN", f"{t.label}: column {t.column_nm} is in no staging or core table of "
+                                 f"{t.project_cd}/{t.table_nm}")
+
+    from .load import BATCH_COLUMN, batch_column, column_mapping
     cores = {(c.project_cd, c.table_nm): c for c in [*cfgs, *queries]}
     for e in active_export_configs(conn, settings):
         label = e.label
@@ -874,8 +883,9 @@ def validate_all(conn: Connection, case_sensitive: bool = True, settings=None,
         exp = {c.name for c in columns(conn, e.exp_schema_nm, e.exp_table_nm) if not c.auto}
         if not exp:
             add("EXPORT_CONFIG", f"{label}: export table {e.exp_schema_nm}.{e.exp_table_nm} not found")
-        elif BATCH_COLUMN not in exp:
-            add("EXPORT_CONFIG", f"{label}: export table {e.exp_schema_nm}.{e.exp_table_nm} lacks the batch column {BATCH_COLUMN}")
+        elif not batch_column(exp, column_mapping(src, targets)):
+            add("EXPORT_CONFIG", f"{label}: export table {e.exp_schema_nm}.{e.exp_table_nm} lacks the batch column "
+                                 f"{BATCH_COLUMN} (or a column mapped to BATCH_ID)")
         else:
             missing = sorted(exp - {c.name for c in columns(conn, src.core_schema_nm, src.core_table_nm)} - {e.exp_btch_col})
             if missing:
