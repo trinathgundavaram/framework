@@ -3,21 +3,14 @@
 A self-contained copy of the compliance batch framework that runs from Airflow DAGs with its metadata,
 staging and core tables in **Teradata**. Nothing outside `airflow/` is used or changed. It follows the
 layout and connection style of the GRE rules engine's Airflow package (`DQ_COMPLETE_REPO/airflow`) and
-the team's DAG conventions (one DAG file, one DAG id, one `<name>_config_var` Variable).
+the team's DAG conventions (one DAG id and one `<name>_config_var` Variable per step).
 
 ```
 airflow/
-  osstd_core_cms_compliance_batch_creation.py      one DAG file per step ...
-  osstd_core_cms_compliance_file_check.py
-  osstd_core_cms_compliance_file_load.py
-  osstd_core_cms_compliance_source_load.py
-  osstd_core_cms_compliance_export_load.py
-  osstd_core_cms_compliance_override_decisions.py
-  osstd_core_cms_compliance_batch_close.py
-  osstd_core_cms_compliance_notify.py
+  osstd_core_cms_compliance_dags.py   the eight step DAGs (one per step; copy the file for another project)
   compliance_framework/
     dags.py        the DAGs (schedule, tasks, triggers, emails, ServiceNow callback), Variable + Connections ->
-                   the framework, run_step() / run_command() in-process
+                   the framework, run_step() in-process
     app.py         the application and its steps (modules, step reports)
     batches.py     batch creation (schedule codes, calendar, intake), release / hold, overrides, close
     ingest.py      FILE_LOAD and SOURCE_LOAD
@@ -35,18 +28,17 @@ airflow/
 airflow_resources/                (not deployed with the DAGs)
   docs/AIRFLOW_DEPLOYMENT.md      this guide
   docs/OPERATIONAL_RUNBOOK.md     metadata tables, values and procedures (Confluence)
+  docs/OPEN_ITEMS.md              what is still open: DEV rehearsal, decisions, behaviour to know
   sql/schema.sql                  Teradata DDL ({{META_DB}} template)
-  sql/approvals.sql               manual override templates
-  examples/dev, examples/prod     one example Variable per DAG
-  examples/cmsuniv_dev            the CMSUNIV project's Variables
-  examples/*.sql, *.xlsx          sample and CMSUNIV metadata, CMSUNIV export feed
-  examples/trigger_configurations.json
+  examples/cmsuniv_dev            one Variable per DAG (the CMSUNIV project, DEV)
+  examples/cmsuniv_setup.sql      every metadata row of the CMSUNIV project
+  examples/cmsuniv_export_dev.sql the CMSUNIV export tables and procedures (DBA)
   requirements.txt                Python packages for the workers
 ```
 
 ## How it fits together
 
-1. **Each step has its own DAG and its own Airflow Variable.** The DAG file only names the two; the
+1. **Each step has its own DAG and its own Airflow Variable.** The DAG file only names them; the
    schedule, connections, scope and settings all come from the Variable.
 
    | Step | DAG id | Variable |
@@ -60,8 +52,8 @@ airflow_resources/                (not deployed with the DAGs)
    | `BATCH_CLOSE` | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CLOSE` | `compliance_batch_close_config_var` |
    | `NOTIFY` | `OSSTD_CORE_CMS_COMPLIANCE_NOTIFY` | `compliance_notify_config_var` |
 
-   The data quality step (`FILE_RULES`) has no DAG for now: add one when the rules are set up (copy a step DAG file
-   with step `FILE_RULES`, below). The admin commands run from the command line (below).
+   The data quality step (`FILE_RULES`) has no DAG for now: add one when the rules are set up (add `FILE_RULES` to
+   `STEPS` in the DAG file, below). The admin commands run from the command line (below).
 
 2. **Two Airflow Connections**, both named in the Variables: Teradata (`td_conn_var`) and the NAS file
    server (`wdc_comp_oper_nas_var`, only needed by the DAGs that load files). The bridge exports them as
@@ -81,19 +73,20 @@ apply to the command line).
 
 ## Deploying
 
-1. Copy the `osstd_core_cms_compliance_*.py` files and the `compliance_framework/` folder into the DAGs
-   folder, side by side.
+1. Copy `osstd_core_cms_compliance_dags.py` and the `compliance_framework/` folder into the DAGs folder, side by
+   side.
 2. Install `airflow_resources/requirements.txt` in the workers' environment. **Airflow 3** (Task SDK
    `airflow.sdk`, the `standard` and `smtp` providers; no Airflow 2 or deprecated imports), on a Python version your
    Airflow 3 release supports. The email tasks and `NOTIFY_BACKEND=airflow` send through the Airflow Connection `smtp_default`.
-3. Create the two Connections and one Variable per DAG (below; ready-made in `airflow_resources/examples/dev` and
-   `airflow_resources/examples/prod`, file name = Variable name).
+3. Create the two Connections and one Variable per DAG (below; ready-made for CMSUNIV DEV in
+   `airflow_resources/examples/cmsuniv_dev`, file name = Variable name).
 4. The framework tables already exist: they are created separately from `airflow_resources/sql/schema.sql` (replace
    `{{META_DB}}` with the metadata database). The framework never creates or alters tables.
 5. Load the configuration tables, then run `validate-config` from the command line (below).
 
-To add another DAG for a step (another project, or another cadence), copy that step's DAG file, give
-the copy its own `dag_id` and `variable_key`, and create that Variable.
+Another project gets its own DAGs: copy `osstd_core_cms_compliance_dags.py`, set `DAG_PREFIX` (e.g.
+`OSSTD_CORE_PRJB_COMPLIANCE`) and `VARIABLE_PREFIX` (e.g. `prjb_compliance`) in the copy, and create its Variables
+(each with `project`, and `trigger_dags` naming the copy's own DAGs). Keep `STEPS` to the steps the project uses.
 
 ### Airflow Connections
 
@@ -122,8 +115,8 @@ The account needs, on the metadata database: SELECT / INSERT / UPDATE / DELETE (
 
 ### Airflow Variables (`compliance_<step>_config_var`)
 
-One per DAG. Paste the matching file from [`examples/dev`](../examples/dev) or [`examples/prod`](../examples/prod)
-as the Variable's value (Admin → Variables) and replace the `REPLACE_WITH_...` values. Example,
+One per DAG. Paste the matching file from [`examples/cmsuniv_dev`](../examples/cmsuniv_dev) as the Variable's
+value (Admin → Variables); for another environment change `td_conn_var`, `meta_db`, `load_env` and the emails. Example,
 `compliance_file_load_config_var`:
 
 ```json
@@ -237,7 +230,6 @@ python -m compliance_framework.cli run --module BATCH_CREATION --project CMSUNIV
 `--set NAME=value` sets a framework setting for the command (e.g. `--set NOTIFY_BACKEND=airflow`); files on the NAS
 also need `NAS_HOST`, `NAS_USER`, `NAS_PASSWORD`. `test-connection --source <Src_Conn_Cd>` reads that Airflow
 Connection, so it runs where the Connection is available (e.g. as `AIRFLOW_CONN_<ID>` in the shell).
-- More trigger examples: [`examples/trigger_configurations.json`](../examples/trigger_configurations.json).
 
 ## Internal sources: table to table (`SOURCE_LOAD`)
 
@@ -465,9 +457,7 @@ UPDATE <META_DB>.ComplianceRequestInTake SET Last_Run_Dt_Key = NULL;
 | `SOURCE_DATA_READY` | Open | FILE_LOAD loaded the source's file into core (`Resolution_Ty = NEW_FILE`); a later file replaces it |
 | `SOURCE_DATA_READY_NO_DATA` | Open | FILE_LOAD received the source's file and it had no data rows: the source had nothing to provide (`Resolution_Ty = NO_DATA`); the batch's core rows are removed |
 | `SOURCE_DATA_CARRY_FORWARD` | Open | OVERRIDE_DECISIONS applied an approved `REUSE` override (`Resolution_Ty = CARRY_FORWARD`, `Reuse_Btch_ID`) |
-| `EXCEPTION_PENDING` | Open | Older rows only: no step sets it any more |
 | `REQUEST_COMPLETE` | Closed | Closed with data (`NEW_FILE` or `CARRY_FORWARD`); also after a late or corrected file with an approved override |
-| `COMPLETED_WITH_EXCEPTION` | Closed | Closed while `EXCEPTION_PENDING` (older rows) |
 | `DATA_NOT_PROVIDED` | Closed | Closed without data: `Resolution_Ty = NO_DATA` (the source sent a file with no data rows; closed by BATCH_CLOSE) or `MISSING` (no data at all by the close date; closed by BATCH_CLOSE, alert `SOURCE_MISSING_AT_CLOSE`). A final status like `REQUEST_COMPLETE` |
 
 BATCH_CLOSE closes, once the SLA hold has passed, every open batch, with or without data: `SOURCE_DATA_READY` /
@@ -494,7 +484,6 @@ reopens any closed batch, with or without data:
 | `REQUEST_COMPLETE` / `CARRY_FORWARD` | `SOURCE_DATA_CARRY_FORWARD` (kept even if the `REUSE` override has expired) |
 | `DATA_NOT_PROVIDED` / `NO_DATA` | `SOURCE_DATA_READY_NO_DATA` |
 | `DATA_NOT_PROVIDED` / `MISSING` | `REQUEST_CREATED` |
-| `COMPLETED_WITH_EXCEPTION` | `EXCEPTION_PENDING` |
 
 `BATCH_REOPENED` is written to the timeline and the audit (emailed). The reopened batch takes files like any open
 batch (no override needed; a resend replaces its rows), SOURCE_LOAD pulls an internal source's reopened batch
@@ -555,13 +544,13 @@ A path with its own server uses that server with the NAS Connection's login. `$e
 - There is no S3 in this version: no bucket, key or object-version columns and no AWS file store.
   `FILE_STORE` = `local` (a folder on the worker) exists for development only.
 
-## Sample metadata
+## Project metadata (CMSUNIV)
 
-A complete worked example - every metadata row for one project (three FDR sources, two internal sources that send
-files and two pulled with a query; daily, monthly and ad-hoc run types; file checks; an existing table layout; the
-export table; REUSE and REOPEN overrides) - is in `examples/`:
-`cmsuniv_odag3_sample_metadata.xlsx` (one tab per table, in DDL order) and `cmsuniv_odag3_sample_metadata.sql`
-(the same rows as Teradata `INSERT` statements).
+Every metadata row of the CMSUNIV project, in load order, is in `examples/cmsuniv_setup.sql`: the project, 55
+sources, run types and report periods, the crosswalk, file sources (one per FDR source and table), internal sources
+(QNXT, AZ, SNPCC), derived columns, file checks, table groups and the export feed. Its export tables and procedures
+are in `examples/cmsuniv_export_dev.sql`. The override templates (REUSE, LATE_ARRIVAL, CORRECTION, REOPEN, approve,
+reject, stop) are in the runbook (`OPERATIONAL_RUNBOOK.md`, section 6.2).
 
 ## File names (`Src_File_Nm_Tmplt`)
 
@@ -781,8 +770,8 @@ yet (`ComplianceFileLoad.Load_Stat = PROMOTED`, `Rules_Stat = NOT_RUN`), runs th
 - The engine is given the staging and the core table of the file (`stg_schema_nm`, `stg_table_nm`,
   `core_schema_nm`, `core_table_nm`) with the batch and load ids, and its export table (`exp_schema_nm`,
   `exp_table_nm`) when the table has one (`EXPORT_LOAD`).
-- **Airflow:** the rules have no DAG for now. When they are set up, add `osstd_core_cms_compliance_file_rules.py`
-  (a copy of a step DAG file with step `FILE_RULES`, `dag_id` `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` and Variable
+- **Airflow:** the rules have no DAG for now. When they are set up, add `FILE_RULES` to `STEPS` in
+  `osstd_core_cms_compliance_dags.py` (DAG `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES`, Variable
   `compliance_file_rules_config_var`), start it from `EXPORT_LOAD` (or `FILE_LOAD` / `SOURCE_LOAD`) through
   `trigger_dags`, and let it start `NOTIFY` so a failed rule is emailed. Until then
   `python -m compliance_framework.cli run --module FILE_RULES --project <project>` runs them by hand.
@@ -1246,8 +1235,8 @@ values, or a second rules DAG with its own Variable. The rules run on the framew
   `airflow.sdk`). The step DAGs need Teradata and were not run
   end to end in Airflow 3.
 - It has **not** been run against a real Teradata system. Before production, on a development Teradata
-  system: create the tables from `airflow_resources/sql/schema.sql`, run `validate-config`, then one full cycle (`BATCH_CREATION`, `FILE_LOAD` of a good
-  and a bad file, `BATCH_CLOSE`, `NOTIFY`) with the step DAGs, and check the tables.
+  system: create the tables from `airflow_resources/sql/schema.sql`, load the metadata, run `validate-config`, then
+  the rehearsal list in `OPEN_ITEMS.md` with the step DAGs, and check the tables.
 - The NAS store was checked against a local SMB test server for connect, list, read and download only,
   and with a stand-in for the rest. Moving files (`Archive` / `Error`), creating the subfolders and the
   modified-time check have **not** been run against your NAS: verify them with one good and one bad file.

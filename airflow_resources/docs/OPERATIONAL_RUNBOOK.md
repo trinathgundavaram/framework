@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.53 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.54 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -148,7 +148,7 @@ A batch is one table + run type + report period + request date. Every **source**
 **Close date** (also called due date) = `Req_Dt_Key + SLA_Days - 1`. Example: created Sunday 10/18 with
 `SLA_Days = 6` → close date Friday 10/23. BATCH_CLOSE closes it on its first run on or after that date.
 
-`REQUEST_COMPLETE`, `DATA_NOT_PROVIDED` and `COMPLETED_WITH_EXCEPTION` are final ("closed") statuses.
+`REQUEST_COMPLETE` and `DATA_NOT_PROVIDED` are final ("closed") statuses.
 
 ---
 
@@ -908,10 +908,8 @@ column.
 | `SOURCE_DATA_READY` | Open | Data loaded / pulled |
 | `SOURCE_DATA_READY_NO_DATA` | Open | The source delivered "no data" (empty file, or empty pull on/after the close date) |
 | `SOURCE_DATA_CARRY_FORWARD` | Open | Data carried forward (REUSE) |
-| `EXCEPTION_PENDING` | Open | An exception is pending (older rows) |
 | `REQUEST_COMPLETE` | Closed | Closed with data (`NEW_FILE` or `CARRY_FORWARD`) |
 | `DATA_NOT_PROVIDED` | Closed | Closed without data (`NO_DATA` or `MISSING`). Final, like `REQUEST_COMPLETE` |
-| `COMPLETED_WITH_EXCEPTION` | Closed | Closed while an exception was pending |
 
 ### 8.12 Resolution types (`Resolution_Ty`)
 
@@ -926,7 +924,6 @@ close date).
 | `PROMOTED` | Loaded into core: the batch's current data | ACCEPTED |
 | `SUPERSEDED` | Was loaded, replaced by a newer load | ACCEPTED |
 | `QUARANTINED` | Rejected (`Quarantine_Rsn_Cd` says why); file moved to `Error` | REJECTED |
-| `RULES_FAILED` | Rejected by rules (older behaviour) | REJECTED |
 | `FAILED_TECHNICAL` | System problem; tried again next run | FAILED |
 | `NO_DATA_YET` | Internal source had no rows before the close date; tried again | WAITING |
 | `DEFERRED` | Another run was loading into the same staging table; the next run picks the file / pull up (no error) | WAITING |
@@ -1006,7 +1003,10 @@ Emailed by NOTIFY unless marked "no".
 
 ### 9.2 DAGs
 
-| Step | DAG id (example names, clone per project) | Variable |
+All the step DAGs come from one file, `airflow/osstd_core_cms_compliance_dags.py` (another project copies it with
+its own `DAG_PREFIX` and `VARIABLE_PREFIX`).
+
+| Step | DAG id | Variable |
 |---|---|---|
 | BATCH_CREATION | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CREATION` | `compliance_batch_creation_config_var` |
 | FILE_CHECK | `OSSTD_CORE_CMS_COMPLIANCE_FILE_CHECK` | `compliance_file_check_config_var` |
@@ -1157,8 +1157,9 @@ scope) plus what the trigger gives.
    `LOAD_TIMESTAMP`, `ROW_SEQUENCE`.
 7. **File checks**: section 5.9 – header names, record types / trailer, value checks.
 8. **Optional**: export (5.11), rules (5.12), calendar (5.6a).
-9. **Airflow**: Connections (9.1); clone the 8 DAG files with project names (e.g. `OSSTD_CORE_PRJB_COMPLIANCE_*`)
-   and their Variables (9.3): every Variable sets `project`; `trigger_dags` names the project's own clones; NOTIFY
+9. **Airflow**: Connections (9.1); copy `airflow/osstd_core_cms_compliance_dags.py` (one file, all the step DAGs)
+   and set `DAG_PREFIX` (e.g. `OSSTD_CORE_PRJB_COMPLIANCE`) and `VARIABLE_PREFIX` (e.g. `prjb_compliance`) in the copy;
+   create its Variables (9.3): every Variable sets `project`; `trigger_dags` names the project's own DAGs; NOTIFY
    sets `DEFAULT_NOTIFY_EMAILS`. Keep one NOTIFY without `project` for events of no project.
 10. **Validate**: `validate-config` from the command line (9.5); fix every ERROR.
 11. **First cycle in DEV**: BATCH_CREATION → put a test file / source rows → FILE_LOAD / SOURCE_LOAD → EXPORT_LOAD

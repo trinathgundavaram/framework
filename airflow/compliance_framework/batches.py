@@ -12,8 +12,8 @@ from zoneinfo import ZoneInfo
 
 from . import config as cfg, config as cfgmod, db
 from .audit import EventLogger
-from .common import (ADHOC, Clock, CloseBlocked, CloseDeferred, COMPLETED_WITH_EXCEPTION, ConfigError,
-    DATA_NOT_PROVIDED, EXCEPTION_PENDING, OPEN_STATUSES, REOPEN_STATUS, REQUEST_COMPLETE, REQUEST_CREATED, SCHEDULED,
+from .common import (ADHOC, Clock, CloseBlocked, CloseDeferred, ConfigError,
+    DATA_NOT_PROVIDED, OPEN_STATUSES, REOPEN_STATUS, REQUEST_COMPLETE, REQUEST_CREATED, SCHEDULED,
     SOURCE_DATA_CARRY_FORWARD, annual_window, build_btch_id, check_transition, code, earliest_close_date,
     period_lookback)
 from .config import RunType, Scope, XwalkRow
@@ -838,8 +838,7 @@ class DecisionProcessor:
                     b = get_batch(self.conn, r["req_id"])
                     if b["batch_close_ind"] != 1:
                         continue
-                    to_stat = (EXCEPTION_PENDING if b["req_stat"] == COMPLETED_WITH_EXCEPTION
-                               else REOPEN_STATUS.get(b["resolution_ty"], REQUEST_CREATED))
+                    to_stat = REOPEN_STATUS.get(b["resolution_ty"], REQUEST_CREATED)
                     resolution = None if b["resolution_ty"] == "MISSING" else b["resolution_ty"]
                     check_transition(b["req_stat"], to_stat)
                     self.conn.execute(
@@ -950,8 +949,6 @@ class DecisionProcessor:
 
 def close_resolution(batch: dict) -> tuple[str, str]:
     """(Req_Stat, Resolution_Ty) a batch closes with."""
-    if batch["req_stat"] == EXCEPTION_PENDING:
-        return COMPLETED_WITH_EXCEPTION, batch["resolution_ty"] or "MISSING"
     if batch["resolution_ty"] in HAS_DATA:
         return REQUEST_COMPLETE, batch["resolution_ty"]
     if batch["resolution_ty"] == "NO_DATA":

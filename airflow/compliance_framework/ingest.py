@@ -31,7 +31,7 @@ from .load import (LoadContext, PLACEHOLDER, QUERY_PREFIX, build_layout, column_
 
 log = logging.getLogger(__name__)
 
-TERMINAL_LOAD_STATS = {"QUARANTINED", "RULES_FAILED", "PROMOTED", "SUPERSEDED"}
+TERMINAL_LOAD_STATS = {"QUARANTINED", "PROMOTED", "SUPERSEDED"}
 UNFINISHED_LOAD_STATS = ("RECEIVED", "STAGING", "STAGED")
 STALE_LOCK = timedelta(minutes=30)
 DEFER_WAIT_SECONDS = 30
@@ -40,19 +40,15 @@ DEFER_WAIT_SECONDS = 30
 class Action(str, Enum):
     PROMOTE = "PROMOTE"
     PROMOTE_REPLACE = "PROMOTE_REPLACE"
-    EXCEPTION_NO_DATA = "EXCEPTION_NO_DATA"
-    EXCEPTION_KEEP_PRIOR = "EXCEPTION_KEEP_PRIOR"
     PROMOTE_LATE = "PROMOTE_LATE"
     PROMOTE_CORRECTION = "PROMOTE_CORRECTION"
     REJECT_CLOSED = "REJECT_CLOSED"
-    REJECT_RULES = "REJECT_RULES"
 
 
 @dataclass(frozen=True)
 class ResolutionInput:
     batch_closed: bool
     has_data: bool
-    file_passed: bool
     override_ty: Optional[str] = None
 
 
@@ -64,13 +60,8 @@ class ResolutionDecision:
 
 def decide(inp: ResolutionInput) -> ResolutionDecision:
     if not inp.batch_closed:
-        if inp.file_passed:
-            return ResolutionDecision(Action.PROMOTE_REPLACE, "O-2") if inp.has_data \
-                else ResolutionDecision(Action.PROMOTE, "O-1")
-        return ResolutionDecision(Action.EXCEPTION_KEEP_PRIOR, "O-4") if inp.has_data \
-            else ResolutionDecision(Action.EXCEPTION_NO_DATA, "O-3")
-    if not inp.file_passed:
-        return ResolutionDecision(Action.REJECT_RULES, "C-4")
+        return ResolutionDecision(Action.PROMOTE_REPLACE, "O-2") if inp.has_data \
+            else ResolutionDecision(Action.PROMOTE, "O-1")
     if inp.has_data and inp.override_ty == "CORRECTION":
         return ResolutionDecision(Action.PROMOTE_CORRECTION, "C-2")
     if not inp.has_data and inp.override_ty == "LATE_ARRIVAL":
@@ -94,7 +85,7 @@ class IngestOutcome:
 
 
 PROMOTED_RESULTS = ("PROMOTED", "LATE_PROMOTED", "CORRECTION_PROMOTED")
-REJECTED_RESULTS = ("REJECTED_CLOSED", "RULES_FAILED")
+REJECTED_RESULTS = ("REJECTED_CLOSED",)
 
 
 @dataclass
@@ -470,7 +461,7 @@ class IngestPipeline:
             closed = b["batch_close_ind"] == 1
             has_data = self._has_data(b)
             ovrd = self.active_override(b, required_override_ty(has_data), today) if closed else None
-            d = decide(ResolutionInput(batch_closed=closed, has_data=has_data, file_passed=True,
+            d = decide(ResolutionInput(batch_closed=closed, has_data=has_data,
                                        override_ty=code(ovrd["override_ty"]) if ovrd else None))
             ctx = dict(project_cd=b["project_cd"], table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"],
                        req_id=req_id, btch_id=b["btch_id"], load_id=load_id, file_ref=ref)

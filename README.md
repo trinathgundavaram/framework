@@ -10,5 +10,6 @@ ready to copy into the infrastructure repository:
 | `glue/`, `stepfunctions/` | Terragrunt submodules deployed by the GitHub Actions deploy workflow |
 
 [`airflow/`](airflow_resources/docs/AIRFLOW_DEPLOYMENT.md) is a separate, self-contained copy of the
-framework that runs from Airflow DAGs with its tables in Teradata. Its DAG files and package are in `airflow/`; its
-documentation, DDL, example Variables and metadata, and requirements are in `airflow_resources/`.
+framework that runs from Airflow DAGs with its tables in Teradata. Its DAG file and package are in `airflow/`; its
+documentation (deployment guide, operational runbook, open items), DDL, CMSUNIV Variables and metadata, and
+requirements are in `airflow_resources/`.
