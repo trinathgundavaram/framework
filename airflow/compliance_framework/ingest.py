@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -32,6 +33,8 @@ log = logging.getLogger(__name__)
 
 TERMINAL_LOAD_STATS = {"QUARANTINED", "RULES_FAILED", "PROMOTED", "SUPERSEDED"}
 UNFINISHED_LOAD_STATS = ("RECEIVED", "STAGING", "STAGED")
+STALE_LOCK = timedelta(minutes=30)
+DEFER_WAIT_SECONDS = 30
 
 
 class Action(str, Enum):
@@ -153,6 +156,11 @@ class IngestPipeline:
 
     def _process_registered(self, share: str, path: str) -> IngestOutcome:
         info = self.store.head(share, path)
+        done = self._unmoved(info)
+        if done is not None:
+            self._archive(info, done["load_id"], rejected=done["load_stat"] not in ("PROMOTED", "SUPERSEDED"))
+            return IngestOutcome(done["load_id"], "MOVE_RETRIED",
+                                 message="already processed; only the move to Archive / Error was tried again")
         load_id = self._register(info)
         self._handled.append(load_id)
         try:
@@ -271,6 +279,16 @@ class IngestPipeline:
                                           WHERE Load_Stat='QUARANTINED' GROUP BY Quarantine_Rsn_Cd ORDER BY n DESC"""),
         }
 
+    def _unmoved(self, info: FileInfo) -> Optional[dict]:
+        """The finished load of this very file (same name, size and time) whose move out of the inbound folder failed."""
+        marks, terminal = db.in_list(sorted(TERMINAL_LOAD_STATS))
+        return self.conn.execute(
+            f"""SELECT f.Load_ID, f.Load_Stat FROM ComplianceFileLoad f
+                 WHERE f.File_Share=%s AND f.File_Path=%s AND f.File_Version=%s AND f.Load_Stat IN ({marks})
+                   AND EXISTS (SELECT 1 FROM CMS_ComplianceExceptionsAudit a
+                                WHERE a.Load_ID = f.Load_ID AND a.Event_Ty = 'FILE_MOVE_FAILED')
+                 ORDER BY f.Load_ID DESC""", [info.share, info.path, info.version, *terminal]).fetchone()
+
     def _register(self, info: FileInfo) -> int:
         """A new load row for this pickup of the file (the caller holds the file lock).
 
@@ -285,6 +303,9 @@ class IngestPipeline:
                 f"""UPDATE ComplianceFileLoad SET Load_Stat='FAILED_TECHNICAL', Error_Txt=%s, Updated_Dtts=%s
                      WHERE File_Share=%s AND File_Path=%s AND Load_Stat IN ({marks})""",
                 ["not finished; the file was picked up again", now, info.share, info.path, *unfinished])
+            self.conn.execute("""UPDATE ComplianceFileLoad SET Load_Stat='SUPERSEDED', Updated_Dtts=%s
+                                  WHERE File_Share=%s AND File_Path=%s AND Load_Stat='DEFERRED'""",
+                              (now, info.share, info.path))
             self.conn.execute(
                 """INSERT INTO ComplianceFileLoad (File_Hash, File_Share, File_Path, File_Version,
                                                   File_Size_Byte, Load_Stat, Rules_Stat, Created_Dtts, Updated_Dtts)
@@ -323,20 +344,39 @@ class IngestPipeline:
                                     cfg, batch)
         stage_table = db.batch_key(f"STAGE {cfg.stg_schema_nm}.{cfg.stg_table_nm}".upper())
         with db.held(self.conn, db.req_key(batch), self.settings.lock_timeout_seconds):
-            if not db.try_lock(self.conn, stage_table):
-                return self._defer(load_id, f"staging table {cfg.stg_schema_nm}.{cfg.stg_table_nm}")
+            if not self._stage_lock(stage_table):
+                return self._defer(load_id, f"staging table {cfg.stg_schema_nm}.{cfg.stg_table_nm}", stage_table)
             try:
                 return self._process_locked(load_id, info, cfg, batch["req_id"])
             finally:
                 db.unlock(self.conn, stage_table)
 
-    def _defer(self, load_id: int, busy: str) -> IngestOutcome:
-        """Another run is loading into the same staging table: no error, the next run picks this up."""
+    def _stage_lock(self, key: str) -> bool:
+        """The staging table's lock, waiting a little (a short load of another run) before giving up."""
+        deadline = time.monotonic() + min(DEFER_WAIT_SECONDS, self.settings.lock_timeout_seconds or 0)
+        while not db.try_lock(self.conn, key):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(1)
+        return True
+
+    def _defer(self, load_id: int, busy: str, key: str) -> IngestOutcome:
+        """Another run is loading into the same staging table: no error, the next run picks this up. A lock that has
+        been held for STALE_LOCK (a crashed run's) is reported once: the release-lock command frees it."""
         text = f"{busy} is in use by another run; picked up by the next run"
+        lock = self.conn.execute("SELECT Owner_ID, Acquired_Dtts FROM ComplianceLock WHERE Lock_Key=%s", (key,)).fetchone()
+        now = self.clock.now()
         with self.conn.transaction():
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='DEFERRED', Error_Txt=%s, Updated_Dtts=%s "
-                              "WHERE Load_ID=%s", (text, self.clock.now(), load_id))
-        log.info("load %s deferred: %s", load_id, text)
+                              "WHERE Load_ID=%s", (text, now, load_id))
+            if lock and lock["acquired_dtts"] and now - lock["acquired_dtts"] >= STALE_LOCK:
+                detail = (f"{busy} has been locked since {lock['acquired_dtts']} by {lock['owner_id']}; its files and "
+                          f"pulls wait. If that run no longer exists: release-lock --key {key}")
+                if not self.conn.execute("SELECT 1 AS ok FROM CMS_ComplianceExceptionsAudit WHERE Event_Ty="
+                                         "'STAGING_LOCK_STALE' AND Event_Txt=%s", (detail,)).fetchone():
+                    self.logger.audit("STAGING_LOCK_STALE", load_id=load_id, description=detail)
+        log.warning("load %s deferred: %s (lock held by %s since %s)", load_id, text,
+                    lock["owner_id"] if lock else "?", lock["acquired_dtts"] if lock else "?")
         return IngestOutcome(load_id, "DEFERRED", message=text)
 
     def _select_batch(self, cfg: FileConfig, run_ty: str, rpt_start, rpt_end) -> tuple[Optional[dict], Optional[str]]:
@@ -544,9 +584,13 @@ class IngestPipeline:
             log.info("FILE_LOAD | %s | load %s | moved to %s", basename(info.path), load_id, self.store.uri(info.share, moved))
         except Exception as e:  # noqa: BLE001
             log.warning("moving %s to %s/ failed: %s", info.path, folder, e)
+            if self.conn.execute("SELECT 1 AS ok FROM CMS_ComplianceExceptionsAudit WHERE Load_ID=%s "
+                                 "AND Event_Ty='FILE_MOVE_FAILED'", (load_id,)).fetchone():
+                return
             with self.conn.transaction():
                 self.logger.audit("FILE_MOVE_FAILED", load_id=load_id, file_ref=self.store.uri(info.share, info.path),
-                                  description=f"{type(e).__name__} moving to {folder}/")
+                                  description=f"{type(e).__name__} moving to {folder}/; the file stays in the inbound "
+                                              "folder and only the move is tried again by the next runs")
 
     def _mark_technical_failure(self, load_id: int, err: Exception) -> None:
         try:
@@ -684,11 +728,21 @@ class SourceLoader:
             return self.conn.execute("SELECT Load_ID FROM ComplianceFileLoad WHERE File_Hash=%s", (key,)).fetchone()["load_id"]
 
     def _layout_for(self, q: QueryConfig, opts, names: list[str]):
-        return build_layout(q.label, columns(self.conn, q.stg_schema_nm, q.stg_table_nm),
-                            columns(self.conn, q.core_schema_nm, q.core_table_nm),
-                            column_mapping(q, cfgmod.target_columns(self.conn)),
-                            f"{q.stg_schema_nm}.{q.stg_table_nm}", f"{q.core_schema_nm}.{q.core_table_nm}",
-                            () if opts.target_columns else tuple(n.lower() for n in names), None, opts.target_columns)
+        layout = build_layout(q.label, columns(self.conn, q.stg_schema_nm, q.stg_table_nm),
+                              columns(self.conn, q.core_schema_nm, q.core_table_nm),
+                              column_mapping(q, cfgmod.target_columns(self.conn)),
+                              f"{q.stg_schema_nm}.{q.stg_table_nm}", f"{q.core_schema_nm}.{q.core_table_nm}",
+                              () if opts.target_columns else tuple(n.lower() for n in names), None, opts.target_columns)
+        if not opts.target_columns:
+            free = {c.casefold() for c in layout.free_cols}
+            unmatched = [n for n in names if n.casefold() not in free]
+            if unmatched:
+                raise FileRejected("SOURCE_DATA_REJECTED",
+                                   f"the query returns columns that are not data columns of {q.stg_schema_nm}."
+                                   f"{q.stg_table_nm} (a column the framework fills, or a name that is not there): "
+                                   f"{', '.join(unmatched[:10])}{' ...' if len(unmatched) > 10 else ''}; name each "
+                                   "column after its staging column, or list them in TARGET_COLUMNS")
+        return layout
 
     def _pull(self, load_id: int, batch: dict, q: QueryConfig) -> IngestOutcome:
         ref = f"{q.db_ty} {q.conn_cd or 'same Teradata system'}: {q.project_cd}/{q.table_nm}/{q.src_id} {batch['btch_id']}"
@@ -698,8 +752,8 @@ class SourceLoader:
         opts = check_options(q, cfgmod.file_checks(self.conn))
         stage_lock = db.batch_key(f"STAGE {q.stg_schema_nm}.{q.stg_table_nm}".upper())
         with db.held(self.conn, db.req_key(batch), self.settings.lock_timeout_seconds):
-            if not db.try_lock(self.conn, stage_lock):
-                return self.pipeline._defer(load_id, f"staging table {q.stg_schema_nm}.{q.stg_table_nm}")
+            if not self.pipeline._stage_lock(stage_lock):
+                return self.pipeline._defer(load_id, f"staging table {q.stg_schema_nm}.{q.stg_table_nm}", stage_lock)
             try:
                 return self._pull_locked(load_id, batch, q, opts, ref)
             finally:

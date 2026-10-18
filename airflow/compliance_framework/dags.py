@@ -13,6 +13,7 @@ from airflow.providers.smtp.operators.smtp import EmailOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import DAG, Connection, Param, Variable
+from airflow.sdk.exceptions import AirflowFailException
 from airflow.timetables.trigger import MultipleCronTriggerTimetable
 from croniter import croniter
 
@@ -190,11 +191,41 @@ def _connect_environment(config: dict, connection_id: str = None) -> None:
     _set_env("GRE_META_CONNECTION", gre.get("meta_connection") or "teradata")
 
 
+TRIGGER_KEYS = ("settings", "gre", "log_level", "fail_on_problems")
+TRIGGER_FILE_KEYS = ("share", "file", "folder")
+TRIGGER_BLOCKED_SETTINGS = ("RULE_ENGINE", "GRE_ENTRYPOINT", "FILE_STORE", "LOCAL_STORE_ROOT", "METADATA_SCHEMA",
+                            "ENVIRONMENT", "ENV_VALUE")
+TRIGGER_GRE_KEYS = ("run_params", "text_params", "extra_filters")
+
+
+def trigger_values(step: str, given: Optional[dict]) -> dict:
+    """What a trigger may change for one run: the step's own inputs, settings and log level. The database, the
+    connections, the file store, the rules engine and code to load (period_file, RULE_ENGINE) stay the Variable's."""
+    allowed = {*STEP_PARAMS.get(step, ()), *TRIGGER_KEYS, *(TRIGGER_FILE_KEYS if step == "FILE_LOAD" else ())}
+    out, ignored = {}, []
+    for key, value in _keys(given).items():
+        if key not in allowed:
+            ignored.append(key)
+            continue
+        if key == "settings" and isinstance(value, dict):
+            blocked = [k for k in value if str(k).upper().removeprefix("FRAMEWORK_") in TRIGGER_BLOCKED_SETTINGS]
+            ignored += [f"settings.{k}" for k in blocked]
+            value = {k: v for k, v in value.items() if k not in blocked}
+        if key == "gre" and isinstance(value, dict):
+            ignored += [f"gre.{k}" for k in value if str(k).lower() not in TRIGGER_GRE_KEYS]
+            value = {k: v for k, v in value.items() if str(k).lower() in TRIGGER_GRE_KEYS}
+        out[key] = value
+    if ignored:
+        logger.warning("%s: not taken from the trigger (set them in the Variable): %s", step, ", ".join(sorted(ignored)))
+    return out
+
+
 def run_compliance_step(step: str, variable_key: str, overrides: dict = None, scope_index: int = None,
                         connection_id: str = None):
-    """Run one framework step; raises RuntimeError when it fails, returns its outcome otherwise."""
+    """Run one framework step. Problems the step reports (exit code 1, e.g. a rejected file) fail the task without a
+    retry; a step that could not run (exit code 2) raises RuntimeError, which Airflow retries."""
     step = step.strip().upper()
-    config, settings = resolve_config(variable_key, overrides, scope_index)
+    config, settings = resolve_config(variable_key, trigger_values(step, overrides), scope_index)
     if step in ("FILE_LOAD", "FILE_CHECK") and str(settings.get("FILE_STORE") or "nas").lower() == "nas" and not config.get(NAS_CONN_KEY):
         raise ValueError(f"'{NAS_CONN_KEY}' (the Airflow Connection of the NAS file server) is required in "
                          f"Airflow Variable '{variable_key}'")
@@ -202,10 +233,14 @@ def run_compliance_step(step: str, variable_key: str, overrides: dict = None, sc
 
     params = {k: config.get(k) for k in SCOPE_KEYS if config.get(k) not in (None, "")}
     timeout = int(_minutes(config, "execution_timeout_minutes", STEP_TIMEOUT.get(step, timedelta(hours=1))).total_seconds() // 60)
-    ttl = int(settings.get("LOCK_TTL_MINUTES") or Settings.lock_ttl_minutes)
-    if ttl < timeout:
-        logger.warning("LOCK_TTL_MINUTES %s is shorter than the task's time limit (%s minutes): a long run could outlive "
-                       "its locks; set LOCK_TTL_MINUTES to at least %s", ttl, timeout, timeout + 30)
+    try:
+        ttl = int(settings.get("LOCK_TTL_MINUTES") or Settings.lock_ttl_minutes)
+    except (TypeError, ValueError):
+        ttl = None   # the step reports the bad setting
+    if ttl is not None and ttl < timeout + 30:
+        settings["LOCK_TTL_MINUTES"] = timeout + 30
+        logger.info("LOCK_TTL_MINUTES raised from %s to %s (the task's time limit is %s minutes), so a run cannot "
+                    "outlive its locks", ttl, timeout + 30, timeout)
     for name in QUIET_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
     outcome, exit_code = run_step(step, as_of=config.get("as_of") or None, settings=settings,
@@ -214,9 +249,13 @@ def run_compliance_step(step: str, variable_key: str, overrides: dict = None, sc
     if not isinstance(fail_on_problems, bool):
         fail_on_problems = FAIL_ON_PROBLEMS.get(step, True)
     text = json.dumps(outcome, indent=2, default=str)
-    if exit_code == 2 or (exit_code == 1 and fail_on_problems):
+    if exit_code == 2:
         logger.error("%s report:\n%s", step, text)
-        raise RuntimeError(f"{step}: {outcome.get('result') or 'failed'} (exit code {exit_code}); the report is above")
+        raise RuntimeError(f"{step}: {outcome.get('result') or 'failed'} (exit code 2); the report is above")
+    if exit_code == 1 and fail_on_problems:
+        logger.error("%s report:\n%s", step, text)
+        raise AirflowFailException(f"{step}: {outcome.get('result') or 'completed with problems'} (exit code 1); the "
+                                   "report is above")
     (logger.warning if exit_code else logger.info)("%s report:\n%s", step, text)
     return outcome
 

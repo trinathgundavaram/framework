@@ -787,6 +787,7 @@ MESSAGES = {
     "SOURCE_QUERY_FAILED": "The data could not be read from the source system.",
     "SOURCE_DATA_REJECTED": "The source data is not in the expected format.",
     "NO_DATA_YET": "The source has no data for this request yet; it is checked again on the next runs until the due date.",
+    "DEFERRED": "Another run was loading into the same table; this is picked up by the next run.",
     "RULES_FAILED": "The file did not pass the data quality rules.",
     "FAILED_TECHNICAL": "The file could not be processed because of a system issue. It will be tried again automatically.",
 }

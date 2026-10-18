@@ -158,8 +158,8 @@ default is right (the examples carry only what differs: connections, `load_env`,
 | `fail_on_problems` | `true` / `false`: whether "completed with problems" (exit code 1) fails the task. Default: true, except `OVERRIDE_DECISIONS`. `FILE_LOAD` processes every file first and then fails the task when any file was not loaded (rejected, or a technical failure); the DAGs it triggers are then not started |
 | `runs` | Optional list of scopes: one task per entry, each with its own `project` / `run_type` / `period` / ... (and `settings`, `gre`). Without it the DAG has one task, scoped by the Variable's own keys |
 | `log_level` | `INFO` (default), `DEBUG`, ... |
-| `execution_timeout_minutes` | Time limit of the step's task. Default: `BATCH_CREATION` and `FILE_CHECK` 60, `FILE_LOAD` and `FILE_RULES` 120, the others 30. Keep it below `LOCK_TTL_MINUTES` (240): the task log warns when it is not |
-| `retries` | How often a failed task is tried again, 5 minutes later. Default 1; 0 = never. The ServiceNow incident and the failure email come after the last try |
+| `execution_timeout_minutes` | Time limit of the step's task. Default: `BATCH_CREATION` and `FILE_CHECK` 60, `FILE_LOAD` and `FILE_RULES` 120, the others 30. `LOCK_TTL_MINUTES` is raised to this limit plus 30 for the run when it is lower, so a run cannot outlive its locks |
+| `retries` | How often a task that could not run (a technical error) is tried again, 5 minutes later. Default 1; 0 = never. Problems the step reports (a rejected file, a batch not loaded) fail the task at once, without a retry, with the ServiceNow incident and the failure email |
 | `dagrun_timeout_minutes` | Time limit of a whole DAG run (default 480) |
 
 Keys by step:
@@ -174,8 +174,12 @@ Keys by step:
 | `BATCH_CLOSE` | the scope | — |
 | `NOTIFY` | the scope (no `project`: every pending event, including those of no project) | `NOTIFY_BACKEND` (`airflow` = email through the Airflow SMTP connection `smtp_default`, `log` = write to the task log, the default), `NOTIFY_FROM_EMAIL`, `DEFAULT_NOTIFY_EMAILS` |
 
-A trigger's configuration overrides the Variable for that run: any scope key above, `as_of` (an ISO
-date or timestamp used as "now", for a missed day), `settings` and `gre`.
+A trigger's configuration overrides the Variable for that run, but only with the step's own inputs (its scope keys
+above, `batch` / `release` / `hold` where the step takes them, `share` / `file` / `folder` for FILE_LOAD), `as_of` (an
+ISO date or timestamp used as "now", for a missed day), `log_level`, `fail_on_problems`, `settings` and the GRE's
+`run_params` / `text_params` / `extra_filters`. The database (`meta_db`), the connections, `period_file` and the
+settings `RULE_ENGINE`, `GRE_ENTRYPOINT`, `FILE_STORE`, `LOCAL_STORE_ROOT`, `METADATA_SCHEMA`, `ENVIRONMENT`,
+`ENV_VALUE` always come from the Variable; anything else in a trigger is ignored with a warning in the task log.
 
 **One DAG, several times (timed runs).** When entries of `runs` have their own `schedule_interval` (and a `name`),
 the DAG runs at every one of those times (and at its own `schedule_interval`, if set), with one task. Each run
@@ -202,10 +206,14 @@ entries without `schedule_interval` work as before: one task each, all in every 
 ## DAGs
 
 - **Step DAGs** — one task named after the step (or one per `runs` entry), then a `trigger_<dag id>`
-  task per `trigger_dags` entry, then `success_email` / `fail_email`. `max_active_runs` is 1 and a failed task
-  is tried once more after 5 minutes (`retries`, default 1); every step is idempotent, so a retry or the next run
-  picks up. DAGs that overlap are safe (locks, below): a file or pull whose staging table another run is loading
-  is left for the next run (`DEFERRED`, no error) instead of waiting.
+  task per `trigger_dags` entry, then `success_email` / `fail_email`. `max_active_runs` is 1. A task that could not
+  run (technical error) is tried once more after 5 minutes (`retries`, default 1); a task whose step reported
+  problems fails at once (no retry). Every step is idempotent, so a retry or the next run picks up. DAGs that
+  overlap are safe (locks, below): a file or pull whose staging table another run is loading waits up to 30 seconds,
+  then is left for the next run (`DEFERRED`, no error). A staging lock held for 30 minutes or more (a crashed run's)
+  is reported once (`STAGING_LOCK_STALE`, emailed) with the `release-lock` command that frees it. A file whose move
+  to `Archive` / `Error` failed is not loaded again: the next runs only try the move (`FILE_MOVE_FAILED`, emailed
+  once).
 - A missing or invalid Variable never breaks parsing: the DAG is still there, unscheduled, and its task
   fails with the reason when run.
 
@@ -247,7 +255,7 @@ sources). An installation that has the table under its earlier name renames it o
 | `Project_Cd`, `Table_Nm`, `Src_ID` | The source, as in the crosswalk (the source needs no file config) |
 | `Src_Db_Ty` | `TERADATA` or `SQLSERVER` |
 | `Src_Conn_Cd` | The Airflow Connection of the source's server. Empty for a source on the framework's own Teradata system: its rows are then copied with one `INSERT ... SELECT` and never pass through Airflow (the framework's account needs SELECT on the source tables). `$env` is replaced as in database names |
-| `Src_Sql_Txt` | One `SELECT` in the source's own dialect. It can use `{btch_id}`, `{rpt_start}`, `{rpt_end}`, `{run_ty}`, `{version}`, `{src_id}`, `{req_id}`, `{project_cd}`, `{table_nm}`, `{load_id}`, `{load_date}`, bound as parameters. Its column names fill the staging columns of the same name (else in table order, or by `TARGET_COLUMNS`) |
+| `Src_Sql_Txt` | One `SELECT` in the source's own dialect. It can use `{btch_id}`, `{rpt_start}`, `{rpt_end}`, `{run_ty}`, `{version}`, `{src_id}`, `{req_id}`, `{project_cd}`, `{table_nm}`, `{load_id}`, `{load_date}`, bound as parameters. Its column names fill the staging columns of the same name; a name that is not a data column of the staging table (a column the framework fills, or a misspelling) rejects the pull (`SOURCE_DATA_REJECTED`) with the names, unless `TARGET_COLUMNS` lists the columns in order |
 | `Stg_Schema_Nm`, `Stg_Table_Nm`, `Core_Schema_Nm`, `Core_Table_Nm` | As in the file config |
 
 **Connections.** One Airflow Connection per server (or per login); many sources can share one. SQL Server:

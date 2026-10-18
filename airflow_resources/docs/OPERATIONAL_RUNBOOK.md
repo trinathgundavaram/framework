@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.50 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.51 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -470,7 +470,7 @@ has no file config.
 | `Project_Cd`, `Table_Nm`, `Src_ID` | Yes | | |
 | `Src_Db_Ty` | Yes | `TERADATA`, `SQLSERVER` | Where the source table is |
 | `Src_Conn_Cd` | No | An Airflow Connection id; `$env` allowed | Empty = the framework's own Teradata system (copied with one INSERT … SELECT); otherwise the source server's Connection |
-| `Src_Sql_Txt` | Yes | One `SELECT` in the source's dialect | Its column names fill the staging columns of the same name. Placeholders (section 8.9) are bound as parameters. `$env` is **not** replaced inside it |
+| `Src_Sql_Txt` | Yes | One `SELECT` in the source's dialect | Its column names fill the staging columns of the same name: every name must be a data column of the staging table (not one the framework fills), else the pull is rejected with the names. Placeholders (section 8.9) are bound as parameters. `$env` is **not** replaced inside it |
 | `Stg_Schema_Nm` … `Core_Table_Nm` | Yes | | As in the file config |
 | `Active_Ind` | Default 1 | | |
 
@@ -970,7 +970,8 @@ Emailed by NOTIFY unless marked "no".
 | `FILE_CHECK_FAILED` | WARNING | yes | FILE_CHECK found problems |
 | `FILE_CHECK_PASSED` | INFO | no | FILE_CHECK passed |
 | `FILE_SAME_CONTENT_OTHER_BATCH` | WARNING | yes | Same content already loaded for another batch |
-| `FILE_MOVE_FAILED` | WARNING | no | File could not be moved to Archive / Error |
+| `FILE_MOVE_FAILED` | WARNING | yes | File could not be moved to Archive / Error; it stays in the inbound folder and the next runs only try the move (no second load) |
+| `STAGING_LOCK_STALE` | WARNING | yes | A staging table has been locked for 30 minutes or more (a crashed run): its files and pulls wait. Free it with `release-lock` (9.5) if that run no longer exists |
 | `FILE_TECHNICAL_FAILURE` | ERROR | yes | System problem loading a file |
 | `CORE_LOAD_ROWCOUNT_MISMATCH` | ERROR | yes | Core rows differ from staged rows |
 | `SOURCE_QUERY_FAILED`, `SOURCE_DATA_REJECTED` | ERROR | yes | Internal source query failed / data does not fit |
@@ -1033,8 +1034,8 @@ A DAG never runs twice at the same time; a run that is due while another runs wa
 | `snow_assignment_group` | No | `D&AE - EDE Govt Compliance` | ServiceNow incident group on failure |
 | `owner`, `tags`, `log_level` | No | `oss`, standard tags, `INFO` | |
 | `fail_on_problems` | No | true (OVERRIDE_DECISIONS false) | Fail the task when the step has problems |
-| `execution_timeout_minutes`, `dagrun_timeout_minutes` | No | per step / 480 | Time limits (keep the task's below `LOCK_TTL_MINUTES`) |
-| `retries` | No | 1 | How often a failed task is tried again (5 minutes later); 0 = never |
+| `execution_timeout_minutes`, `dagrun_timeout_minutes` | No | per step / 480 | Time limits (`LOCK_TTL_MINUTES` is raised to the task's limit + 30 when lower) |
+| `retries` | No | 1 | How often a task that hit a technical error is tried again (5 minutes later); 0 = never. Problems the step reports (a rejected file) fail at once, with the incident and email |
 | `settings` | No | | Framework settings (section 9.4) |
 | `gre` | FILE_RULES | from the Variable | GRE rules engine settings (`meta_db`, `text_params`, `extra_filters`, …) |
 
@@ -1077,7 +1078,9 @@ A DAG never runs twice at the same time; a run that is due while another runs wa
 
 ### 9.5 Triggering a DAG by hand (JSON)
 
-Any key overrides the Variable for that run:
+These keys override the Variable for that run. The database, the connections, `period_file` and the settings
+`RULE_ENGINE`, `GRE_ENTRYPOINT`, `FILE_STORE`, `LOCAL_STORE_ROOT`, `METADATA_SCHEMA`, `ENVIRONMENT`, `ENV_VALUE` cannot
+be changed from a trigger (ignored, with a warning in the task log):
 
 | Key | Steps | Meaning |
 |---|---|---|
