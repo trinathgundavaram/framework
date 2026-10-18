@@ -2,7 +2,7 @@
 
 State at version 0.3.54. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
 everything they list that is not below is done. Tested: 21 scenarios on Python 3.13 and 3.9 against a PostgreSQL
-stand-in for Teradata; the DAG file parses on Airflow 3.3.2. **Nothing has run on Teradata, the NAS or a real
+stand-in for Teradata; the 8 DAG files parse on Airflow 3.3.2. **Nothing has run on Teradata, the NAS or a real
 Airflow deployment yet.**
 
 ## 1. Before the first production run

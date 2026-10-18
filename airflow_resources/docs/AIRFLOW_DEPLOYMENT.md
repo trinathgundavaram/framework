@@ -3,11 +3,18 @@
 A self-contained copy of the compliance batch framework that runs from Airflow DAGs with its metadata,
 staging and core tables in **Teradata**. Nothing outside `airflow/` is used or changed. It follows the
 layout and connection style of the GRE rules engine's Airflow package (`DQ_COMPLETE_REPO/airflow`) and
-the team's DAG conventions (one DAG id and one `<name>_config_var` Variable per step).
+the team's DAG conventions (one DAG file, one DAG id, one `<name>_config_var` Variable).
 
 ```
 airflow/
-  osstd_core_cms_compliance_dags.py   the eight step DAGs (one per step; copy the file for another project)
+  osstd_core_cms_compliance_batch_creation.py      one DAG file per step
+  osstd_core_cms_compliance_file_check.py
+  osstd_core_cms_compliance_file_load.py
+  osstd_core_cms_compliance_source_load.py
+  osstd_core_cms_compliance_export_load.py
+  osstd_core_cms_compliance_override_decisions.py
+  osstd_core_cms_compliance_batch_close.py
+  osstd_core_cms_compliance_notify.py
   compliance_framework/
     dags.py        the DAGs (schedule, tasks, triggers, emails, ServiceNow callback), Variable + Connections ->
                    the framework, run_step() in-process
@@ -52,8 +59,8 @@ airflow_resources/                (not deployed with the DAGs)
    | `BATCH_CLOSE` | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CLOSE` | `compliance_batch_close_config_var` |
    | `NOTIFY` | `OSSTD_CORE_CMS_COMPLIANCE_NOTIFY` | `compliance_notify_config_var` |
 
-   The data quality step (`FILE_RULES`) has no DAG for now: add one when the rules are set up (add `FILE_RULES` to
-   `STEPS` in the DAG file, below). The admin commands run from the command line (below).
+   The data quality step (`FILE_RULES`) has no DAG for now: add one when the rules are set up (a DAG file for step
+   `FILE_RULES`, below). The admin commands run from the command line (below).
 
 2. **Two Airflow Connections**, both named in the Variables: Teradata (`td_conn_var`) and the NAS file
    server (`wdc_comp_oper_nas_var`, only needed by the DAGs that load files). The bridge exports them as
@@ -73,8 +80,8 @@ apply to the command line).
 
 ## Deploying
 
-1. Copy `osstd_core_cms_compliance_dags.py` and the `compliance_framework/` folder into the DAGs folder, side by
-   side.
+1. Copy the `osstd_core_cms_compliance_*.py` files and the `compliance_framework/` folder into the DAGs folder,
+   side by side.
 2. Install `airflow_resources/requirements.txt` in the workers' environment. **Airflow 3** (Task SDK
    `airflow.sdk`, the `standard` and `smtp` providers; no Airflow 2 or deprecated imports), on a Python version your
    Airflow 3 release supports. The email tasks and `NOTIFY_BACKEND=airflow` send through the Airflow Connection `smtp_default`.
@@ -84,9 +91,9 @@ apply to the command line).
    `{{META_DB}}` with the metadata database). The framework never creates or alters tables.
 5. Load the configuration tables, then run `validate-config` from the command line (below).
 
-Another project gets its own DAGs: copy `osstd_core_cms_compliance_dags.py`, set `DAG_PREFIX` (e.g.
-`OSSTD_CORE_PRJB_COMPLIANCE`) and `VARIABLE_PREFIX` (e.g. `prjb_compliance`) in the copy, and create its Variables
-(each with `project`, and `trigger_dags` naming the copy's own DAGs). Keep `STEPS` to the steps the project uses.
+Another project (or another cadence) gets its own DAGs: copy each step's DAG file, give the copy its own `dag_id`
+(e.g. `OSSTD_CORE_PRJB_COMPLIANCE_FILE_LOAD`) and `variable_key` (e.g. `prjb_compliance_file_load_config_var`), and
+create those Variables (each with `project`, and `trigger_dags` naming the copies' own DAGs).
 
 ### Airflow Connections
 
@@ -770,8 +777,8 @@ yet (`ComplianceFileLoad.Load_Stat = PROMOTED`, `Rules_Stat = NOT_RUN`), runs th
 - The engine is given the staging and the core table of the file (`stg_schema_nm`, `stg_table_nm`,
   `core_schema_nm`, `core_table_nm`) with the batch and load ids, and its export table (`exp_schema_nm`,
   `exp_table_nm`) when the table has one (`EXPORT_LOAD`).
-- **Airflow:** the rules have no DAG for now. When they are set up, add `FILE_RULES` to `STEPS` in
-  `osstd_core_cms_compliance_dags.py` (DAG `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES`, Variable
+- **Airflow:** the rules have no DAG for now. When they are set up, add `osstd_core_cms_compliance_file_rules.py`
+  (a copy of a step DAG file with step `FILE_RULES`, `dag_id` `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` and Variable
   `compliance_file_rules_config_var`), start it from `EXPORT_LOAD` (or `FILE_LOAD` / `SOURCE_LOAD`) through
   `trigger_dags`, and let it start `NOTIFY` so a failed rule is emailed. Until then
   `python -m compliance_framework.cli run --module FILE_RULES --project <project>` runs them by hand.

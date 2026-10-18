@@ -1003,8 +1003,8 @@ Emailed by NOTIFY unless marked "no".
 
 ### 9.2 DAGs
 
-All the step DAGs come from one file, `airflow/osstd_core_cms_compliance_dags.py` (another project copies it with
-its own `DAG_PREFIX` and `VARIABLE_PREFIX`).
+One DAG file per step in `airflow/` (`osstd_core_cms_compliance_<step>.py`); another project copies them with its
+own DAG ids and Variable names.
 
 | Step | DAG id | Variable |
 |---|---|---|
@@ -1157,10 +1157,10 @@ scope) plus what the trigger gives.
    `LOAD_TIMESTAMP`, `ROW_SEQUENCE`.
 7. **File checks**: section 5.9 – header names, record types / trailer, value checks.
 8. **Optional**: export (5.11), rules (5.12), calendar (5.6a).
-9. **Airflow**: Connections (9.1); copy `airflow/osstd_core_cms_compliance_dags.py` (one file, all the step DAGs)
-   and set `DAG_PREFIX` (e.g. `OSSTD_CORE_PRJB_COMPLIANCE`) and `VARIABLE_PREFIX` (e.g. `prjb_compliance`) in the copy;
-   create its Variables (9.3): every Variable sets `project`; `trigger_dags` names the project's own DAGs; NOTIFY
-   sets `DEFAULT_NOTIFY_EMAILS`. Keep one NOTIFY without `project` for events of no project.
+9. **Airflow**: Connections (9.1); copy the 8 DAG files with project names (e.g. `OSSTD_CORE_PRJB_COMPLIANCE_*`,
+   Variables `prjb_compliance_<step>_config_var`) and create their Variables (9.3): every Variable sets `project`;
+   `trigger_dags` names the project's own DAGs; NOTIFY sets `DEFAULT_NOTIFY_EMAILS`. Keep one NOTIFY without
+   `project` for events of no project.
 10. **Validate**: `validate-config` from the command line (9.5); fix every ERROR.
 11. **First cycle in DEV**: BATCH_CREATION → put a test file / source rows → FILE_LOAD / SOURCE_LOAD → EXPORT_LOAD
     → BATCH_CLOSE → NOTIFY; check with section 12. Try a bad file, a missing source, a late file.
