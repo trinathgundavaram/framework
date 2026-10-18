@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.52 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.53 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -488,8 +488,9 @@ VALUES ('CMSUNIV', 'ODAG3', '40', 'SQLSERVER', 'cms_src_appeals_sqlsrv',
 ```
 
 When is it pulled: scheduled run types from the request date on (an empty result before the close date means "no
-data yet" and is tried again on the next runs; empty on or after the close date means "no data"); ad hoc only when
-released (section 11.6).
+data yet" and is tried again on the next runs; empty on or after the close date means "no data", and the batch is
+still pulled again on every run until it closes, so a source table loaded later that day is picked up, e.g. a DAILY
+batch with SLA 1); ad hoc only when released (section 11.6).
 
 ### 5.9 ComplianceFileCheckConfig (file checks)
 
@@ -577,7 +578,9 @@ VALUES ('CMSUNIV', 'ODAG3', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG_DE_TABLE3_2022_EXP', 
 -- ALTER TABLE CMSUNIV_EXPORT_DEV_T.ODAG_DE_TABLE3_2022_EXP ADD Exp_Btch_ID VARCHAR(100);
 ```
 
-What the export holds: per source, run type and report period, the latest batch with data. A carried-forward batch
+What the export holds: per source, run type and report period, the latest batch with data (or with "no data" from the
+source: an empty file or pull). A later batch of the same dates that closed with nothing (`MISSING`) does not replace
+it, so the batch with the data can still be re-exported. A carried-forward batch
 gets a copy of the reused rows under its own batch ID.
 
 ### 5.12 ComplianceRuleBinding (optional)

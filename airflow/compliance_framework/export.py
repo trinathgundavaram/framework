@@ -160,11 +160,13 @@ class ExportLoader:
         period = (b["project_cd"], b["table_nm"], b["src_id"], b["run_ty"], b["rpt_start_dt_key"], b["rpt_end_dt_key"])
         newest = self.conn.execute(
             """SELECT * FROM ComplianceRequestControl WHERE Project_Cd=%s AND Table_Nm=%s AND Src_ID=%s
-                  AND Run_Ty=%s AND Rpt_Start_Dt_Key=%s AND Rpt_End_Dt_Key=%s AND Resolution_Ty IS NOT NULL
+                  AND Run_Ty=%s AND Rpt_Start_Dt_Key=%s AND Rpt_End_Dt_Key=%s
+                  AND Resolution_Ty IN ('NEW_FILE', 'CARRY_FORWARD', 'NO_DATA')
                 ORDER BY Req_ID DESC""", period).fetchone()
         keep = self._data_chain(newest) if newest else []
         if newest and newest["btch_id"] != b["btch_id"] and b["btch_id"] not in keep:
-            item.update(status="SKIPPED", detail=f"a later batch of the same period has data: {newest['btch_id']}")
+            item.update(status="SKIPPED", detail=f"the period's data is batch {newest['btch_id']} (the latest batch of the "
+                                                 "period with data or 'no data' from the source)")
             self._done(b, f"not exported: {item['detail']}")
             log.info("EXPORT_LOAD | %s | skipped: %s", b["btch_id"], item["detail"])
             return item

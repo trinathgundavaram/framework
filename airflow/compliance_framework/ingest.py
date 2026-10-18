@@ -691,7 +691,8 @@ class SourceLoader:
         where, params = scope.sql("c")
         rows = self.conn.execute(
             f"""SELECT c.* FROM ComplianceRequestControl c
-                 WHERE c.Batch_Close_Ind = 0 AND (c.Req_Stat = 'REQUEST_CREATED' OR {REOPENED_AWAITING_DATA})
+                 WHERE c.Batch_Close_Ind = 0
+                   AND (c.Req_Stat IN ('REQUEST_CREATED', 'SOURCE_DATA_READY_NO_DATA') OR {REOPENED_AWAITING_DATA})
                    AND c.Req_Dt_Key <= %s{where}
                  ORDER BY c.Req_ID""", [self.clock.today(self.settings.business_tz), *params]).fetchall()
         return [(b, cfgs[(b["project_cd"], b["table_nm"], b["src_id"])]) for b in rows
@@ -783,6 +784,8 @@ class SourceLoader:
         due = self._due(b)
         if rows == 0 and self.clock.today(self.settings.business_tz) < due:
             return self._not_yet(load_id, b, due)
+        if rows == 0 and b["req_stat"] == SOURCE_DATA_READY_NO_DATA:
+            return self._still_empty(load_id, b)
         with self.conn.transaction():
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, Updated_Dtts=%s "
                               "WHERE Load_ID=%s", (rows, self.clock.now(), load_id))
@@ -829,6 +832,16 @@ class SourceLoader:
                               "Updated_Dtts=%s WHERE Load_ID=%s", (text, self.clock.now(), load_id))
             self.logger.batch_event("SOURCE_NO_DATA_YET", req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id,
                                     detail=text)
+        log.info("SOURCE_LOAD | %s | source %s | %s", b["btch_id"], b["src_id"], text)
+        return IngestOutcome(load_id, "NO_DATA_YET", message=text, req_id=b["req_id"])
+
+    def _still_empty(self, load_id: int, b: dict) -> IngestOutcome:
+        """An open batch whose source had no rows is pulled again until it closes (a source loaded later in the day);
+        while it still has none nothing changes."""
+        text = "still no rows; pulled again on the next runs until the batch closes"
+        with self.conn.transaction():
+            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='NO_DATA_YET', Stg_Rcd_Cnt=0, Error_Txt=%s, "
+                              "Updated_Dtts=%s WHERE Load_ID=%s", (text, self.clock.now(), load_id))
         log.info("SOURCE_LOAD | %s | source %s | %s", b["btch_id"], b["src_id"], text)
         return IngestOutcome(load_id, "NO_DATA_YET", message=text, req_id=b["req_id"])
 

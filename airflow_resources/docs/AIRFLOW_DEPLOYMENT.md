@@ -267,7 +267,10 @@ Server needs `pyodbc` and the Microsoft ODBC driver on the workers. Check a conn
 `python -m compliance_framework.cli test-connection --source <Src_Conn_Cd> --db-type SQLSERVER`.
 
 **Which batches are pulled.** With the scope (`project`, `table_group` or `table`, `run_type`): every open batch
-of a query source that has no data yet (`REQUEST_CREATED`, request date reached). With `batch` (one `Btch_ID`, or
+of a query source that has no data yet (`REQUEST_CREATED`, request date reached), or whose earlier pull returned no
+rows on or after its due date (`SOURCE_DATA_READY_NO_DATA`): it is pulled again on every run until it closes, so a
+source table loaded later in the day is taken (a DAILY batch with SLA 1 has no "before the due date"); while it still
+returns no rows nothing changes. With `batch` (one `Btch_ID`, or
 several separated by commas): the query sources of those batches, whatever their data; the new pull replaces the batch's rows
 (a closed batch still needs its override). A scheduled run type's batch is pulled from its request date on, so data that
 is ready early is taken at once. A query that returns no rows **before the batch's due date** (`Req_Dt_Key + SLA_Days - 1`)
