@@ -735,6 +735,10 @@ class SourceLoader:
                               () if opts.target_columns else tuple(n.lower() for n in names), None, opts.target_columns)
         if not opts.target_columns:
             free = {c.casefold() for c in layout.free_cols}
+            twice = sorted({n for n in names if [x.casefold() for x in names].count(n.casefold()) > 1})
+            if twice:
+                raise FileRejected("SOURCE_DATA_REJECTED", f"the query returns a column name more than once: "
+                                   f"{', '.join(twice)}; give each column its own name (AS ...)")
             unmatched = [n for n in names if n.casefold() not in free]
             if unmatched:
                 raise FileRejected("SOURCE_DATA_REJECTED",

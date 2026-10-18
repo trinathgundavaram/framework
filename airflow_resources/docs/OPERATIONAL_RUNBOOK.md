@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.51 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.52 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -1027,13 +1027,13 @@ A DAG never runs twice at the same time; a run that is due while another runs wa
 | `project` | **Yes, per project** | every project | The project the DAG works on |
 | `table_group`, `table`, `run_type` | No | all | Narrow the run |
 | `schedule_interval` | No | none (trigger only) | Cron expression, Central time, e.g. `0 20 * * *` |
-| `trigger_dags` | No | none | DAG ids to start after success (must be the project's own clones) |
+| `trigger_dags` | No | none | DAG ids to start after success (must be the project's own clones); a list or one comma-separated string |
 | `hold` | No | none | Run types to hold, e.g. `"WEEKLY"` (SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE) |
 | `runs` | No | | List of scopes; with `name` + `schedule_interval` per entry: timed runs (section 9.6) |
 | `email_recipient` | No | none | Success / failure emails of the DAG |
 | `snow_assignment_group` | No | `D&AE - EDE Govt Compliance` | ServiceNow incident group on failure |
 | `owner`, `tags`, `log_level` | No | `oss`, standard tags, `INFO` | |
-| `fail_on_problems` | No | true (OVERRIDE_DECISIONS false) | Fail the task when the step has problems |
+| `fail_on_problems` | No | true (OVERRIDE_DECISIONS false) | Fail the task when the step has problems (`true` / `false`, also as text) |
 | `execution_timeout_minutes`, `dagrun_timeout_minutes` | No | per step / 480 | Time limits (`LOCK_TTL_MINUTES` is raised to the task's limit + 30 when lower) |
 | `retries` | No | 1 | How often a task that hit a technical error is tried again (5 minutes later); 0 = never. Problems the step reports (a rejected file) fail at once, with the incident and email |
 | `settings` | No | | Framework settings (section 9.4) |

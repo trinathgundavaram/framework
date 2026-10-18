@@ -13,7 +13,10 @@ from airflow.providers.smtp.operators.smtp import EmailOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import DAG, Connection, Param, Variable
-from airflow.sdk.exceptions import AirflowFailException
+try:
+    from airflow.sdk.exceptions import AirflowFailException
+except ImportError:  # Airflow 3.0
+    from airflow.exceptions import AirflowFailException
 from airflow.timetables.trigger import MultipleCronTriggerTimetable
 from croniter import croniter
 
@@ -198,6 +201,14 @@ TRIGGER_BLOCKED_SETTINGS = ("RULE_ENGINE", "GRE_ENTRYPOINT", "FILE_STORE", "LOCA
 TRIGGER_GRE_KEYS = ("run_params", "text_params", "extra_filters")
 
 
+def _flag(value, default: bool) -> bool:
+    """A yes / no value from a Variable (JSON true / false) or a trigger form (text 'true' / 'false')."""
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    return True if text in ("true", "yes", "y", "1") else False if text in ("false", "no", "n", "0") else default
+
+
 def trigger_values(step: str, given: Optional[dict]) -> dict:
     """What a trigger may change for one run: the step's own inputs, settings and log level. The database, the
     connections, the file store, the rules engine and code to load (period_file, RULE_ENGINE) stay the Variable's."""
@@ -245,9 +256,7 @@ def run_compliance_step(step: str, variable_key: str, overrides: dict = None, sc
         logging.getLogger(name).setLevel(logging.WARNING)
     outcome, exit_code = run_step(step, as_of=config.get("as_of") or None, settings=settings,
                                   log_level=config.get("log_level") or "INFO", **params)
-    fail_on_problems = config.get("fail_on_problems")
-    if not isinstance(fail_on_problems, bool):
-        fail_on_problems = FAIL_ON_PROBLEMS.get(step, True)
+    fail_on_problems = _flag(config.get("fail_on_problems"), FAIL_ON_PROBLEMS.get(step, True))
     text = json.dumps(outcome, indent=2, default=str)
     if exit_code == 2:
         logger.error("%s report:\n%s", step, text)
@@ -364,7 +373,7 @@ def _dag(dag_id: str, dag_config: dict, description: str, params: dict, tag: str
     return DAG(dag_id=dag_id, description=description, default_args=default_args,
                schedule=_schedule(dag_config, tz), catchup=False, max_active_runs=1,
                dagrun_timeout=_minutes(dag_config, "dagrun_timeout_minutes", timedelta(hours=8)), params=params,
-               user_defined_macros={"conf_value": conf_value}, tags=[*(dag_config.get("tags") or DEFAULT_TAGS), tag])
+               user_defined_macros={"conf_value": conf_value}, tags=[*(_names(dag_config.get("tags")) or DEFAULT_TAGS), tag])
 
 
 def _overrides(context, names) -> dict:
@@ -394,10 +403,22 @@ def _add_emails(dag: DAG, dag_config: dict, upstream: list) -> None:
 
 
 def _task_id(step: str, scope: dict, index: int, scopes: list) -> str:
+    """step_<project>_<table>_<run type> of a runs entry; entries that would share it also get their number."""
     if len(scopes) == 1:
         return step.lower()
-    name = "_".join(str(scope[k]) for k in ("project", "table_group", "table", "run_type") if scope.get(k)) or str(index + 1)
-    return f"{step.lower()}_{''.join(c if c.isalnum() else '_' for c in name).lower()}"
+
+    def base(s: dict, i: int) -> str:
+        name = "_".join(str(s[k]) for k in ("project", "table_group", "table", "run_type") if s.get(k)) or str(i + 1)
+        return f"{step.lower()}_{''.join(c if c.isalnum() else '_' for c in name).lower()}"
+    names = [base(s, i) for i, s in enumerate(scopes)]
+    return names[index] if names.count(names[index]) == 1 else f"{names[index]}_{index + 1}"
+
+
+def _names(value) -> list:
+    """A list setting of the Variable (trigger_dags, tags) given as a list or as one comma-separated string."""
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(",") if v.strip()]
+    return list(value or [])
 
 
 def _retries(dag_config: dict) -> int:
@@ -445,9 +466,11 @@ def build_step_dag(dag_id: str, step: str, variable_key: str) -> DAG:
                 outcomes.append(run_compliance_step(step, variable_key, overrides=overrides, scope_index=index))
             except Exception as e:  # noqa: BLE001
                 logger.error("%s with %s failed: %s", step, entry, e)
-                failed.append(f"{entry}: {e}")
+                failed.append((f"{entry}: {e}", isinstance(e, AirflowFailException)))
         if failed:
-            raise RuntimeError(f"{step}: {len(failed)} of {len(failed) + len(outcomes)} run(s) failed: {'; '.join(failed)}")
+            text = f"{step}: {len(failed)} of {len(failed) + len(outcomes)} run(s) failed: {'; '.join(t for t, _ in failed)}"
+            # retried only when a run could not run; problems the step reported fail without a retry
+            raise AirflowFailException(text) if all(problem for _, problem in failed) else RuntimeError(text)
         return outcomes
 
     try:
@@ -467,7 +490,7 @@ def build_step_dag(dag_id: str, step: str, variable_key: str) -> DAG:
     given = "{{ conf_value(dag_run, params, '%s') }}"
     triggers = [TriggerDagRunOperator(task_id=f"trigger_{str(target).lower()}", dag=dag, trigger_dag_id=str(target),
                                       trigger_rule="all_success", conf={k: given % k for k in PASSED_ON})
-                for target in dag_config.get("trigger_dags") or []]
+                for target in _names(dag_config.get("trigger_dags"))]
     for trigger in triggers:
         tasks >> trigger
     _add_emails(dag, dag_config, [*tasks, *triggers])

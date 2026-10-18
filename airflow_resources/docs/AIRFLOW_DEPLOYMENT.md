@@ -150,12 +150,12 @@ default is right (the examples carry only what differs: connections, `load_env`,
 | `load_env` | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); falls back to `environment`, then `gre.environment`, else `DEV` |
 | `schedule_interval` | Cron expression of the DAG; leave out for a DAG that is only triggered |
 | `schedule_timezone` | Optional; schedules run in Central time (`America/Chicago`, with daylight saving) |
-| `trigger_dags` | DAG ids to start when the step succeeds; the scope (`project`, `table_group`, `table`, `run_type`) and `as_of` of this run are passed on, so a chain started for one table group stays on it |
+| `trigger_dags` | DAG ids to start when the step succeeds (a list, or one comma-separated string); the scope (`project`, `table_group`, `table`, `run_type`) and `as_of` of this run are passed on, so a chain started for one table group stays on it |
 | `email_recipient` | Who gets the DAG's success / failure emails (`success_email`, `fail_email` tasks). Without it the DAG has no email tasks |
 | `snow_assignment_group` | ServiceNow assignment group of the incident opened when a task fails (default `D&AE - EDE Govt Compliance`) |
-| `owner`, `tags` | DAG owner (default `oss`) and tags |
+| `owner`, `tags` | DAG owner (default `oss`) and tags (a list, or one comma-separated string) |
 | `settings` | Framework settings by name, only where they differ from the default. Common: `LOCK_TIMEOUT_SECONDS` (300), `LOCK_TTL_MINUTES` (240); plus the step's own, below (defaults in brackets) |
-| `fail_on_problems` | `true` / `false`: whether "completed with problems" (exit code 1) fails the task. Default: true, except `OVERRIDE_DECISIONS`. `FILE_LOAD` processes every file first and then fails the task when any file was not loaded (rejected, or a technical failure); the DAGs it triggers are then not started |
+| `fail_on_problems` | `true` / `false` (also as text, from a trigger form): whether "completed with problems" (exit code 1) fails the task. Default: true, except `OVERRIDE_DECISIONS`. `FILE_LOAD` processes every file first and then fails the task when any file was not loaded (rejected, or a technical failure); the DAGs it triggers are then not started |
 | `runs` | Optional list of scopes: one task per entry, each with its own `project` / `run_type` / `period` / ... (and `settings`, `gre`). Without it the DAG has one task, scoped by the Variable's own keys |
 | `log_level` | `INFO` (default), `DEBUG`, ... |
 | `execution_timeout_minutes` | Time limit of the step's task. Default: `BATCH_CREATION` and `FILE_CHECK` 60, `FILE_LOAD` and `FILE_RULES` 120, the others 30. `LOCK_TTL_MINUTES` is raised to this limit plus 30 for the run when it is lower, so a run cannot outlive its locks |
@@ -255,7 +255,7 @@ sources). An installation that has the table under its earlier name renames it o
 | `Project_Cd`, `Table_Nm`, `Src_ID` | The source, as in the crosswalk (the source needs no file config) |
 | `Src_Db_Ty` | `TERADATA` or `SQLSERVER` |
 | `Src_Conn_Cd` | The Airflow Connection of the source's server. Empty for a source on the framework's own Teradata system: its rows are then copied with one `INSERT ... SELECT` and never pass through Airflow (the framework's account needs SELECT on the source tables). `$env` is replaced as in database names |
-| `Src_Sql_Txt` | One `SELECT` in the source's own dialect. It can use `{btch_id}`, `{rpt_start}`, `{rpt_end}`, `{run_ty}`, `{version}`, `{src_id}`, `{req_id}`, `{project_cd}`, `{table_nm}`, `{load_id}`, `{load_date}`, bound as parameters. Its column names fill the staging columns of the same name; a name that is not a data column of the staging table (a column the framework fills, or a misspelling) rejects the pull (`SOURCE_DATA_REJECTED`) with the names, unless `TARGET_COLUMNS` lists the columns in order |
+| `Src_Sql_Txt` | One `SELECT` in the source's own dialect. It can use `{btch_id}`, `{rpt_start}`, `{rpt_end}`, `{run_ty}`, `{version}`, `{src_id}`, `{req_id}`, `{project_cd}`, `{table_nm}`, `{load_id}`, `{load_date}`, bound as parameters. Its column names fill the staging columns of the same name; a name that is not a data column of the staging table (a column the framework fills, or a misspelling), or a name returned twice, rejects the pull (`SOURCE_DATA_REJECTED`) with the names, unless `TARGET_COLUMNS` lists the columns in order |
 | `Stg_Schema_Nm`, `Stg_Table_Nm`, `Core_Schema_Nm`, `Core_Table_Nm` | As in the file config |
 
 **Connections.** One Airflow Connection per server (or per login); many sources can share one. SQL Server:
