@@ -70,6 +70,17 @@ def get_batch(conn: Connection, req_id: int) -> dict:
     return conn.execute("SELECT * FROM ComplianceRequestControl WHERE Req_ID=%s", (req_id,)).fetchone()
 
 
+HAS_DATA = ("NEW_FILE", "CARRY_FORWARD")
+
+
+def has_data(conn: Connection, batch: dict) -> bool:
+    """Whether a batch row holds data: its own file / pull with rows, or carried-forward data. An empty file or pull
+    (NO_DATA) is no data, so a late file takes LATE_ARRIVAL and a REUSE applies. Without Resolution_Ty: its load."""
+    if batch.get("resolution_ty"):
+        return batch["resolution_ty"] in HAS_DATA
+    return promoted_load(conn, batch["req_id"]) is not None
+
+
 def promoted_load(conn: Connection, req_id: int) -> Optional[dict]:
     """The batch's PROMOTED load, if any."""
     return conn.execute("SELECT * FROM ComplianceFileLoad WHERE Req_ID=%s AND Load_Stat='PROMOTED'",
@@ -318,7 +329,7 @@ def check_schedule(rt: RunType) -> Optional[str]:
         elif not (rt.sched_day == "LAST" or (rt.sched_day or "").isdigit() and 1 <= int(rt.sched_day) <= 31):
             return "Sched_Day_Cd of a MONTHLY schedule must be 1 to 31, LAST or a weekday (MON ... SUN)"
         if any(not 1 <= m <= 12 for m in rt.sched_months):
-            return "Sched_Months_Txt must list months 1 to 12"
+            return "Sched_Months_Txt must list months 1 to 12, comma separated (e.g. 1,4,7,10)"
     if rt.sched_window_days < 1:
         return "Sched_Window_Days must be 1 or more"
     if abs(rt.sched_offset_days) > 31:
@@ -789,6 +800,10 @@ class DecisionProcessor:
             s.invalid.append(o["ovrd_id"])
             return
         check_transition(b["req_stat"], SOURCE_DATA_CARRY_FORWARD)
+        empty = promoted_load(self.conn, b["req_id"])
+        if empty is not None:
+            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='SUPERSEDED', Updated_Dtts=%s WHERE Load_ID=%s",
+                              (self.clock.now(), empty["load_id"]))
         self.conn.execute(
             """UPDATE ComplianceRequestControl SET Resolution_Ty='CARRY_FORWARD', Reuse_Btch_ID=%s,
                       Req_Stat=%s, Updated_Dtts=%s WHERE Req_ID=%s""",
@@ -796,7 +811,7 @@ class DecisionProcessor:
         if code(o["reuse_btch_id"]) != src["btch_id"]:
             self.conn.execute("UPDATE ComplianceBatchOverride SET Reuse_Btch_ID=%s, Updated_Dtts=%s "
                               "WHERE Ovrd_ID=%s", (src["btch_id"], self.clock.now(), o["ovrd_id"]))
-        self.logger.audit("OVERRIDE_APPROVED", actor=o["reviewed_by"],
+        self.logger.audit("OVERRIDE_APPROVED", actor=o["reviewed_by"] or o.get("created_by") or "SYSTEM",
                           description=f"REUSE of {src['btch_id']} valid through {valid_thru}", **ctx)
         self.logger.batch_event("CARRY_FORWARD_APPLIED", req_id=b["req_id"], btch_id=b["btch_id"],
                                 ovrd_id=o["ovrd_id"], actor=o["reviewed_by"] or "SYSTEM",
@@ -904,8 +919,8 @@ class DecisionProcessor:
             return f"run type {b['run_ty']} does not allow carry-forward (Carry_Fwd_Ind = 0)"
         if b["batch_close_ind"] == 1:
             return "batch is closed"
-        if promoted_load(self.conn, b["req_id"]) is not None:
-            return "batch already has promoted data"
+        if has_data(self.conn, b):
+            return "batch already has data"
         if src is None:
             return ("no earlier closed batch with data"
                     + (f" matches Reuse_Btch_ID {o['reuse_btch_id']}" if o["reuse_btch_id"] else ""))
@@ -932,9 +947,6 @@ class DecisionProcessor:
 
 
 # closing: Batch close (design §11).
-
-HAS_DATA = ("NEW_FILE", "CARRY_FORWARD")
-
 
 def close_resolution(batch: dict) -> tuple[str, str]:
     """(Req_Stat, Resolution_Ty) a batch closes with."""

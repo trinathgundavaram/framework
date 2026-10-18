@@ -49,7 +49,7 @@ class RunType:
         return cls(code(r["run_ty"]), code(r["run_category_cd"]), r["sla_days"], r["carry_fwd_ind"] == 1, r["active_ind"] == 1,
                    _text(r.get("batch_schedule_sql_txt")), code(_text(r.get("sched_cd"))), code(_text(r.get("sched_day_cd"))),
                    code(_text(r.get("sched_week_cd"))),
-                   tuple(int(m) for m in months.replace(" ", "").split(",") if m.isdigit()) if months else (),
+                   tuple(int(m) if m.isdigit() else 0 for m in months.replace(" ", "").split(",") if m) if months else (),
                    int(r.get("sched_window_days") or 1), int(r.get("sched_offset_days") or 0))
 
 
@@ -824,7 +824,15 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
         except ConfigError:
             opts = None
         try:
-            file_layout(conn, c, targets, opts)
+            layout = file_layout(conn, c, targets, opts)
+            if layout.names and not layout.targets:
+                free = {n.casefold() for n in layout.free_cols}
+                unmatched = [n for n in layout.names if n.casefold() not in free]
+                if unmatched and len(unmatched) < len(layout.names):
+                    add("HEADER_NAMES_PARTIAL", f"{label}: header names that are not staging columns: "
+                        f"{', '.join(unmatched[:10])}{' ...' if len(unmatched) > 10 else ''}; the fields load by "
+                        "position into the staging table's data columns (check their order, or add TARGET_COLUMNS)",
+                        "WARNING")
         except (LookupError, ConfigError) as e:
             add("TARGET_TABLE", f"{label}: {e}")
 

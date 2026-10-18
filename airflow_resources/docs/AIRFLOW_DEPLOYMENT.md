@@ -75,7 +75,9 @@ airflow_resources/                (not deployed with the DAGs)
    with problems" (exit code 1) where the step is configured that way; otherwise the outcome is the
    task's XCom.
 
-No `.env` file and no AWS Secrets Manager: credentials come from the Airflow Connections only.
+No `.env` file and no AWS Secrets Manager: credentials come from the Airflow Connections only, and on Airflow the
+framework settings come from the Variable only (a `.env` file or `FRAMEWORK_*` variables on a worker are ignored; they
+apply to the command line).
 
 ## Deploying
 
@@ -156,7 +158,8 @@ default is right (the examples carry only what differs: connections, `load_env`,
 | `fail_on_problems` | `true` / `false`: whether "completed with problems" (exit code 1) fails the task. Default: true, except `OVERRIDE_DECISIONS`. `FILE_LOAD` processes every file first and then fails the task when any file was not loaded (rejected, or a technical failure); the DAGs it triggers are then not started |
 | `runs` | Optional list of scopes: one task per entry, each with its own `project` / `run_type` / `period` / ... (and `settings`, `gre`). Without it the DAG has one task, scoped by the Variable's own keys |
 | `log_level` | `INFO` (default), `DEBUG`, ... |
-| `execution_timeout_minutes` | Time limit of the step's task. Default: `BATCH_CREATION` and `FILE_CHECK` 60, `FILE_LOAD` and `FILE_RULES` 120, the others 30 |
+| `execution_timeout_minutes` | Time limit of the step's task. Default: `BATCH_CREATION` and `FILE_CHECK` 60, `FILE_LOAD` and `FILE_RULES` 120, the others 30. Keep it below `LOCK_TTL_MINUTES` (240): the task log warns when it is not |
+| `retries` | How often a failed task is tried again, 5 minutes later. Default 1; 0 = never. The ServiceNow incident and the failure email come after the last try |
 | `dagrun_timeout_minutes` | Time limit of a whole DAG run (default 480) |
 
 Keys by step:
@@ -199,9 +202,10 @@ entries without `schedule_interval` work as before: one task each, all in every 
 ## DAGs
 
 - **Step DAGs** — one task named after the step (or one per `runs` entry), then a `trigger_<dag id>`
-  task per `trigger_dags` entry, then `success_email` / `fail_email`. `max_active_runs` is 1 and tasks
-  do not retry (`retries: 0`); every step is idempotent, so the next run picks up. DAGs that overlap are
-  safe (locks, below).
+  task per `trigger_dags` entry, then `success_email` / `fail_email`. `max_active_runs` is 1 and a failed task
+  is tried once more after 5 minutes (`retries`, default 1); every step is idempotent, so a retry or the next run
+  picks up. DAGs that overlap are safe (locks, below): a file or pull whose staging table another run is loading
+  is left for the next run (`DEFERRED`, no error) instead of waiting.
 - A missing or invalid Variable never breaks parsing: the DAG is still there, unscheduled, and its task
   fails with the reason when run.
 

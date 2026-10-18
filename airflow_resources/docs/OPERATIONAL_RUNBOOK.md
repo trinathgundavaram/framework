@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.49 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.50 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -829,7 +829,7 @@ Example: `CMSAuth_MedHOK_PYMT_C_22_MNT_20260901_20260930_20261019093000.txt` mat
 | `Check_Cd` | Field | `Check_Val_Txt` example | What is checked |
 |---|---|---|---|
 | `RECORD_TYPE` | `*` | `H,D,T` | First field of header, data rows and trailer |
-| `HEADER_NAMES` | `*` | `MemberFirstName\|MemberID\|Amount` | The header line's names in order (case and spaces ignored); also decides which column each field loads to |
+| `HEADER_NAMES` | `*` | `MemberFirstName\|MemberID\|Amount` | The header line's names in order (case and spaces ignored); also decides which column each field loads to: the column of the same name when every name is one, otherwise by position (validate-config warns `HEADER_NAMES_PARTIAL` when only some names are columns) |
 | `COLUMN_COUNT` | `*` | `23` | Fields per header / data row (record type field included) |
 | `TARGET_COLUMNS` | `*` | `MemberFirstName\|MemberID` | Not a check: the staging column of each field, in file order |
 | `TRAILER` | `*` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | The trailer's fields: `RECORD_TYPE`, `FILE_NAME`, `DATA_ROW_COUNT`, `TOTAL_ROW_COUNT`, `TIMESTAMP`, `SKIP` |
@@ -870,9 +870,9 @@ values (`COLUMN_VALUES REQUIRED` covers those).
 
 | Type | For | Effect | Applied by |
 |---|---|---|---|
-| `REUSE` | An open batch without data, run type with `Carry_Fwd_Ind = 1` | Carries the data of an earlier closed batch (same table, source, run type) forward; closes as `REQUEST_COMPLETE` / `CARRY_FORWARD`. Must be applied before the batch's close run | OVERRIDE_DECISIONS |
-| `LATE_ARRIVAL` | A closed batch without data | A late file is accepted; the batch stays closed, becomes `REQUEST_COMPLETE` | FILE_LOAD |
-| `CORRECTION` | A closed batch with data | A corrected file replaces the data; the batch stays closed | FILE_LOAD |
+| `REUSE` | An open batch without data (nothing yet, or an empty file / pull), run type with `Carry_Fwd_Ind = 1` | Carries the data of an earlier closed batch (same table, source, run type) forward; closes as `REQUEST_COMPLETE` / `CARRY_FORWARD`. Must be applied before the batch's close run | OVERRIDE_DECISIONS |
+| `LATE_ARRIVAL` | A closed batch without data (`DATA_NOT_PROVIDED`: nothing came, or an empty file / pull) | A late file is accepted; the batch stays closed, becomes `REQUEST_COMPLETE` | FILE_LOAD |
+| `CORRECTION` | A closed batch with data (`REQUEST_COMPLETE`: a file / pull with rows, or carried forward) | A corrected file replaces the data; the batch stays closed | FILE_LOAD |
 | `REOPEN` | Any closed batch | Opens it again (status of its data); closes again after new data arrives (or `close-batch`). Applied once per row | OVERRIDE_DECISIONS |
 
 `Apprvl_Stat`: `PENDING_REVIEW` (default, not used), `APPROVED` (used while `Valid_Thru_Dt_Key` ≥ today), `REJECTED`.
@@ -926,6 +926,7 @@ close date).
 | `RULES_FAILED` | Rejected by rules (older behaviour) | REJECTED |
 | `FAILED_TECHNICAL` | System problem; tried again next run | FAILED |
 | `NO_DATA_YET` | Internal source had no rows before the close date; tried again | WAITING |
+| `DEFERRED` | Another run was loading into the same staging table; the next run picks the file / pull up (no error) | WAITING |
 
 | `Rules_Stat` | Meaning |
 |---|---|
@@ -1032,7 +1033,8 @@ A DAG never runs twice at the same time; a run that is due while another runs wa
 | `snow_assignment_group` | No | `D&AE - EDE Govt Compliance` | ServiceNow incident group on failure |
 | `owner`, `tags`, `log_level` | No | `oss`, standard tags, `INFO` | |
 | `fail_on_problems` | No | true (OVERRIDE_DECISIONS false) | Fail the task when the step has problems |
-| `execution_timeout_minutes`, `dagrun_timeout_minutes` | No | per step / 480 | Time limits |
+| `execution_timeout_minutes`, `dagrun_timeout_minutes` | No | per step / 480 | Time limits (keep the task's below `LOCK_TTL_MINUTES`) |
+| `retries` | No | 1 | How often a failed task is tried again (5 minutes later); 0 = never |
 | `settings` | No | | Framework settings (section 9.4) |
 | `gre` | FILE_RULES | from the Variable | GRE rules engine settings (`meta_db`, `text_params`, `extra_filters`, …) |
 

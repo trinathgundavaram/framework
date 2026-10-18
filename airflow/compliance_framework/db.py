@@ -100,6 +100,11 @@ def _bind(value: Any) -> Any:
     return value
 
 
+def bind_row(row: Sequence) -> list:
+    """A row from another database, every value made sendable (a source row's values differ from row to row)."""
+    return [_bind(v) for v in row]
+
+
 def _clean(value: Any) -> Any:
     if isinstance(value, Decimal) and value == value.to_integral_value():
         return int(value)
@@ -669,6 +674,9 @@ class _Env(dict):
 
     def source(self, key: str) -> str:
         return self.origin.get(key, "env")
+
+
+Env = _Env   # Env() = no environment: on Airflow the settings come from the Variable only (no .env, no FRAMEWORK_*)
 
 
 def merged_env(env: Optional[Mapping[str, str]] = None, env_file: Optional[str] = None) -> _Env:

@@ -19,6 +19,7 @@ from croniter import croniter
 from .app import App, report, resolve_module
 from .cli import _json_default, main as cli_main
 from .common import FrameworkError, parse_as_of
+from . import db
 from .db import Settings
 
 
@@ -200,6 +201,11 @@ def run_compliance_step(step: str, variable_key: str, overrides: dict = None, sc
     _connect_environment(config, connection_id)
 
     params = {k: config.get(k) for k in SCOPE_KEYS if config.get(k) not in (None, "")}
+    timeout = int(_minutes(config, "execution_timeout_minutes", STEP_TIMEOUT.get(step, timedelta(hours=1))).total_seconds() // 60)
+    ttl = int(settings.get("LOCK_TTL_MINUTES") or Settings.lock_ttl_minutes)
+    if ttl < timeout:
+        logger.warning("LOCK_TTL_MINUTES %s is shorter than the task's time limit (%s minutes): a long run could outlive "
+                       "its locks; set LOCK_TTL_MINUTES to at least %s", ttl, timeout, timeout + 30)
     for name in QUIET_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
     outcome, exit_code = run_step(step, as_of=config.get("as_of") or None, settings=settings,
@@ -227,15 +233,15 @@ def _plain(value: Any) -> Any:
 def run_step(step: str, *, as_of: Optional[str] = None, settings: Optional[Mapping[str, Any]] = None,
              log_level: str = "INFO", **params) -> tuple[Optional[dict], int]:
     """Run one module for a project; context values the module does not take are ignored."""
-    logging.getLogger(__package__).setLevel(log_level.upper())
     try:
+        logging.getLogger(__package__).setLevel(str(log_level or "INFO").upper())
         spec = resolve_module(step)
         unknown = sorted(set(params) - set(SCOPE_KEYS))
         if unknown:
             raise FrameworkError(f"unknown run parameter(s): {', '.join(unknown)}")
         accepted = {k: v for k, v in params.items() if k in spec.params and v not in (None, "")}
         dropped = sorted(k for k, v in params.items() if k not in spec.params and v not in (None, ""))
-        resolved = Settings.load(overrides={k: str(v) for k, v in (settings or {}).items()})
+        resolved = Settings.load(env=db.Env(), overrides={k: str(v) for k, v in (settings or {}).items()})
         log.info("%s starting | project %s | %s%s", spec.name, accepted.get("project", "all projects"),
                  ", ".join(f"{k}={v}" for k, v in accepted.items() if k != "project") or "no other parameters",
                  f" | not used by {spec.name}: {', '.join(dropped)}" if dropped else "")
@@ -244,6 +250,9 @@ def run_step(step: str, *, as_of: Optional[str] = None, settings: Optional[Mappi
     except (FrameworkError, ValueError, LookupError) as e:
         log.error("%s: %s", type(e).__name__, e)
         return {"step": step, "result": "COULD NOT RUN", "problem": f"{type(e).__name__}: {e}"}, 2
+    except Exception as e:  # noqa: BLE001 - any other failure still ends with the step report
+        log.exception("%s failed", step)
+        return {"step": step, "result": "COULD NOT RUN", "problem": db.error_text(e)}, 2
     return _plain(report(out)), out.exit_code
 
 
@@ -272,6 +281,7 @@ STEP_PARAMS = {
 }
 PASSED_ON = (*SCOPE, "as_of")
 DEFAULT_ASSIGNMENT_GROUP = "D&AE - EDE Govt Compliance"
+DEFAULT_RETRIES = 1
 DEFAULT_TAGS = ["Compliance", "Compliance_Batch_Framework"]
 _TEXT = ["null", "string"]
 
@@ -307,7 +317,7 @@ def _dag(dag_id: str, dag_config: dict, description: str, params: dict, tag: str
         "owner": dag_config.get("owner") or "oss",
         "depends_on_past": False,
         "start_date": start_date,
-        "retries": 0,
+        "retries": _retries(dag_config),
         "retry_delay": timedelta(minutes=5),
         "on_failure_callback": _failure_alert_ticket(dag_config.get("snow_assignment_group")
                                                      or DEFAULT_ASSIGNMENT_GROUP),
@@ -349,6 +359,16 @@ def _task_id(step: str, scope: dict, index: int, scopes: list) -> str:
         return step.lower()
     name = "_".join(str(scope[k]) for k in ("project", "table_group", "table", "run_type") if scope.get(k)) or str(index + 1)
     return f"{step.lower()}_{''.join(c if c.isalnum() else '_' for c in name).lower()}"
+
+
+def _retries(dag_config: dict) -> int:
+    """How often a failed task is tried again (Variable key `retries`, default 1; 0 = never)."""
+    value = dag_config.get("retries")
+    try:
+        return max(0, int(value)) if value not in (None, "") else DEFAULT_RETRIES
+    except (TypeError, ValueError):
+        logger.warning("retries must be a whole number; using %s", DEFAULT_RETRIES)
+        return DEFAULT_RETRIES
 
 
 def _minutes(dag_config: dict, key: str, default: timedelta) -> timedelta:

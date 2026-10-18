@@ -618,6 +618,10 @@ def _cast(c: Column, value) -> tuple[str, list]:
     kind = {"DATE": "DATE", "TIMESTAMP": "TIMESTAMP(0)", "TIMESTAMP_TZ": "TIMESTAMP(0) WITH TIME ZONE"}.get(c.temporal or "")
     if kind:
         return f"CAST(? AS {kind})", [value]
+    if isinstance(value, datetime):
+        return "CAST(? AS TIMESTAMP(0) WITH TIME ZONE)", [value]
+    if isinstance(value, date):
+        return "CAST(? AS DATE)", [value]
     return ("CAST(? AS BIGINT)", [value]) if isinstance(value, int) else ("CAST(? AS DECIMAL(38,10))", [value])
 
 
@@ -765,7 +769,7 @@ ACCEPTED = ("PROMOTED", "SUPERSEDED")
 QUERY_PREFIX = "QUERY:"
 REJECTED = ("QUARANTINED", "RULES_FAILED")
 FAILED = ("FAILED_TECHNICAL",)
-WAITING = ("NO_DATA_YET",)
+WAITING = ("NO_DATA_YET", "DEFERRED")
 MESSAGES = {
     "FILE_REJECTED_UNPARSEABLE": "The file name does not follow the agreed naming format.",
     "FILE_REJECTED_AMBIGUOUS_TEMPLATE": "The file name fits more than one file setup, so the file could not be identified.",

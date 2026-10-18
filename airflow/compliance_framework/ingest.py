@@ -15,7 +15,7 @@ from typing import Optional
 from . import config as cfgmod, db
 from .adapters import FileInfo, FileStore, basename, dirname, parse_uri, sha256_file
 from .audit import EventLogger
-from .batches import Releases, REOPENED_AWAITING_DATA, get_batch, promoted_load
+from .batches import Releases, REOPENED_AWAITING_DATA, get_batch, has_data, promoted_load
 from .common import (DATA_NOT_PROVIDED, REQUEST_COMPLETE, SOURCE_DATA_READY, SOURCE_DATA_READY_NO_DATA, Clock,
                      FileRejected, RowCountMismatch, check_transition, code, earliest_close_date)
 from .config import FileConfig, MatchError, QueryConfig, Scope, TemplateMatcher, check_options
@@ -322,9 +322,22 @@ class IngestPipeline:
             return self._quarantine(load_id, info, "FILE_PARSE_ERROR", "zero-byte file but a header is expected",
                                     cfg, batch)
         stage_table = db.batch_key(f"STAGE {cfg.stg_schema_nm}.{cfg.stg_table_nm}".upper())
-        with db.held(self.conn, db.req_key(batch), self.settings.lock_timeout_seconds), \
-                db.held(self.conn, stage_table, self.settings.lock_timeout_seconds):
-            return self._process_locked(load_id, info, cfg, batch["req_id"])
+        with db.held(self.conn, db.req_key(batch), self.settings.lock_timeout_seconds):
+            if not db.try_lock(self.conn, stage_table):
+                return self._defer(load_id, f"staging table {cfg.stg_schema_nm}.{cfg.stg_table_nm}")
+            try:
+                return self._process_locked(load_id, info, cfg, batch["req_id"])
+            finally:
+                db.unlock(self.conn, stage_table)
+
+    def _defer(self, load_id: int, busy: str) -> IngestOutcome:
+        """Another run is loading into the same staging table: no error, the next run picks this up."""
+        text = f"{busy} is in use by another run; picked up by the next run"
+        with self.conn.transaction():
+            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='DEFERRED', Error_Txt=%s, Updated_Dtts=%s "
+                              "WHERE Load_ID=%s", (text, self.clock.now(), load_id))
+        log.info("load %s deferred: %s", load_id, text)
+        return IngestOutcome(load_id, "DEFERRED", message=text)
 
     def _select_batch(self, cfg: FileConfig, run_ty: str, rpt_start, rpt_end) -> tuple[Optional[dict], Optional[str]]:
         """The batch a file belongs to (D-78)."""
@@ -353,7 +366,7 @@ class IngestPipeline:
             (batch["req_id"], override_ty, today)).fetchone()
 
     def _has_data(self, batch: dict) -> bool:
-        return batch["resolution_ty"] == "CARRY_FORWARD" or promoted_load(self.conn, batch["req_id"]) is not None
+        return has_data(self.conn, batch)
 
     def _process_locked(self, load_id: int, info: FileInfo, cfg: FileConfig, req_id: int) -> IngestOutcome:
         """The caller holds the batch lock and the lock of the staging table (stage and core load are one unit)."""
@@ -461,7 +474,7 @@ class IngestPipeline:
                               Action.PROMOTE_CORRECTION: "CORRECTION_PROMOTED"}.get(d.action, "PROMOTED")
 
             else:
-                self._rules_failed(load_id, "batch is closed and has no approved override", now)
+                self._rejected_closed(load_id, "batch is closed and has no approved override", now)
                 self.logger.audit("FILE_REJECTED_BATCH_CLOSED", description="no approved, valid override", **ctx)
                 out.result, out.event_ty = "REJECTED_CLOSED", "FILE_REJECTED_BATCH_CLOSED"
         return out
@@ -482,10 +495,10 @@ class IngestPipeline:
         self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='SUPERSEDED', Updated_Dtts=%s "
                           "WHERE Load_ID=%s AND Load_Stat='PROMOTED'", (self.clock.now(), load_id))
 
-    def _rules_failed(self, load_id, detail, now) -> None:
+    def _rejected_closed(self, load_id, detail, now) -> None:
         self.conn.execute(
-            """UPDATE ComplianceFileLoad SET Load_Stat='RULES_FAILED', Rules_Stat='NOT_RUN', Error_Txt=%s, Updated_Dtts=%s
-                WHERE Load_ID=%s""",
+            """UPDATE ComplianceFileLoad SET Load_Stat='QUARANTINED', Quarantine_Rsn_Cd='FILE_REJECTED_BATCH_CLOSED',
+                      Rules_Stat='NOT_RUN', Error_Txt=%s, Updated_Dtts=%s WHERE Load_ID=%s""",
             (detail[:4000] if detail else detail, now, load_id))
 
     def _quarantine(self, load_id: int, info: FileInfo, event_ty: str, message: str,
@@ -557,11 +570,11 @@ class IngestPipeline:
         row = self.conn.execute(
             """SELECT f.File_Share, f.File_Path, f.Req_ID, f.Btch_ID, c.Project_Cd, c.Table_Nm, c.Src_ID, c.Run_Ty
                  FROM ComplianceFileLoad f LEFT JOIN ComplianceRequestControl c ON c.Req_ID = f.Req_ID
-                WHERE f.Load_ID=%s""", (load_id,)).fetchone()
-        self.logger.audit("FILE_TECHNICAL_FAILURE", load_id=load_id, req_id=row["req_id"], btch_id=row["btch_id"],
-                          file_ref=self.store.uri(row["file_share"], row["file_path"]),
-                          project_cd=row["project_cd"] or self._scope_project, table_nm=row["table_nm"],
-                          src_id=row["src_id"], run_ty=row["run_ty"],
+                WHERE f.Load_ID=%s""", (load_id,)).fetchone() or {}
+        self.logger.audit("FILE_TECHNICAL_FAILURE", load_id=load_id, req_id=row.get("req_id"), btch_id=row.get("btch_id"),
+                          file_ref=self.store.uri(row["file_share"], row["file_path"]) if row.get("file_path") else None,
+                          project_cd=row.get("project_cd") or self._scope_project, table_nm=row.get("table_nm"),
+                          src_id=row.get("src_id"), run_ty=row.get("run_ty"),
                           description=sanitize_db_error(db.error_text(err))[:500])
 
 
@@ -684,32 +697,39 @@ class SourceLoader:
                               "Updated_Dtts=%s WHERE Load_ID=%s", (batch["req_id"], batch["btch_id"], self.clock.now(), load_id))
         opts = check_options(q, cfgmod.file_checks(self.conn))
         stage_lock = db.batch_key(f"STAGE {q.stg_schema_nm}.{q.stg_table_nm}".upper())
-        with db.held(self.conn, db.req_key(batch), self.settings.lock_timeout_seconds), \
-                db.held(self.conn, stage_lock, self.settings.lock_timeout_seconds):
-            b = get_batch(self.conn, batch["req_id"])
-            ctx = LoadContext(b["btch_id"], load_id, b["run_ty"],
-                              b["cmplnc_vrsn"], q.src_id,
-                              f"{q.project_cd}/{q.table_nm}/{q.src_id}", self.clock.now(), q.project_cd, q.table_nm,
-                              _as_date(b["rpt_start_dt_key"]), _as_date(b["rpt_end_dt_key"]), b["req_id"],
-                              self.settings.business_tz)
+        with db.held(self.conn, db.req_key(batch), self.settings.lock_timeout_seconds):
+            if not db.try_lock(self.conn, stage_lock):
+                return self.pipeline._defer(load_id, f"staging table {q.stg_schema_nm}.{q.stg_table_nm}")
             try:
-                if q.same_system:
-                    rows, layout = stage_query(self.conn, cfg=q, layout_for=lambda names: self._layout_for(q, opts, names),
-                                               ctx=ctx, sql=q.sql)
-                else:
-                    rows, layout = self._stage_from_source(q, opts, ctx)
-            except FileRejected as e:
-                return self._reject(load_id, b, q, e.event_ty, str(e), ref)
-            log.info("SOURCE_LOAD | %s | load %s | %s row(s) %s into %s.%s", b["btch_id"], load_id, rows,
-                     "copied on Teradata" if q.same_system else f"read from {q.conn_cd}", q.stg_schema_nm, q.stg_table_nm)
-            due = self._due(b)
-            if rows == 0 and self.clock.today(self.settings.business_tz) < due:
-                return self._not_yet(load_id, b, due)
-            with self.conn.transaction():
-                self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, Updated_Dtts=%s "
-                                  "WHERE Load_ID=%s", (rows, self.clock.now(), load_id))
-            self.pipeline._load = (layout, ctx)
-            return self.pipeline._resolve(load_id, None, q, b["req_id"], rows, ref=ref)
+                return self._pull_locked(load_id, batch, q, opts, ref)
+            finally:
+                db.unlock(self.conn, stage_lock)
+
+    def _pull_locked(self, load_id: int, batch: dict, q: QueryConfig, opts, ref: str) -> IngestOutcome:
+        b = get_batch(self.conn, batch["req_id"])
+        ctx = LoadContext(b["btch_id"], load_id, b["run_ty"],
+                          b["cmplnc_vrsn"], q.src_id,
+                          f"{q.project_cd}/{q.table_nm}/{q.src_id}", self.clock.now(), q.project_cd, q.table_nm,
+                          _as_date(b["rpt_start_dt_key"]), _as_date(b["rpt_end_dt_key"]), b["req_id"],
+                          self.settings.business_tz)
+        try:
+            if q.same_system:
+                rows, layout = stage_query(self.conn, cfg=q, layout_for=lambda names: self._layout_for(q, opts, names),
+                                           ctx=ctx, sql=q.sql)
+            else:
+                rows, layout = self._stage_from_source(q, opts, ctx)
+        except FileRejected as e:
+            return self._reject(load_id, b, q, e.event_ty, str(e), ref)
+        log.info("SOURCE_LOAD | %s | load %s | %s row(s) %s into %s.%s", b["btch_id"], load_id, rows,
+                 "copied on Teradata" if q.same_system else f"read from {q.conn_cd}", q.stg_schema_nm, q.stg_table_nm)
+        due = self._due(b)
+        if rows == 0 and self.clock.today(self.settings.business_tz) < due:
+            return self._not_yet(load_id, b, due)
+        with self.conn.transaction():
+            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, Updated_Dtts=%s "
+                              "WHERE Load_ID=%s", (rows, self.clock.now(), load_id))
+        self.pipeline._load = (layout, ctx)
+        return self.pipeline._resolve(load_id, None, q, b["req_id"], rows, ref=ref)
 
     def _source(self, q: QueryConfig):
         if q.conn_cd not in self._sources:
@@ -734,7 +754,7 @@ class SourceLoader:
                     chunk = cur.fetchmany(self.settings.insert_batch_rows)
                     if not chunk:
                         return
-                    yield from (list(r) for r in chunk)
+                    yield from (db.bind_row(r) for r in chunk)
             return stage_rows(self.conn, self.settings, cfg=q, layout=layout, ctx=ctx, records=rows()), layout
         finally:
             cur.close()
