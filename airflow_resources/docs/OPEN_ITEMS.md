@@ -1,6 +1,6 @@
 # Compliance Batch Framework (Airflow / Teradata): open items
 
-State at version 0.3.55. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
+State at version 0.3.56. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
 everything they list that is not below is done. Tested: 21 scenarios on Python 3.13 and 3.9 against a PostgreSQL
 stand-in for Teradata; the 8 DAG files parse and a step DAG runs (stubbed step) on Airflow 3.3.0. **Nothing has run on Teradata, the NAS or a real
 Airflow deployment yet.**
@@ -65,7 +65,8 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
   problems (a rejected file, a batch not loaded) fails at once with the incident and email.
 - **Triggers** may change the step's inputs and normal settings only; the database, connections, file store, rules
   engine and `period_file` always come from the Variable.
-- **Intake requests** make one batch per request day; a multi-day window gives a batch each day, and a day without a
+- **Intake requests** need no crosswalk row: one row per source, with its `Src_ID` and `Cmplnc_Vrsn` (both
+  required); the source needs a file or internal source config for the table. They make one batch per request day; a multi-day window gives a batch each day, and a day without a
   file closes `DATA_NOT_PROVIDED` with an email. One batch per request = one request day.
 - **IN1** batches close without data every day (one email a day). **CMS** (ad hoc) is pulled and exported only with
   `release`; only CMS allows carry-forward.

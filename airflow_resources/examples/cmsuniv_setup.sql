@@ -171,7 +171,7 @@ VALUES ('992', 'MAN', 'FDR', 1);
 -- MNT: the Sunday before the 3rd Tuesday (MONTHLY TUE week 3, offset -2), previous calendar month, SLA 5.
 -- IN1: ad hoc, created daily for SNPCC1 only (schedule DAILY), previous day, SLA 1. Never released, so never pulled
 --      or exported, BATCH_CLOSE closes it the next day as DATA_NOT_PROVIDED.
--- CMS: ad hoc, from ComplianceRequestInTake only, SLA 1.
+-- CMS: ad hoc, from ComplianceRequestInTake only (no crosswalk row: each request names its source and version), SLA 1.
 -- ----------------------------------------------------------------------------------------------------
 INSERT INTO HSABC_DEV.ComplianceRunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Sched_Cd, Sched_Day_Cd, Sched_Week_Cd, Sched_Months_Txt, Sched_Window_Days, Sched_Offset_Days, Active_Ind)
 VALUES ('DAILY', 'Daily, previous day', 'SCHEDULED', 1, 0, 'DAILY', NULL, NULL, NULL, 1, 0, 1);
@@ -218,103 +218,104 @@ VALUES ('CMSUNIV', 'FA4', 'MNT', 'ANNUAL_WINDOW(11-01,01-31)', 1);
 
 -- ----------------------------------------------------------------------------------------------------
 -- 4. Crosswalk: one row per table and source
--- FDR sources: DAILY, MNT, CMS. Internal sources: DAILY, WEEKLY, MNT, CMS (SNPCC1 / 11 also IN1).
+-- FDR sources: DAILY, MNT. Internal sources: DAILY, WEEKLY, MNT (SNPCC1 / 11 also IN1, ad hoc with a schedule).
+-- CMS (ad hoc) has no crosswalk rows: its batches come from ComplianceRequestInTake, one request per source.
 -- Version 2200 from 1900-01-01.
 -- ----------------------------------------------------------------------------------------------------
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG1', '101', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG1', '101', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG1', '103', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG1', '103', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG1', '110', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG1', '110', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG1', '120', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG1', '120', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG1', '124', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG1', '124', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG1', '134', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG1', '134', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG1', '203', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG1', '203', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG1', '218', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG1', '218', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG1', '219', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG1', '219', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG1', '51', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG1', '51', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG2', '51', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG2', '51', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '10', 'DAILY,WEEKLY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '10', 'DAILY,WEEKLY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '40', 'DAILY,WEEKLY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '40', 'DAILY,WEEKLY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '210', 'DAILY,WEEKLY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '210', 'DAILY,WEEKLY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '101', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '101', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '103', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '103', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '106', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '106', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '107', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '107', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '120', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '120', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '121', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '121', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '154', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '154', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '175', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '175', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '213', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '213', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '217', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '217', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '51', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '51', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG4', '51', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG4', '51', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG5', '51', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG5', '51', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG6', '51', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG6', '51', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG1', '64', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'CDAG1', '64', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG2', '64', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'CDAG2', '64', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG3', '64', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'CDAG3', '64', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG4', '64', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'CDAG4', '64', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG5', '64', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'CDAG5', '64', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG6', '32', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'CDAG6', '32', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG6', '51', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'CDAG6', '51', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG6', '64', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'CDAG6', '64', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG7', '51', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'CDAG7', '51', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'FA1', '64', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'FA1', '64', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'FA2', '64', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'FA2', '64', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'FA3', '64', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'FA3', '64', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'FA4', '10', 'DAILY,WEEKLY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'FA4', '10', 'DAILY,WEEKLY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'FA4', '40', 'DAILY,WEEKLY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'FA4', '40', 'DAILY,WEEKLY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'FA4', '210', 'DAILY,WEEKLY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'FA4', '210', 'DAILY,WEEKLY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'FA4', '32', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'FA4', '32', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'FA4', '64', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'FA4', '64', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'FA4', '901', 'DAILY,MNT,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'FA4', '901', 'DAILY,MNT', DATE '1900-01-01', NULL, '2200', 1, 1);
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'SNPCC1', '11', 'DAILY,WEEKLY,MNT,IN1,CMS', DATE '1900-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'SNPCC1', '11', 'DAILY,WEEKLY,MNT,IN1', DATE '1900-01-01', NULL, '2200', 1, 1);
 
 -- ----------------------------------------------------------------------------------------------------
 -- 7. File checks: the header line of each table's FDR files
@@ -667,3 +668,12 @@ INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_N
 VALUES ('CMSUNIV', 'FA4', 'CMSUNIV_EXPORT_$ENV_T', 'FA4_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_FA4', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
 VALUES ('CMSUNIV', 'SNPCC1', 'CMSUNIV_EXPORT_$ENV_T', 'SNPCC1_EXPORT', 'Exp_Btch_ID', 'CMSUNIV_EXPORT_$ENV_T.SP_EXPORT_SNPCC1', '{btch_id}, {data_btch_id}, {src_id}, {run_ty}, {rpt_start}, {rpt_end}', 1);
+
+-- ----------------------------------------------------------------------------------------------------
+-- 9. Ad-hoc requests (CMS): one row per source, when a request comes in (example, commented out)
+-- Each request names its source and compliance version, no crosswalk row is needed. Req_Start / Req_End = the
+-- days BATCH_CREATION makes the batch (the same day twice = one batch).
+-- ----------------------------------------------------------------------------------------------------
+-- INSERT INTO HSABC_DEV.ComplianceRequestInTake (Project_Cd, Table_Nm, Src_ID, Run_Ty, Cmplnc_Vrsn, Rpt_Start_Dt_Key,
+--   Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key)
+-- VALUES ('CMSUNIV', 'ODAG3', '51', 'CMS', '2200', DATE '2026-07-01', DATE '2026-09-30', DATE '2026-10-20', DATE '2026-10-20');

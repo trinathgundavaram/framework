@@ -532,8 +532,9 @@ class IntakeSummary:
 
 class IntakeProcessor:
     """ComplianceRequestInTake: requests for batches of given report dates, for any active run type (ADHOC, or a
-    SCHEDULED one outside its schedule). A request reuses an open batch of the same source, run type and report dates
-    that something else created; its own batches on the days of its window are new each day."""
+    SCHEDULED one outside its schedule). A request stands on its own: its source and compliance version are on the
+    row, no crosswalk row is needed. It reuses an open batch of the same source, run type and report dates that
+    something else created; its own batches on the days of its window are new each day."""
 
     def __init__(self, conn: Connection, clock: Clock, settings: Settings):
         self.conn = conn
@@ -582,17 +583,11 @@ class IntakeProcessor:
         return summary
 
     def _process(self, it: dict, summary: IntakeSummary, run_types: dict[str, RunType]) -> None:
-        rt = run_types.get(it["run_ty"])
-        reason = None
-        targets: list[XwalkRow] = []
-        if rt is None or not rt.active:
-            reason = f"run type {it['run_ty']} is unknown or inactive"
-        else:
-            rpt_start, rpt_end = db.as_date(it["rpt_start_dt_key"]), db.as_date(it["rpt_end_dt_key"])
-            sources = cfg.effective_sources(self.conn, it["project_cd"], it["table_nm"], it["run_ty"], rpt_start)
-            targets = [x for x in sources if it["src_id"] is None or x.src_id == it["src_id"]]
-            if not targets:
-                reason = "no active, effective crosswalk source for this request"
+        rpt_start, rpt_end = db.as_date(it["rpt_start_dt_key"]), db.as_date(it["rpt_end_dt_key"])
+        reason = intake_problem(self.conn, it, run_types, self.settings)
+        targets: list[XwalkRow] = [] if reason else [XwalkRow(
+            it["project_cd"], it["table_nm"], it["src_id"], it["run_ty"], rpt_start, None,
+            code(_text(it.get("cmplnc_vrsn"))), True)]
         if reason:
             with self.conn.transaction():
                 self._mark_run(it["intake_id"])
@@ -625,6 +620,36 @@ class IntakeProcessor:
     def _mark_run(self, intake_id: int) -> None:
         self.conn.execute("UPDATE ComplianceRequestInTake SET Last_Run_Dt_Key=%s, Updated_Dtts=%s WHERE Intake_ID=%s",
                           (self.clock.today(self.settings.business_tz), self.clock.now(), intake_id))
+
+
+def _text(value) -> Optional[str]:
+    return value.strip() or None if isinstance(value, str) else None
+
+
+def intake_problem(conn, it: dict, run_types: dict, settings=None) -> Optional[str]:
+    """Why an intake request cannot make its batch, or None. A request stands on its own (no crosswalk row): it names
+    its source (Src_ID) and its compliance version (Cmplnc_Vrsn); the source needs a file or internal source config."""
+    rt = run_types.get(code(it["run_ty"]))
+    if rt is None or not rt.active:
+        return f"run type {it['run_ty']} is unknown or inactive"
+    if not _text(it.get("src_id")):
+        return "Src_ID is required (one request per source)"
+    if not _text(it.get("cmplnc_vrsn")):
+        return "Cmplnc_Vrsn is required (the compliance version of the batch)"
+    if db.as_date(it["rpt_end_dt_key"]) < db.as_date(it["rpt_start_dt_key"]):
+        return "Rpt_End_Dt_Key is before Rpt_Start_Dt_Key"
+    project = conn.execute("SELECT Active_Ind FROM ComplianceProject WHERE UPPER(Project_Cd) = %s",
+                           (code(it["project_cd"]),)).fetchone()
+    if project is None or project["active_ind"] != 1:
+        return f"project {it['project_cd']} is unknown or inactive"
+    source = conn.execute("SELECT Active_Ind FROM ComplianceSourceSystem WHERE UPPER(Src_ID) = %s",
+                          (code(it["src_id"]),)).fetchone()
+    if source is None or source["active_ind"] != 1:
+        return f"source {it['src_id']} is unknown or inactive"
+    if cfg.target_tables(conn, it["project_cd"], it["table_nm"], it["src_id"], settings) is None:
+        return (f"source {it['src_id']} has no active file config or internal source config for table "
+                f"{it['table_nm']}, so no data could arrive")
+    return None
 
 
 def _coded(intake: dict) -> dict:

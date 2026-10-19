@@ -1148,7 +1148,11 @@ The run categories are `SCHEDULED` (batches created on a schedule for a period; 
   `Rpt_Dt_Sql_Txt`; its rows without one get batches from `ComplianceRequestInTake` only. So one ad-hoc run type can
   run daily for some sources and on request (other dates) for others.
 - `ComplianceRequestInTake` takes any active run type, `SCHEDULED` ones too (e.g. an extra `MNT` batch for an earlier
-  month).
+  month). A request needs no crosswalk row: it names its source (`Src_ID`, required) and its compliance version
+  (`Cmplnc_Vrsn`, required), and the source must have an active file config or internal source config for the
+  table; otherwise the request fails (`INTAKE_FAILED`, emailed) and validate-config reports it (`INTAKE_REQUEST`).
+  The crosswalk is only for scheduled batches (including an ad-hoc run type's schedule, e.g. IN1). Existing
+  installations add the column: `ALTER TABLE <META_DB>.ComplianceRequestInTake ADD Cmplnc_Vrsn VARCHAR(10);`
 - A request whose source, run type and report dates already have an open batch made by the schedule or another
   request uses that batch (no second batch); a closed batch gets a new one (a re-request). A request's own window
   (`Req_Start_Dt_Key` to `Req_End_Dt_Key`) still makes its batch on each day. The schedule skips report dates

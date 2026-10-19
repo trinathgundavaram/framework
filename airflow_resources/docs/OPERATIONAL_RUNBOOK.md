@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.55 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.56 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -382,6 +382,9 @@ the period the row is valid for and the compliance version.
 | `Include_Ind` | Default 1 | `1`, `0` | On a row for one run type: `0` switches that run type off for the source |
 | `Active_Ind` | Default 1 | `1`, `0` | |
 
+Ad-hoc requests (`ComplianceRequestInTake`, e.g. CMS) need **no** crosswalk row. List an ad-hoc run type here only
+when it has a schedule and the source should get its scheduled batches (e.g. IN1 for SNPCC1).
+
 **Exceptions for one run type.** A row with a single run type, for a run type that is also in the source's list,
 **replaces** the list's entry for that run type while the single row is effective:
 
@@ -607,14 +610,18 @@ VALUES ('CMSUNIV', 'ODAG3', '*', '*', 'CMSUNIV_ODAG3', 'DEFAULT', 1);
 
 ### 6.1 ComplianceRequestInTake (ad-hoc requests)
 
-One row per request. BATCH_CREATION creates the batches on each day of the request window.
+One row per request and source. BATCH_CREATION creates the batch on each day of the request window. A request
+stands on its own: it needs **no crosswalk row** (the crosswalk is for scheduled batches); its source and compliance
+version are on the row. The source needs an active file config or internal source config for the table, so its
+data can arrive.
 
 | Column | Required | Values | Meaning |
 |---|---|---|---|
 | `Intake_ID` | (framework) | | Generated: leave out |
 | `Project_Cd`, `Table_Nm` | Yes | | |
-| `Src_ID` | No | A source or NULL | NULL = every source with a crosswalk row for that run type |
+| `Src_ID` | Yes | A source | The source of the batch (one request per source) |
 | `Run_Ty` | Yes | Any active run type (ad hoc, or a scheduled one outside its schedule) | |
+| `Cmplnc_Vrsn` | Yes | e.g. `2200` | The compliance version stored on the batch and written to the `VERSION` column |
 | `Rpt_Start_Dt_Key`, `Rpt_End_Dt_Key` | Yes | Dates | Report dates of the batch |
 | `Req_Start_Dt_Key`, `Req_End_Dt_Key` | Yes | Dates | The days batches are created (same date twice = one batch) |
 | `Last_Run_Dt_Key` | (framework) | | Last day the request was handled: leave out |
@@ -623,11 +630,16 @@ A request whose source, run type and report dates already have an **open** batch
 request uses that batch.
 
 ```sql
-INSERT INTO HSABC_DEV.ComplianceRequestInTake (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key)
-VALUES ('CMSUNIV', 'ODAG3', NULL, 'CMS', DATE '2026-07-01', DATE '2026-09-30', DATE '2026-10-19', DATE '2026-10-19');
+INSERT INTO HSABC_DEV.ComplianceRequestInTake (Project_Cd, Table_Nm, Src_ID, Run_Ty, Cmplnc_Vrsn, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key)
+VALUES ('CMSUNIV', 'ODAG3', '51', 'CMS', '2200', DATE '2026-07-01', DATE '2026-09-30', DATE '2026-10-19', DATE '2026-10-19');
+-- the same request for every source of ODAG3 that has a file or internal source config (one row per source)
+INSERT INTO HSABC_DEV.ComplianceRequestInTake (Project_Cd, Table_Nm, Src_ID, Run_Ty, Cmplnc_Vrsn, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key)
+SELECT 'CMSUNIV', 'ODAG3', Src_ID, 'CMS', '2200', DATE '2026-07-01', DATE '2026-09-30', DATE '2026-10-19', DATE '2026-10-19'
+FROM (SELECT Src_ID FROM HSABC_DEV.ComplianceSourceFileConfig WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'ODAG3' AND Active_Ind = 1
+      UNION SELECT Src_ID FROM HSABC_DEV.ComplianceInternalSourceConfig WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'ODAG3' AND Active_Ind = 1) s;
 -- a daily ad-hoc batch for the previous day, for every day of November (one row per day)
-INSERT INTO HSABC_DEV.ComplianceRequestInTake (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key)
-SELECT 'CMSUNIV', 'ODAG3', '140', 'CMS', c.calendar_date - 1, c.calendar_date - 1, c.calendar_date, c.calendar_date
+INSERT INTO HSABC_DEV.ComplianceRequestInTake (Project_Cd, Table_Nm, Src_ID, Run_Ty, Cmplnc_Vrsn, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key)
+SELECT 'CMSUNIV', 'ODAG3', '140', 'CMS', '2200', c.calendar_date - 1, c.calendar_date - 1, c.calendar_date, c.calendar_date
 FROM sys_calendar.calendar c WHERE c.calendar_date BETWEEN DATE '2026-11-01' AND DATE '2026-11-30';
 ```
 
@@ -728,7 +740,7 @@ locks until they expire (`LOCK_TTL_MINUTES`, default 240) or are released (secti
 | Value | Batches created | Internal sources pulled | Exported |
 |---|---|---|---|
 | `SCHEDULED` | By the schedule (codes or SQL), the calendar, or an intake request | From the request date (empty before the close date = try again) | From the close date (from `RELEASE_TIME` on that day, if set), or when released |
-| `ADHOC` | By intake requests (and by a schedule if the run type has one, for crosswalk rows that find a report period) | When released | When released |
+| `ADHOC` | By intake requests (no crosswalk row needed), and by a schedule if the run type has one, for the crosswalk rows that list it and find a report period (e.g. IN1) | When released | When released |
 
 ### 8.2 Schedule codes (`ComplianceRunType`)
 

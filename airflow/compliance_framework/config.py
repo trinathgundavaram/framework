@@ -651,7 +651,8 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
                               "HAVING count(*) > 1").fetchall():
             add("CODE_CASE_DUPLICATE", f"{table}: {r['n']} rows have {column} {r['cd']} in different upper / lower case")
     rts = run_types(conn)
-    from compliance_framework.batches import batch_due, check_period, check_schedule, report_dates, scheduled
+    from compliance_framework.batches import (batch_due, check_period, check_schedule, intake_problem, report_dates,
+                                              scheduled)
     from compliance_framework.load import VALUE_CODES
     for rt in rts.values():
         if not rt.run_ty.isalnum():
@@ -707,6 +708,12 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
         elif x.rpt_dt_sql and not re.match(r"^\s*(SELECT|WITH)\b[^;]*;?\s*$", x.rpt_dt_sql, re.IGNORECASE):
             add("RPT_DT_SQL", f"Rpt_Dt_Sql_Txt of {x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty} must be a single "
                               "SELECT statement")
+    for r in conn.execute("SELECT * FROM ComplianceRequestInTake WHERE Req_End_Dt_Key >= %s ORDER BY Intake_ID",
+                          (run_date,)).fetchall():
+        problem = intake_problem(conn, r, rts, settings)
+        if problem:
+            add("INTAKE_REQUEST", f"ComplianceRequestInTake {r['intake_id']} ({code(r['project_cd'])}/{code(r['table_nm'])}/"
+                                  f"{code(r['run_ty'])}): {problem}")
     if db.table_exists(conn, conn.schema, "ComplianceBatchCalendar"):
         for r in conn.execute("SELECT * FROM ComplianceBatchCalendar WHERE Active_Ind = 1").fetchall():
             c = CalendarRow.from_row(r)
