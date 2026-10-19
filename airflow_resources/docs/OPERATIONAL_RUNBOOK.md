@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.56 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.57 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -348,7 +348,8 @@ one table wins over the project's `*` row; `Rpt_Period_Cd` on a crosswalk row wi
 | `Project_Cd` | Yes | A project | |
 | `Table_Nm` | Default `*` | A table or `*` | `*` = every table of the project |
 | `Run_Ty` | Yes | A run type | |
-| `Rpt_Period_Cd` | Yes | Period code (section 8.4) | Report dates, counted from the batch's scheduled date |
+| `Rpt_Period_Cd` | One of the two | Period code (section 8.4) | Report dates, counted from the batch's scheduled date |
+| `Rpt_Dt_Sql_Txt` | One of the two | One `SELECT` (section 8.3) | For dates no code expresses: returns `rpt_start` and `rpt_end`. A row has a code or SQL, not both |
 | `Active_Ind` | Default 1 | `1`, `0` | |
 
 Ad-hoc run types need no row (their dates come from the request). Careful: an ad-hoc run type that has a schedule
@@ -766,7 +767,8 @@ Only when no code is set. Both are a single `SELECT` (no `;` inside).
 
 - `Batch_Schedule_Sql_Txt`: returns **one row** on a day batches are due, **no row** otherwise. Placeholders:
   `{run_date}`, `{project_cd}`, `{run_ty}`. Its columns can be used by name in `Rpt_Dt_Sql_Txt` (e.g. `period_dt`).
-- `Rpt_Dt_Sql_Txt`: returns one row with `rpt_start` and `rpt_end`. Placeholders: `{run_date}`, `{project_cd}`,
+- `Rpt_Dt_Sql_Txt` (on a `ComplianceRunTypePeriod` row, or on a crosswalk row): returns one row with `rpt_start` and
+  `rpt_end`. Placeholders: `{run_date}`, `{project_cd}`,
   `{run_ty}`, `{table_nm}`, `{src_id}`, the schedule row's columns (with a code schedule: `{period_dt}` = the
   scheduled date).
 

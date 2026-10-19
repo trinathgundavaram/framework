@@ -849,9 +849,13 @@ VALUES ('CMSUNIV', 'ODAG3', '140', 'WEEKLY', DATE '2026-01-01', '2200', 0);
 
 ### Which dates: `ComplianceRunTypePeriod` (or `Rpt_Period_Cd` on the crosswalk)
 
-The report dates of a run type for a project: `Project_Cd`, `Table_Nm` (`*` = every table), `Run_Ty`,
-`Rpt_Period_Cd`. The period used for a batch is the first found of: the crosswalk row's `Rpt_Period_Cd`, its
-`Rpt_Dt_Sql_Txt`, the table's `ComplianceRunTypePeriod` row, the project's `*` row. A SCHEDULED run type with a
+The report dates of a run type for a project: `Project_Cd`, `Table_Nm` (`*` = every table), `Run_Ty`, and either
+`Rpt_Period_Cd` (a code, below) or `Rpt_Dt_Sql_Txt` (a SELECT returning `rpt_start` and `rpt_end`, for dates no code
+expresses; same placeholders as the crosswalk's, `{period_dt}` = the scheduled date). The period used for a batch is
+the first found of: the crosswalk row's `Rpt_Period_Cd`, its `Rpt_Dt_Sql_Txt`, the table's `ComplianceRunTypePeriod`
+row, the project's `*` row. Existing installations: `ALTER TABLE <META_DB>.ComplianceRunTypePeriod ADD Rpt_Dt_Sql_Txt
+VARCHAR(8000);` and `ALTER TABLE <META_DB>.ComplianceRunTypePeriod ADD Rpt_Period_Cd NULL;` (the code may then be
+empty). A SCHEDULED run type with a
 schedule code and no period anywhere is a validate-config error. An ADHOC run type with a schedule gets scheduled
 batches for every crosswalk row that finds a period (set none for it when only some sources are scheduled, and put
 `Rpt_Period_Cd` on those rows).

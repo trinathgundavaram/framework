@@ -228,20 +228,25 @@ def xwalk_rows(conn: Connection, *, project_cd: Optional[str] = None, table_nm: 
                 continue
             x = replace(x, overridden=tuple(own[key]))
         if not (x.rpt_period_cd or x.rpt_dt_sql):
-            x = replace(x, rpt_period_cd=periods.get((x.project_cd, x.table_nm, x.run_ty))
-                        or periods.get((x.project_cd, "*", x.run_ty)))
+            period, sql = periods.get((x.project_cd, x.table_nm, x.run_ty)) or periods.get((x.project_cd, "*", x.run_ty)) \
+                or (None, None)
+            x = replace(x, rpt_period_cd=period, rpt_dt_sql=sql)
         if x.include or switched_off:
             out.append(x)
     return sorted(out, key=lambda x: (x.project_cd, x.table_nm, x.src_id, x.run_ty, x.effective_start_dt))
 
 
-def run_type_periods(conn: Connection) -> dict[tuple, str]:
-    """The active ComplianceRunTypePeriod rows: (project, table or '*', run type) -> Rpt_Period_Cd."""
+def run_type_periods(conn: Connection) -> dict[tuple, tuple]:
+    """The active ComplianceRunTypePeriod rows: (project, table or '*', run type) -> (Rpt_Period_Cd, Rpt_Dt_Sql_Txt),
+    one of them set (the code wins when a row has both; validate-config reports that)."""
     if not db.table_exists(conn, conn.schema, "ComplianceRunTypePeriod"):
         return {}
-    return {(code(r["project_cd"]), code(r["table_nm"] or "*"), code(r["run_ty"])): code(_text(r["rpt_period_cd"]))
-            for r in conn.execute("SELECT * FROM ComplianceRunTypePeriod WHERE Active_Ind = 1").fetchall()
-            if _text(r["rpt_period_cd"])}
+    out = {}
+    for r in conn.execute("SELECT * FROM ComplianceRunTypePeriod WHERE Active_Ind = 1").fetchall():
+        period, sql = code(_text(r.get("rpt_period_cd"))), _text(r.get("rpt_dt_sql_txt"))
+        if period or sql:
+            out[(code(r["project_cd"]), code(r["table_nm"] or "*"), code(r["run_ty"]))] = (period, None if period else sql)
+    return out
 
 
 @dataclass(frozen=True)
@@ -675,10 +680,18 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
                 add("RUN_TYPE_PERIOD", f"{label}: project {code(r['project_cd'])} is not in ComplianceProject")
             if code(r["run_ty"]) not in rts:
                 add("RUN_TYPE_PERIOD", f"{label}: run type {code(r['run_ty'])} is not in ComplianceRunType")
-            try:
-                check_period(_text(r["rpt_period_cd"]) or "")
-            except ConfigError as e:
-                add("RUN_TYPE_PERIOD", f"{label}: {e}")
+            period, sql = _text(r.get("rpt_period_cd")), _text(r.get("rpt_dt_sql_txt"))
+            if period and sql:
+                add("RUN_TYPE_PERIOD", f"{label}: set Rpt_Period_Cd or Rpt_Dt_Sql_Txt, not both (the code is used)")
+            elif not period and not sql:
+                add("RUN_TYPE_PERIOD", f"{label}: needs Rpt_Period_Cd or Rpt_Dt_Sql_Txt")
+            elif sql and not re.match(r"^\s*(SELECT|WITH)\b[^;]*;?\s*$", sql, re.IGNORECASE):
+                add("RUN_TYPE_PERIOD", f"{label}: Rpt_Dt_Sql_Txt must be a single SELECT statement")
+            if period:
+                try:
+                    check_period(period)
+                except ConfigError as e:
+                    add("RUN_TYPE_PERIOD", f"{label}: {e}")
 
     run_date, cache, due = run_date or date.today(), {}, {}
     for x in xw:
