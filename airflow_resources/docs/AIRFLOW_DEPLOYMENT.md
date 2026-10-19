@@ -30,7 +30,8 @@ airflow/
     adapters.py    file stores (NAS, local), email channel, rules engine
     common.py      codes, statuses, dates, clock
     cli.py         command line: the admin commands (validate-config, health, locks, close-batch, ...) and any step
-    .airflowignore keeps Airflow from parsing the package as DAG files
+    .airflowignore keeps Airflow from parsing the package as DAG files (deploy it too: a dot file; the modules
+                   use absolute imports, so they also load if Airflow parses them)
 
 airflow_resources/                (not deployed with the DAGs)
   docs/AIRFLOW_DEPLOYMENT.md      this guide
@@ -1237,10 +1238,13 @@ values, or a second rules DAG with its own Variable. The rules run on the framew
 
 - The framework logic (batch creation, intake, file load, promotion, overrides, close, notifications,
   locks) and the GRE bridge pass the framework's test suite when run against a stand-in for the
-  `teradatasql` driver backed by PostgreSQL. With Airflow 3.3.2 (Task SDK 1.3.2, standard provider 1.20.1, smtp
-  provider 3.1.1) every DAG file parses without import errors or deprecation warnings (Variable and Connections read through
-  `airflow.sdk`). The step DAGs need Teradata and were not run
-  end to end in Airflow 3.
+  `teradatasql` driver backed by PostgreSQL. **Airflow 3.3.0** (the version in use; installed with its official
+  constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp provider 3.0.1; also checked on 3.3.2): every DAG file
+  parses without import errors or deprecation warnings from the framework, also without `.airflowignore` and with
+  `DAG_DISCOVERY_SAFE_MODE` off (Airflow then imports every package module on its own: they use absolute imports).
+  `airflow dags test` ran a step DAG with the step stubbed: success; a reported problem (exit 1) failed without a
+  retry; a technical error (exit 2) went `up_for_retry`, was retried and then failed. The step DAGs need Teradata
+  and were not run end to end.
 - It has **not** been run against a real Teradata system. Before production, on a development Teradata
   system: create the tables from `airflow_resources/sql/schema.sql`, load the metadata, run `validate-config`, then
   the rehearsal list in `OPEN_ITEMS.md` with the step DAGs, and check the tables.

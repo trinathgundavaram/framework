@@ -4,10 +4,10 @@ from __future__ import annotations
 import logging
 from typing import NamedTuple, Optional
 
-from . import db
-from .adapters import Channel, Message
-from .common import Clock, ConfigError
-from .db import Connection, Settings
+from compliance_framework import db
+from compliance_framework.adapters import Channel, Message
+from compliance_framework.common import Clock, ConfigError
+from compliance_framework.db import Connection, Settings
 
 log = logging.getLogger(__name__)
 

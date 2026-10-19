@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 from urllib.parse import urlparse
 
-from .common import ConfigError, RuleEngineNotConfigured
-from .db import Settings, nas_settings, smb_client
+from compliance_framework.common import ConfigError, RuleEngineNotConfigured
+from compliance_framework.db import Settings, nas_settings, smb_client
 
 log = logging.getLogger(__name__)
 

@@ -20,11 +20,11 @@ except ImportError:  # Airflow 3.0
 from airflow.timetables.trigger import MultipleCronTriggerTimetable
 from croniter import croniter
 
-from .app import App, report, resolve_module
-from .cli import _json_default, main as cli_main
-from .common import FrameworkError, parse_as_of
-from . import db
-from .db import Settings
+from compliance_framework.app import App, report, resolve_module
+from compliance_framework.cli import _json_default, main as cli_main
+from compliance_framework.common import FrameworkError, parse_as_of
+from compliance_framework import db
+from compliance_framework.db import Settings
 
 
 # compliance_task: Airflow bridge: a step's Variable (configuration) + the Teradata and NAS Connections -> the framework.
@@ -282,7 +282,7 @@ def run_step(step: str, *, as_of: Optional[str] = None, settings: Optional[Mappi
              log_level: str = "INFO", **params) -> tuple[Optional[dict], int]:
     """Run one module for a project; context values the module does not take are ignored."""
     try:
-        logging.getLogger(__package__).setLevel(str(log_level or "INFO").upper())
+        logging.getLogger("compliance_framework").setLevel(str(log_level or "INFO").upper())
         spec = resolve_module(step)
         unknown = sorted(set(params) - set(SCOPE_KEYS))
         if unknown:

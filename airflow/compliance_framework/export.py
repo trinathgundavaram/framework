@@ -9,14 +9,14 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Optional
 
-from . import config as cfgmod, db
-from .adapters import ERROR, RuleEngine
-from .audit import EventLogger
-from .batches import Releases, get_batch
-from .common import Clock, ConfigError, code
-from .config import Scope
-from .db import Settings, ident
-from .load import BATCH_COLUMN, LoadContext, _cast, batch_column, column_mapping, columns, sanitize_db_error
+from compliance_framework import config as cfgmod, db
+from compliance_framework.adapters import ERROR, RuleEngine
+from compliance_framework.audit import EventLogger
+from compliance_framework.batches import Releases, get_batch
+from compliance_framework.common import Clock, ConfigError, code
+from compliance_framework.config import Scope
+from compliance_framework.db import Settings, ident
+from compliance_framework.load import BATCH_COLUMN, LoadContext, _cast, batch_column, column_mapping, columns, sanitize_db_error
 
 
 # export: EXPORT_LOAD: copy each batch whose data changed from core into its export table (ComplianceExportConfig).

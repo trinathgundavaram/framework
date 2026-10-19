@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.54 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.55 (Airflow 3 / Teradata).
 
 **How to use this page**
 

@@ -12,10 +12,10 @@ from decimal import Decimal, InvalidOperation
 from itertools import combinations
 from typing import Iterable, Mapping, Optional, Sequence
 
-from . import db
-from .adapters import parse_uri
-from .common import ADHOC, ConfigError, SCHEDULED, code
-from .db import Connection
+from compliance_framework import db
+from compliance_framework.adapters import parse_uri
+from compliance_framework.common import ADHOC, ConfigError, SCHEDULED, code
+from compliance_framework.db import Connection
 
 
 # config: Configuration rows, filename templates and the validator.
@@ -651,8 +651,8 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
                               "HAVING count(*) > 1").fetchall():
             add("CODE_CASE_DUPLICATE", f"{table}: {r['n']} rows have {column} {r['cd']} in different upper / lower case")
     rts = run_types(conn)
-    from .batches import batch_due, check_period, check_schedule, report_dates, scheduled
-    from .load import VALUE_CODES
+    from compliance_framework.batches import batch_due, check_period, check_schedule, report_dates, scheduled
+    from compliance_framework.load import VALUE_CODES
     for rt in rts.values():
         if not rt.run_ty.isalnum():
             add("RUN_TYPE", f"run type {rt.run_ty!r} must be letters and digits only (it is the {{RUNTY}} token)")
@@ -720,7 +720,7 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
     cfgs = active_file_configs(conn, settings)
 
     checks = file_checks(conn)
-    from .load import header_columns
+    from compliance_framework.load import header_columns
 
     for c in cfgs:
         try:
@@ -788,7 +788,7 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
                 add("XWALK_OVERLAP", f"xwalk {a.project_cd}/{a.table_nm}/{a.src_id}/{a.run_ty}: effective windows "
                                      f"starting {a.effective_start_dt} and {b.effective_start_dt} overlap")
 
-    from .load import delimiter_for, file_layout
+    from compliance_framework.load import delimiter_for, file_layout
 
     targets = target_columns(conn)
     for t in targets:
@@ -836,7 +836,7 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
         except (LookupError, ConfigError) as e:
             add("TARGET_TABLE", f"{label}: {e}")
 
-    from .load import sql_body
+    from compliance_framework.load import sql_body
     for q in queries:
         label = q.label
         if q.db_ty not in SOURCE_DB_TYPES:
@@ -859,7 +859,7 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
             file_layout(conn, q, targets, check_options(q, checks))
         except (LookupError, ConfigError) as e:
             add("TARGET_TABLE", f"{label}: {e}")
-    from .load import columns
+    from compliance_framework.load import columns
     table_cols: dict[tuple, set] = defaultdict(set)
     for c in [*cfgs, *queries]:
         for schema, table in ((c.stg_schema_nm, c.stg_table_nm), (c.core_schema_nm, c.core_table_nm)):
@@ -870,7 +870,7 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
             add("TARGET_COLUMN", f"{t.label}: column {t.column_nm} is in no staging or core table of "
                                  f"{t.project_cd}/{t.table_nm}")
 
-    from .load import BATCH_COLUMN, batch_column, column_mapping
+    from compliance_framework.load import BATCH_COLUMN, batch_column, column_mapping
     cores = {(c.project_cd, c.table_nm): c for c in [*cfgs, *queries]}
     for e in active_export_configs(conn, settings):
         label = e.label

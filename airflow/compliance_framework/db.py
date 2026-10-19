@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 
-from .common import BUSINESS_TZ, ConfigError, LockTimeout, resolve_env
+from compliance_framework.common import BUSINESS_TZ, ConfigError, LockTimeout, resolve_env
 
 
 # db: Teradata database layer: connection wrapper, transactions, table-based locks.

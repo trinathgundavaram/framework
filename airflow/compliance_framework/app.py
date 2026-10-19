@@ -5,18 +5,18 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Any, Callable, Mapping, Optional
 
-from . import config as cfgmod
-from .adapters import FileStore, RuleEngine, build_channel, build_file_store, build_rule_engine, dirname
-from .audit import NotificationDispatcher
-from .batches import (BatchCloser, DecisionProcessor, IntakeProcessor, ScheduleSummary, create_batches,
+from compliance_framework import config as cfgmod
+from compliance_framework.adapters import FileStore, RuleEngine, build_channel, build_file_store, build_rule_engine, dirname
+from compliance_framework.audit import NotificationDispatcher
+from compliance_framework.batches import (BatchCloser, DecisionProcessor, IntakeProcessor, ScheduleSummary, create_batches,
     run_type_list, wanted)
-from .common import ADHOC, Clock, ConfigError, SCHEDULED, code
-from .config import resolve_scope
-from .db import Connection, Settings, held_locks, schema_exists
-from .export import RulesRunner
-from .filecheck import FileChecker
-from .ingest import IngestPipeline
-from .load import MESSAGES
+from compliance_framework.common import ADHOC, Clock, ConfigError, SCHEDULED, code
+from compliance_framework.config import resolve_scope
+from compliance_framework.db import Connection, Settings, held_locks, schema_exists
+from compliance_framework.export import RulesRunner
+from compliance_framework.filecheck import FileChecker
+from compliance_framework.ingest import IngestPipeline
+from compliance_framework.load import MESSAGES
 
 
 # app: Service wiring (design §15.3 for the operational health report).
@@ -65,12 +65,12 @@ class App:
 
     @cached_property
     def source_loader(self):
-        from .ingest import SourceLoader
+        from compliance_framework.ingest import SourceLoader
         return SourceLoader(self.conn, self.clock, self.settings, self.pipeline)
 
     @cached_property
     def exporter(self):
-        from .export import ExportLoader
+        from compliance_framework.export import ExportLoader
         return ExportLoader(self.conn, self.clock, self.settings)
 
     @cached_property
@@ -239,7 +239,7 @@ def report(out: ModuleOutcome) -> dict:
 
 def _file_load(app, p: dict) -> ModuleOutcome:
     """Every file is processed; exit 1 when any of them was not loaded (after all were tried)."""
-    from .ingest import PathIngestSummary
+    from compliance_framework.ingest import PathIngestSummary
 
     share, file, folder, project = p.get("share"), p.get("file"), p.get("folder"), p.get("project")
     if (project or p.get("table_group") or p.get("table") or p.get("run_type")) and (share or file or folder):

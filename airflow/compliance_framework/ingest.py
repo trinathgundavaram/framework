@@ -13,16 +13,16 @@ from enum import Enum
 from functools import partial
 from typing import Optional
 
-from . import config as cfgmod, db
-from .adapters import FileInfo, FileStore, basename, dirname, parse_uri, sha256_file
-from .audit import EventLogger
-from .batches import Releases, REOPENED_AWAITING_DATA, get_batch, has_data, promoted_load
-from .common import (DATA_NOT_PROVIDED, REQUEST_COMPLETE, SOURCE_DATA_READY, SOURCE_DATA_READY_NO_DATA, Clock,
+from compliance_framework import config as cfgmod, db
+from compliance_framework.adapters import FileInfo, FileStore, basename, dirname, parse_uri, sha256_file
+from compliance_framework.audit import EventLogger
+from compliance_framework.batches import Releases, REOPENED_AWAITING_DATA, get_batch, has_data, promoted_load
+from compliance_framework.common import (DATA_NOT_PROVIDED, REQUEST_COMPLETE, SOURCE_DATA_READY, SOURCE_DATA_READY_NO_DATA, Clock,
                      FileRejected, RowCountMismatch, check_transition, code, earliest_close_date)
-from .config import FileConfig, MatchError, QueryConfig, Scope, TemplateMatcher, check_options
-from .db import Connection, Settings, source_connection
-from .filecheck import check_content, error_rows, file_columns
-from .load import (LoadContext, PLACEHOLDER, QUERY_PREFIX, build_layout, column_mapping, columns, file_details,
+from compliance_framework.config import FileConfig, MatchError, QueryConfig, Scope, TemplateMatcher, check_options
+from compliance_framework.db import Connection, Settings, source_connection
+from compliance_framework.filecheck import check_content, error_rows, file_columns
+from compliance_framework.load import (LoadContext, PLACEHOLDER, QUERY_PREFIX, build_layout, column_mapping, columns, file_details,
     file_layout, raw_line, sanitize_db_error, sql_body, stage, stage_query, stage_rows, swap, write_error_log,
     write_reports)
 

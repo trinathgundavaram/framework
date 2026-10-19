@@ -15,15 +15,15 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
-from . import config as cfgmod
-from . import db
-from .adapters import FileStore, basename, dirname, parse_uri
-from .audit import EventLogger
-from .common import Clock, ConfigError, code
-from .config import (CheckOptions, FieldRule, FileConfig, MatchError, Scope, check_options, data_fields,
+from compliance_framework import config as cfgmod
+from compliance_framework import db
+from compliance_framework.adapters import FileStore, basename, dirname, parse_uri
+from compliance_framework.audit import EventLogger
+from compliance_framework.common import Clock, ConfigError, code
+from compliance_framework.config import (CheckOptions, FieldRule, FileConfig, MatchError, Scope, check_options, data_fields,
                      trailer_problems)
-from .db import Settings
-from .load import (DELIMITED_FILE_TYPES, _file_lines, _lf_lines, _undecodable_line, delimiter_for, file_layout,
+from compliance_framework.db import Settings
+from compliance_framework.load import (DELIMITED_FILE_TYPES, _file_lines, _lf_lines, _undecodable_line, delimiter_for, file_layout,
                    header_columns, raw_line, write_error_log)
 
 log = logging.getLogger(__name__)

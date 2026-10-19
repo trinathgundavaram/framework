@@ -11,11 +11,11 @@ from datetime import date, datetime
 from typing import Iterable, Iterator, Mapping, Optional, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from . import db
-from .adapters import basename, dirname
-from .common import ConfigError, FileRejected, RowCountMismatch, code
-from .config import CheckOptions, MatchError, trailer_problems
-from .db import Connection
+from compliance_framework import db
+from compliance_framework.adapters import basename, dirname
+from compliance_framework.common import ConfigError, FileRejected, RowCountMismatch, code
+from compliance_framework.config import CheckOptions, MatchError, trailer_problems
+from compliance_framework.db import Connection
 
 
 # layout: Which columns of a file's staging and core tables the framework fills, and with what (ComplianceTargetColumnConfig).
@@ -287,8 +287,8 @@ def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], 
 # load: Staging load and core promotion on Teradata (design §9.4, §10).
 
 if TYPE_CHECKING:
-    from .config import FileConfig
-    from .db import Settings
+    from compliance_framework.config import FileConfig
+    from compliance_framework.db import Settings
 
 log = logging.getLogger(__name__)
 

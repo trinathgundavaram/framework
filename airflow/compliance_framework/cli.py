@@ -8,13 +8,13 @@ import sys
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 
-from .app import App, describe_modules, report, run_module
-from .audit import EventLogger
-from .common import FrameworkError, parse_as_of
-from .config import resolve_scope, validate_all
-from .db import Settings, held_locks, release_lock, schema_exists
+from compliance_framework.app import App, describe_modules, report, run_module
+from compliance_framework.audit import EventLogger
+from compliance_framework.common import FrameworkError, parse_as_of
+from compliance_framework.config import resolve_scope, validate_all
+from compliance_framework.db import Settings, held_locks, release_lock, schema_exists
 
-log = logging.getLogger(__package__)
+log = logging.getLogger("compliance_framework")
 
 
 def _json_default(o):
@@ -109,7 +109,7 @@ def _no_app(args, settings: Settings) -> int:
         _print({"database": target, "settings": settings.describe()})
         return 0
     if getattr(args, "source", None):
-        from .db import source_connection
+        from compliance_framework.db import source_connection
 
         try:
             src = source_connection(args.source, args.db_type.strip().upper())

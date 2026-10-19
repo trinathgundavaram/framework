@@ -10,14 +10,14 @@ from functools import partial
 from typing import Callable, Iterable, Optional
 from zoneinfo import ZoneInfo
 
-from . import config as cfg, config as cfgmod, db
-from .audit import EventLogger
-from .common import (ADHOC, Clock, CloseBlocked, CloseDeferred, ConfigError,
+from compliance_framework import config as cfg, config as cfgmod, db
+from compliance_framework.audit import EventLogger
+from compliance_framework.common import (ADHOC, Clock, CloseBlocked, CloseDeferred, ConfigError,
     DATA_NOT_PROVIDED, OPEN_STATUSES, REOPEN_STATUS, REQUEST_COMPLETE, REQUEST_CREATED, SCHEDULED,
     SOURCE_DATA_CARRY_FORWARD, annual_window, build_btch_id, check_transition, code, earliest_close_date,
     period_lookback)
-from .config import RunType, Scope, XwalkRow
-from .db import Connection, Settings
+from compliance_framework.config import RunType, Scope, XwalkRow
+from compliance_framework.db import Connection, Settings
 
 
 # batches: Batch creation (scheduled and ad-hoc) and batch rows.
