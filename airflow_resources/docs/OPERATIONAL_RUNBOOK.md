@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.57 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.58 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -379,7 +379,7 @@ the period the row is valid for and the compliance version.
 | `Effective_End_Dt_Key` | No | Date | Last run date (empty = open ended). End a row and add a new one to change the version |
 | `Cmplnc_Vrsn` | Yes | Up to 10, e.g. `2200` | The compliance version; stored on each batch, written to the `VERSION` column |
 | `Rpt_Period_Cd` | No | Period code (section 8.4) | Only when this row's dates differ from `ComplianceRunTypePeriod` |
-| `Rpt_Dt_Sql_Txt` | No | One `SELECT` | Fallback for dates no code expresses (section 8.3) |
+| `Rpt_Dt_Sql_Txt` | No | One `SELECT` | Fallback for dates no code expresses (section 8.3). Set this or `Rpt_Period_Cd`, not both (`validate-config` reports it; the code is used) |
 | `Include_Ind` | Default 1 | `1`, `0` | On a row for one run type: `0` switches that run type off for the source |
 | `Active_Ind` | Default 1 | `1`, `0` | |
 

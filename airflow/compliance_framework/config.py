@@ -699,6 +699,9 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
         if rt and rt.active and rt.run_category_cd == SCHEDULED and rt.sched_cd and not (x.rpt_period_cd or x.rpt_dt_sql):
             add("RPT_PERIOD", f"{x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty}: no report period (Rpt_Period_Cd on "
                               "the crosswalk row or a ComplianceRunTypePeriod row)")
+        if x.rpt_period_cd and x.rpt_dt_sql:
+            add("RPT_PERIOD", f"xwalk {x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty}: set Rpt_Period_Cd or "
+                              "Rpt_Dt_Sql_Txt, not both (the code is used)")
         if x.rpt_period_cd:
             try:
                 check_period(x.rpt_period_cd)
