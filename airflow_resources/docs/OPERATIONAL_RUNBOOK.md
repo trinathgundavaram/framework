@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.60 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.61 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -494,7 +494,7 @@ has no file config.
 | `Project_Cd`, `Table_Nm`, `Src_ID` | Yes | | |
 | `Src_Db_Ty` | Yes | `TERADATA`, `SQLSERVER` | Where the source table is |
 | `Src_Conn_Cd` | No | An Airflow Connection id; `$env` allowed | Empty = the framework's own Teradata system (copied with one INSERT … SELECT); otherwise the source server's Connection |
-| `Src_Sql_Txt` | Yes | One `SELECT` in the source's dialect | Its column names fill the staging columns of the same name: every name must be a data column of the staging table (not one the framework fills), else the pull is rejected with the names. Placeholders (section 8.9) are bound as parameters. `$env` is **not** replaced inside it |
+| `Src_Sql_Txt` | Yes | One `SELECT` in the source's dialect | Its column names fill the staging columns of the same name: every name must be a column of the staging table, else the pull is rejected with the names. A column the query returns wins over its `ComplianceTargetColumnConfig` row for that pull (e.g. an ID from the source instead of `ROW_SEQUENCE`); only the batch (`Btch_ID` / `BATCH_ID`), source (`SOURCE_ID`) and load (`LOAD_ID`) columns are always the framework's. Placeholders (section 8.9) are bound as parameters. `$env` is **not** replaced inside it |
 | `Stg_Schema_Nm` … `Core_Table_Nm` | Yes | | As in the file config |
 | `Active_Ind` | Default 1 | | |
 
@@ -1035,7 +1035,7 @@ Emailed by NOTIFY unless marked "no".
 |---|---|---|
 | Teradata (name in `td_conn_var`, e.g. `DEV`) | host, login, password; Extra `{"logmech": "LDAP"}` | Every step |
 | NAS (name in `wdc_comp_oper_nas_var`) | host, login, password, port (445) | FILE_CHECK, FILE_LOAD |
-| SQL Server source (name = `Src_Conn_Cd`) | host or `server\instance`, port, schema = database, login, password; Extra `{"driver": "ODBC Driver 18 for SQL Server", "encrypt": "yes", "trust_server_certificate": "yes"}` | SOURCE_LOAD |
+| SQL Server source (name = `Src_Conn_Cd`) | host or `server\instance`, port, schema = database, login, password; Extra `{"driver": "ODBC Driver 17 for SQL Server", "encrypt": "yes", "trust_server_certificate": "yes"}` (`driver` is optional: without it the newest `ODBC Driver NN for SQL Server` installed on the worker is used, and the log names it) | SOURCE_LOAD |
 | `smtp_default` | Airflow SMTP connection | DAG emails, NOTIFY (`NOTIFY_BACKEND = airflow`) |
 
 ### 9.2 DAGs
@@ -1341,6 +1341,15 @@ ORDER BY d.Event_Dtts DESC;
 
 ## 13. Troubleshooting
 
+Every configured statement is written to the task log as it runs: internal source queries (`Src_Sql_Txt`), `SQL` columns (`Value_Txt`), `Rpt_Dt_Sql_Txt`, `Batch_Schedule_Sql_Txt` and export procedure calls. Each entry shows the SQL as sent (`?` = a parameter), every parameter with its value, and the statement with the values written in, which can be copied and run by hand on the same database:
+
+```
+INFO - SOURCE_LOAD | 20261020_CMSUNIV_SNPCC1_DLY source 11 | Src_Sql_Txt on SQL_SNPCC
+    SQL:         SELECT ... FROM QUALITY.SNPMOC.Table1_cms2022 WHERE BatchID = ?
+    parameters:  btch_id = '20261020_CMSUNIV_SNPCC1_DLY'
+    with values: SELECT ... FROM QUALITY.SNPMOC.Table1_cms2022 WHERE BatchID = '20261020_CMSUNIV_SNPCC1_DLY'
+```
+
 | Symptom | Likely cause | What to do |
 |---|---|---|
 | File rejected `FILE_REJECTED_UNPARSEABLE` | Name does not match `Src_File_Nm_Tmplt` | Compare the name with the template (8.5); fix the template or ask for the right name |
@@ -1357,6 +1366,8 @@ ORDER BY d.Event_Dtts DESC;
 | Batch closed as `DATA_NOT_PROVIDED` / `MISSING` | Nothing by the close date | Expected; late data: `LATE_ARRIVAL` or `REOPEN` |
 | Carry-forward refused | Batch closed, run type without `Carry_Fwd_Ind`, no earlier batch with data | Apply before the close run; check 12.7 and the `OVERRIDE_INVALID_DETECTED` text |
 | Internal source `WAITING` | No rows yet before the close date | Normal; tried again each run |
+| Pull rejected `SOURCE_QUERY_FAILED` "could not connect to …" | Worker cannot reach the source: `[01000] … Can't open lib 'ODBC Driver 18 …'` = that driver is not installed on the worker (list them with `odbcinst -q -d`; set the installed one as `driver` in the Connection's Extra, or leave `driver` out); `[08001]` / `[HYT00]` = server, port, firewall or certificate (`trust_server_certificate`); `[28000]` = login | Fix the worker or the Connection; the next run pulls again |
+| Pull rejected `SOURCE_QUERY_FAILED` "the query on … failed" | The `Src_Sql_Txt` fails on the source (`Invalid object name` = table / database name; the Connection has no database unless its Schema is set) | Run the query on the source with the batch's values; fix `Src_Sql_Txt` |
 | Step "locked" | Another run is working on it, or a crashed run | Wait; else 11.15 |
 | No alert emails | NOTIFY not scheduled / not triggered, no `DEFAULT_NOTIFY_EMAILS`, no `smtp_default` | Check 12.6 and the NOTIFY Variable |
 | Rules never run | Table has an export and the batch is not exported yet | Normal: rules wait for the export |

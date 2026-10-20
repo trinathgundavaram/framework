@@ -257,12 +257,12 @@ sources). An installation that has the table under its earlier name renames it o
 | `Project_Cd`, `Table_Nm`, `Src_ID` | The source, as in the crosswalk (the source needs no file config) |
 | `Src_Db_Ty` | `TERADATA` or `SQLSERVER` |
 | `Src_Conn_Cd` | The Airflow Connection of the source's server. Empty for a source on the framework's own Teradata system: its rows are then copied with one `INSERT ... SELECT` and never pass through Airflow (the framework's account needs SELECT on the source tables). `$env` is replaced as in database names |
-| `Src_Sql_Txt` | One `SELECT` in the source's own dialect. It can use `{btch_id}`, `{rpt_start}`, `{rpt_end}`, `{run_ty}`, `{version}`, `{src_id}`, `{req_id}`, `{project_cd}`, `{table_nm}`, `{load_id}`, `{load_date}`, bound as parameters. Its column names fill the staging columns of the same name; a name that is not a data column of the staging table (a column the framework fills, or a misspelling), or a name returned twice, rejects the pull (`SOURCE_DATA_REJECTED`) with the names, unless `TARGET_COLUMNS` lists the columns in order |
+| `Src_Sql_Txt` | One `SELECT` in the source's own dialect. It can use `{btch_id}`, `{rpt_start}`, `{rpt_end}`, `{run_ty}`, `{version}`, `{src_id}`, `{req_id}`, `{project_cd}`, `{table_nm}`, `{load_id}`, `{load_date}`, bound as parameters. Its column names fill the staging columns of the same name; a column it returns wins over that column's `ComplianceTargetColumnConfig` row for the pull (e.g. an ID from the source instead of `ROW_SEQUENCE`), except the batch, `SOURCE_ID` and `LOAD_ID` columns, which are always the framework's; a name that is not a column of the staging table (a misspelling), one of those three, or a name returned twice, rejects the pull (`SOURCE_DATA_REJECTED`) with the names, unless `TARGET_COLUMNS` lists the columns in order |
 | `Stg_Schema_Nm`, `Stg_Table_Nm`, `Core_Schema_Nm`, `Core_Table_Nm` | As in the file config |
 
 **Connections.** One Airflow Connection per server (or per login); many sources can share one. SQL Server:
 host (or `server\instance`), port, schema = default database, login and password, and Extra such as
-`{"driver": "ODBC Driver 18 for SQL Server", "encrypt": "yes", "trust_server_certificate": "yes"}`
+`{"driver": "ODBC Driver 17 for SQL Server", "encrypt": "yes", "trust_server_certificate": "yes"}` (`driver` is optional: without it the newest `ODBC Driver NN for SQL Server` installed on the worker is used, and the log names it)
 (`"authentication"` for Azure AD logins, `"login_timeout"` in seconds). Teradata: host, login, password, Extra
 `{"logmech": "LDAP"}`. Credentials stay in Airflow; the log shows only the Connection id, host and database. SQL
 Server needs `pyodbc` and the Microsoft ODBC driver on the workers. Check a connection from the command line:

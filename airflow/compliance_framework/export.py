@@ -245,6 +245,8 @@ class ExportLoader:
                  "req_dt": _as_date(b["req_dt_key"]), "rpt_start": _as_date(b["rpt_start_dt_key"]),
                  "rpt_end": _as_date(b["rpt_end_dt_key"])}
         proc = ".".join(db.ident(p) for p in e.proc_nm.split("."))
+        db.log_sql(f"EXPORT_LOAD | {b['btch_id']} source {b['src_id']} | procedure {e.proc_nm}",
+                   f"CALL {proc}({', '.join('{' + n + '}' for n in e.proc_params)})", given)
         with self.conn.transaction():
             self.conn.execute_qmark(f"CALL {proc}({', '.join('?' for _ in e.proc_params)})",
                                     [given[n] for n in e.proc_params])

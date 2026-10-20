@@ -46,6 +46,35 @@ def error_line(exc: BaseException) -> str:
     return m.group(0) if m else (str(exc).splitlines() or [""])[0]
 
 
+_NAMED = re.compile(r"\{(\w+)\}")
+
+
+def log_sql(what: str, body: str, params: Mapping, db_ty: str = "TERADATA") -> None:
+    """Log a configured statement as it runs: the SQL as sent (? = a parameter), each {name} parameter with its value,
+    and the statement with the values written in (to read or run by hand; the database gets them as parameters)."""
+    body = " ".join(body.split())
+    typed = db_ty.upper() != "SQLSERVER"
+    value = lambda m: _literal(params.get(m.group(1).lower()), typed)
+    names = dict.fromkeys(n.lower() for n in _NAMED.findall(body))
+    shown = ", ".join(f"{n} = {_literal(params.get(n), typed)}" for n in names) or "none"
+    log.info("%s\n    SQL:         %s\n    parameters:  %s\n    with values: %s", what, _NAMED.sub("?", body), shown,
+             _NAMED.sub(value, body))
+
+
+def _literal(v: Any, typed: bool = True) -> str:
+    """A value as SQL text: DATE '...' / TIMESTAMP '...' on Teradata, plain '...' on SQL Server."""
+    if v is None:
+        return "NULL"
+    if isinstance(v, (bool, int, float, Decimal)):
+        return str(int(v) if isinstance(v, bool) else v)
+    if isinstance(v, datetime):
+        text = v.replace(tzinfo=None).isoformat(sep=" ")
+        return f"TIMESTAMP '{text}'" if typed else f"'{text}'"
+    if isinstance(v, date):
+        return f"DATE '{v.isoformat()}'" if typed else f"'{v.isoformat()}'"
+    return "'" + str(v).replace("'", "''") + "'"
+
+
 def error_text(exc: BaseException) -> str:
     """One line for logs, step outcomes and stored error text: the exception type and the database's message."""
     return f"{type(exc).__name__}: {error_line(exc)}"[:1000]
@@ -484,6 +513,12 @@ def _odbc_value(value) -> str:
     return "{" + text.replace("}", "}}") + "}" if any(c in text for c in ";{}=") else text
 
 
+def sqlserver_driver(installed: Iterable[str]) -> str:
+    """The newest Microsoft 'ODBC Driver NN for SQL Server' installed on the worker (18 when none is found)."""
+    found = [(int(m.group(1)), d) for d in installed if (m := re.fullmatch(r"ODBC Driver (\d+) for SQL Server", d.strip()))]
+    return max(found)[1] if found else "ODBC Driver 18 for SQL Server"
+
+
 def source_connection(conn_cd: str, db_ty: str):
     """A DB-API connection to an internal source, from its Airflow Connection `conn_cd` (no credential is logged)."""
     if conn_cd in SOURCE_OPENERS:
@@ -498,7 +533,9 @@ def source_connection(conn_cd: str, db_ty: str):
             import pyodbc
         except ImportError:
             raise ImportError("pyodbc is required for SQL Server sources. Install with: pip install pyodbc")
-        parts = {"DRIVER": "{" + extra.get("driver", "ODBC Driver 18 for SQL Server") + "}",
+        driver = extra.get("driver") or sqlserver_driver(pyodbc.drivers())
+        logger.info("Source %s uses ODBC driver %s", conn_cd, driver)
+        parts = {"DRIVER": "{" + driver + "}",
                  "SERVER": f"{c.host},{c.port}" if c.port else c.host, "DATABASE": c.schema, "UID": c.login,
                  "PWD": c.password, "Encrypt": extra.get("encrypt", "yes"),
                  "TrustServerCertificate": extra.get("trust_server_certificate", "no"),

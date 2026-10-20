@@ -545,6 +545,7 @@ def sql_values(conn, layout: Layout, ctx: LoadContext) -> dict:
             what = f"{layout.label}: Value_Txt of column {c.name}"
             body = sql_body(what, text)
             names = [n.lower() for n in PLACEHOLDER.findall(body)]
+            db.log_sql(what, body, params)
             try:
                 rows = conn.execute_qmark(PLACEHOLDER.sub("?", body), [params[n] for n in names]).fetchall()
             except Exception as e:  # noqa: BLE001
@@ -656,6 +657,7 @@ def stage_query(conn: Connection, *, cfg, layout_for, ctx: LoadContext, sql: str
     order = [n.lower() for n in PLACEHOLDER.findall(body)]
     params = ctx.sql_params()
     query, values = PLACEHOLDER.sub("?", body), [params[n] for n in order]
+    db.log_sql(f"SOURCE_LOAD | {ctx.btch_id} source {ctx.src_id} | Src_Sql_Txt (same Teradata system)", body, params)
     names = conn.execute_qmark(f"SELECT * FROM ({query}) AS q WHERE 1 = 0", values).columns
     layout = layout_for(names)
     resolved = sql_values(conn, layout, ctx)

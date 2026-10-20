@@ -285,6 +285,7 @@ def _config_sql(conn, what: str, sql: str, params: dict, cache: Optional[dict] =
     if cache is not None and key in cache:
         return cache[key]
     order = [n.lower() for n in _PLACEHOLDER.findall(body)]
+    db.log_sql(what, body, params)
     try:
         rows = conn.execute_qmark(_PLACEHOLDER.sub("?", body), [params[n] for n in order]).fetchall()
     except Exception as e:  # noqa: BLE001

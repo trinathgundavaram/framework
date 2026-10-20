@@ -22,7 +22,7 @@ from compliance_framework.common import (DATA_NOT_PROVIDED, REQUEST_COMPLETE, SO
 from compliance_framework.config import FileConfig, MatchError, QueryConfig, Scope, TemplateMatcher, check_options
 from compliance_framework.db import Connection, Settings, source_connection
 from compliance_framework.filecheck import check_content, error_rows, file_columns
-from compliance_framework.load import (LoadContext, PLACEHOLDER, QUERY_PREFIX, build_layout, check_core_types, column_mapping,
+from compliance_framework.load import (ColumnMapping, LoadContext, PLACEHOLDER, QUERY_PREFIX, build_layout, check_core_types, column_mapping,
     columns, file_details,
     file_layout, raw_line, sanitize_db_error, sql_body, stage, stage_query, stage_rows, swap, write_error_log,
     write_reports)
@@ -620,6 +620,20 @@ class IngestPipeline:
 
 # source_load: SOURCE_LOAD: pull a batch's data from an internal source with its own SELECT (ComplianceInternalSourceConfig).
 
+FRAMEWORK_KEYS = ("BATCH_ID", "SOURCE_ID", "LOAD_ID")
+
+
+def _source_error(e: Exception) -> str:
+    """A source driver's message (pyodbc: SQLSTATE and text) with data values masked (names stay readable)."""
+    args = getattr(e, "args", ())
+    if len(args) >= 2 and isinstance(args[1], str):
+        text = args[1] if args[1].startswith(f"[{args[0]}]") else f"[{args[0]}] {args[1]}"
+    else:
+        text = db.error_line(e)
+    text = re.sub(r"(value\s*:?\s*)'[^']*'", r"\1'***'", text, flags=re.IGNORECASE)
+    return sanitize_db_error(re.sub(r"(value is )\([^)]*\)", r"\1(***)", text, flags=re.IGNORECASE))
+
+
 class SourceLoader:
     def __init__(self, conn, clock, settings, pipeline):
         self.conn, self.clock, self.settings, self.pipeline = conn, clock, settings, pipeline
@@ -725,9 +739,13 @@ class SourceLoader:
             return self.conn.execute("SELECT Load_ID FROM ComplianceFileLoad WHERE File_Hash=%s", (key,)).fetchone()["load_id"]
 
     def _layout_for(self, q: QueryConfig, opts, names: list[str]):
+        mapping = column_mapping(q, cfgmod.target_columns(self.conn))
+        if not opts.target_columns:
+            given = {n.casefold() for n in names}
+            mapping = ColumnMapping({c: v for c, v in mapping.items() if c.casefold() not in given or v in FRAMEWORK_KEYS},
+                                    texts=mapping.texts)
         layout = build_layout(q.label, columns(self.conn, q.stg_schema_nm, q.stg_table_nm),
-                              columns(self.conn, q.core_schema_nm, q.core_table_nm),
-                              column_mapping(q, cfgmod.target_columns(self.conn)),
+                              columns(self.conn, q.core_schema_nm, q.core_table_nm), mapping,
                               f"{q.stg_schema_nm}.{q.stg_table_nm}", f"{q.core_schema_nm}.{q.core_table_nm}",
                               () if opts.target_columns else tuple(n.lower() for n in names), None, opts.target_columns)
         if not opts.target_columns:
@@ -740,7 +758,8 @@ class SourceLoader:
             if unmatched:
                 raise FileRejected("SOURCE_DATA_REJECTED",
                                    f"the query returns columns that are not data columns of {q.stg_schema_nm}."
-                                   f"{q.stg_table_nm} (a column the framework fills, or a name that is not there): "
+                                   f"{q.stg_table_nm} (a name that is not there, or the batch, source or load "
+                                   "column, which the framework always fills): "
                                    f"{', '.join(unmatched[:10])}{' ...' if len(unmatched) > 10 else ''}; name each "
                                    "column after its staging column, or list them in TARGET_COLUMNS")
         return layout
@@ -801,11 +820,16 @@ class SourceLoader:
         body = sql_body(f"{q.label}: Src_Sql_Txt", q.sql)
         params = ctx.sql_params()
         values = [_plain(params[n.lower()]) for n in PLACEHOLDER.findall(body)]
+        db.log_sql(f"SOURCE_LOAD | {ctx.btch_id} source {ctx.src_id} | Src_Sql_Txt on {q.conn_cd}", body,
+                   {k: _plain(v) for k, v in params.items()}, q.db_ty)
         try:
             cur = self._source(q).cursor()
+        except Exception as e:  # noqa: BLE001
+            raise FileRejected("SOURCE_QUERY_FAILED", f"could not connect to {q.conn_cd}: {_source_error(e)}")
+        try:
             cur.execute(PLACEHOLDER.sub("?", body), values)
         except Exception as e:  # noqa: BLE001
-            raise FileRejected("SOURCE_QUERY_FAILED", f"the query on {q.conn_cd} failed: {sanitize_db_error(db.error_line(e))}")
+            raise FileRejected("SOURCE_QUERY_FAILED", f"the query on {q.conn_cd} failed: {_source_error(e)}")
         try:
             names = [d[0] for d in cur.description]
             layout = self._layout_for(q, opts, names)

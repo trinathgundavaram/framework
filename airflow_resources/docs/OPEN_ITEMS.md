@@ -1,6 +1,6 @@
 # Compliance Batch Framework (Airflow / Teradata): open items
 
-State at version 0.3.60. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
+State at version 0.3.61. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
 everything they list that is not below is done. Tested: 23 scenarios on Python 3.13 and 3.9 against a PostgreSQL
 stand-in for Teradata; the 8 DAG files parse and a step DAG runs (stubbed step) on Airflow 3.3.0. **Nothing has run on Teradata, the NAS or a real
 Airflow deployment yet.**
@@ -75,7 +75,8 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
 - **MNT** is made on the Sunday before the 3rd Tuesday only; a missed Sunday needs a manual run with `as_of`.
 - **Tables without a target list** (CDAG1 – 5, FA1 – 4; FA2 because its header names `RejectReasonCode6` twice) load
   by position: their staging data columns must be in the file's field order.
-- **Internal source queries** must name every column after its staging column (or use `TARGET_COLUMNS`).
+- **Internal source queries** must name every column after its staging column (or use `TARGET_COLUMNS`); a returned
+  column wins over its derived-column row (not the batch, source or load column).
 - **`StagingCreateDate`** is the load date, copied unchanged to core and the export. `Allow_Zero_Rcd_Ind` is kept in
   the table but not used.
 - **Admin commands** (`validate-config`, `health`, `locks`, `release-lock`, `close-batch`, `test-connection`) run
