@@ -90,6 +90,8 @@ apply to the command line).
    `airflow_resources/examples/cmsuniv_dev`, file name = Variable name).
 4. The framework tables already exist: they are created separately from `airflow_resources/sql/schema.sql` (replace
    `{{META_DB}}` with the metadata database). The framework never creates or alters tables.
+   Tables created before 0.3.60: `ALTER TABLE <META_DB>.ComplianceFileLoad RENAME Quarantine_Rsn_Cd TO Reject_Rsn_Cd;` and
+   `UPDATE <META_DB>.ComplianceFileLoad SET Load_Stat = 'REJECTED' WHERE Load_Stat = 'QUARANTINED';`
 5. Load the configuration tables, then run `validate-config` from the command line (below).
 
 Another project (or another cadence) gets its own DAGs: copy each step's DAG file, give the copy its own `dag_id`
@@ -478,7 +480,7 @@ batch). `DATA_NOT_PROVIDED` is a final status like `REQUEST_COMPLETE`. Not close
 close, data still comes in with a `LATE_ARRIVAL` override or a `REOPEN`. A file that is rejected does not
 change the batch status. `Allow_Zero_Rcd_Ind` is no longer used: a file with no data rows is always accepted as
 the source's delivery. The loads themselves keep their own status (`ComplianceFileLoad.Load_Stat`: `PROMOTED`,
-`SUPERSEDED`, `QUARANTINED`, ...).
+`SUPERSEDED`, `REJECTED`, ...).
 
 **Reopening a closed batch (`REOPEN` override).** A late or corrected file can always be loaded into a closed
 batch with an approved `LATE_ARRIVAL` / `CORRECTION` override (the batch stays closed). To open the batch again
@@ -536,7 +538,7 @@ A path with its own server uses that server with the NAS Connection's login. `$e
   name before: the same name and path may come back with updated data, after a rejection or after a load. For an
   open batch it replaces the batch's data; a closed batch still needs the usual override. Earlier rows stay as
   history. A load of the same file left unfinished by a run that stopped is closed as `FAILED_TECHNICAL`.
-- There is no quarantine path and no archive path to configure. The subfolders are created when first
+- There is no reject path and no archive path to configure. The subfolders are created when first
   needed and are never swept. Their names are the `ARCHIVE_FOLDER` / `ERROR_FOLDER` settings; with
   `ARCHIVE_BY_YEAR = true` a loaded file goes to `Archive/<year>/`.
 - A file moved into `Archive` / `Error` never replaces one already there: the name gets `_1`, `_2`, ... before
@@ -1054,6 +1056,7 @@ Rules:
 - The rows need no order. Where a column sits in the table decides its place: derived columns can be at the
   start, at the end or between file columns, and the file's values fill the remaining columns left to right.
 - A row for one table wins over the project's `*` row for the same column.
+- The same column can have different types in staging and core. `LOAD_DATE`, `LOAD_TIMESTAMP`, `RPT_START` and `RPT_END` are written to each table in that table's type (a date in a timestamp column is its midnight). Any other text staging column whose core column is a number, date, time or timestamp is converted to the core column's type as `DBC.ColumnsV` gives it, dates and times with the column's own `FORMAT` (e.g. `DATE FORMAT 'MM/DD/YYYY'`); an empty value becomes NULL. If a value does not convert (or a NOT NULL core column would be empty), the file or pull is rejected (`CORE_TYPE_MISMATCH`, the column named, no data shown), its staged rows are removed and core is not touched. Columns of the same kind in both tables are copied as they are.
 - **How the file's fields reach the table.** The columns in `ComplianceTargetColumnConfig` (and `Btch_ID`) are
   filled by the framework wherever they are in the table. The file's fields fill the other columns, decided by the
   first of these that applies to the file's source:
@@ -1105,7 +1108,7 @@ Load_Dtts` and start with a row ID:
 
 | `Project_Cd` | `Table_Nm` | `Column_Nm` | `Value_Cd` |
 |---|---|---|---|
-| `CMSUNIV` | `*` | `StagingCreateDate` | `LOAD_TIMESTAMP` |
+| `CMSUNIV` | `*` | `StagingCreateDate` | `LOAD_DATE` |
 | `CMSUNIV` | `*` | `Universe_Vrsn` | `VERSION` |
 | `CMSUNIV` | `*` | `Run_Ty` | `RUN_TYPE` |
 | `CMSUNIV` | `*` | `FileName` | `FILE_NAME` |
@@ -1201,7 +1204,7 @@ follow the framework's own column names:
 - Staging: the business columns in file order, then `btch_id VARCHAR(250)`, `load_id BIGINT`,
   `src_file_nm VARCHAR(1024)`, `stg_load_dtts TIMESTAMP(6) WITH TIME ZONE`. File values arrive as
   text: declare business columns VARCHAR, or types Teradata converts from text implicitly (a value that
-  does not convert quarantines the file as `FILE_PARSE_ERROR`).
+  does not convert rejects the file as `FILE_PARSE_ERROR`).
 - Rejected rows: the `FILE_PARSE_ERROR` message names the file line, both for bytes that are not valid
   in `FILE_ENCODING` and for a value Teradata refuses (untranslatable character, bad number or date,
   overflow). Teradata does not say which row of a batch failed, so the framework re-sends parts of the

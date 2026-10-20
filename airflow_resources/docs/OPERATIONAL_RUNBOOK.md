@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.58 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.60 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -462,7 +462,27 @@ VALUES ('CMSUNIV', 'ODAG3', '51', 'CMSAuth_MedHOK_PYMT_C_{VERSION}_{RUNTY}_{RPTS
 
 **Staging and core tables** are yours (DDL by your DBA). They need: the file's columns; `Btch_ID VARCHAR(250)`;
 a **source column** (e.g. `Src_Data_Key`) mapped to `SOURCE_ID` in `ComplianceTargetColumnConfig`; and the derived
-columns you map. A run-type column (mapped to `RUN_TYPE`) lets staging be cleared per run type.
+columns you map. A run-type column (mapped to `RUN_TYPE`) lets staging be cleared per run type. Staging (e.g. the
+`..._FILELAND_...` database) can keep every column as text; core can use real types (`DATE`, `TIMESTAMP(0)`,
+`DECIMAL`, `INTEGER` …): the framework converts on the way to core (below).
+
+**How a file goes from the NAS to core** (one FILE_LOAD run, file by file):
+
+| # | Step | Result |
+|---|---|---|
+| 1 | The name is matched to its file config and its open batch; a `ComplianceFileLoad` row is written | `RECEIVED` |
+| 2 | File checks (5.9) | Failed: `REJECTED`, file to `Error/`, error log in `ErrorLog/`, email |
+| 3 | The batch's earlier staging rows of the source are removed, the file's records inserted with the derived columns | `STAGED`, `Stg_Rcd_Cnt` |
+| 4 | Every text staging value whose core column has another type is test-converted to the core column's type and `FORMAT` (from `DBC.ColumnsV`) | A value that does not convert, or an empty NOT NULL column: `REJECTED` (`CORE_TYPE_MISMATCH`, column named), staged rows removed, core untouched |
+| 5 | One transaction: the batch's core rows of the source are removed and the staged rows copied in (converted as in step 4); the copied count must equal the staged count | `PROMOTED`, batch `SOURCE_DATA_READY` |
+| 6 | The file moves to `Archive/`, a line goes to the control report | |
+
+Conversion rules: an empty value becomes NULL; dates and times use the core column's own `FORMAT` (a DATE column
+without one has the system default, often `YY/MM/DD` or `YYYY-MM-DD`, so give it the file's format, e.g.
+`DATE FORMAT 'MM/DD/YYYY'`); the load date / time and the report dates are written in each table's own type (a date
+in a `TIMESTAMP` column is its midnight); columns of the same kind in both tables are copied as they are. Internal
+source pulls (SOURCE_LOAD) follow steps 3 to 5. A database error at any step (a missing table, the database down) is
+`FAILED_TECHNICAL`: nothing is half done, the file stays in the inbound folder and is tried again on the next run.
 
 ### 5.8 ComplianceInternalSourceConfig (internal sources, optional)
 
@@ -553,7 +573,7 @@ INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'Run_Ty', 'RUN_TYPE', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'Universe_Vrsn', 'VERSION', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'FileName', 'FILE_NAME', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'StagingCreateDate', 'LOAD_TIMESTAMP', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'StagingCreateDate', 'LOAD_DATE', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'Load_Dtts', 'LOAD_TIMESTAMP', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', 'ODAG3', 'ODAG_DE_Table3_2022_ID', 'ROW_SEQUENCE', NULL, 1);
 -- a value looked up from another table (one row, one column); per batch row: use {src_id} or {req_id}
@@ -713,7 +733,7 @@ One row per batch **and source**.
 ### 7.2 ComplianceFileLoad – loads and pulls
 
 One row per file pickup or internal-source pull (`Load_ID`). `Load_Stat` and `Rules_Stat`: section 8.13.
-`Quarantine_Rsn_Cd` holds the rejection reason (an audit event code), `Error_Txt` the technical detail,
+`Reject_Rsn_Cd` holds the rejection reason (an audit event code), `Error_Txt` the technical detail,
 `Stg_Rcd_Cnt` the rows staged. Pulls have `File_Share = QUERY:<connection or LOCAL>`.
 
 ### 7.3 ComplianceRequestFileDetail – the batch timeline
@@ -883,6 +903,8 @@ values (`COLUMN_VALUES REQUIRED` covers those).
 | `CONSTANT` | `Value_Txt` on every row |
 | `SQL` | The one value of the `SELECT` in `Value_Txt` (placeholders section 8.9) |
 
+The same column can have different types in staging and core. `LOAD_DATE`, `LOAD_TIMESTAMP`, `RPT_START` and `RPT_END` are written to each table in that table's type (a date in a timestamp column is its midnight). Any other text staging column whose core column is a number, date, time or timestamp is converted to the core column's type as `DBC.ColumnsV` gives it, dates and times with the column's own `FORMAT` (e.g. `DATE FORMAT 'MM/DD/YYYY'`); an empty value becomes NULL. If a value does not convert (or a NOT NULL core column would be empty), the file or pull is rejected (`CORE_TYPE_MISMATCH`, the column named, no data shown), its staged rows are removed and core is not touched. Columns of the same kind in both tables are copied as they are.
+
 ### 8.8 Override types (`ComplianceBatchOverride.Override_Ty`)
 
 | Type | For | Effect | Applied by |
@@ -937,7 +959,7 @@ close date).
 | `RECEIVED`, `STAGING`, `STAGED` | In progress | – |
 | `PROMOTED` | Loaded into core: the batch's current data | ACCEPTED |
 | `SUPERSEDED` | Was loaded, replaced by a newer load | ACCEPTED |
-| `QUARANTINED` | Rejected (`Quarantine_Rsn_Cd` says why); file moved to `Error` | REJECTED |
+| `REJECTED` | Rejected (`Reject_Rsn_Cd` says why); file moved to `Error` | REJECTED |
 | `FAILED_TECHNICAL` | System problem; tried again next run | FAILED |
 | `NO_DATA_YET` | Internal source had no rows before the close date; tried again | WAITING |
 | `DEFERRED` | Another run was loading into the same staging table; the next run picks the file / pull up (no error) | WAITING |
@@ -989,6 +1011,7 @@ Emailed by NOTIFY unless marked "no".
 | `FILE_TECHNICAL_FAILURE` | ERROR | yes | System problem loading a file |
 | `CORE_LOAD_ROWCOUNT_MISMATCH` | ERROR | yes | Core rows differ from staged rows |
 | `SOURCE_QUERY_FAILED`, `SOURCE_DATA_REJECTED` | ERROR | yes | Internal source query failed / data does not fit |
+| `CORE_TYPE_MISMATCH` | ERROR | yes | A file or pull has a value that does not convert to its core column's type; rejected |
 | `SOURCE_MISSING_AT_CLOSE` | WARNING | yes | No data by the close date; closed as `DATA_NOT_PROVIDED` |
 | `EXPORT_LOAD_FAILED` | ERROR | yes | Export of a batch failed (rolled back) |
 | `RULES_VALIDATION_FAILED` | ERROR | yes | A data quality rule failed |
@@ -1266,9 +1289,9 @@ ORDER BY c.Src_ID, d.Detail_ID;
 **12.3 Rejected or failed loads (last 7 days)**
 
 ```sql
-SELECT Load_ID, File_Path, Btch_ID, Load_Stat, Quarantine_Rsn_Cd, Error_Txt, Updated_Dtts
+SELECT Load_ID, File_Path, Btch_ID, Load_Stat, Reject_Rsn_Cd, Error_Txt, Updated_Dtts
 FROM HSABC_DEV.ComplianceFileLoad
-WHERE Load_Stat IN ('QUARANTINED', 'RULES_FAILED', 'FAILED_TECHNICAL') AND Updated_Dtts >= CURRENT_TIMESTAMP - INTERVAL '7' DAY
+WHERE Load_Stat IN ('REJECTED', 'RULES_FAILED', 'FAILED_TECHNICAL') AND Updated_Dtts >= CURRENT_TIMESTAMP - INTERVAL '7' DAY
 ORDER BY Updated_Dtts DESC;
 ```
 
@@ -1325,6 +1348,9 @@ ORDER BY d.Event_Dtts DESC;
 | `FILE_REJECTED_BATCH_CLOSED` | Batch already closed | `LATE_ARRIVAL` / `CORRECTION` / `REOPEN` override, then resend |
 | Version error in the name | `{VERSION}` ≠ `File_Vrsn_Cd` | Fix `File_Vrsn_Cd` or the file name |
 | Column count / header problems | File layout changed | Check `HEADER_NAMES` / `COLUMN_COUNT` / `TARGET_COLUMNS` |
+| File rejected `CORE_TYPE_MISMATCH` | A value does not convert to its core column's type or `FORMAT` (the message names the column and type), or a NOT NULL core column is empty | Fix the file, or the core column's type / `FORMAT` (5.7), then resend |
+| Load `FAILED_TECHNICAL`, "Object '…' does not exist" (error 3807) | A framework table (`sql/schema.sql`) or a staging / core table is missing, or the user has no rights | Create the table / grant; the next run loads the file |
+| File rejected `FILE_PARSE_ERROR` "line n" with "Invalid date" / "Invalid timestamp" | A typed **staging** column cannot take the file's value (staging is not converted) | Make the staging column text (5.7), or fix the file; the error log shows the record |
 | Load fails "must return one row" (SQL column) | `{btch_id}` lookup returns one row per source | Add `AND Src_ID = {src_id}` or use `{req_id}` |
 | "needs a column mapped to SOURCE_ID" | Staging / core / export table without source column | Add the column and a `SOURCE_ID` row (5.10) |
 | Batch not exported | Not due yet, held, or ad hoc not released | Step report `held` list; release (11.6) or wait |

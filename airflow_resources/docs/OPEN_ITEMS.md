@@ -1,7 +1,7 @@
 # Compliance Batch Framework (Airflow / Teradata): open items
 
-State at version 0.3.58. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
-everything they list that is not below is done. Tested: 21 scenarios on Python 3.13 and 3.9 against a PostgreSQL
+State at version 0.3.60. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
+everything they list that is not below is done. Tested: 23 scenarios on Python 3.13 and 3.9 against a PostgreSQL
 stand-in for Teradata; the 8 DAG files parse and a step DAG runs (stubbed step) on Airflow 3.3.0. **Nothing has run on Teradata, the NAS or a real
 Airflow deployment yet.**
 
@@ -17,7 +17,7 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
 |---|---|---|
 | 1 | `validate-config` | No ERROR except Facets (210) until its config exists; `HEADER_NAMES_PARTIAL` warnings for the tables without a target list (CDAG1 – 5, FA1 – 4) |
 | 2 | BATCH_CREATION on a Sunday before the 3rd Tuesday | DAILY, WEEKLY, MNT, IN1 batches; FA tables with their fixed dates |
-| 3 | One good and one bad file per file layout (general, MedHOK) | Good: `PROMOTED`, file in `Archive/`. Bad: `QUARANTINED`, file in `Error/`, error log in `ErrorLog/`, FILE_LOAD fails at once (no retry), incident + email |
+| 3 | One good and one bad file per file layout (general, MedHOK) | Good: `PROMOTED`, file in `Archive/`. Bad: `REJECTED`, file in `Error/`, error log in `ErrorLog/`, FILE_LOAD fails at once (no retry), incident + email |
 | 4 | SOURCE_LOAD for QNXT, AZ, SNPCC before and after the source tables are loaded | Empty first pull = no data, pulled again on the next runs until the batch closes |
 | 5 | An internal query with one misnamed column | Pull rejected `SOURCE_DATA_REJECTED` with the name |
 | 6 | EXPORT_LOAD (procedures) after the due date; ad hoc (CMS) only with `release` | Export rows stamped with the batch ID; re-export replaces them |
@@ -27,6 +27,7 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
 | 10 | FILE_LOAD while SOURCE_LOAD holds the same staging table; a lock left by a killed task | Deferred (no error); after 30 minutes `STAGING_LOCK_STALE` emailed with `release-lock` |
 | 11 | A Teradata logon failure (wrong password in the Connection) | Task retried once after 5 minutes, then fails with the incident |
 | 12 | NOTIFY | One email per open audit event through `smtp_default` |
+| 13 | A file into a core table with typed columns (`DATE`, `TIMESTAMP(0)`, `DECIMAL`); then one with a bad date | Values converted with the core column's `FORMAT`; the bad file `REJECTED` `CORE_TYPE_MISMATCH` naming the column, core unchanged |
 
 ### Still to configure
 

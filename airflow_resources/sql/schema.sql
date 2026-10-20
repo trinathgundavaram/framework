@@ -274,7 +274,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceFileLoad (
   Btch_ID           VARCHAR(250),
   Load_Stat         VARCHAR(25)   NOT NULL,
   Rules_Stat        VARCHAR(25)   DEFAULT 'NOT_RUN' NOT NULL,
-  Quarantine_Rsn_Cd VARCHAR(60),
+  Reject_Rsn_Cd VARCHAR(60),
   Stg_Rcd_Cnt       BIGINT,
   Error_Txt         VARCHAR(4000),
   Created_Dtts      TIMESTAMP(6) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,

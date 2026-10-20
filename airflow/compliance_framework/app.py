@@ -256,9 +256,9 @@ def _file_load(app, p: dict) -> ModuleOutcome:
             s.tally(app.pipeline.process_file(share, file))
         finally:
             s.reports, s.files = app.pipeline.control_report()
-        return ModuleOutcome("FILE_LOAD", s, 1 if s.quarantined or s.rejected else 0)
+        return ModuleOutcome("FILE_LOAD", s, 1 if s.rejected or s.rejected_closed else 0)
     s = app.pipeline.process_path(share, folder, _scope(app, p))
-    return ModuleOutcome("FILE_LOAD", s, 1 if s.errors or s.quarantined or s.rejected else 0)
+    return ModuleOutcome("FILE_LOAD", s, 1 if s.errors or s.rejected or s.rejected_closed else 0)
 
 
 def _source_load(app, p: dict) -> ModuleOutcome:
@@ -266,7 +266,7 @@ def _source_load(app, p: dict) -> ModuleOutcome:
     names = [n.strip() for n in (p.get("batch") or "").split(",") if n.strip()]
     s = app.source_loader.run(_scope(app, p), names or None, release=wanted(p.get("release")),
                                    hold=run_type_list(p.get("hold")))
-    return ModuleOutcome("SOURCE_LOAD", s, 1 if s.errors or s.quarantined or s.rejected else 0)
+    return ModuleOutcome("SOURCE_LOAD", s, 1 if s.errors or s.rejected or s.rejected_closed else 0)
 
 
 def _export_load(app, p: dict) -> ModuleOutcome:

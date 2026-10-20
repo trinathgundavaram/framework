@@ -38,7 +38,7 @@ class RuleEngineNotConfigured(TechnicalFailure):
 
 
 class FileRejected(FrameworkError):
-    """A file failed a structural pre-check; carries the quarantine event code."""
+    """A file failed a structural pre-check; carries the reject event code."""
 
     def __init__(self, event_ty: str, message: str):
         super().__init__(message)

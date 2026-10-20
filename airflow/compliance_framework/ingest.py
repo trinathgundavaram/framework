@@ -22,7 +22,8 @@ from compliance_framework.common import (DATA_NOT_PROVIDED, REQUEST_COMPLETE, SO
 from compliance_framework.config import FileConfig, MatchError, QueryConfig, Scope, TemplateMatcher, check_options
 from compliance_framework.db import Connection, Settings, source_connection
 from compliance_framework.filecheck import check_content, error_rows, file_columns
-from compliance_framework.load import (LoadContext, PLACEHOLDER, QUERY_PREFIX, build_layout, column_mapping, columns, file_details,
+from compliance_framework.load import (LoadContext, PLACEHOLDER, QUERY_PREFIX, build_layout, check_core_types, column_mapping,
+    columns, file_details,
     file_layout, raw_line, sanitize_db_error, sql_body, stage, stage_query, stage_rows, swap, write_error_log,
     write_reports)
 
@@ -31,7 +32,7 @@ from compliance_framework.load import (LoadContext, PLACEHOLDER, QUERY_PREFIX, b
 
 log = logging.getLogger(__name__)
 
-TERMINAL_LOAD_STATS = {"QUARANTINED", "PROMOTED", "SUPERSEDED"}
+TERMINAL_LOAD_STATS = {"REJECTED", "PROMOTED", "SUPERSEDED"}
 UNFINISHED_LOAD_STATS = ("RECEIVED", "STAGING", "STAGED")
 STALE_LOCK = timedelta(minutes=30)
 DEFER_WAIT_SECONDS = 30
@@ -93,8 +94,8 @@ class PathIngestSummary:
     """Result of one process_path() sweep."""
     scanned: int = 0
     promoted: int = 0
-    quarantined: int = 0
     rejected: int = 0
+    rejected_closed: int = 0
     other: int = 0
     skipped: int = 0
     locations: list[str] = field(default_factory=list)
@@ -109,10 +110,10 @@ class PathIngestSummary:
         self.outcomes.append(outcome)
         if outcome.result in PROMOTED_RESULTS:
             self.promoted += 1
-        elif outcome.result == "QUARANTINED":
-            self.quarantined += 1
-        elif outcome.result in REJECTED_RESULTS:
+        elif outcome.result == "REJECTED":
             self.rejected += 1
+        elif outcome.result in REJECTED_RESULTS:
+            self.rejected_closed += 1
         else:
             self.other += 1
 
@@ -258,7 +259,7 @@ class IngestPipeline:
         return sorted({parse_uri(c.src_file_path) for c in cfgmod.active_file_configs(self.conn, self.settings)})
 
     def health(self) -> dict[str, list[dict]]:
-        """Loads stuck mid-pipeline, and current quarantine counts by reason (design §15.3)."""
+        """Loads stuck mid-pipeline, and current reject counts by reason (design §15.3)."""
         q = partial(db.fetch_all, self.conn)
         stale_before = self.clock.now() - timedelta(minutes=self.settings.heartbeat_stale_minutes)
         return {
@@ -266,8 +267,8 @@ class IngestPipeline:
                 """SELECT Load_ID, File_Path, Load_Stat, Updated_Dtts FROM ComplianceFileLoad
                     WHERE Load_Stat IN ('RECEIVED','STAGING','STAGED','RULES_RUNNING','FAILED_TECHNICAL')
                       AND Updated_Dtts < %s ORDER BY Load_ID""", stale_before),
-            "quarantine_by_reason": q("""SELECT Quarantine_Rsn_Cd, count(*) AS n FROM ComplianceFileLoad
-                                          WHERE Load_Stat='QUARANTINED' GROUP BY Quarantine_Rsn_Cd ORDER BY n DESC"""),
+            "rejected_by_reason": q("""SELECT Reject_Rsn_Cd, count(*) AS n FROM ComplianceFileLoad
+                                          WHERE Load_Stat='REJECTED' GROUP BY Reject_Rsn_Cd ORDER BY n DESC"""),
         }
 
     def _unmoved(self, info: FileInfo) -> Optional[dict]:
@@ -310,11 +311,11 @@ class IngestPipeline:
         try:
             m = matcher.match(name)
         except MatchError as e:
-            return self._quarantine(load_id, info, e.event_ty, str(e), e.cfg)
+            return self._reject_file(load_id, info, e.event_ty, str(e), e.cfg)
         cfg = m.cfg
         share, folder = parse_uri(cfg.src_file_path)
         if info.share != share or dirname(info.path) != folder:
-            return self._quarantine(load_id, info, "FILE_REJECTED_UNPARSEABLE",
+            return self._reject_file(load_id, info, "FILE_REJECTED_UNPARSEABLE",
                                     f"{name} matched Cfg_ID {cfg.cfg_id} but is not in its inbound location", cfg)
         run_ty = code(m.run_ty)
         batch, override = self._select_batch(cfg, run_ty, m.rpt_start, m.rpt_end)
@@ -322,16 +323,16 @@ class IngestPipeline:
             event = "FILE_REJECTED_BATCH_CLOSED" if override == "CLOSED" else "FILE_REJECTED_NO_BATCH"
             detail = ("every batch for this period is closed and no approved, valid override exists"
                       if override == "CLOSED" else "no batch exists for this period")
-            return self._quarantine(load_id, info, event,
+            return self._reject_file(load_id, info, event,
                                     f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}/{run_ty} "
                                     f"{m.rpt_start}..{m.rpt_end}: {detail}", cfg)
         with self.conn.transaction():
             self.conn.execute(
-                """UPDATE ComplianceFileLoad SET Cfg_ID=%s, Req_ID=%s, Btch_ID=%s, Load_Stat='STAGING', Quarantine_Rsn_Cd=NULL, Error_Txt=NULL,
+                """UPDATE ComplianceFileLoad SET Cfg_ID=%s, Req_ID=%s, Btch_ID=%s, Load_Stat='STAGING', Reject_Rsn_Cd=NULL, Error_Txt=NULL,
                           Updated_Dtts=%s WHERE Load_ID=%s""",
                 (cfg.cfg_id, batch["req_id"], batch["btch_id"], self.clock.now(), load_id))
         if info.size == 0 and cfg.has_header:
-            return self._quarantine(load_id, info, "FILE_PARSE_ERROR", "zero-byte file but a header is expected",
+            return self._reject_file(load_id, info, "FILE_PARSE_ERROR", "zero-byte file but a header is expected",
                                     cfg, batch)
         stage_table = db.batch_key(f"STAGE {cfg.stg_schema_nm}.{cfg.stg_table_nm}".upper())
         with db.held(self.conn, db.req_key(batch), self.settings.lock_timeout_seconds):
@@ -416,7 +417,7 @@ class IngestPipeline:
                                   (sha, self.clock.now(), load_id))
             other = self.conn.execute(
                 """SELECT TOP 1 Load_ID, Btch_ID FROM ComplianceFileLoad WHERE File_Sha256=%s AND Req_ID<>%s
-                      AND Load_Stat <> 'QUARANTINED'""", (sha, batch["req_id"])).fetchone()
+                      AND Load_Stat <> 'REJECTED'""", (sha, batch["req_id"])).fetchone()
             if other:
                 with self.conn.transaction():
                     self.logger.audit("FILE_SAME_CONTENT_OTHER_BATCH", load_id=load_id, req_id=req_id,
@@ -430,7 +431,7 @@ class IngestPipeline:
                                       self.settings, opts, details,
                                       file_columns(layout) if opts.value_rules or opts.field_rules else None)
                 if found:
-                    return self._quarantine(load_id, info, "FILE_CONTENT_CHECK_FAILED",
+                    return self._reject_file(load_id, info, "FILE_CONTENT_CHECK_FAILED",
                                             f"{len(found)} problem(s); first: {found[0][0]}: {found[0][1]}", cfg, batch,
                                             rows=error_rows(found, details))
             log.info("FILE_LOAD | %s | load %s | batch %s | %s bytes read", basename(info.path), load_id, batch["btch_id"],
@@ -439,9 +440,13 @@ class IngestPipeline:
                 staged_rows = stage(self.conn, self.settings, file_path=path, cfg=cfg, layout=layout, ctx=ctx,
                                     opts=opts)
             except FileRejected as e:
-                return self._quarantine(load_id, info, e.event_ty, str(e), cfg, batch, local_path=path)
+                return self._reject_file(load_id, info, e.event_ty, str(e), cfg, batch, local_path=path)
         log.info("FILE_LOAD | %s | load %s | %s data row(s) staged into %s.%s", basename(info.path), load_id, staged_rows,
                  cfg.stg_schema_nm, cfg.stg_table_nm)
+        try:
+            check_core_types(self.conn, cfg, layout, ctx)
+        except FileRejected as e:
+            return self._reject_file(load_id, info, e.event_ty, str(e), cfg, batch)
         with self.conn.transaction():
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, Updated_Dtts=%s "
                               "WHERE Load_ID=%s", (staged_rows, self.clock.now(), load_id))
@@ -528,11 +533,11 @@ class IngestPipeline:
 
     def _rejected_closed(self, load_id, detail, now) -> None:
         self.conn.execute(
-            """UPDATE ComplianceFileLoad SET Load_Stat='QUARANTINED', Quarantine_Rsn_Cd='FILE_REJECTED_BATCH_CLOSED',
+            """UPDATE ComplianceFileLoad SET Load_Stat='REJECTED', Reject_Rsn_Cd='FILE_REJECTED_BATCH_CLOSED',
                       Rules_Stat='NOT_RUN', Error_Txt=%s, Updated_Dtts=%s WHERE Load_ID=%s""",
             (detail[:4000] if detail else detail, now, load_id))
 
-    def _quarantine(self, load_id: int, info: FileInfo, event_ty: str, message: str,
+    def _reject_file(self, load_id: int, info: FileInfo, event_ty: str, message: str,
                     cfg: Optional[FileConfig] = None, batch: Optional[dict] = None,
                     local_path: Optional[str] = None, rows: Optional[list] = None) -> IngestOutcome:
         error_file = self._error_file(info, event_ty, message, local_path, rows)
@@ -540,7 +545,7 @@ class IngestPipeline:
             message = f"{message}; details in {error_file}"
         with self.conn.transaction():
             self.conn.execute(
-                """UPDATE ComplianceFileLoad SET Load_Stat='QUARANTINED', Quarantine_Rsn_Cd=%s, Error_Txt=%s,
+                """UPDATE ComplianceFileLoad SET Load_Stat='REJECTED', Reject_Rsn_Cd=%s, Error_Txt=%s,
                           Updated_Dtts=%s WHERE Load_ID=%s""", (event_ty, message[:4000], self.clock.now(), load_id))
             if cfg:
                 self.conn.execute("UPDATE ComplianceFileLoad SET Cfg_ID=%s WHERE Load_ID=%s", (cfg.cfg_id, load_id))
@@ -552,7 +557,7 @@ class IngestPipeline:
             self.logger.audit(event_ty, load_id=load_id, file_ref=self.store.uri(info.share, info.path),
                               description=message, **ctx)
         self._archive(info, load_id, rejected=True)
-        return IngestOutcome(load_id, "QUARANTINED", event_ty=event_ty, message=message,
+        return IngestOutcome(load_id, "REJECTED", event_ty=event_ty, message=message,
                              req_id=batch["req_id"] if batch else None)
 
     def _error_file(self, info, event_ty: str, message: str, local_path: Optional[str],
@@ -777,6 +782,10 @@ class SourceLoader:
             return self._not_yet(load_id, b, due)
         if rows == 0 and b["req_stat"] == SOURCE_DATA_READY_NO_DATA:
             return self._still_empty(load_id, b)
+        try:
+            check_core_types(self.conn, q, layout, ctx)
+        except FileRejected as e:
+            return self._reject(load_id, b, q, e.event_ty, str(e), ref)
         with self.conn.transaction():
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, Updated_Dtts=%s "
                               "WHERE Load_ID=%s", (rows, self.clock.now(), load_id))
@@ -838,12 +847,12 @@ class SourceLoader:
 
     def _reject(self, load_id: int, b: dict, q: QueryConfig, event_ty: str, message: str, ref: str) -> IngestOutcome:
         with self.conn.transaction():
-            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='QUARANTINED', Quarantine_Rsn_Cd=%s, Error_Txt=%s, "
+            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='REJECTED', Reject_Rsn_Cd=%s, Error_Txt=%s, "
                               "Updated_Dtts=%s WHERE Load_ID=%s", (event_ty, message[:4000], self.clock.now(), load_id))
             self.logger.audit(event_ty, load_id=load_id, file_ref=ref[:1024], description=message, project_cd=q.project_cd,
                               table_nm=q.table_nm, src_id=q.src_id, run_ty=b["run_ty"], req_id=b["req_id"],
                               btch_id=b["btch_id"])
-        return IngestOutcome(load_id, "QUARANTINED", event_ty=event_ty, message=message, req_id=b["req_id"])
+        return IngestOutcome(load_id, "REJECTED", event_ty=event_ty, message=message, req_id=b["req_id"])
 
 
 def _plain(value):
