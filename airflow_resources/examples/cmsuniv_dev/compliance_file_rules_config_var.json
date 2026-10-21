@@ -1,0 +1,8 @@
+{
+  "td_conn_var": "DEV",
+  "meta_db": "HSABC_DEV",
+  "load_env": "DEV",
+  "email_recipient": "TRINATH_gundavaram@example.com",
+  "project": "CMSUNIV",
+  "pool": "gre_rules"
+}

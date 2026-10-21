@@ -603,7 +603,7 @@ class Settings:
 
     file_rules_mode: str = "GATE"
     rule_engine: str = "gre"
-    gre_entrypoint: Optional[str] = None
+    gre_entrypoint: Optional[str] = "compliance_framework.export:run_gre"
 
     release_time: Optional[str] = None
 

@@ -264,7 +264,8 @@ class ExportLoader:
             self.logger.batch_event("EXPORT_LOADED", req_id=b["req_id"], btch_id=b["btch_id"], detail=detail)
 
 
-# rules: File rules, run after the core load (design §9.4); they never block or undo a load.
+# rules: Data quality rules of each exported batch (the table's rule group), run after the export; they never block or
+# undo a load or an export.
 
 PENDING_RULES_STATS = ("NOT_RUN", "ERROR")
 CORE_LOADS = ("FILE_LOADED", "LATE_ARRIVAL_LOADED", "CORRECTION_LOADED")
@@ -272,19 +273,21 @@ CORE_LOADS = ("FILE_LOADED", "LATE_ARRIVAL_LOADED", "CORRECTION_LOADED")
 
 @dataclass
 class RulesSummary:
-    """Result of one FILE_RULES run: Load_IDs by outcome."""
+    """Result of one FILE_RULES run: batch IDs by outcome."""
     evaluated: int = 0
-    passed: list[int] = field(default_factory=list)
-    warned: list[int] = field(default_factory=list)
-    failed: list[int] = field(default_factory=list)
-    skipped: list[int] = field(default_factory=list)
-    deferred: list[int] = field(default_factory=list)
-    waiting_for_export: list[int] = field(default_factory=list)
+    passed: list[str] = field(default_factory=list)
+    warned: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    deferred: list[str] = field(default_factory=list)
+    waiting_for_export: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
 class RulesRunner:
-    """Runs the bound rules for every loaded file that has not had them yet."""
+    """Runs the rules of every batch whose loaded data has not had them yet, one batch at a time: the rules of the
+    batch's table (rule group = table, variant = run type, unless ComplianceRuleBinding names others), filtered to
+    the batch. A table with an export table waits for the batch's export."""
 
     def __init__(self, conn, clock: Clock, settings: Settings, rule_engine: RuleEngine):
         self.conn, self.clock, self.settings, self.rules = conn, clock, settings, rule_engine
@@ -292,30 +295,33 @@ class RulesRunner:
         self._exports: dict = {}
 
     def run(self, scope: Optional[Scope] = None) -> RulesSummary:
-        """The loaded files of a scope (a project, a table group or table, a run type), or of every project."""
+        """The batches of a scope (a project, a table group or table, a run type), or of every project."""
         s = RulesSummary()
         where, params = (scope or Scope()).sql("c")
         rows = self.conn.execute(
-            "SELECT f.Load_ID, f.Req_ID, f.Btch_ID, c.Project_Cd, c.Table_Nm FROM ComplianceFileLoad f "
+            "SELECT f.Load_ID, f.Req_ID, f.Btch_ID, f.Stg_Rcd_Cnt, c.Project_Cd, c.Table_Nm FROM ComplianceFileLoad f "
             "JOIN ComplianceRequestControl c ON c.Req_ID = f.Req_ID "
             "WHERE f.Load_Stat = 'FILE_LOADED' AND f.Rules_Stat IN ('NOT_RUN', 'ERROR')" + where + " ORDER BY f.Load_ID",
             params).fetchall()
         self._exports = {(e.project_cd, e.table_nm): e for e in cfgmod.active_export_configs(self.conn, self.settings)}
         waiting = self._not_exported([r["load_id"] for r in rows
                                       if (r["project_cd"], r["table_nm"]) in self._exports])
+        batches: dict[str, list[dict]] = {}
         for r in rows:
-            if r["load_id"] in waiting:
-                s.waiting_for_export.append(r["load_id"])
+            batches.setdefault(r["btch_id"], []).append(r)
+        for btch_id, loads in batches.items():
+            if any(r["load_id"] in waiting for r in loads):
+                s.waiting_for_export.append(btch_id)
                 continue
-            key = db.req_key(r)
+            key = f"RULES:{btch_id}"
             if not db.try_lock(self.conn, key):
-                s.deferred.append(r["load_id"])
+                s.deferred.append(btch_id)
                 continue
             try:
-                self._run_load(r["load_id"], s)
+                self._run_batch(btch_id, [r["load_id"] for r in loads], s)
             except Exception as e:  # noqa: BLE001
-                log.exception("rules for load %s failed", r["load_id"])
-                s.errors.append(f"load {r['load_id']}: {db.error_text(e)}")
+                log.exception("rules for batch %s failed", btch_id)
+                s.errors.append(f"{btch_id}: {db.error_text(e)}")
             finally:
                 db.unlock(self.conn, key)
         return s
@@ -337,52 +343,62 @@ class RulesRunner:
                 [*core_loads, *chunk, *chunk]).fetchall())
         return out
 
-    def _run_load(self, load_id: int, s: RulesSummary) -> None:
-        load = self.conn.execute("SELECT * FROM ComplianceFileLoad WHERE Load_ID=%s", (load_id,)).fetchone()
-        if load["load_stat"] != "FILE_LOADED" or load["rules_stat"] not in PENDING_RULES_STATS:
+    def _run_batch(self, btch_id: str, load_ids: list[int], s: RulesSummary) -> None:
+        ids, chunk = db.in_list(load_ids)
+        loads = self.conn.execute(f"SELECT * FROM ComplianceFileLoad WHERE Load_ID IN ({ids})", chunk).fetchall()
+        loads = [l for l in loads if l["load_stat"] == "FILE_LOADED" and l["rules_stat"] in PENDING_RULES_STATS]
+        if not loads:
             return
         s.evaluated += 1
-        b = get_batch(self.conn, load["req_id"])
-        ctx = dict(project_cd=b["project_cd"], table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"],
-                   req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id)
-        bindings = cfgmod.rule_bindings(self.conn, b["project_cd"], b["table_nm"], b["src_id"], b["run_ty"])
-        cfg = cfgmod.target_tables(self.conn, b["project_cd"], b["table_nm"], b["src_id"], settings=self.settings)
-        if not bindings or cfg is None:
-            self._set(load_id, "SKIPPED")
-            s.skipped.append(load_id)
+        b = get_batch(self.conn, loads[0]["req_id"])
+        ctx = dict(project_cd=b["project_cd"], table_nm=b["table_nm"], run_ty=b["run_ty"], btch_id=btch_id)
+        if not any(l["stg_rcd_cnt"] for l in loads):
+            self._set(loads, "SKIPPED")
+            log.info("FILE_RULES | %s | no data rows: rules skipped", btch_id)
+            s.skipped.append(btch_id)
             return
+        bindings = cfgmod.rule_bindings(self.conn, b["project_cd"], b["table_nm"], "*", b["run_ty"]) or [
+            cfgmod.RuleBinding(b["project_cd"], b["table_nm"], "*", b["run_ty"], b["table_nm"], b["run_ty"])]
         exp = self._exports.get((b["project_cd"], b["table_nm"]))
+        log.info("FILE_RULES | %s | rule group(s) %s", btch_id,
+                 ", ".join(f"{x.gre_rule_group}/{x.gre_rule_variant}" for x in bindings))
         outcome = self.rules.run(self.conn, bindings, {
-            "scope": "FILE_LEVEL", "btch_id": b["btch_id"], "load_id": load_id,
-            "project_cd": b["project_cd"], "table_nm": b["table_nm"], "src_id": b["src_id"], "run_ty": b["run_ty"],
-            "rpt_start_dt_key": b["rpt_start_dt_key"], "rpt_end_dt_key": b["rpt_end_dt_key"],
-            "req_dt_key": b["req_dt_key"], "stg_schema_nm": cfg.stg_schema_nm, "stg_table_nm": cfg.stg_table_nm,
-            "core_schema_nm": cfg.core_schema_nm, "core_table_nm": cfg.core_table_nm,
-            "exp_schema_nm": exp.exp_schema_nm if exp else None, "exp_table_nm": exp.exp_table_nm if exp else None,
-            "exp_btch_id": b["btch_id"] if exp else None},
-            self.settings.file_rules_mode)
+            "scope": "BATCH_LEVEL", "btch_id": btch_id, "project_cd": b["project_cd"], "table_nm": b["table_nm"],
+            "run_ty": b["run_ty"], "rpt_start_dt_key": b["rpt_start_dt_key"], "rpt_end_dt_key": b["rpt_end_dt_key"],
+            "req_dt_key": b["req_dt_key"], "exp_schema_nm": exp.exp_schema_nm if exp else None,
+            "exp_table_nm": exp.exp_table_nm if exp else None}, self.settings.file_rules_mode)
         with self.conn.transaction():
-            self._set(load_id, outcome.status)
             if outcome.status == ERROR:
+                self._set(loads, ERROR)
                 detail = sanitize_db_error(outcome.error or "")
-                if load["rules_stat"] != ERROR:
+                if all(l["rules_stat"] != ERROR for l in loads):
                     self.logger.audit("RULES_ENGINE_TECHNICAL_FAILURE", description=detail, **ctx)
-                s.errors.append(f"load {load_id}: {detail}")
-            elif not outcome.passed:
+                s.errors.append(f"{btch_id}: {detail}")
+                return
+            if outcome.rules_run == 0:
+                self._set(loads, "SKIPPED")
+                s.skipped.append(btch_id)
+                return
+            self._set(loads, outcome.status)
+            if not outcome.passed:
                 detail = "failed rules: " + ", ".join(outcome.failed_rules)
-                self.logger.batch_event("FILE_RULES_FAILED", req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id,
-                                        detail=detail)
+                self._events(loads, "FILE_RULES_FAILED", detail)
                 self.logger.audit("RULES_VALIDATION_FAILED", description=detail, **ctx)
-                s.failed.append(load_id)
+                s.failed.append(btch_id)
             else:
                 detail = "warnings: " + ", ".join(outcome.warned_rules) if outcome.warned_rules else None
-                self.logger.batch_event("FILE_RULES_PASSED", req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id,
-                                        detail=detail)
-                (s.warned if outcome.warned_rules else s.passed).append(load_id)
+                self._events(loads, "FILE_RULES_PASSED", detail)
+                (s.warned if outcome.warned_rules else s.passed).append(btch_id)
 
-    def _set(self, load_id: int, rules_stat: str) -> None:
-        self.conn.execute("UPDATE ComplianceFileLoad SET Rules_Stat=%s, Updated_Dtts=%s WHERE Load_ID=%s",
-                          (rules_stat, self.clock.now(), load_id))
+    def _events(self, loads: list[dict], event_ty: str, detail: Optional[str]) -> None:
+        for l in loads:
+            self.logger.batch_event(event_ty, req_id=l["req_id"], btch_id=l["btch_id"], load_id=l["load_id"],
+                                    detail=detail)
+
+    def _set(self, loads: list[dict], rules_stat: str) -> None:
+        ids, chunk = db.in_list([l["load_id"] for l in loads])
+        self.conn.execute(f"UPDATE ComplianceFileLoad SET Rules_Stat=%s, Updated_Dtts=%s WHERE Load_ID IN ({ids})",
+                          [rules_stat, self.clock.now(), *chunk])
 
 
 # gre_bridge: File rules through the GRE rules engine: GRE_ENTRYPOINT=compliance_framework.export:run_gre.
@@ -414,27 +430,41 @@ def _configured(env_key: str) -> dict:
 
 
 def run_gre(conn, rule_group: str, rule_variant: str, run_params: dict) -> list:
-    """One GRE rule_group for one staged file -> [{"rule_ref", "passed"}]; raises on a technical failure."""
+    """One GRE rule_group for one batch -> [{"rule_ref", "passed"}]; raises on a technical failure.
+
+    run_key = the batch ID (a rerun of the batch refreshes its results); the rules see only the batch's rows
+    (extra_filters: GRE_BATCH_COLUMN = the batch ID); the framework's values are text_params ({btch_id}, {run_ty} ...
+    in a rule; run_type / batch_schedule for gre_exceptions); run_params are only the Variable's own (they also
+    filter the record count by column).
+    """
     meta_db = os.environ.get("GRE_META_DB")
     if not meta_db:
         raise RuntimeError("GRE_META_DB is not set")
-    run_key = f"CBF_LOAD_{run_params['load_id']}"
-    params = {**_configured("GRE_RUN_PARAMS"), **{k: _text(v) for k, v in run_params.items() if v is not None}}
+    btch_id = run_params["btch_id"]
     variant = None if rule_variant in (None, "", "*") else rule_variant
-    outcome, exit_code = _run_rules()(project_name=os.environ.get("GRE_PROJECT_NAME") or None, rule_group=rule_group,
-                                      rule_variant=variant, run_key=run_key, run_params=params,
-                                      extra_filters=_configured("GRE_EXTRA_FILTERS"),
-                                      text_params=_configured("GRE_TEXT_PARAMS"),
-                                      log_level=os.environ.get("GRE_LOG_LEVEL") or "ERROR")
+    text_params = {**{k: _text(v) for k, v in run_params.items() if v is not None}, "run_type": run_params.get("run_ty"),
+                   "batch_schedule": btch_id, **_configured("GRE_TEXT_PARAMS")}
+    extra_filters = {**_configured("GRE_EXTRA_FILTERS"), (os.environ.get("GRE_BATCH_COLUMN") or "Btch_ID"): btch_id}
+    kwargs = dict(project_name=os.environ.get("GRE_PROJECT_NAME") or run_params.get("project_cd") or None,
+                  process_name=os.environ.get("GRE_PROCESS_NAME") or run_params.get("project_cd") or None,
+                  rule_group=rule_group, rule_variant=variant, run_key=btch_id, run_params=_configured("GRE_RUN_PARAMS"),
+                  extra_filters=extra_filters, text_params=text_params,
+                  log_level=os.environ.get("GRE_LOG_LEVEL") or "ERROR")
+    run_rules = _run_rules()
+    logger.info("FILE_RULES | %s | GRE rule_group=%s rule_variant=%s run_key=%s extra_filters=%s", btch_id,
+                rule_group, variant, btch_id, extra_filters)
+    outcome, exit_code = run_rules(**kwargs)
     summary = (outcome or {}).get("rule_groups", {}).get(rule_group)
     if summary is None:
         raise RuntimeError(f"GRE returned nothing for rule_group {rule_group} (exit_code={exit_code})")
     if summary["status"] == "NO_RULES":
         logger.warning("GRE rule_group %s (variant %s) has no active rules", rule_group, variant)
         return []
-    if summary["status"] != "COMPLETED" or summary.get("errored"):
-        raise RuntimeError(f"GRE rule_group {rule_group} did not complete: status={summary['status']} "
-                           f"errored={summary.get('errored')}")
+    if summary["status"] != "COMPLETED":
+        raise RuntimeError(f"GRE rule_group {rule_group} did not complete: status {summary['status']}")
+    if summary.get("errored"):
+        raise RuntimeError(f"GRE rule_group {rule_group}: {summary['errored']} rule(s) could not run (see the GRE log "
+                           "and gre_rule_errors for run_key " + run_params["btch_id"] + ")")
     rows = conn.execute(f"SELECT rule_id, status FROM {ident(meta_db)}.gre_results WHERE run_id = %s",
                         (summary["run_id"],)).fetchall()
     if not rows:

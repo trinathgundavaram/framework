@@ -23,7 +23,7 @@ airflow/
     ingest.py      FILE_LOAD and SOURCE_LOAD
     filecheck.py   FILE_CHECK
     load.py        staging / core layout, staging load, core swap, control report and error log
-    export.py      EXPORT_LOAD, FILE_RULES (data quality rules, no DAG yet) and the GRE bridge
+    export.py      EXPORT_LOAD, FILE_RULES (data quality rules per exported batch) and the GRE bridge
     config.py      metadata rows and validate-config, scope of a run, file check options
     db.py          Teradata layer (transactions, locks), connections (Teradata, NAS, source servers), settings
     audit.py       batch timeline, exceptions audit, notifications
@@ -60,8 +60,12 @@ airflow_resources/                (not deployed with the DAGs)
    | `BATCH_CLOSE` | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CLOSE` | `compliance_batch_close_config_var` |
    | `NOTIFY` | `OSSTD_CORE_CMS_COMPLIANCE_NOTIFY` | `compliance_notify_config_var` |
 
-   The data quality step (`FILE_RULES`) has no DAG for now: add one when the rules are set up (a DAG file for step
-   `FILE_RULES`, below). The admin commands run from the command line (below).
+   | `FILE_RULES` | `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` | `compliance_file_rules_config_var` |
+
+   FILE_RULES calls the GRE code in `<dags>/rules_engine` (the `airflow/rules_engine` folder of the GRE repository)
+   and runs in the Airflow pool `gre_rules`: create it once with 1 slot (Admin → Pools). EXPORT_LOAD starts it and
+   waits for it in deferred mode, which needs the Airflow triggerer. The admin commands run from the command line
+   (below).
 
 2. **Two Airflow Connections**, both named in the Variables: Teradata (`td_conn_var`) and the NAS file
    server (`wdc_comp_oper_nas_var`, only needed by the DAGs that load files). The bridge exports them as
@@ -767,29 +771,35 @@ file again adds no new row.
 The rules engine is not part of the load. `FILE_LOAD` validates the file, stages it and loads it to
 core; it never calls the rules engine and never waits for it.
 
-`FILE_RULES` is a separate step. It takes every file that is loaded to core and has not had its rules
-yet (`ComplianceFileLoad.Load_Stat = FILE_LOADED`, `Rules_Stat = NOT_RUN`), runs the rules bound to it in
-`ComplianceRuleBinding`, and records the outcome:
+`FILE_RULES` is a separate step (DAG `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES`), started by EXPORT_LOAD, which waits
+for it. It takes every **batch** whose loaded data has not had its rules yet (`Load_Stat = FILE_LOADED`,
+`Rules_Stat = NOT_RUN` or `ERROR`; a table with an export table only after the batch's export), one batch at a time,
+and runs that table's GRE rules on that batch's rows only, calling the GRE's `run_rules()` in the task:
 
-| Outcome | `Rules_Stat` | What else happens |
+| GRE argument | Value |
+|---|---|
+| `rule_group`, `rule_variant` | The batch's table and run type (`CDAG2`, `MNT`), or the `ComplianceRuleBinding` rows of the table |
+| `run_key` | The batch ID |
+| `extra_filters` | `{<gre.batch_column, default Btch_ID>: <batch ID>}` plus the Variable's `gre.extra_filters`: the GRE filters each rule's result and its record count to the batch |
+| `text_params` | The batch's values (`btch_id`, `run_ty`, `table_nm`, `project_cd`, report dates; `{name}` in a rule) and `run_type` / `batch_schedule` (written to `gre_exceptions`) plus `gre.text_params` |
+| `run_params` | Only the Variable's `gre.run_params` (each key also filters the record count by that column) |
+| `project_name`, `process_name` | `gre.project_name` / `gre.process_name`, default the project |
+
+| Outcome | `Rules_Stat` of the batch's loads | What else happens |
 |---|---|---|
-| All rules pass | `PASSED` (`PASSED_WITH_WARNINGS` under `FILE_RULES_MODE` = `ANNOTATE`) | `FILE_RULES_PASSED` on the batch timeline |
+| All rules pass | `PASSED` (`PASSED_WITH_WARNINGS` under `FILE_RULES_MODE` = `ANNOTATE`) | `FILE_RULES_PASSED` on the timeline |
 | A rule fails | `FAILED` | `FILE_RULES_FAILED` on the timeline, `RULES_VALIDATION_FAILED` audit event, emailed by `NOTIFY` |
-| No binding for the file | `SKIPPED` | nothing |
-| The engine could not run | `ERROR` | audited once, the step exits 1, the file is tried again on the next run |
+| No active rules, or no data rows | `SKIPPED` | nothing (no data rows: the GRE is not called) |
+| A rule could not run, or the GRE failed | `ERROR` | audited once, the batch is tried again on the next run, the task fails at the end |
 
-- A rule failure changes nothing else: the data stays in core, the file stays in `Archive`, the batch
-  keeps its status and closes as usual. Acting on a failed rule is a decision for the project.
-- Only the batch's current load is checked; a load replaced by a newer file is not. A file loaded again
-  is checked again.
-- The engine is given the staging and the core table of the file (`stg_schema_nm`, `stg_table_nm`,
-  `core_schema_nm`, `core_table_nm`) with the batch and load ids, and its export table (`exp_schema_nm`,
-  `exp_table_nm`) when the table has one (`EXPORT_LOAD`).
-- **Airflow:** the rules have no DAG for now. When they are set up, add `osstd_core_cms_compliance_file_rules.py`
-  (a copy of a step DAG file with step `FILE_RULES`, `dag_id` `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` and Variable
-  `compliance_file_rules_config_var`), start it from `EXPORT_LOAD` (or `FILE_LOAD` / `SOURCE_LOAD`) through
-  `trigger_dags`, and let it start `NOTIFY` so a failed rule is emailed. Until then
-  `python -m compliance_framework.cli run --module FILE_RULES --project <project>` runs them by hand.
+- A rule failure changes nothing else: the data stays in core and in the export, the batch keeps its status and
+  closes as usual.
+- One batch at a time in one task, in the pool `gre_rules` (1 slot): the GRE tables are never written by two rules
+  runs at once; EXPORT_LOAD waits, so the export tables are not written while their rules read them.
+- The GRE writes each rule's final SQL to the task log. `python -m compliance_framework.cli run --module FILE_RULES
+  --project <project>` runs the step by hand.
+- An EXPORT_LOAD with a failed batch fails and does not start FILE_RULES; the batches it did export get their rules
+  on the next EXPORT_LOAD (they stay `NOT_RUN`).
 
 
 ## Failure tickets and emails

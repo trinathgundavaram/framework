@@ -1,3 +1,3 @@
 """CMS Compliance Framework."""
 
-__version__ = "0.3.64"
+__version__ = "0.3.65"

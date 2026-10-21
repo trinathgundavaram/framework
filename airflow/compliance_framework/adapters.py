@@ -314,6 +314,7 @@ class RuleOutcome:
     failed_rules: list[str] = field(default_factory=list)
     warned_rules: list[str] = field(default_factory=list)
     error: Optional[str] = None
+    rules_run: int = 1
 
     @property
     def passed(self) -> bool:
@@ -344,10 +345,10 @@ class CallableRuleEngine(RuleEngine):
             return RuleOutcome(ERROR, error=str(e))
         failed = [r["rule_ref"] for r in results if not r.get("passed")]
         if not failed:
-            return RuleOutcome(PASSED)
+            return RuleOutcome(PASSED, rules_run=len(results))
         if mode == "GATE":
-            return RuleOutcome(FAILED, failed_rules=failed)
-        return RuleOutcome(PASSED_WITH_WARNINGS, warned_rules=failed)
+            return RuleOutcome(FAILED, failed_rules=failed, rules_run=len(results))
+        return RuleOutcome(PASSED_WITH_WARNINGS, warned_rules=failed, rules_run=len(results))
 
 
 class NoRulesEngine(RuleEngine):

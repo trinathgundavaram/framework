@@ -1,8 +1,8 @@
 # Compliance Batch Framework (Airflow / Teradata): open items
 
-State at version 0.3.64. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
-everything they list that is not below is done. Tested: 24 scenarios on Python 3.13 and 3.9 against a PostgreSQL
-stand-in for Teradata; the 8 DAG files parse and a step DAG runs (stubbed step) on Airflow 3.3.0. **Nothing has run on Teradata, the NAS or a real
+State at version 0.3.65. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
+everything they list that is not below is done. Tested: 25 scenarios on Python 3.13 and 3.9 against a PostgreSQL
+stand-in for Teradata; the 9 DAG files parse and a step DAG runs (stubbed step) on Airflow 3.3.0. **Nothing has run on Teradata, the NAS or a real
 Airflow deployment yet.**
 
 ## 1. Before the first production run
@@ -27,6 +27,7 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
 | 10 | FILE_LOAD while SOURCE_LOAD holds the same staging table; a lock left by a killed task | Deferred (no error); after 30 minutes `STAGING_LOCK_STALE` emailed with `release-lock` |
 | 11 | A Teradata logon failure (wrong password in the Connection) | Task retried once after 5 minutes, then fails with the incident |
 | 12 | NOTIFY | One email per open audit event through `smtp_default` |
+| 14 | EXPORT_LOAD of ODAG + CDAG, then FILE_RULES (pool `gre_rules`, triggerer running) | EXPORT_LOAD waits; one GRE run per exported batch, `run_key` = batch ID, only that batch's rows (`Btch_ID` filter); results `PASSED` / `FAILED` on the loads; rule SQL in the log |
 | 13 | A file into a core table with typed columns (`DATE`, `TIMESTAMP(0)`, `DECIMAL`); then one with a bad date | Values converted with the core column's `FORMAT`; the bad file `REJECTED` `CORE_TYPE_MISMATCH` naming the column, core unchanged |
 
 ### Still to configure
@@ -53,7 +54,7 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
 | Member data in error logs | `ErrorLog/` files on the NAS hold the rejected records | Mask fields, or restrict the folder |
 | Approvals | Overrides, intake requests and releases are approved by convention (SQL), not enforced | A reviewer different from the creator, a role check, or an approval screen |
 | Who acted | Holds, releases and re-pulls are recorded as `SYSTEM` | Pass the triggering user from Airflow |
-| Data quality gate | Rules are off for now; when on, a failed rule is reported but does not stop the export | Decide when rules start, and whether a failure blocks the export |
+| Data quality gate | Rules run per batch after its export (FILE_RULES); a failed rule is reported and emailed, the export stands | Whether a failed rule should hold the submission |
 | Retention | Control, audit, timeline, staging, core, export and NAS archive are never purged | A retention period per table and folder |
 | Business days | SLA and due dates are calendar days; no holidays | A business calendar if needed |
 | Status view | Business users read status through SQL (runbook section 12) | A dashboard over `ComplianceRequestControl` |

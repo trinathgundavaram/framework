@@ -3,5 +3,9 @@
   "meta_db": "HSABC_DEV",
   "load_env": "DEV",
   "email_recipient": "TRINATH_gundavaram@example.com",
-  "project": "CMSUNIV"
+  "project": "CMSUNIV",
+  "trigger_dags": [
+    "OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES"
+  ],
+  "wait_for_triggered": true
 }

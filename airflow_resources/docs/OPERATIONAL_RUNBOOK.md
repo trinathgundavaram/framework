@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.64 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.65 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -109,7 +109,7 @@ starts the next one (configured in its Variable, `trigger_dags`).
    closes every batch past its close date (with or without data)
 
  Command line (by hand)  validate-config, health, locks, close-batch … (2.11)
- FILE_RULES              data quality rules: no DAG yet (added when the rules are set up)
+ FILE_RULES  (started by EXPORT_LOAD, which waits for it) data quality rules of each exported batch (2.12)
 ```
 
 ### 2.1 Order of a day
@@ -121,7 +121,8 @@ starts the next one (configured in its Variable, `trigger_dags`).
 | 3 | FILE_LOAD | After FILE_CHECK, or on its own (e.g. hourly) | OVERRIDE_DECISIONS, EXPORT_LOAD |
 | 4 | SOURCE_LOAD | After the source systems have loaded their own data (e.g. 06:30) | EXPORT_LOAD |
 | 5 | OVERRIDE_DECISIONS | After FILE_LOAD (or scheduled) | — |
-| 6 | EXPORT_LOAD | After FILE_LOAD / SOURCE_LOAD, and once in the evening (e.g. 20:00) | — |
+| 6 | EXPORT_LOAD | After FILE_LOAD / SOURCE_LOAD, and once in the evening (e.g. 20:00) | FILE_RULES (and waits for it) |
+| 6a | FILE_RULES | Started by EXPORT_LOAD | — |
 | 7 | BATCH_CLOSE | End of day (e.g. 22:00) | BATCH_CREATION, NOTIFY |
 | 8 | NOTIFY | After BATCH_CLOSE, and on its own schedule (e.g. hourly) | — |
 
@@ -274,6 +275,32 @@ Emails every alert of `CMS_ComplianceExceptionsAudit` not sent yet (`Notified_In
 in 8.15), one email per event, to the Variable's `email_recipient`, then marks it sent; an email that fails stays
 for the next run. Without `project` it sends the events of every project and of none. The DAGs' success / failure
 emails do not replace it: many alerts (a rejected file, a missing source, a stuck lock) do not fail any DAG.
+
+### 2.12 FILE_RULES (data quality rules)
+
+Runs the GRE rules of each **exported batch**, one batch at a time, by calling the GRE code in `<dags>/rules_engine`
+directly (no other DAG). EXPORT_LOAD starts it and **waits until it ends** (`wait_for_triggered`), so the export
+tables are not written while their rules read them; FILE_RULES runs in the Airflow pool `gre_rules` (1 slot), so
+two rules runs never write the GRE tables at the same time.
+
+| For each batch | Value |
+|---|---|
+| Which batches | Batches whose loaded data has not had its rules yet; a table with an export table only after the batch's export |
+| Rule group / variant | The batch's table / run type (`CDAG2` / `MNT`): the GRE runs the group's rules with that variant and those without one. A `ComplianceRuleBinding` row (5.12) names other groups |
+| `run_key` | The batch ID: a rerun of the batch refreshes its results and exceptions; `gre_results` / `gre_exceptions` join to `ComplianceRequestControl` by `run_key = Btch_ID` |
+| Rows checked | Only the batch's: `extra_filters` `<batch column> = <Btch_ID>` (`gre.batch_column`, default `Btch_ID`) |
+| `text_params` | `btch_id`, `run_ty`, `table_nm`, `project_cd`, report dates (for `{name}` in a rule), and `run_type` / `batch_schedule` for `gre_exceptions` |
+| `project_name` / `process_name` | The project (`CMSUNIV`); recorded by the GRE |
+
+| Result | `Rules_Stat` of the batch's loads | Timeline / alert | Task |
+|---|---|---|---|
+| All rules passed | `PASSED` (`PASSED_WITH_WARNINGS` under `ANNOTATE`) | `FILE_RULES_PASSED` | Success |
+| A rule failed | `FAILED` | `FILE_RULES_FAILED`, `RULES_VALIDATION_FAILED` (emailed) | Success (a result, not an error) |
+| The group has no active rules | `SKIPPED` | — | Success |
+| The batch has no data rows | `SKIPPED` (the GRE is not called) | — | Success |
+| A rule could not run, or the GRE failed | `ERROR`, tried again on the next run | `RULES_ENGINE_TECHNICAL_FAILURE` (emailed once) | Fails at the end; the other batches still run |
+
+Options: the scope (`project`, `table_group`, `table`, `run_type`), `as_of`. Each rule's final SQL is in the task log.
 
 ### 2.11 Command line (admin)
 
@@ -803,7 +830,9 @@ gets a copy of the reused rows under its own batch ID.
 
 ### 5.12 ComplianceRuleBinding (optional)
 
-Which GRE rule group runs on a loaded file (FILE_RULES). Rows add up.
+Optional: without a row, FILE_RULES runs the rule group named like the table with the batch's run type as variant
+(2.12). A row names other rule groups for a table (and run type); rows add up; `Src_ID` is `*` (rules run per
+batch, for all its sources).
 
 | Column | Required | Values | Meaning |
 |---|---|---|---|
@@ -1163,7 +1192,7 @@ close date).
 | `NOT_RUN` | Rules not run yet (FILE_RULES waits for the export when the table has one) |
 | `PASSED` / `PASSED_WITH_WARNINGS` | All rules passed (warnings under `FILE_RULES_MODE = ANNOTATE`) |
 | `FAILED` | A rule failed (reported, emailed; nothing else changes) |
-| `SKIPPED` | No rule binding for the file |
+| `SKIPPED` | No active rules for the batch's table / run type, or the batch has no data rows |
 | `ERROR` | The engine could not run; tried again |
 
 ### 8.14 Timeline events (`ComplianceRequestFileDetail.Event_Ty`)
@@ -1247,6 +1276,7 @@ own DAG ids and Variable names.
 | OVERRIDE_DECISIONS | `OSSTD_CORE_CMS_COMPLIANCE_OVERRIDE_DECISIONS` | `compliance_override_decisions_config_var` |
 | BATCH_CLOSE | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CLOSE` | `compliance_batch_close_config_var` |
 | NOTIFY | `OSSTD_CORE_CMS_COMPLIANCE_NOTIFY` | `compliance_notify_config_var` |
+| FILE_RULES | `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` | `compliance_file_rules_config_var` |
 
 A DAG never runs twice at the same time; a run that is due while another runs waits.
 
@@ -1310,7 +1340,9 @@ the framework fills in everything else. A CMSUNIV DEV Variable (`airflow_resourc
 | `tags` | `Compliance`, `Compliance_Batch_Framework` | A list (the step's name is always added) |
 | `snow_assignment_group` | `D&AE - EDE Govt Compliance` | ServiceNow group of the incident opened when a task fails |
 | `settings` | none | Framework settings that differ from their default (9.4) |
-| `gre` | from the Variable | GRE rules engine settings (FILE_RULES only: `meta_db`, `text_params`, `extra_filters`, …) |
+| `pool` | none | An Airflow pool for the step's task (FILE_RULES: `gre_rules`, 1 slot, created under Admin → Pools) |
+| `wait_for_triggered` | `false` | `true`: the `trigger_dags` tasks wait until the started DAG ends (deferred: no worker slot held; needs the Airflow triggerer) and fail if it fails. EXPORT_LOAD: `true` |
+| `gre` | from the Variable | GRE rules engine settings (FILE_RULES only), all optional: `batch_column` (`Btch_ID`: the batch column of the rules' tables / views), `meta_db` (the GRE tables' database, default `meta_db`), `environment` (`load_env`, for `$env` in rules), `project_name` / `process_name` (the project), `log_level`, `max_parallel_rules` (1), `package_dir` (`<dags>/rules_engine`), `run_params` / `text_params` / `extra_filters` (added to the framework's) |
 
 **Success / failure emails and NOTIFY are different.** The success / failure emails (`email_recipient`) say whether
 the DAG run worked. NOTIFY emails the **business alerts** the steps record in `CMS_ComplianceExceptionsAudit`: which
@@ -1349,7 +1381,7 @@ come from the Variable: `NOTIFY_BACKEND = airflow`, `DEFAULT_NOTIFY_EMAILS` = `e
 | `LOAD_ENGINE` | `BATCH` | `BATCH` (inserts in batches) or `FASTLOAD` (very large files; test first) |
 | `INSERT_BATCH_ROWS`, `INSERT_BATCH_BYTES` | `2000`, `500000` | Rows / bytes per insert batch |
 | `RULE_ENGINE` | `gre` | `gre` or `none` (no data quality rules) |
-| `GRE_ENTRYPOINT` | | `compliance_framework.export:run_gre` |
+| `GRE_ENTRYPOINT` | `compliance_framework.export:run_gre` | The function that runs a batch's rules (the framework's GRE bridge) |
 | `FILE_RULES_MODE` | `GATE` | `GATE` (a failed rule = `FAILED`) or `ANNOTATE` (= `PASSED_WITH_WARNINGS`) |
 | `RELEASE_TIME` | none | `HH:MM`: on the close date, export (or pull) only from that time |
 | `LOCK_TIMEOUT_SECONDS` | `300` | Seconds a step waits for a busy batch |
@@ -1438,7 +1470,8 @@ scope) plus what the trigger gives.
    `LOAD_TIMESTAMP`, `ROW_SEQUENCE`.
 7. **File checks**: section 5.9 – header names, record types / trailer, value checks.
 8. **Optional**: export (5.11), rules (5.12), calendar (5.6a).
-9. **Airflow**: Connections (9.1); copy the 8 DAG files with project names (e.g. `OSSTD_CORE_PRJB_COMPLIANCE_*`,
+9. **Airflow**: Connections (9.1); the GRE code in `<dags>/rules_engine` and the pool `gre_rules` (1 slot) for
+   FILE_RULES; copy the 9 DAG files with project names (e.g. `OSSTD_CORE_PRJB_COMPLIANCE_*`,
    Variables `prjb_compliance_<step>_config_var`) and create their Variables (9.3): every Variable sets `project`;
    `trigger_dags` names the project's own DAGs; NOTIFY's `email_recipient` gets the alerts. Keep one NOTIFY without
    `project` for events of no project.
@@ -1669,7 +1702,8 @@ FA report dates (every run type): FA1 `LAST_DAYS(MONTH,1,14)` (the last 14 days 
 to the new year's dates on 1 February.
 
 DAG chain (Variables in `cmsuniv_dev/`): FILE_CHECK → FILE_LOAD → OVERRIDE_DECISIONS, EXPORT_LOAD; SOURCE_LOAD →
-EXPORT_LOAD; BATCH_CLOSE → BATCH_CREATION, NOTIFY. No schedules yet.
+EXPORT_LOAD → FILE_RULES (waits); BATCH_CLOSE → BATCH_CREATION, NOTIFY. No schedules yet. Rules: GRE rule groups
+named like the tables (`ODAG1` …, `CDAG1` …), variants = run types or empty, read `EXPORT_FEED_$ENV_V.SDO_CMSUNIV_*`.
 
 ---
 

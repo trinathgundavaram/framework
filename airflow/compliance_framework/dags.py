@@ -44,7 +44,8 @@ SCOPE_KEYS = ("project", "table_group", "run_type", "period", "table", "period_f
               "share", "file", "folder", "batch", "release", "hold")
 _GRE_ENV = {"environment": "GRE_ENVIRONMENT", "meta_db": "GRE_META_DB", "log_level": "GRE_LOG_LEVEL",
             "log_dir": "GRE_LOG_DIR", "max_parallel_rules": "GRE_MAX_PARALLEL_RULES",
-            "package_dir": "GRE_PACKAGE_DIR", "project_name": "GRE_PROJECT_NAME"}
+            "package_dir": "GRE_PACKAGE_DIR", "project_name": "GRE_PROJECT_NAME", "process_name": "GRE_PROCESS_NAME",
+            "batch_column": "GRE_BATCH_COLUMN"}
 _GRE_PARAMS = {"run_params": "GRE_RUN_PARAMS", "text_params": "GRE_TEXT_PARAMS", "extra_filters": "GRE_EXTRA_FILTERS"}
 _MERGED = ("settings", "gre")
 QUIET_LOGGERS = ("smbprotocol", "smbclient", "spnego")
@@ -484,17 +485,20 @@ def build_step_dag(dag_id: str, step: str, variable_key: str) -> DAG:
         logger.warning("%s: %s", dag_id, e)
         scopes = [{}]
     timeout = _minutes(dag_config, "execution_timeout_minutes", STEP_TIMEOUT[step])
+    pool = {"pool": dag_config["pool"]} if dag_config.get("pool") else {}
     if timed:
         tasks = [PythonOperator(task_id=step.lower(), dag=dag, python_callable=run_timed, execution_timeout=timeout,
-                                show_return_value_in_logs=False)]
+                                show_return_value_in_logs=False, **pool)]
     else:
         tasks = [PythonOperator(task_id=_task_id(step, scope, i, scopes), dag=dag, python_callable=run_step,
                                 op_kwargs={"scope_index": i if dag_config.get("runs") else None},
-                                execution_timeout=timeout, show_return_value_in_logs=False)
+                                execution_timeout=timeout, show_return_value_in_logs=False, **pool)
                  for i, scope in enumerate(scopes)]
     given = "{{ conf_value(dag_run, params, '%s') }}"
+    wait = {"wait_for_completion": True, "deferrable": True, "poke_interval": 60, "allowed_states": ["success"],
+            "failed_states": ["failed"]} if _flag(dag_config.get("wait_for_triggered"), False) else {}
     triggers = [TriggerDagRunOperator(task_id=f"trigger_{str(target).lower()}", dag=dag, trigger_dag_id=str(target),
-                                      trigger_rule="all_success", conf={k: given % k for k in PASSED_ON})
+                                      trigger_rule="all_success", conf={k: given % k for k in PASSED_ON}, **wait)
                 for target in _names(dag_config.get("trigger_dags"))]
     for trigger in triggers:
         tasks >> trigger
