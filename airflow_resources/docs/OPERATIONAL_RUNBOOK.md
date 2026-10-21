@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.62 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.63 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -980,8 +980,8 @@ close date).
 |---|---|
 | `BATCH_CREATED` | The batch row was created |
 | `FILE_RECEIVED` | A file / pull reached the batch |
-| `FILE_PROMOTED` | Data loaded into core |
-| `LATE_ARRIVAL_PROMOTED`, `CORRECTION_PROMOTED` | Data loaded into a closed batch with an override |
+| `FILE_LOADED` | Data loaded into core |
+| `LATE_ARRIVAL_LOADED`, `CORRECTION_LOADED` | Data loaded into a closed batch with an override |
 | `FILE_REPLACED_BEFORE_CLOSE` | A new file replaced the batch's data (or its carry-forward) before close |
 | `SOURCE_NO_DATA_YET` | Internal source pull had no rows before the close date |
 | `CARRY_FORWARD_APPLIED`, `CARRY_FORWARD_REMOVED` | Carry-forward applied / ended |

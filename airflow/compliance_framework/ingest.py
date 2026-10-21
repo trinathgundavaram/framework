@@ -16,7 +16,7 @@ from typing import Optional
 from compliance_framework import config as cfgmod, db
 from compliance_framework.adapters import FileInfo, FileStore, basename, dirname, parse_uri, sha256_file
 from compliance_framework.audit import EventLogger
-from compliance_framework.batches import Releases, REOPENED_AWAITING_DATA, get_batch, has_data, promoted_load
+from compliance_framework.batches import Releases, REOPENED_AWAITING_DATA, get_batch, has_data, current_load
 from compliance_framework.common import (DATA_NOT_PROVIDED, REQUEST_COMPLETE, SOURCE_DATA_READY, SOURCE_DATA_READY_NO_DATA, Clock,
                      FileRejected, RowCountMismatch, check_transition, code, earliest_close_date)
 from compliance_framework.config import FileConfig, MatchError, QueryConfig, Scope, TemplateMatcher, check_options
@@ -39,10 +39,10 @@ DEFER_WAIT_SECONDS = 30
 
 
 class Action(str, Enum):
-    PROMOTE = "PROMOTE"
-    PROMOTE_REPLACE = "PROMOTE_REPLACE"
-    PROMOTE_LATE = "PROMOTE_LATE"
-    PROMOTE_CORRECTION = "PROMOTE_CORRECTION"
+    LOAD = "LOAD"
+    LOAD_REPLACE = "LOAD_REPLACE"
+    LOAD_LATE = "LOAD_LATE"
+    LOAD_CORRECTION = "LOAD_CORRECTION"
     REJECT_CLOSED = "REJECT_CLOSED"
 
 
@@ -61,12 +61,12 @@ class ResolutionDecision:
 
 def decide(inp: ResolutionInput) -> ResolutionDecision:
     if not inp.batch_closed:
-        return ResolutionDecision(Action.PROMOTE_REPLACE, "O-2") if inp.has_data \
-            else ResolutionDecision(Action.PROMOTE, "O-1")
+        return ResolutionDecision(Action.LOAD_REPLACE, "O-2") if inp.has_data \
+            else ResolutionDecision(Action.LOAD, "O-1")
     if inp.has_data and inp.override_ty == "CORRECTION":
-        return ResolutionDecision(Action.PROMOTE_CORRECTION, "C-2")
+        return ResolutionDecision(Action.LOAD_CORRECTION, "C-2")
     if not inp.has_data and inp.override_ty == "LATE_ARRIVAL":
-        return ResolutionDecision(Action.PROMOTE_LATE, "C-1")
+        return ResolutionDecision(Action.LOAD_LATE, "C-1")
     return ResolutionDecision(Action.REJECT_CLOSED, "C-3")
 
 
@@ -85,7 +85,7 @@ class IngestOutcome:
     message: Optional[str] = None
 
 
-PROMOTED_RESULTS = ("PROMOTED", "LATE_PROMOTED", "CORRECTION_PROMOTED")
+LOADED_RESULTS = ("LOADED", "LATE_LOADED", "CORRECTION_LOADED")
 REJECTED_RESULTS = ("REJECTED_CLOSED",)
 
 
@@ -93,7 +93,7 @@ REJECTED_RESULTS = ("REJECTED_CLOSED",)
 class PathIngestSummary:
     """Result of one process_path() sweep."""
     scanned: int = 0
-    promoted: int = 0
+    loaded: int = 0
     rejected: int = 0
     rejected_closed: int = 0
     other: int = 0
@@ -108,8 +108,8 @@ class PathIngestSummary:
 
     def tally(self, outcome: IngestOutcome) -> None:
         self.outcomes.append(outcome)
-        if outcome.result in PROMOTED_RESULTS:
-            self.promoted += 1
+        if outcome.result in LOADED_RESULTS:
+            self.loaded += 1
         elif outcome.result == "REJECTED":
             self.rejected += 1
         elif outcome.result in REJECTED_RESULTS:
@@ -452,11 +452,11 @@ class IngestPipeline:
                               "WHERE Load_ID=%s", (staged_rows, self.clock.now(), load_id))
 
         result = self._resolve(load_id, info, cfg, req_id, staged_rows)
-        self._archive(info, load_id, rejected=result.result not in PROMOTED_RESULTS)
+        self._archive(info, load_id, rejected=result.result not in LOADED_RESULTS)
         return result
 
     def _resolve(self, load_id, info, cfg, req_id, rows: int, ref: Optional[str] = None) -> IngestOutcome:
-        """Promote the staged file (an empty file is the source's delivery too: it had no data), or reject it when
+        """Load the staged file into core (an empty file is the source's delivery too: it had no data), or reject it when
         its batch is closed without an override."""
         now = self.clock.now()
         ref = ref or self.store.uri(info.share, info.path)
@@ -474,7 +474,7 @@ class IngestPipeline:
             self.logger.batch_event("FILE_RECEIVED", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
                                     detail=f"{ref} rule={d.rule}")
 
-            if d.action in (Action.PROMOTE, Action.PROMOTE_REPLACE, Action.PROMOTE_LATE, Action.PROMOTE_CORRECTION):
+            if d.action in (Action.LOAD, Action.LOAD_REPLACE, Action.LOAD_LATE, Action.LOAD_CORRECTION):
                 if closed:
                     to_stat = REQUEST_COMPLETE if rows else DATA_NOT_PROVIDED
                 else:
@@ -482,7 +482,7 @@ class IngestPipeline:
                 check_transition(b["req_stat"], to_stat)
                 staged_cnt = self.conn.execute("SELECT Stg_Rcd_Cnt FROM ComplianceFileLoad WHERE Load_ID=%s",
                                                (load_id,)).fetchone()["stg_rcd_cnt"]
-                prior = promoted_load(self.conn, b["req_id"])
+                prior = current_load(self.conn, b["req_id"])
                 if prior and prior["load_id"] != load_id:
                     self._supersede(prior["load_id"])
                 res = swap(self.conn, cfg, *self._load, staged_cnt)
@@ -491,23 +491,23 @@ class IngestPipeline:
                               Updated_Dtts=%s WHERE Req_ID=%s""", ("NEW_FILE" if rows else "NO_DATA", to_stat, now, req_id))
                 self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='FILE_LOADED', Rules_Stat='NOT_RUN', Updated_Dtts=%s "
                                   "WHERE Load_ID=%s", (now, load_id))
-                if d.action == Action.PROMOTE_REPLACE:
+                if d.action == Action.LOAD_REPLACE:
                     self.logger.batch_event(
                         "FILE_REPLACED_BEFORE_CLOSE", req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
                         detail=(f"replaces load {prior['load_id']}" if prior
                                 else f"replaces carried data of {b['reuse_btch_id']}"))
                 if b["resolution_ty"] == "CARRY_FORWARD":
                     self._end_carry_forward(b, load_id, now)
-                promoted_event = {Action.PROMOTE_LATE: "LATE_ARRIVAL_PROMOTED",
-                                  Action.PROMOTE_CORRECTION: "CORRECTION_PROMOTED"}.get(d.action, "FILE_PROMOTED")
-                self.logger.batch_event(promoted_event, req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
+                loaded_event = {Action.LOAD_LATE: "LATE_ARRIVAL_LOADED",
+                                  Action.LOAD_CORRECTION: "CORRECTION_LOADED"}.get(d.action, "FILE_LOADED")
+                self.logger.batch_event(loaded_event, req_id=req_id, btch_id=b["btch_id"], load_id=load_id,
                                         ovrd_id=out.ovrd_id, detail=f"appended={res.appended_cnt} deleted={res.deleted_cnt}"
                                                + ("" if rows else "; the source had no data"))
                 log.info("FILE_LOAD | load %s | %s row(s) loaded into %s.%s, %s earlier row(s) of the batch removed | "
                          "batch %s is %s", load_id, res.appended_cnt, cfg.core_schema_nm, cfg.core_table_nm, res.deleted_cnt,
                          b["btch_id"], to_stat)
-                out.result = {Action.PROMOTE_LATE: "LATE_PROMOTED",
-                              Action.PROMOTE_CORRECTION: "CORRECTION_PROMOTED"}.get(d.action, "PROMOTED")
+                out.result = {Action.LOAD_LATE: "LATE_LOADED",
+                              Action.LOAD_CORRECTION: "CORRECTION_LOADED"}.get(d.action, "LOADED")
 
             else:
                 self._rejected_closed(load_id, "batch is closed and has no approved override", now)

@@ -23,7 +23,7 @@ from compliance_framework.load import BATCH_COLUMN, LoadContext, _cast, batch_co
 
 log = logging.getLogger(__name__)
 
-CHANGES = ("FILE_PROMOTED", "LATE_ARRIVAL_PROMOTED", "CORRECTION_PROMOTED", "CARRY_FORWARD_APPLIED",
+CHANGES = ("FILE_LOADED", "LATE_ARRIVAL_LOADED", "CORRECTION_LOADED", "CARRY_FORWARD_APPLIED",
            "CARRY_FORWARD_REMOVED")
 BATCH_VALUES = ("RUN_TYPE", "VERSION", "REQ_ID", "RPT_START", "RPT_END")
 
@@ -267,7 +267,7 @@ class ExportLoader:
 # rules: File rules, run after the core load (design §9.4); they never block or undo a load.
 
 PENDING_RULES_STATS = ("NOT_RUN", "ERROR")
-PROMOTIONS = ("FILE_PROMOTED", "LATE_ARRIVAL_PROMOTED", "CORRECTION_PROMOTED")
+CORE_LOADS = ("FILE_LOADED", "LATE_ARRIVAL_LOADED", "CORRECTION_LOADED")
 
 
 @dataclass
@@ -323,18 +323,18 @@ class RulesRunner:
     def _not_exported(self, load_ids: list[int]) -> set:
         """Loads of tables with an export table whose batch has not been exported since the load (EXPORT_LOAD)."""
         out = set()
-        marks, promotions = db.in_list(PROMOTIONS)
+        marks, core_loads = db.in_list(CORE_LOADS)
         for i in range(0, len(load_ids), 500):
             ids, chunk = db.in_list(load_ids[i:i + 500])
             out.update(r["load_id"] for r in self.conn.execute(
                 f"""SELECT f.Load_ID FROM ComplianceFileLoad f
-                      LEFT JOIN (SELECT Load_ID, MAX(Event_Dtts) AS promoted_at FROM ComplianceRequestFileDetail
+                      LEFT JOIN (SELECT Load_ID, MAX(Event_Dtts) AS loaded_at FROM ComplianceRequestFileDetail
                                   WHERE Event_Ty IN ({marks}) AND Load_ID IN ({ids}) GROUP BY Load_ID) p
                              ON p.Load_ID = f.Load_ID
                       LEFT JOIN (SELECT Req_ID, MAX(Event_Dtts) AS exported_at FROM ComplianceRequestFileDetail
                                   WHERE Event_Ty = 'EXPORT_LOADED' GROUP BY Req_ID) e ON e.Req_ID = f.Req_ID
-                     WHERE f.Load_ID IN ({ids}) AND (e.exported_at IS NULL OR e.exported_at < p.promoted_at)""",
-                [*promotions, *chunk, *chunk]).fetchall())
+                     WHERE f.Load_ID IN ({ids}) AND (e.exported_at IS NULL OR e.exported_at < p.loaded_at)""",
+                [*core_loads, *chunk, *chunk]).fetchall())
         return out
 
     def _run_load(self, load_id: int, s: RulesSummary) -> None:

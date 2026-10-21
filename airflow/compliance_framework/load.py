@@ -316,7 +316,7 @@ def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], 
     return layout
 
 
-# load: Staging load and core promotion on Teradata (design §9.4, §10).
+# load: Staging load and core load on Teradata (design §9.4, §10).
 
 if TYPE_CHECKING:
     from compliance_framework.config import FileConfig
@@ -830,12 +830,12 @@ def check_core_types(conn, cfg, layout: Layout, ctx: LoadContext) -> None:
 
 
 @dataclass
-class PromotionResult:
+class CoreLoadResult:
     deleted_cnt: int
     appended_cnt: int
 
 
-def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_rows: int) -> PromotionResult:
+def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_rows: int) -> CoreLoadResult:
     """Delete the batch's core rows and insert the staged ones; runs inside the caller's transaction."""
     core, stg = _table(cfg.core_schema_nm, cfg.core_table_nm), _table(cfg.stg_schema_nm, cfg.stg_table_nm)
     core_src, stage_src = layout.column("SOURCE_ID", "core"), layout.column("SOURCE_ID")
@@ -864,7 +864,7 @@ def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_row
                             values).rowcount
     if appended != expected_rows:
         raise RowCountMismatch(f"appended {appended} rows for load {ctx.load_id}, staged {expected_rows}")
-    return PromotionResult(deleted, appended)
+    return CoreLoadResult(deleted, appended)
 
 
 # control_report: The control report of a FILE_LOAD run: one line per file, in <inbound folder>/<CONTROL_REPORT_FOLDER>/.

@@ -96,6 +96,9 @@ apply to the command line).
    'DEFERRED' THEN 'STAGING_TABLE_BUSY' ELSE Reject_Rsn_Cd END, Load_Stat = CASE Load_Stat WHEN 'PROMOTED' THEN
    'FILE_LOADED' WHEN 'SUPERSEDED' THEN 'RELOADED' WHEN 'FAILED_TECHNICAL' THEN 'PROCESS_FAILURE' WHEN 'DEFERRED' THEN
    'LOAD_INCOMPLETE' END WHERE Load_Stat IN ('PROMOTED', 'SUPERSEDED', 'FAILED_TECHNICAL', 'DEFERRED');`
+   and `UPDATE <META_DB>.ComplianceRequestFileDetail SET Event_Ty = CASE Event_Ty WHEN 'FILE_PROMOTED' THEN 'FILE_LOADED'
+   WHEN 'LATE_ARRIVAL_PROMOTED' THEN 'LATE_ARRIVAL_LOADED' WHEN 'CORRECTION_PROMOTED' THEN 'CORRECTION_LOADED' END
+   WHERE Event_Ty IN ('FILE_PROMOTED', 'LATE_ARRIVAL_PROMOTED', 'CORRECTION_PROMOTED');`
 5. Load the configuration tables, then run `validate-config` from the command line (below).
 
 Another project (or another cadence) gets its own DAGs: copy each step's DAG file, give the copy its own `dag_id`
@@ -1252,7 +1255,7 @@ values, or a second rules DAG with its own Variable. The rules run on the framew
 
 ## Validation status
 
-- The framework logic (batch creation, intake, file load, promotion, overrides, close, notifications,
+- The framework logic (batch creation, intake, file load, core load, overrides, close, notifications,
   locks) and the GRE bridge pass the framework's test suite when run against a stand-in for the
   `teradatasql` driver backed by PostgreSQL. **Airflow 3.3.0** (the version in use; installed with its official
   constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp provider 3.0.1; also checked on 3.3.2): every DAG file

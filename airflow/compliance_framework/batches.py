@@ -24,7 +24,7 @@ from compliance_framework.db import Connection, Settings
 
 log = logging.getLogger(__name__)
 
-DATA_EVENTS = ("FILE_PROMOTED", "LATE_ARRIVAL_PROMOTED", "CORRECTION_PROMOTED", "CARRY_FORWARD_APPLIED")
+DATA_EVENTS = ("FILE_LOADED", "LATE_ARRIVAL_LOADED", "CORRECTION_LOADED", "CARRY_FORWARD_APPLIED")
 REOPENED_AWAITING_DATA = f"""EXISTS (SELECT 1 FROM ComplianceRequestFileDetail o WHERE o.Req_ID = c.Req_ID
       AND o.Event_Ty = 'BATCH_REOPENED' AND NOT EXISTS (SELECT 1 FROM ComplianceRequestFileDetail n
             WHERE n.Req_ID = o.Req_ID AND n.Detail_ID > o.Detail_ID
@@ -78,11 +78,11 @@ def has_data(conn: Connection, batch: dict) -> bool:
     (NO_DATA) is no data, so a late file takes LATE_ARRIVAL and a REUSE applies. Without Resolution_Ty: its load."""
     if batch.get("resolution_ty"):
         return batch["resolution_ty"] in HAS_DATA
-    return promoted_load(conn, batch["req_id"]) is not None
+    return current_load(conn, batch["req_id"]) is not None
 
 
-def promoted_load(conn: Connection, req_id: int) -> Optional[dict]:
-    """The batch's PROMOTED load, if any."""
+def current_load(conn: Connection, req_id: int) -> Optional[dict]:
+    """The batch's current load (FILE_LOADED), if any."""
     return conn.execute("SELECT * FROM ComplianceFileLoad WHERE Req_ID=%s AND Load_Stat='FILE_LOADED'",
                         (req_id,)).fetchone()
 
@@ -826,7 +826,7 @@ class DecisionProcessor:
             s.invalid.append(o["ovrd_id"])
             return
         check_transition(b["req_stat"], SOURCE_DATA_CARRY_FORWARD)
-        empty = promoted_load(self.conn, b["req_id"])
+        empty = current_load(self.conn, b["req_id"])
         if empty is not None:
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='RELOADED', Updated_Dtts=%s WHERE Load_ID=%s",
                               (self.clock.now(), empty["load_id"]))
@@ -968,7 +968,7 @@ class DecisionProcessor:
         if row and row["resolution_ty"] == "CARRY_FORWARD":
             row = self.conn.execute("SELECT * FROM ComplianceRequestControl WHERE Btch_ID=%s AND Src_ID=%s",
                                     (row["reuse_btch_id"], row["src_id"])).fetchone()
-        return row if row and promoted_load(self.conn, row["req_id"]) else None
+        return row if row and current_load(self.conn, row["req_id"]) else None
 
 
 # closing: Batch close (design §11).
