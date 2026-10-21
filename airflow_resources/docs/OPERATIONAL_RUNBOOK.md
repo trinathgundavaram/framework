@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.63 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.64 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -20,14 +20,14 @@ reading the code. **Version:** framework 0.3.63 (Airflow 3 / Teradata).
 - The audit columns `Created_Dtts`, `Created_By`, `Updated_Dtts`, `Updated_By` are filled by the database. Leave
   them out of every INSERT. Columns marked **(framework)** are written by the framework only: never insert or update
   them.
-- After any configuration change, run **validate-config** (section 9.1). It reports every problem it finds.
+- After any configuration change, run **validate-config** (section 2.11). It reports every problem it finds.
 
 ---
 
 ## Contents
 
 1. What the framework does (business view)
-2. The daily flow (DAGs) – diagram
+2. The daily flow (DAGs) – diagram, order, what each DAG does
 3. The life of a batch – diagram and statuses
 4. Metadata tables – map and roles
 5. Configuration tables (you fill these)
@@ -40,6 +40,8 @@ reading the code. **Version:** framework 0.3.63 (Airflow 3 / Teradata).
 12. Monitoring queries
 13. Troubleshooting
 14. Glossary
+15. CMSUNIV setup at a glance
+16. Upgrading an existing installation
 
 ---
 
@@ -47,7 +49,7 @@ reading the code. **Version:** framework 0.3.63 (Airflow 3 / Teradata).
 
 The framework collects data for compliance reporting from many **sources** (external vendors such as FDRs that
 send files, and internal systems that are read with a query), for many **tables** (datasets, e.g. ODAG3) of a
-**project** (e.g. the CMS Universes), on a schedule (**run types** such as DAILY, WEEKLY, MNT) or on request
+**project** (e.g. the CMS Universes), on a schedule (**run types** such as DLY, WKLY, MNT) or on request
 (**ad hoc**).
 
 For every table, run type and report period it creates a **batch**, waits for each source's data, checks it, loads
@@ -97,18 +99,187 @@ starts the next one (configured in its Variable, `trigger_dags`).
                    core → export table (when due / released)
                        │
                        ▼
-                 NOTIFY  ◄──── also triggered by the other steps
+                 NOTIFY  ◄──── triggered by BATCH_CLOSE (+ its own schedule)
                    emails the open audit events
 
  OVERRIDE_DECISIONS  (triggered by FILE_LOAD, or scheduled)
    applies approved carry-forwards (REUSE) and reopens (REOPEN), expires old ones
 
- BATCH_CLOSE  (nightly, e.g. 22:00)
+ BATCH_CLOSE  (nightly, e.g. 22:00) ──► BATCH_CREATION (next day's batches) and NOTIFY
    closes every batch past its close date (with or without data)
 
- Command line (by hand)  validate-config, health, locks, close-batch … (9.5)
+ Command line (by hand)  validate-config, health, locks, close-batch … (2.11)
  FILE_RULES              data quality rules: no DAG yet (added when the rules are set up)
 ```
+
+### 2.1 Order of a day
+
+| # | DAG | Runs | Starts automatically |
+|---|---|---|---|
+| 1 | BATCH_CREATION | Start of day (e.g. 06:00), and after BATCH_CLOSE | — |
+| 2 | FILE_CHECK (optional) | When files are expected (e.g. every 15 min) | FILE_LOAD |
+| 3 | FILE_LOAD | After FILE_CHECK, or on its own (e.g. hourly) | OVERRIDE_DECISIONS, EXPORT_LOAD |
+| 4 | SOURCE_LOAD | After the source systems have loaded their own data (e.g. 06:30) | EXPORT_LOAD |
+| 5 | OVERRIDE_DECISIONS | After FILE_LOAD (or scheduled) | — |
+| 6 | EXPORT_LOAD | After FILE_LOAD / SOURCE_LOAD, and once in the evening (e.g. 20:00) | — |
+| 7 | BATCH_CLOSE | End of day (e.g. 22:00) | BATCH_CREATION, NOTIFY |
+| 8 | NOTIFY | After BATCH_CLOSE, and on its own schedule (e.g. hourly) | — |
+
+Rules: batches exist before files and pulls arrive (1 before 2 – 4); carry-forwards are applied before the close
+(5 before 7); the evening export runs before the close (6 before 7); FILE_LOAD and SOURCE_LOAD are independent (a
+table loaded by both waits its turn); keep FILE_LOAD out of the window between BATCH_CLOSE and BATCH_CREATION, or a
+file for a closed period is rejected. Until `schedule_interval` is set, every chain starts only when triggered by
+hand.
+
+### 2.2 What every DAG does the same way
+
+- **Tasks:** the step's task (one per `runs` entry), a `trigger_<dag id>` task per `trigger_dags` entry, then
+  `success_email` / `fail_email` to `email_recipient`.
+- **Result of a step** (the JSON report at the end of the task log, the "step report"):
+
+| Exit | Meaning | Task | Next DAGs |
+|---|---|---|---|
+| 0 | Done, nothing to report | Success | Started |
+| 1 | Done, with problems the step reported (a rejected file, a batch not loaded, a failed export) | Fails at once, no retry, ServiceNow incident + failure email (OVERRIDE_DECISIONS, and any DAG with `fail_on_problems = false`: success) | Not started |
+| 2 | Could not run (database down, a missing table, a bad Variable) | Fails, retried `retries` times after 5 minutes, then incident + email | Not started |
+
+- **Safe to repeat:** every step can run again at any time and only does what is still to do (a batch is never
+  created twice, a file never loaded twice, an export replaces its own rows).
+- **Never twice at once:** a DAG waits for its own previous run; different DAGs can overlap (batch and table locks
+  keep them apart; a busy staging table makes a file or pull `LOAD_INCOMPLETE`, picked up by the next run).
+- **Scope:** `project`, `table_group`, `table`, `run_type` narrow what a run works on (Variable, `runs` entry or
+  trigger: 9.3, 9.5). `as_of` runs it as if it were another day (a missed day).
+- **Logs:** each step writes its progress (`FILE_LOAD | <file> | load 1 | 4 data row(s) staged …`), every configured
+  SQL with its parameters (section 13), and the step report.
+
+### 2.3 BATCH_CREATION
+
+Creates the batches that are due: one row per source in `ComplianceRequestControl`.
+
+| Where batches come from | When | Report dates |
+|---|---|---|
+| A `SCHEDULED` run type with schedule codes (`Sched_Cd` …, 8.2) | On its scheduled day, moved by `Sched_Offset_Days`; a missed day is still created within `Sched_Window_Days`, with the scheduled day's dates | `ComplianceRunTypePeriod` / crosswalk (5.5, 8.4), counted from the scheduled day |
+| A run type with `Batch_Schedule_Sql_Txt` | When the statement returns a row | From that row, or the period row |
+| `ComplianceBatchCalendar` | On the calendar dates | The calendar row's dates |
+| An `ADHOC` run type with a schedule (e.g. IN1) | As a scheduled one, for the sources whose crosswalk row lists it | As a scheduled one |
+| `ComplianceRequestInTake` | Every day of the request window, one batch per day | The request's dates |
+
+- **Which sources:** every crosswalk row active and effective on the batch's date that lists the run type
+  (`Include_Ind = 1`); one batch per table + run type + report period + day, one row per source.
+- **Batch ID:** `<YYYYMMDD of the day>_<project>_<table>_<run type>`, e.g. `20261020_CMSUNIV_ODAG3_DLY`.
+- **Version:** the `Cmplnc_Vrsn` of the crosswalk row (or of the intake request).
+- **Close date:** `Req_Dt_Key + SLA_Days - 1`.
+- **Options:** `period` (a period code: create batches with those dates now), `lookback_days` / `lookback_weeks`
+  (catch up missed days), `run_type`, `table` / `table_group`, `as_of`.
+- **Problems (exit 1):** a configuration error met while creating (a bad period code, a failing SQL), a failed
+  intake request (`INTAKE_FAILED`). The other batches are still created.
+
+### 2.4 FILE_CHECK (optional)
+
+Checks the files waiting in the inbound folders of the scope's file configs; **loads nothing**.
+
+- Files modified in the last `NAS_MIN_AGE_SECONDS` (120) are left for the next run (still arriving).
+- Per file: the name against `Src_File_Nm_Tmplt` (exactly one config must match), the open batch of its run type and
+  dates, the checks of `ComplianceFileCheckConfig` (5.9).
+- Passed: `FILE_CHECK_PASSED` (not emailed). Failed: `FILE_CHECK_FAILED` (emailed by NOTIFY), an error log in
+  `ErrorLog/`, and with `CHECK_MOVE_FAILED = true` the file moves to `Error/` (so FILE_LOAD does not pick it up).
+- **One failed file fails the task** (exit 1), so the FILE_LOAD it triggers does not start. Set
+  `"fail_on_problems": false` in its Variable if the good files should still be loaded right away.
+- Options: the scope, `as_of`. Settings: `CHECK_CONTENT`, `CHECK_MOVE_FAILED` and the file settings of 9.4.
+
+### 2.5 FILE_LOAD
+
+Loads every waiting file of the scope's file configs: name → batch → checks → staging → core (5.7, "How a file goes
+from the NAS to core").
+
+| What happens to a file | `Load_Stat` | File moves to | Batch |
+|---|---|---|---|
+| Loaded, with rows | `FILE_LOADED` | `Archive/` (`Archive/<year>/` with `ARCHIVE_BY_YEAR`) | `SOURCE_DATA_READY` (`NEW_FILE`) |
+| Loaded, no data rows | `FILE_LOADED` | `Archive/` | `SOURCE_DATA_READY_NO_DATA` (`NO_DATA`) |
+| A newer file for the same batch before the close | the earlier load becomes `RELOADED` | | data replaced |
+| A name, batch, check or type problem | `REJECTED` (`Reject_Rsn_Cd` says why) | `Error/`, error log in `ErrorLog/` | unchanged |
+| Batch closed, no approved override | `REJECTED` (`FILE_REJECTED_BATCH_CLOSED`) | `Error/` | unchanged |
+| Closed batch with an approved `LATE_ARRIVAL` / `CORRECTION` | `FILE_LOADED` | `Archive/` | stays closed, data replaced |
+| Staging table busy | `LOAD_INCOMPLETE` (`STAGING_TABLE_BUSY`) | stays | picked up by the next run |
+| System problem | `PROCESS_FAILURE` | stays | tried again (retry, next run) |
+
+- A file is identified by its path, size and time: the same name delivered again is a new delivery; the same
+  content for another batch is loaded and reported (`FILE_SAME_CONTENT_OTHER_BATCH`).
+- Before core: the NOT NULL and type checks (5.7 step 4); staging and core columns pair by name, then by order.
+- One control report line per file goes to `ControlReport/`.
+- **Problems (exit 1):** any rejected file. The task fails (incident + email) and the triggered EXPORT_LOAD /
+  OVERRIDE_DECISIONS do not start; the other files of the run are still loaded. `"fail_on_problems": false` keeps
+  the chain going.
+- Options: the scope, `as_of`; from a trigger also `share`, `folder`, `file` (one file). Settings: the file and load
+  settings of 9.4.
+
+### 2.6 SOURCE_LOAD
+
+Pulls every open batch whose source has a `ComplianceInternalSourceConfig` row (5.8), with its query.
+
+| Pull result | `Load_Stat` | Batch |
+|---|---|---|
+| Rows | `FILE_LOADED` | `SOURCE_DATA_READY` |
+| No rows, before the close date | `NO_DATA_YET` (report: `WAITING`) | unchanged; pulled again on the next runs |
+| No rows, on / after the close date | `FILE_LOADED` | `SOURCE_DATA_READY_NO_DATA`; still pulled again until it closes |
+| Query or connection failed | `REJECTED` (`SOURCE_QUERY_FAILED`, with the driver's message) | unchanged |
+| Columns do not fit staging / core | `REJECTED` (`SOURCE_DATA_REJECTED` / `CORE_TYPE_MISMATCH`) | unchanged |
+
+- Ad-hoc run types (IN1, CMS) are pulled only when released (`release`, 11.6); held run types (`hold`) are skipped.
+  Both are listed under `held` in the step report.
+- The query's column names fill the staging columns of the same name (`AS` aliases); a column it returns wins over
+  its `ComplianceTargetColumnConfig` row, except the batch, source and load columns.
+- Each query is logged with its parameters and a copy with the values written in.
+- Options: the scope, `batch`, `release`, `hold`, `as_of`.
+
+### 2.7 OVERRIDE_DECISIONS
+
+Applies the approved rows of `ComplianceBatchOverride` (6.2): `REUSE` (carry the data of an earlier closed batch
+forward; run type with `Carry_Fwd_Ind = 1`; before the close) and `REOPEN` (open a closed batch again until new data
+arrives); expires overrides past `Valid_Thru_Dt_Key`. `LATE_ARRIVAL` / `CORRECTION` are used by FILE_LOAD directly.
+An override that cannot apply is reported (`OVERRIDE_INVALID_DETECTED`, emailed) and the task still succeeds
+(`fail_on_problems` false). Options: the scope, `as_of`.
+
+### 2.8 EXPORT_LOAD
+
+Copies the data of each batch that is due into the table's export table (`ComplianceExportConfig`, 5.11), by
+columns or by calling the export procedure with the batch's values.
+
+- **Due:** `SCHEDULED` run types from the close date on (from `RELEASE_TIME` that day, if set); `ADHOC` run types
+  only when released. Held run types wait.
+- **Which data:** the newest batch of the period whose resolution is `NEW_FILE`, `CARRY_FORWARD` or `NO_DATA`. A
+  re-export replaces the batch's own export rows (`Exp_Btch_ID`); a batch is exported again only when it has new
+  data since its last export.
+- Timeline `EXPORT_LOADED`; a failure is rolled back and reported (`EXPORT_LOAD_FAILED`, exit 1).
+- Options: the scope, `batch`, `release`, `hold`, `as_of`.
+
+### 2.9 BATCH_CLOSE
+
+Closes every open batch whose close date has come:
+
+| Batch at the close | Closed as | Alert |
+|---|---|---|
+| Data loaded or carried forward | `REQUEST_COMPLETE` (`NEW_FILE` / `CARRY_FORWARD`) | — |
+| The source said "no data" | `DATA_NOT_PROVIDED` (`NO_DATA`) | — |
+| Nothing arrived | `DATA_NOT_PROVIDED` (`MISSING`) | `SOURCE_MISSING_AT_CLOSE` (emailed) |
+| Being loaded right now | stays open, closed by the next run | `BATCH_CLOSE_DEFERRED_LOCKED` (not emailed) |
+
+Held run types (`hold`) and reopened batches still waiting for data stay open. A file after the close needs a
+`LATE_ARRIVAL` (or `REOPEN`) override. Options: the scope, `hold`, `as_of`. It starts BATCH_CREATION (the next day's
+batches) and NOTIFY.
+
+### 2.10 NOTIFY
+
+Emails every alert of `CMS_ComplianceExceptionsAudit` not sent yet (`Notified_Ind = 0`; the events marked "emailed"
+in 8.15), one email per event, to the Variable's `email_recipient`, then marks it sent; an email that fails stays
+for the next run. Without `project` it sends the events of every project and of none. The DAGs' success / failure
+emails do not replace it: many alerts (a rejected file, a missing source, a stuck lock) do not fail any DAG.
+
+### 2.11 Command line (admin)
+
+`validate-config` (checks all configuration), `health` (stuck loads, rejected counts), `locks` / `release-lock`,
+`close-batch` / `close-batches`, `test-connection`, `show-config`, `notify`, `run --module <STEP>`: run from a worker
+(deployment guide, "Admin commands").
 
 ---
 
@@ -247,6 +418,27 @@ A batch is one table + run type + report period + request date. Every **source**
 
 ## 5. Configuration tables (you fill these)
 
+### 5.0 How to make entries (all configuration tables)
+
+| Rule | Detail |
+|---|---|
+| Order of the inserts | `ComplianceProject` → `ComplianceTable` → `ComplianceSourceSystem` → `ComplianceRunType` → `ComplianceRunTypePeriod` → `ComplianceDataSetSourceXwalk` → `ComplianceSourceFileConfig` / `ComplianceInternalSourceConfig` → `ComplianceFileCheckConfig` → `ComplianceTargetColumnConfig` → `ComplianceExportConfig` → `ComplianceRuleBinding`. Requests and overrides (section 6) when needed |
+| Codes | Upper case letters, digits and `_`; not case sensitive. Lengths: project 30, table 63, source 30, run type 20, version 10 |
+| Run type names | Short codes as they appear in file names and batch IDs: `DLY`, `WKLY`, `MNT`, `IN1`, `CMS` (CMSUNIV). The schedule itself is in `Sched_Cd` (`DAILY`, `WEEKLY`, `MONTHLY`), not in the name |
+| Lists | Comma separated without spaces: `DLY,WKLY,MNT`, `H,D,T` |
+| Dates | `DATE '2026-10-20'`; open end = `NULL` (crosswalk `Effective_End_Dt_Key`, overrides) |
+| A quote inside SQL text | Doubled, as in any Teradata string: `'SELECT ... WHERE Status = ''A'''` |
+| SQL text | One `SELECT` (no `;` in the middle). `{name}` placeholders (8.9) are passed as parameters: write `{rpt_start}`, never `'{rpt_start}'` |
+| `$env` | In database names and NAS paths: replaced by `load_env` (`CMSUNIV_STAGE_$ENV_T` = `CMSUNIV_STAGE_DEV_T` in DEV); not inside SQL text |
+| `*` | "Every" where the column allows it (`Table_Nm`, `Src_ID`, `Run_Ty`, `Check_Field_Nm`); a specific row wins over `*` |
+| Switching off | `Active_Ind = 0` (configuration rows are not deleted); in the crosswalk also `Include_Ind = 0` with a start date to stop one run type from a day |
+| Changing a row | `UPDATE` it. A change applies from the next run, also to open batches (their report dates do not change). For a change from a given day use the crosswalk's effective dates |
+| Audit columns | `Created_Dtts`, `Created_By`, `Updated_Dtts`, `Updated_By` are filled by the database: leave them out of an INSERT |
+| Framework tables | `ComplianceRequestControl`, `ComplianceFileLoad`, `ComplianceRequestFileDetail`, `CMS_ComplianceExceptionsAudit`, `ComplianceLock`: not changed by hand, except as a procedure in section 11 says |
+| Staging / core / export tables | Yours (DBA). Staging can be all text; core can be typed (converted on the way, 5.7). Columns with the same name pair by name, the others by order |
+| After every change | Run `validate-config` (2.11) and fix every ERROR |
+
+
 ### 5.1 ComplianceProject
 
 One row per project.
@@ -320,10 +512,10 @@ One row per run type, shared by all projects. Decides **when** batches are creat
 ```sql
 -- Daily, closes the same day
 INSERT INTO HSABC_DEV.ComplianceRunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Sched_Cd, Sched_Window_Days, Active_Ind)
-VALUES ('DAILY', 'Daily monitoring for the previous day', 'SCHEDULED', 1, 0, 'DAILY', 1, 1);
+VALUES ('DLY', 'Daily monitoring for the previous day', 'SCHEDULED', 1, 0, 'DAILY', 1, 1);
 -- Weekly, created Sunday, closes Friday
 INSERT INTO HSABC_DEV.ComplianceRunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Sched_Cd, Sched_Day_Cd, Sched_Window_Days, Active_Ind)
-VALUES ('WEEKLY', 'Weekly, previous Monday to Sunday', 'SCHEDULED', 6, 0, 'WEEKLY', 'SUN', 2, 1);
+VALUES ('WKLY', 'Weekly, previous Monday to Sunday', 'SCHEDULED', 6, 0, 'WEEKLY', 'SUN', 2, 1);
 -- Monthly on the 3rd Tuesday, 5 days to catch up a missed run
 INSERT INTO HSABC_DEV.ComplianceRunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Sched_Cd, Sched_Day_Cd, Sched_Week_Cd, Sched_Window_Days, Active_Ind)
 VALUES ('MNT', 'Monthly submission', 'SCHEDULED', 10, 0, 'MONTHLY', 'TUE', '3', 5, 1);
@@ -357,11 +549,11 @@ creates scheduled batches for **every** source that finds a period; when only so
 no row here and put `Rpt_Period_Cd` on those sources' crosswalk rows.
 
 ```sql
-INSERT INTO HSABC_DEV.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'DAILY', 'PREV_DAY', 1);
-INSERT INTO HSABC_DEV.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'WEEKLY', 'PREV_CALENDAR_WEEK', 1);
+INSERT INTO HSABC_DEV.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'DLY', 'PREV_DAY', 1);
+INSERT INTO HSABC_DEV.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'WKLY', 'PREV_CALENDAR_WEEK', 1);
 INSERT INTO HSABC_DEV.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'MNT', 'PREV_CALENDAR_MONTH', 1);
--- WEEKLY2: the Monday-Sunday week 5 weeks back
-INSERT INTO HSABC_DEV.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'WEEKLY2', 'RANGE(WEEK,5,1)', 1);
+-- WKLY2: the Monday-Sunday week 5 weeks back
+INSERT INTO HSABC_DEV.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'WKLY2', 'RANGE(WEEK,5,1)', 1);
 -- ODAG5 reports the quarter for MNT instead of the month
 INSERT INTO HSABC_DEV.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', 'ODAG5', 'MNT', 'PREV_CALENDAR_QUARTER', 1);
 ```
@@ -374,7 +566,7 @@ the period the row is valid for and the compliance version.
 | Column | Required | Values | Meaning |
 |---|---|---|---|
 | `Project_Cd`, `Table_Nm`, `Src_ID` | Yes | Existing codes | This source sends this table |
-| `Run_Ty` | Yes | One run type, or a list `DAILY,WEEKLY,MNT` (up to 200 characters) | The run types it sends. Only the listed ones: a run type added later applies to no source until it is listed |
+| `Run_Ty` | Yes | One run type, or a list `DLY,WKLY,MNT` (up to 200 characters) | The run types it sends. Only the listed ones: a run type added later applies to no source until it is listed |
 | `Effective_Start_Dt_Key` | Yes | Date | First run date the row applies |
 | `Effective_End_Dt_Key` | No | Date | Last run date (empty = open ended). End a row and add a new one to change the version |
 | `Cmplnc_Vrsn` | Yes | Up to 10, e.g. `2200` | The compliance version; stored on each batch, written to the `VERSION` column |
@@ -399,19 +591,19 @@ each with its own `Rpt_Period_Cd`) keep working.
 ```sql
 -- internal source 10: daily, monthly and ad hoc
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '10', 'DAILY,MNT,CMS', DATE '2026-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '10', 'DLY,MNT,CMS', DATE '2026-01-01', NULL, '2200', 1, 1);
 -- FDR 51: weekly, monthly and ad hoc
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '51', 'WEEKLY,MNT,CMS', DATE '2026-01-01', NULL, '2200', 1, 1);
+VALUES ('CMSUNIV', 'ODAG3', '51', 'WKLY,MNT,CMS', DATE '2026-01-01', NULL, '2200', 1, 1);
 -- ... but 51's MNT moves to version 2300 from November, with the last 3 months as report dates
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Period_Cd, Include_Ind, Active_Ind)
 VALUES ('CMSUNIV', 'ODAG3', '51', 'MNT', DATE '2026-11-01', NULL, '2300', 'RANGE(MONTH,3,3)', 1, 1);
 -- ESI 140 sends weekly, monthly and ad hoc ...
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '140', 'WEEKLY,MNT,CMS', DATE '2026-01-01', NULL, '2200', 1, 1);
--- ... but stops its weekly batches from December (same as removing WEEKLY from the list, with a start date)
+VALUES ('CMSUNIV', 'ODAG3', '140', 'WKLY,MNT,CMS', DATE '2026-01-01', NULL, '2200', 1, 1);
+-- ... but stops its weekly batches from December (same as removing WKLY from the list, with a start date)
 INSERT INTO HSABC_DEV.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Include_Ind, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '140', 'WEEKLY', DATE '2026-12-01', NULL, '2200', 0, 1);
+VALUES ('CMSUNIV', 'ODAG3', '140', 'WKLY', DATE '2026-12-01', NULL, '2200', 0, 1);
 ```
 
 ### 5.6a ComplianceBatchCalendar (optional)
@@ -515,7 +707,7 @@ VALUES ('CMSUNIV', 'ODAG3', '40', 'SQLSERVER', 'cms_src_appeals_sqlsrv',
 
 When is it pulled: scheduled run types from the request date on (an empty result before the close date means "no
 data yet" and is tried again on the next runs; empty on or after the close date means "no data", and the batch is
-still pulled again on every run until it closes, so a source table loaded later that day is picked up, e.g. a DAILY
+still pulled again on every run until it closes, so a source table loaded later that day is picked up, e.g. a DLY
 batch with SLA 1); ad hoc only when released (section 11.6).
 
 ### 5.9 ComplianceFileCheckConfig (file checks)
@@ -686,19 +878,19 @@ One row per exception, for **one source** of a batch (`Req_ID`). Applied only wh
 -- REUSE: the open batch of source 51 reuses the latest earlier batch (apply BEFORE the batch's close run)
 INSERT INTO HSABC_DEV.ComplianceBatchOverride (Override_Ty, Req_ID, Btch_ID, Reuse_Btch_ID, Apprvl_Stat, Valid_Thru_Dt_Key, Rsn_Txt, Reviewed_By, Reviewed_Dtts)
 SELECT 'REUSE', Req_ID, Btch_ID, NULL, 'APPROVED', DATE '2026-10-31', 'MedHOK confirmed no change', 'approver_id', CURRENT_TIMESTAMP(6)
-FROM HSABC_DEV.ComplianceRequestControl WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_DAILY' AND Src_ID = '51';
+FROM HSABC_DEV.ComplianceRequestControl WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_DLY' AND Src_ID = '51';
 -- LATE_ARRIVAL: a closed batch without data accepts a late file
 INSERT INTO HSABC_DEV.ComplianceBatchOverride (Override_Ty, Req_ID, Btch_ID, Apprvl_Stat, Valid_Thru_Dt_Key, Rsn_Txt, Reviewed_By, Reviewed_Dtts)
 SELECT 'LATE_ARRIVAL', Req_ID, Btch_ID, 'APPROVED', DATE '2026-10-31', 'ESI file came late', 'approver_id', CURRENT_TIMESTAMP(6)
-FROM HSABC_DEV.ComplianceRequestControl WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_DAILY' AND Src_ID = '140';
+FROM HSABC_DEV.ComplianceRequestControl WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_DLY' AND Src_ID = '140';
 -- CORRECTION: a closed batch with data accepts a corrected file
 INSERT INTO HSABC_DEV.ComplianceBatchOverride (Override_Ty, Req_ID, Btch_ID, Apprvl_Stat, Valid_Thru_Dt_Key, Rsn_Txt, Reviewed_By, Reviewed_Dtts)
 SELECT 'CORRECTION', Req_ID, Btch_ID, 'APPROVED', DATE '2026-10-31', 'Corrected amounts', 'approver_id', CURRENT_TIMESTAMP(6)
-FROM HSABC_DEV.ComplianceRequestControl WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_DAILY' AND Src_ID = '51';
+FROM HSABC_DEV.ComplianceRequestControl WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_DLY' AND Src_ID = '51';
 -- REOPEN: open a closed batch again until new data arrives
 INSERT INTO HSABC_DEV.ComplianceBatchOverride (Override_Ty, Req_ID, Btch_ID, Apprvl_Stat, Valid_Thru_Dt_Key, Rsn_Txt, Reviewed_By, Reviewed_Dtts)
 SELECT 'REOPEN', Req_ID, Btch_ID, 'APPROVED', DATE '2026-10-31', 'Resend expected', 'approver_id', CURRENT_TIMESTAMP(6)
-FROM HSABC_DEV.ComplianceRequestControl WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_DAILY' AND Src_ID = '140';
+FROM HSABC_DEV.ComplianceRequestControl WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_DLY' AND Src_ID = '140';
 ```
 
 Approve, reject or stop a row:
@@ -780,7 +972,7 @@ locks until they expire (`LOCK_TTL_MINUTES`, default 240) or are released (secti
 
 `Sched_Window_Days` (≥ 1): the batch can still be created up to that many days from its scheduled date (missed
 run). One batch per scheduled date, never one per day of the window. Every scheduled date gets its batch, also when
-its report dates are the same as the previous one's (a DAILY run type with fixed dates, e.g. `ANNUAL_WINDOW`, gets a
+its report dates are the same as the previous one's (a DLY run type with fixed dates, e.g. `ANNUAL_WINDOW`, gets a
 batch every day).
 
 ### 8.3 SQL fallbacks for schedule and report dates
@@ -1009,7 +1201,7 @@ Emailed by NOTIFY unless marked "no".
 | `FILE_CHECK_PASSED` | INFO | no | FILE_CHECK passed |
 | `FILE_SAME_CONTENT_OTHER_BATCH` | WARNING | yes | Same content already loaded for another batch |
 | `FILE_MOVE_FAILED` | WARNING | yes | File could not be moved to Archive / Error; it stays in the inbound folder and the next runs only try the move (no second load) |
-| `STAGING_LOCK_STALE` | WARNING | yes | A staging table has been locked for 30 minutes or more (a crashed run): its files and pulls wait. Free it with `release-lock` (9.5) if that run no longer exists |
+| `STAGING_LOCK_STALE` | WARNING | yes | A staging table has been locked for 30 minutes or more (a crashed run): its files and pulls wait. Free it with `release-lock` (2.11) if that run no longer exists |
 | `FILE_TECHNICAL_FAILURE` | ERROR | yes | System problem loading a file |
 | `CORE_LOAD_ROWCOUNT_MISMATCH` | ERROR | yes | Core rows differ from staged rows |
 | `SOURCE_QUERY_FAILED`, `SOURCE_DATA_REJECTED` | ERROR | yes | Internal source query failed / data does not fit |
@@ -1036,7 +1228,7 @@ Emailed by NOTIFY unless marked "no".
 | Connection | Type / fields | Used by |
 |---|---|---|
 | Teradata (name in `td_conn_var`, e.g. `DEV`) | host, login, password; Extra `{"logmech": "LDAP"}` | Every step |
-| NAS (name in `wdc_comp_oper_nas_var`) | host, login, password, port (445) | FILE_CHECK, FILE_LOAD |
+| NAS (`comp_oper_creds`, or the name in `wdc_comp_oper_nas_var`) | host, login, password, port (445) | FILE_CHECK, FILE_LOAD |
 | SQL Server source (name = `Src_Conn_Cd`) | host or `server\instance`, port, schema = database, login, password; Extra `{"driver": "ODBC Driver 17 for SQL Server", "encrypt": "yes", "trust_server_certificate": "yes"}` (`driver` is optional: without it the newest `ODBC Driver NN for SQL Server` installed on the worker is used, and the log names it) | SOURCE_LOAD |
 | `smtp_default` | Airflow SMTP connection | DAG emails, NOTIFY (`NOTIFY_BACKEND = airflow`) |
 
@@ -1060,63 +1252,113 @@ A DAG never runs twice at the same time; a run that is due while another runs wa
 
 ### 9.3 Variable keys
 
-| Key | Required | Default | Meaning |
-|---|---|---|---|
-| `meta_db` | **Yes** | | Metadata database (e.g. `HSABC_DEV`) |
-| `td_conn_var` | Yes | `compliance_teradata` | Teradata Connection id |
-| `wdc_comp_oper_nas_var` | FILE_LOAD, FILE_CHECK | | NAS Connection id |
-| `load_env` | Recommended | `DEV` | Environment: email subjects and `$env` (DEV / TEST / QA / PROD / UAT) |
-| `project` | **Yes, per project** | every project | The project the DAG works on |
-| `table_group`, `table`, `run_type` | No | all | Narrow the run |
-| `schedule_interval` | No | none (trigger only) | Cron expression, Central time, e.g. `0 20 * * *` |
-| `trigger_dags` | No | none | DAG ids to start after success (must be the project's own clones); a list or one comma-separated string |
-| `hold` | No | none | Run types to hold, e.g. `"WEEKLY"` (SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE) |
-| `runs` | No | | List of scopes; with `name` + `schedule_interval` per entry: timed runs (section 9.6) |
-| `email_recipient` | No | none | Success / failure emails of the DAG |
-| `snow_assignment_group` | No | `D&AE - EDE Govt Compliance` | ServiceNow incident group on failure |
-| `owner`, `tags`, `log_level` | No | `oss`, standard tags, `INFO` | |
-| `fail_on_problems` | No | true (OVERRIDE_DECISIONS false) | Fail the task when the step has problems (`true` / `false`, also as text) |
-| `execution_timeout_minutes`, `dagrun_timeout_minutes` | No | per step / 480 | Time limits (`LOCK_TTL_MINUTES` is raised to the task's limit + 30 when lower) |
-| `retries` | No | 1 | How often a task that hit a technical error is tried again (5 minutes later); 0 = never. Problems the step reports (a rejected file) fail at once, with the incident and email |
-| `settings` | No | | Framework settings (section 9.4) |
-| `gre` | FILE_RULES | from the Variable | GRE rules engine settings (`meta_db`, `text_params`, `extra_filters`, …) |
+Every DAG has one Variable (JSON object; keys in any case). Put in a Variable **only what differs from the default**:
+the framework fills in everything else. A CMSUNIV DEV Variable (`airflow_resources/examples/cmsuniv_dev`):
 
 ```json
-{"meta_db": "HSABC_DEV", "td_conn_var": "DEV", "load_env": "DEV", "project": "CMSUNIV",
- "wdc_comp_oper_nas_var": "wdc_comp_oper_nas_dev", "schedule_interval": "0 * * * *",
- "email_recipient": "compliance-dev@example.com",
- "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_EXPORT_LOAD", "OSSTD_CORE_CMS_COMPLIANCE_OVERRIDE_DECISIONS", "OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"],
- "settings": {"CHECK_MOVE_FAILED": true}}
+{"td_conn_var": "DEV", "meta_db": "HSABC_DEV", "load_env": "DEV",
+ "email_recipient": "TRINATH_gundavaram@example.com", "project": "CMSUNIV",
+ "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_EXPORT_LOAD", "OSSTD_CORE_CMS_COMPLIANCE_OVERRIDE_DECISIONS"]}
 ```
+
+**Connection and environment**
+
+| Key | Required | Default | Values |
+|---|---|---|---|
+| `meta_db` | **Yes** | | The metadata database, e.g. `HSABC_DEV`, `HSABC_PROD` |
+| `td_conn_var` | No | `compliance_teradata` | The Airflow Connection id of Teradata (CMSUNIV: `DEV`) |
+| `wdc_comp_oper_nas_var` | No | `comp_oper_creds` | The Airflow Connection id of the NAS; used by FILE_CHECK and FILE_LOAD only |
+| `load_env` | No | `DEV` | `DEV`, `TEST`, `QA`, `UAT`, `PROD` (any letters / digits): the value of `$env` in database names and paths (uppercase where it stands in upper case) and the email subjects |
+| `email_recipient` | No | none | One address, a list `["a@x.com", "b@x.com"]` or `"a@x.com,b@x.com"`. Gets the DAG's success / failure emails and, in the NOTIFY Variable, the alert emails (9.4 `DEFAULT_NOTIFY_EMAILS`). Without it: no emails |
+
+**What the run works on** (also accepted from a trigger, 9.5)
+
+| Key | Steps | Default | Values |
+|---|---|---|---|
+| `project` | all | every project | A `Project_Cd`, e.g. `CMSUNIV`. Leave it out only in a NOTIFY that should send the events of every project |
+| `table_group` | all | all | A `Table_Group_Cd` of `ComplianceTable`, e.g. `ODAG`, `SNPCC` |
+| `table` | all | all | A `Table_Nm`, e.g. `ODAG3` |
+| `run_type` | all | all | A `Run_Ty`, e.g. `DLY`, `WKLY`, `MNT` |
+| `period` | BATCH_CREATION | from the schedule codes | A period code (8.4), e.g. `PREV_DAY`: create batches with these report dates now |
+| `period_file` | BATCH_CREATION | none | A Python file with a custom period function (advanced) |
+| `lookback_days`, `lookback_weeks` | BATCH_CREATION | none | Whole numbers: create the missed batches of the last n days / weeks |
+| `batch` | SOURCE_LOAD, EXPORT_LOAD | all due | One `Btch_ID` |
+| `release` | SOURCE_LOAD, EXPORT_LOAD | `false` | `true`: work on ad-hoc / held batches now (11.6) |
+| `hold` | SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE | none | Run types to leave alone, e.g. `"WKLY"` or `["WKLY", "MNT"]` |
+| `as_of` | all | now | A date or timestamp, `2026-10-18` or `2026-10-18T06:00`: run as if it were then (Central time) |
+| `share`, `file`, `folder` | FILE_LOAD (trigger) | all files | Load one file / folder |
+
+**Schedule and chaining**
+
+| Key | Default | Values |
+|---|---|---|
+| `schedule_interval` | none (runs only when triggered) | A cron expression in `schedule_timezone`, e.g. `0 6 * * *` (06:00 daily), `*/15 * * * *` (every 15 minutes) |
+| `schedule_timezone` | `America/Chicago` | An IANA time zone name |
+| `trigger_dags` | none | DAG ids started after the step succeeds: a list, or one comma-separated string. Use the project's own DAG ids |
+| `runs` | none | A list of scopes, one task each; with `name` and `schedule_interval` per entry they are timed runs (9.6) |
+
+**Task behaviour**
+
+| Key | Default | Values |
+|---|---|---|
+| `retries` | `1` | `0` or more: how often a task that hit a technical error is tried again (5 minutes later). Problems the step reports (a rejected file) fail at once |
+| `fail_on_problems` | `true` (OVERRIDE_DECISIONS `false`) | `true` / `false`: fail the task when the step reports problems |
+| `execution_timeout_minutes` | BATCH_CREATION, FILE_CHECK 60; FILE_LOAD, SOURCE_LOAD, EXPORT_LOAD 120; OVERRIDE_DECISIONS, BATCH_CLOSE, NOTIFY 30 | Minutes. `LOCK_TTL_MINUTES` is raised to this + 30 when lower |
+| `dagrun_timeout_minutes` | `480` | Minutes |
+| `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `owner` | `oss` | Airflow owner |
+| `tags` | `Compliance`, `Compliance_Batch_Framework` | A list (the step's name is always added) |
+| `snow_assignment_group` | `D&AE - EDE Govt Compliance` | ServiceNow group of the incident opened when a task fails |
+| `settings` | none | Framework settings that differ from their default (9.4) |
+| `gre` | from the Variable | GRE rules engine settings (FILE_RULES only: `meta_db`, `text_params`, `extra_filters`, …) |
+
+**Success / failure emails and NOTIFY are different.** The success / failure emails (`email_recipient`) say whether
+the DAG run worked. NOTIFY emails the **business alerts** the steps record in `CMS_ComplianceExceptionsAudit`: which
+file was rejected and why, a source missing at the close date, a carry-forward applied, a file that could not be
+moved, a stuck staging lock, a failed export (8.15). Many of these do not fail the DAG (the run itself worked), so
+only NOTIFY tells you about them. NOTIFY sends every alert not sent yet, then marks it sent: run it after
+BATCH_CLOSE (its `trigger_dags`) and, when the DAGs run unattended, on its own schedule (e.g. `0 * * * *`), so the
+alerts of the day's loads arrive within the hour. It does not need to follow every step.
 
 ### 9.4 Framework settings (`"settings": {...}`)
 
-| Setting | Default | Meaning |
+All have a default; set one only to change it. The names are not case sensitive. Under Airflow the email settings
+come from the Variable: `NOTIFY_BACKEND = airflow`, `DEFAULT_NOTIFY_EMAILS` = `email_recipient`, `NOTIFY_FROM_EMAIL`
+= its first address.
+
+| Setting | Default | Values and meaning |
 |---|---|---|
-| `FILE_STORE` | `nas` | `nas` or `local` (tests) |
-| `ARCHIVE_FOLDER`, `ERROR_FOLDER`, `ERROR_LOG_FOLDER`, `CONTROL_REPORT_FOLDER` | `Archive`, `Error`, `ErrorLog`, `ControlReport` | Subfolders of the inbound folder |
-| `ARCHIVE_BY_YEAR` | false | Archive into `Archive/<year>/` |
-| `NAS_MIN_AGE_SECONDS` | 120 | A file younger than this is left for the next run (still arriving) |
-| `CHECK_MOVE_FAILED` | false | FILE_CHECK moves a failed file to `Error` |
-| `CHECK_CONTENT` | true | FILE_CHECK reads the content (else name / batch only) |
-| `CHECK_ON_LOAD` | false | FILE_LOAD runs the content checks itself |
-| `WRITE_ERROR_FILE`, `WRITE_CONTROL_REPORT` | true | Write the error log / control report |
-| `FILE_ENCODING` | `utf-8` | File encoding |
-| `QUOTE_CHAR` | `"` | Quote character |
-| `EMPTY_AS_NULL` | true | Empty field = NULL |
-| `SUPPORTED_FILE_TYPES` | `.txt,.csv` | Accepted extensions |
-| `LOAD_ENGINE` | `BATCH` | `BATCH` or `FASTLOAD` (large files; test first) |
-| `INSERT_BATCH_ROWS`, `INSERT_BATCH_BYTES` | 2000, 500000 | Insert batch size |
-| `RULE_ENGINE` | `gre` | `gre` or `none` |
+| `BUSINESS_TZ` | `America/Chicago` | IANA time zone of the business day (dates, close dates, timestamps written) |
+| `FILE_STORE` | `nas` | `nas` (the NAS over SMB) or `local` (a local folder, tests) |
+| `LOCAL_STORE_ROOT` | `./.local_store` | Folder of `FILE_STORE = local` |
+| `ARCHIVE_FOLDER` | `Archive` | Subfolder of the inbound folder for loaded files |
+| `ERROR_FOLDER` | `Error` | Subfolder for rejected files |
+| `ERROR_LOG_FOLDER` | `ErrorLog` | Subfolder for the error logs of rejected files |
+| `CONTROL_REPORT_FOLDER` | `ControlReport` | Subfolder for the control reports |
+| `ARCHIVE_BY_YEAR` | `false` | `true`: archive into `Archive/<year>/` |
+| `NAS_MIN_AGE_SECONDS` | `120` | Seconds: a file modified more recently is left for the next run (still arriving) |
+| `SUPPORTED_FILE_TYPES` | `.txt,.csv` | Comma-separated extensions; other files are rejected |
+| `FILE_ENCODING` | `utf-8` | `utf-8`, `latin-1`, `cp1252`, … |
+| `QUOTE_CHAR` | `"` | One character, or empty for none |
+| `EMPTY_AS_NULL` | `true` | `true`: an empty field is NULL; `false`: an empty string |
+| `CHECK_CONTENT` | `true` | FILE_CHECK reads the content; `false`: name and batch only |
+| `CHECK_MOVE_FAILED` | `false` | FILE_CHECK moves a file that fails its checks to `Error/` (CMSUNIV: `true` in the FILE_CHECK Variable) |
+| `CHECK_ON_LOAD` | `false` | `true`: FILE_LOAD runs the content checks itself before loading |
+| `WRITE_ERROR_FILE` | `true` | Write an error log for a rejected file |
+| `WRITE_CONTROL_REPORT` | `true` | Write the control report of each FILE_LOAD run |
+| `LOAD_ENGINE` | `BATCH` | `BATCH` (inserts in batches) or `FASTLOAD` (very large files; test first) |
+| `INSERT_BATCH_ROWS`, `INSERT_BATCH_BYTES` | `2000`, `500000` | Rows / bytes per insert batch |
+| `RULE_ENGINE` | `gre` | `gre` or `none` (no data quality rules) |
 | `GRE_ENTRYPOINT` | | `compliance_framework.export:run_gre` |
-| `FILE_RULES_MODE` | `GATE` | `GATE` (failure = FAILED) or `ANNOTATE` (failure = PASSED_WITH_WARNINGS) |
+| `FILE_RULES_MODE` | `GATE` | `GATE` (a failed rule = `FAILED`) or `ANNOTATE` (= `PASSED_WITH_WARNINGS`) |
 | `RELEASE_TIME` | none | `HH:MM`: on the close date, export (or pull) only from that time |
-| `NOTIFY_BACKEND` | `log` | `airflow` (email through `smtp_default`) or `log` |
-| `NOTIFY_FROM_EMAIL` | | Sender address |
-| `DEFAULT_NOTIFY_EMAILS` | | Alert recipients (the project's NOTIFY Variable) |
-| `LOCK_TIMEOUT_SECONDS` | 300 | How long a step waits for a busy batch / table |
-| `LOCK_TTL_MINUTES` | 240 | When a lock left by a crashed run expires |
-| `ENV_VALUE` | from `load_env` | Value of `$env` if different |
+| `LOCK_TIMEOUT_SECONDS` | `300` | Seconds a step waits for a busy batch |
+| `LOCK_TTL_MINUTES` | `240` | Minutes after which a lock left by a crashed run expires |
+| `HEARTBEAT_STALE_MINUTES` | `30` | Minutes after which `health` lists a load still in progress as stuck |
+| `NOTIFY_BACKEND` | `airflow` (command line: `log`) | `airflow` (email through `smtp_default`) or `log` (write the alert to the log only) |
+| `DEFAULT_NOTIFY_EMAILS` | `email_recipient` | Alert recipients, comma-separated |
+| `NOTIFY_FROM_EMAIL` | first `email_recipient` | Sender address of the alerts |
+| `ENV_VALUE` | from `load_env` | Value of `$env` when it should differ from `load_env` |
 
 ### 9.5 Triggering a DAG by hand (JSON)
 
@@ -1163,7 +1405,7 @@ export FRAMEWORK_METADATA_SCHEMA=HSABC_DEV FRAMEWORK_ENVIRONMENT=DEV
 ```json
 {"meta_db": "HSABC_DEV", "td_conn_var": "DEV", "load_env": "DEV", "project": "CMSUNIV", "schedule_interval": null,
  "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"],
- "runs": [{"name": "DAILY", "run_type": "DAILY", "schedule_interval": "0 20 * * *", "settings": {"RELEASE_TIME": "20:00"}},
+ "runs": [{"name": "DLY", "run_type": "DLY", "schedule_interval": "0 20 * * *", "settings": {"RELEASE_TIME": "20:00"}},
           {"name": "MNT", "run_type": "MNT", "schedule_interval": "0 6 * * *"}]}
 ```
 
@@ -1198,9 +1440,9 @@ scope) plus what the trigger gives.
 8. **Optional**: export (5.11), rules (5.12), calendar (5.6a).
 9. **Airflow**: Connections (9.1); copy the 8 DAG files with project names (e.g. `OSSTD_CORE_PRJB_COMPLIANCE_*`,
    Variables `prjb_compliance_<step>_config_var`) and create their Variables (9.3): every Variable sets `project`;
-   `trigger_dags` names the project's own DAGs; NOTIFY sets `DEFAULT_NOTIFY_EMAILS`. Keep one NOTIFY without
+   `trigger_dags` names the project's own DAGs; NOTIFY's `email_recipient` gets the alerts. Keep one NOTIFY without
    `project` for events of no project.
-10. **Validate**: `validate-config` from the command line (9.5); fix every ERROR.
+10. **Validate**: `validate-config` from the command line (2.11); fix every ERROR.
 11. **First cycle in DEV**: BATCH_CREATION → put a test file / source rows → FILE_LOAD / SOURCE_LOAD → EXPORT_LOAD
     → BATCH_CLOSE → NOTIFY; check with section 12. Try a bad file, a missing source, a late file.
 12. **Production**: same rows in the PROD metadata DB (`$env` makes database names and paths follow).
@@ -1209,7 +1451,7 @@ scope) plus what the trigger gives.
 
 ## 11. Operating procedures (how to …)
 
-**11.1 Check the configuration.** `python -m compliance_framework.cli validate-config` (9.5). ERRORs must be fixed; WARNINGs explain
+**11.1 Check the configuration.** `python -m compliance_framework.cli validate-config` (2.11). ERRORs must be fixed; WARNINGs explain
 something to look at.
 
 **11.2 Create batches for a missed day.** Trigger BATCH_CREATION with `{"project": "CMSUNIV", "as_of": "2026-10-19"}`.
@@ -1225,10 +1467,10 @@ back into the inbound folder (any name collision gets `_1`, `_2`).
 (6.2); OVERRIDE_DECISIONS applies it. The run type needs `Carry_Fwd_Ind = 1`.
 
 **11.6 Release early / export ad hoc.** Trigger EXPORT_LOAD (and SOURCE_LOAD for internal sources) with
-`{"project": "CMSUNIV", "run_type": "WEEKLY", "release": "true"}` (or `"batch": "<Btch_ID>"`). Released batches with
+`{"project": "CMSUNIV", "run_type": "WKLY", "release": "true"}` (or `"batch": "<Btch_ID>"`). Released batches with
 data close on the next BATCH_CLOSE.
 
-**11.7 Hold a run type for business reasons.** Add `"hold": "WEEKLY"` to the SOURCE_LOAD, EXPORT_LOAD and BATCH_CLOSE
+**11.7 Hold a run type for business reasons.** Add `"hold": "WKLY"` to the SOURCE_LOAD, EXPORT_LOAD and BATCH_CLOSE
 Variables. Remove it to go back to normal. Release single batches with 11.6 meanwhile.
 
 **11.8 A late file for a closed batch.** Without data: approved `LATE_ARRIVAL`; with data: approved `CORRECTION`.
@@ -1242,7 +1484,7 @@ batch needs its override).
 
 **11.11 Re-export a batch.** Trigger EXPORT_LOAD with `{"batch": "<Btch_ID>"}`.
 
-**11.12 Close a batch by hand.** `close-batch` from the command line (9.5); every open source of the batch, or `--src-id` for
+**11.12 Close a batch by hand.** `close-batch` from the command line (2.11); every open source of the batch, or `--src-id` for
 one. Refused before the close date unless released.
 
 **11.13 Run the step for one table group / table / run type.** Trigger with `table_group` or `table`, and/or
@@ -1250,7 +1492,7 @@ one. Refused before the close date unless released.
 
 **11.14 An alert email arrived.** Look up the event in 8.15 and the batch in 12.1 / 12.2.
 
-**11.15 A step waits or says "locked".** `locks` from the command line (9.5); if the owner run no longer exists:
+**11.15 A step waits or says "locked".** `locks` from the command line (2.11); if the owner run no longer exists:
 `release-lock --key <Lock_Key>`.
 
 **11.16 Change a version.** For every run type of the source: end the crosswalk row (`Effective_End_Dt_Key`) and
@@ -1284,7 +1526,7 @@ ORDER BY Req_Dt_Key, Btch_ID, Src_ID;
 ```sql
 SELECT c.Src_ID, d.Event_Dtts, d.Event_Ty, d.Actor, d.Load_ID, d.Event_Txt
 FROM HSABC_DEV.ComplianceRequestFileDetail d JOIN HSABC_DEV.ComplianceRequestControl c ON c.Req_ID = d.Req_ID
-WHERE c.Btch_ID = '20261019_CMSUNIV_ODAG3_DAILY'
+WHERE c.Btch_ID = '20261019_CMSUNIV_ODAG3_DLY'
 ORDER BY c.Src_ID, d.Detail_ID;
 ```
 
@@ -1371,7 +1613,7 @@ INFO - SOURCE_LOAD | 20261020_CMSUNIV_SNPCC1_DLY source 11 | Src_Sql_Txt on SQL_
 | Pull rejected `SOURCE_QUERY_FAILED` "could not connect to …" | Worker cannot reach the source: `[01000] … Can't open lib 'ODBC Driver 18 …'` = that driver is not installed on the worker (list them with `odbcinst -q -d`; set the installed one as `driver` in the Connection's Extra, or leave `driver` out); `[08001]` / `[HYT00]` = server, port, firewall or certificate (`trust_server_certificate`); `[28000]` = login | Fix the worker or the Connection; the next run pulls again |
 | Pull rejected `SOURCE_QUERY_FAILED` "the query on … failed" | The `Src_Sql_Txt` fails on the source (`Invalid object name` = table / database name; the Connection has no database unless its Schema is set) | Run the query on the source with the batch's values; fix `Src_Sql_Txt` |
 | Step "locked" | Another run is working on it, or a crashed run | Wait; else 11.15 |
-| No alert emails | NOTIFY not scheduled / not triggered, no `DEFAULT_NOTIFY_EMAILS`, no `smtp_default` | Check 12.6 and the NOTIFY Variable |
+| No alert emails | NOTIFY not scheduled / not triggered, no `email_recipient` in its Variable, no `smtp_default` | Check 12.6 and the NOTIFY Variable |
 | Rules never run | Table has an export and the batch is not exported yet | Normal: rules wait for the export |
 
 ---
@@ -1384,7 +1626,7 @@ INFO - SOURCE_LOAD | 20261020_CMSUNIV_SNPCC1_DLY source 11 | Src_Sql_Txt on SQL_
 | Table | A dataset of the project, e.g. ODAG3 (`Table_Nm`); has staging, core and optionally export tables |
 | Table group | Tables run together, e.g. ODAG1–5 |
 | Source | Who provides the data: an FDR sending files, or an internal system read by a query (`Src_ID`) |
-| Run type | How often / why batches are made: DAILY, WEEKLY, MNT, ad hoc (`Run_Ty`) |
+| Run type | How often / why batches are made: DLY, WKLY, MNT, ad hoc (`Run_Ty`) |
 | Crosswalk | Which source sends which table for which run type, from when, at which version |
 | Batch | One table + run type + report period + request date; one row per source (`Btch_ID`, `Req_ID`) |
 | Report period | The dates the data is about (`Rpt_Start_Dt_Key` – `Rpt_End_Dt_Key`) |
@@ -1398,3 +1640,68 @@ INFO - SOURCE_LOAD | 20261020_CMSUNIV_SNPCC1_DLY source 11 | Src_Sql_Txt on SQL_
 | Timeline | Every event of a batch (`ComplianceRequestFileDetail`) |
 | Exceptions audit | Problems and approvals, emailed (`CMS_ComplianceExceptionsAudit`) |
 | Step report | The summary each step writes at the end of its Airflow log |
+
+---
+
+## 15. CMSUNIV setup at a glance
+
+The rows are in `airflow_resources/examples/cmsuniv_setup.sql` (export tables and procedures in
+`cmsuniv_export_dev.sql`, Variables in `cmsuniv_dev/`).
+
+| What | CMSUNIV |
+|---|---|
+| Project | `CMSUNIV`; metadata `HSABC_DEV`; staging `CMSUNIV_FILELAND_$ENV_T` (files) / `CMSUNIV_STAGE_$ENV_T` (internal), core `CMSUNIV_CORE_$ENV_T`, export `CMSUNIV_EXPORT_$ENV_T` |
+| Table groups | `ODAG` (ODAG1 – 6), `CDAG` (CDAG1 – 7), `FA` (FA1 – 4), `SNPCC` (SNPCC1) |
+| Sources | 55: FDRs send files to `chs_dms/Dev/OSS_Inbound/External/CMSUNIV`; internal: QNXT 10 (`SQL_CHS`), AZ 40 (`SQL_AZ`), SNPCC 11 (`SQL_SNPCC`), Facets 210 (Teradata, to be configured) |
+| Version | `2200` from 1900-01-01 on every crosswalk row |
+| File names | `CMSAUTH_<source>_<file type>_22_<run type>_<report start>_<report end>_<timestamp>.txt`, e.g. `CMSAUTH_CDHDHMO_PYMT_C_22_DLY_20261019_20261019_20261014104600.txt` |
+
+| Run type | Category | When created | Report dates | SLA (close) | Who |
+|---|---|---|---|---|---|
+| `DLY` | SCHEDULED | Every day (`Sched_Cd DAILY`) | Previous day (`PREV_DAY`); FA tables their own | 1 (same day) | Every source |
+| `WKLY` | SCHEDULED | Every Sunday (`WEEKLY SUN`) | The 60 days ending the Saturday before (`RANGE(DAY,60,60)`) | 5 (Friday) | Internal sources |
+| `MNT` | SCHEDULED | The Sunday before the 3rd Tuesday (`MONTHLY TUE 3`, offset -2) | Previous calendar month | 5 | Every source |
+| `IN1` | ADHOC with a daily schedule | Every day, SNPCC1 / 11 only | Previous day | 1 | Never released: closes as `DATA_NOT_PROVIDED`, one alert a day |
+| `CMS` | ADHOC | Only from `ComplianceRequestInTake` | The request's dates | 1 | Pulled / exported only when released; the only run type with carry-forward |
+
+FA report dates (every run type): FA1 `LAST_DAYS(MONTH,1,14)` (the last 14 days of the previous month), FA2
+`ANNUAL_WINDOW(01-01,01-31)`, FA3 `ANNUAL_WINDOW(11-01,12-31,02-01)`, FA4 `ANNUAL_WINDOW(11-01,01-31)`; FA2 – FA4 move
+to the new year's dates on 1 February.
+
+DAG chain (Variables in `cmsuniv_dev/`): FILE_CHECK → FILE_LOAD → OVERRIDE_DECISIONS, EXPORT_LOAD; SOURCE_LOAD →
+EXPORT_LOAD; BATCH_CLOSE → BATCH_CREATION, NOTIFY. No schedules yet.
+
+---
+
+## 16. Upgrading an existing installation
+
+`airflow_resources/sql/schema.sql` always has the current tables. For tables created with an earlier version, run
+the statements of every version after yours, in order (replace `HSABC_DEV`):
+
+| From before | Statements |
+|---|---|
+| 0.3.57 | `ALTER TABLE HSABC_DEV.ComplianceRunTypePeriod ADD Rpt_Dt_Sql_Txt VARCHAR(8000);` `ALTER TABLE HSABC_DEV.ComplianceRunTypePeriod ADD Rpt_Period_Cd NULL;` |
+| 0.3.60 | `ALTER TABLE HSABC_DEV.ComplianceFileLoad RENAME Quarantine_Rsn_Cd TO Reject_Rsn_Cd;` `UPDATE HSABC_DEV.ComplianceFileLoad SET Load_Stat = 'REJECTED' WHERE Load_Stat = 'QUARANTINED';` |
+| 0.3.62 | the `Load_Stat` renames below |
+| 0.3.63 | the timeline event renames below |
+
+```sql
+-- 0.3.62: load statuses
+UPDATE HSABC_DEV.ComplianceFileLoad
+SET Reject_Rsn_Cd = CASE WHEN Load_Stat = 'DEFERRED' THEN 'STAGING_TABLE_BUSY' ELSE Reject_Rsn_Cd END,
+    Load_Stat = CASE Load_Stat WHEN 'PROMOTED' THEN 'FILE_LOADED' WHEN 'SUPERSEDED' THEN 'RELOADED'
+                               WHEN 'FAILED_TECHNICAL' THEN 'PROCESS_FAILURE' WHEN 'DEFERRED' THEN 'LOAD_INCOMPLETE' END
+WHERE Load_Stat IN ('PROMOTED', 'SUPERSEDED', 'FAILED_TECHNICAL', 'DEFERRED');
+
+-- 0.3.63: timeline events
+UPDATE HSABC_DEV.ComplianceRequestFileDetail
+SET Event_Ty = CASE Event_Ty WHEN 'FILE_PROMOTED' THEN 'FILE_LOADED'
+                             WHEN 'LATE_ARRIVAL_PROMOTED' THEN 'LATE_ARRIVAL_LOADED'
+                             WHEN 'CORRECTION_PROMOTED' THEN 'CORRECTION_LOADED' END
+WHERE Event_Ty IN ('FILE_PROMOTED', 'LATE_ARRIVAL_PROMOTED', 'CORRECTION_PROMOTED');
+```
+
+Renaming a run type (e.g. `DAILY` → `DLY`) is a configuration change, not an upgrade: insert the new
+`ComplianceRunType` row, change the `Run_Ty` of its `ComplianceRunTypePeriod` rows and the run type lists of the
+crosswalk, then set the old run type's `Active_Ind = 0`. Batches already created keep their old batch IDs; let them
+close first.

@@ -1,28 +1,6 @@
 {
   "td_conn_var": "DEV",
-  "meta_db": "HSABC_dev",
+  "meta_db": "HSABC_DEV",
   "load_env": "DEV",
-  "email_recipient": "TRINATH_gundavaram@example.com",
-  "owner": "oss",
-  "snow_assignment_group": "D&AE - EDE Govt Compliance",
-  "tags": [
-    "Compliance",
-    "Compliance_Batch_Framework"
-  ],
-  "schedule_timezone": "America/Chicago",
-  "log_level": "INFO",
-  "schedule_interval": null,
-  "settings": {
-    "BUSINESS_TZ": "America/Chicago",
-    "LOCK_TTL_MINUTES": 240,
-    "FILE_STORE": "nas",
-    "ARCHIVE_FOLDER": "Archive",
-    "ERROR_FOLDER": "Error",
-    "NAS_MIN_AGE_SECONDS": 120,
-    "CHECK_MOVE_FAILED": true,
-    "WRITE_ERROR_FILE": true,
-    "NOTIFY_BACKEND": "airflow",
-    "NOTIFY_FROM_EMAIL": "TRINATH_gundavaram@example.com",
-    "DEFAULT_NOTIFY_EMAILS": "TRINATH_gundavaram@example.com"
-  }
+  "email_recipient": "TRINATH_gundavaram@example.com"
 }

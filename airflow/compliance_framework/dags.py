@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONNECTION_ID = "compliance_teradata"
 TD_CONN_KEY = "td_conn_var"
 NAS_CONN_KEY = "wdc_comp_oper_nas_var"
+DEFAULT_NAS_CONNECTION_ID = "comp_oper_creds"
 DEFAULT_TIMEZONE = "America/Chicago"
 STEPS = ("BATCH_CREATION", "FILE_CHECK", "FILE_LOAD", "SOURCE_LOAD", "EXPORT_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BATCH_CLOSE",
          "NOTIFY")
@@ -172,6 +173,11 @@ def resolve_config(variable_key: str, overrides: dict = None, scope_index: int =
     environment = config.get("load_env") or config.get("environment") or (config.get("gre") or {}).get("environment")
     if environment:
         settings.setdefault("ENVIRONMENT", environment)
+    recipients = _names(config.get("email_recipient"))
+    settings.setdefault("NOTIFY_BACKEND", "airflow")
+    if recipients:
+        settings.setdefault("DEFAULT_NOTIFY_EMAILS", ",".join(recipients))
+        settings.setdefault("NOTIFY_FROM_EMAIL", recipients[0])
     return config, settings
 
 
@@ -237,9 +243,8 @@ def run_compliance_step(step: str, variable_key: str, overrides: dict = None, sc
     retry; a step that could not run (exit code 2) raises RuntimeError, which Airflow retries."""
     step = step.strip().upper()
     config, settings = resolve_config(variable_key, trigger_values(step, overrides), scope_index)
-    if step in ("FILE_LOAD", "FILE_CHECK") and str(settings.get("FILE_STORE") or "nas").lower() == "nas" and not config.get(NAS_CONN_KEY):
-        raise ValueError(f"'{NAS_CONN_KEY}' (the Airflow Connection of the NAS file server) is required in "
-                         f"Airflow Variable '{variable_key}'")
+    if step in ("FILE_LOAD", "FILE_CHECK") and str(settings.get("FILE_STORE") or "nas").lower() == "nas":
+        config[NAS_CONN_KEY] = config.get(NAS_CONN_KEY) or DEFAULT_NAS_CONNECTION_ID
     _connect_environment(config, connection_id)
 
     params = {k: config.get(k) for k in SCOPE_KEYS if config.get(k) not in (None, "")}

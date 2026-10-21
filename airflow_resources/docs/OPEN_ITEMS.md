@@ -1,6 +1,6 @@
 # Compliance Batch Framework (Airflow / Teradata): open items
 
-State at version 0.3.63. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
+State at version 0.3.64. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
 everything they list that is not below is done. Tested: 24 scenarios on Python 3.13 and 3.9 against a PostgreSQL
 stand-in for Teradata; the 8 DAG files parse and a step DAG runs (stubbed step) on Airflow 3.3.0. **Nothing has run on Teradata, the NAS or a real
 Airflow deployment yet.**
@@ -16,7 +16,7 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
 | # | Case | Expected |
 |---|---|---|
 | 1 | `validate-config` | No ERROR except Facets (210) until its config exists; `HEADER_NAMES_PARTIAL` warnings for the tables without a target list (CDAG1 – 5, FA1 – 4) |
-| 2 | BATCH_CREATION on a Sunday before the 3rd Tuesday | DAILY, WEEKLY, MNT, IN1 batches; FA tables with their fixed dates |
+| 2 | BATCH_CREATION on a Sunday before the 3rd Tuesday | DLY, WKLY, MNT, IN1 batches; FA tables with their fixed dates |
 | 3 | One good and one bad file per file layout (general, MedHOK) | Good: `FILE_LOADED`, file in `Archive/`. Bad: `REJECTED`, file in `Error/`, error log in `ErrorLog/`, FILE_LOAD fails at once (no retry), incident + email |
 | 4 | SOURCE_LOAD for QNXT, AZ, SNPCC before and after the source tables are loaded | Empty first pull = no data, pulled again on the next runs until the batch closes |
 | 5 | An internal query with one misnamed column | Pull rejected `SOURCE_DATA_REJECTED` with the name |
@@ -71,7 +71,7 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
   file closes `DATA_NOT_PROVIDED` with an email. One batch per request = one request day.
 - **IN1** batches close without data every day (one email a day). **CMS** (ad hoc) is pulled and exported only with
   `release`; only CMS allows carry-forward.
-- **FA DAILY** batches are made every day with the FA tables' fixed dates; FA2 – FA4 move to the new dates on 1 Feb.
+- **FA DLY** batches are made every day with the FA tables' fixed dates; FA2 – FA4 move to the new dates on 1 Feb.
 - **MNT** is made on the Sunday before the 3rd Tuesday only; a missed Sunday needs a manual run with `as_of`.
 - **Tables without a target list** (CDAG1 – 5, FA1 – 4; FA2 because its header names `RejectReasonCode6` twice) load
   by position: their staging data columns must be in the file's field order.

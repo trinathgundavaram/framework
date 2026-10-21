@@ -139,13 +139,11 @@ value (Admin → Variables); for another environment change `td_conn_var`, `meta
 ```json
 {
   "td_conn_var": "DEV",
-  "wdc_comp_oper_nas_var": "wdc_comp_oper_nas_dev",
-  "meta_db": "HSABC_dev",
+  "meta_db": "HSABC_DEV",
   "load_env": "DEV",
-  "schedule_interval": "*/15 * * * *",
   "email_recipient": "compliance-dev@example.com",
-  "project": "CMS_UNIVERSE",
-  "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_EXPORT_LOAD", "OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"]
+  "project": "CMSUNIV",
+  "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_EXPORT_LOAD", "OSSTD_CORE_CMS_COMPLIANCE_OVERRIDE_DECISIONS"]
 }
 ```
 
@@ -156,7 +154,7 @@ default is right (the examples carry only what differs: connections, `load_env`,
 |---|---|
 | `meta_db` (required) | Teradata database holding the framework tables |
 | `td_conn_var` | Airflow Connection of Teradata. Falls back to `connection_id`, then `gre.connection_id`, then `compliance_teradata` |
-| `wdc_comp_oper_nas_var` | Airflow Connection of the NAS file server. Required where files are checked or loaded (`FILE_CHECK`, `FILE_LOAD`) |
+| `wdc_comp_oper_nas_var` | Airflow Connection of the NAS file server, used where files are checked or loaded (`FILE_CHECK`, `FILE_LOAD`); default `comp_oper_creds` |
 | `load_env` | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); falls back to `environment`, then `gre.environment`, else `DEV` |
 | `schedule_interval` | Cron expression of the DAG; leave out for a DAG that is only triggered |
 | `schedule_timezone` | Optional; schedules run in Central time (`America/Chicago`, with daylight saving) |
@@ -182,7 +180,7 @@ Keys by step:
 | `FILE_RULES` | the scope; `gre` (the GRE's own Airflow Variable; every key optional: `meta_db` (default the Variable's `meta_db`), `environment` (`load_env`), `project_name` (`project`), `log_level` (the Variable's, `INFO`), `max_parallel_rules` (1), `connection_type` / `meta_connection` (`teradata`), `run_params` / `text_params` / `extra_filters` (none); plus `package_dir`, the folder holding the GRE's `run_rules.py`, default `<dags>/rules_engine`) | `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `FILE_RULES_MODE` (`GATE`) |
 | `OVERRIDE_DECISIONS` | the scope | — |
 | `BATCH_CLOSE` | the scope | — |
-| `NOTIFY` | the scope (no `project`: every pending event, including those of no project) | `NOTIFY_BACKEND` (`airflow` = email through the Airflow SMTP connection `smtp_default`, `log` = write to the task log, the default), `NOTIFY_FROM_EMAIL`, `DEFAULT_NOTIFY_EMAILS` |
+| `NOTIFY` | the scope (no `project`: every pending event, including those of no project) | none needed: under Airflow the alerts are emailed through `smtp_default` to the Variable's `email_recipient` (from its first address); `NOTIFY_BACKEND` (`log` = write to the task log), `NOTIFY_FROM_EMAIL`, `DEFAULT_NOTIFY_EMAILS` change that |
 
 A trigger's configuration overrides the Variable for that run, but only with the step's own inputs (its scope keys
 above, `batch` / `release` / `hold` where the step takes them, `share` / `file` / `folder` for FILE_LOAD), `as_of` (an
@@ -193,19 +191,19 @@ settings `RULE_ENGINE`, `GRE_ENTRYPOINT`, `FILE_STORE`, `LOCAL_STORE_ROOT`, `MET
 
 **One DAG, several times (timed runs).** When entries of `runs` have their own `schedule_interval` (and a `name`),
 the DAG runs at every one of those times (and at its own `schedule_interval`, if set), with one task. Each run
-works with the entry scheduled at its time, e.g. EXPORT_LOAD for MNT at 06:00 and for DAILY at 20:00:
+works with the entry scheduled at its time, e.g. EXPORT_LOAD for MNT at 06:00 and for DLY at 20:00:
 
 ```json
 {"meta_db": "HSABC_DEV", "td_conn_var": "DEV", "load_env": "DEV", "project": "CMS_UNIVERSE", "schedule_interval": null,
  "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"],
- "runs": [{"name": "DAILY", "run_type": "DAILY", "schedule_interval": "0 20 * * *", "settings": {"RELEASE_TIME": "20:00"}},
+ "runs": [{"name": "DLY", "run_type": "DLY", "schedule_interval": "0 20 * * *", "settings": {"RELEASE_TIME": "20:00"}},
           {"name": "MNT", "run_type": "MNT", "schedule_interval": "0 6 * * *"}]}
 ```
 
 | Run | Works with |
 |---|---|
 | Scheduled | The entry (or entries, one after the other) whose `schedule_interval` is the run's time |
-| Manual with `"run": "MNT"` (or `"DAILY,MNT"`) | Those entries, plus what the trigger gives (`batch`, `release`, `settings`, ...) |
+| Manual with `"run": "MNT"` (or `"DLY,MNT"`) | Those entries, plus what the trigger gives (`batch`, `release`, `settings`, ...) |
 | Manual without `run`, or started by another DAG | The Variable's own scope, plus what the trigger gives |
 
 A DAG never runs twice at the same time (`max_active_runs` 1): a run that is due, or triggered, while another is
@@ -278,7 +276,7 @@ Server needs `pyodbc` and the Microsoft ODBC driver on the workers. Check a conn
 **Which batches are pulled.** With the scope (`project`, `table_group` or `table`, `run_type`): every open batch
 of a query source that has no data yet (`REQUEST_CREATED`, request date reached), or whose earlier pull returned no
 rows on or after its due date (`SOURCE_DATA_READY_NO_DATA`): it is pulled again on every run until it closes, so a
-source table loaded later in the day is taken (a DAILY batch with SLA 1 has no "before the due date"); while it still
+source table loaded later in the day is taken (a DLY batch with SLA 1 has no "before the due date"); while it still
 returns no rows nothing changes. With `batch` (one `Btch_ID`, or
 several separated by commas): the query sources of those batches, whatever their data; the new pull replaces the batch's rows
 (a closed batch still needs its override). A scheduled run type's batch is pulled from its request date on, so data that
@@ -330,11 +328,11 @@ SOURCE_LOAD); the export:
 
 | Run category | Data exported (and, for ad hoc, internal sources pulled) |
 |---|---|
-| `SCHEDULED` (DAILY, WEEKLY, MONTHLY, ...) | from the batch's due date on: its close date, `Req_Dt_Key + SLA_Days - 1` (WEEKLY created Sunday 10/18 with `SLA_Days = 6`: Friday 10/23; DAILY with `SLA_Days = 1`: the same day). After that every change is exported at once |
+| `SCHEDULED` (DLY, WKLY, MNT, ...) | from the batch's due date on: its close date, `Req_Dt_Key + SLA_Days - 1` (WKLY created Sunday 10/18 with `SLA_Days = 6`: Friday 10/23; DAILY with `SLA_Days = 1`: the same day). After that every change is exported at once |
 | `ADHOC` | only when released |
 
 `RELEASE_TIME` (setting, `HH:MM` Central time) makes the due date start at that time instead of midnight, e.g.
-`"RELEASE_TIME": "20:00"` in the EXPORT_LOAD Variable: a DAILY batch created in the morning is exported from 20:00
+`"RELEASE_TIME": "20:00"` in the EXPORT_LOAD Variable: a DLY batch created in the morning is exported from 20:00
 that evening. It applies to the steps whose Variable has it (the examples: EXPORT_LOAD only, so internal sources are
 pulled in the morning and exported in the evening).
 
@@ -343,7 +341,7 @@ not fail the task. FILE_RULES leaves the loads of tables with an export table un
 (`waiting_for_export` in its report), so the rules always read the export.
 
 **Releasing early** (e.g. weekly data ready on Wednesday): trigger the DAG with `release` = `true` and the scope,
-for example `{"project": "CMS_UNIVERSE", "run_type": "WEEKLY", "release": "true"}` (or a `table_group`, a
+for example `{"project": "CMS_UNIVERSE", "run_type": "WKLY", "release": "true"}` (or a `table_group`, a
 `table`, or `batch`):
 
 - `SOURCE_LOAD` releases and pulls the scope's held batches of internal sources (and triggers EXPORT_LOAD);
@@ -355,7 +353,7 @@ exported at once, and BATCH_CLOSE closes it on its next run (or `close-batch`) w
 has data. Batches without data still close on their SLA date. Other run types and batches are not touched.
 
 **Holding a run type for business reasons** (scheduled or ad hoc, also past the due date): put
-`"hold": "WEEKLY"` (run types, comma separated, or a list) in the Variable of `SOURCE_LOAD`, `EXPORT_LOAD` and
+`"hold": "WKLY"` (run types, comma separated, or a list) in the Variable of `SOURCE_LOAD`, `EXPORT_LOAD` and
 `BATCH_CLOSE`, or give it in a trigger. As long as a DAG gets that input, its project's batches of those run types
 are not pulled, exported or closed (listed under `held` / `on_hold` in the report), next week's batches included.
 To run them anyway, trigger with `release` = `true` and the scope: the batches it releases go through every step
@@ -436,7 +434,7 @@ The SMB library's connection messages are no longer written (warnings and errors
 
 ## Batch ID (`Btch_ID`)
 
-`Btch_ID` = `{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Run_Ty}`, e.g. `20261019_CMSUNIV_ODAG3_DAILY`: one batch per table,
+`Btch_ID` = `{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Run_Ty}`, e.g. `20261019_CMSUNIV_ODAG3_DLY`: one batch per table,
 run type and request date, shared by every source. Each source has its own row in `ComplianceRequestControl`
 (`Btch_ID` + `Src_ID` is unique; `Req_ID` identifies the row) with its own status, data, SLA, close, overrides and
 timeline. A second report period of the same table and run type on the same request date (an ad-hoc request, an
@@ -838,11 +836,11 @@ date. Between -31 and 31.
 `Sched_Window_Days` (default 1): the batch can still be created that many days from its scheduled date, for the
 same report dates, so a missed run catches up (e.g. `5` for the 3rd Tuesday: Tuesday to Saturday). One batch is
 made per scheduled date, never one per day of the window, and every scheduled date gets its batch even when its
-report dates are the previous one's (DAILY with `ANNUAL_WINDOW(01-01,01-31)` = a batch every day for January).
+report dates are the previous one's (DLY with `ANNUAL_WINDOW(01-01,01-31)` = a batch every day for January).
 
 ### Which sources: one crosswalk row per table and source
 
-`Run_Ty` lists the run types of the source, e.g. `DAILY,WEEKLY,MNT` (only the listed run types: a run type added
+`Run_Ty` lists the run types of the source, e.g. `DLY,WKLY,MNT` (only the listed run types: a run type added
 later applies to no source until it is listed). The version and effective dates are on the row. A row for **one**
 run type replaces the list's entry for that run type while that row is effective: its own `Cmplnc_Vrsn`, effective
 dates or `Rpt_Period_Cd`; with `Include_Ind = 0` it switches that run type off for the source. A row with a single
@@ -850,10 +848,10 @@ run type and no list is a normal row, so existing crosswalks keep working unchan
 
 ```sql
 INSERT INTO <META_DB>.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Cmplnc_Vrsn)
-VALUES ('CMSUNIV', 'ODAG3', '51', 'DAILY,WEEKLY,MNT', DATE '2026-01-01', '2200');
+VALUES ('CMSUNIV', 'ODAG3', '51', 'DLY,WKLY,MNT', DATE '2026-01-01', '2200');
 -- source 140 has no weekly batches
 INSERT INTO <META_DB>.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Cmplnc_Vrsn, Include_Ind)
-VALUES ('CMSUNIV', 'ODAG3', '140', 'WEEKLY', DATE '2026-01-01', '2200', 0);
+VALUES ('CMSUNIV', 'ODAG3', '140', 'WKLY', DATE '2026-01-01', '2200', 0);
 ```
 
 ### Which dates: `ComplianceRunTypePeriod` (or `Rpt_Period_Cd` on the crosswalk)
@@ -870,9 +868,9 @@ batches for every crosswalk row that finds a period (set none for it when only s
 `Rpt_Period_Cd` on those rows).
 
 ```sql
-INSERT INTO <META_DB>.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'DAILY', 'PREV_DAY');
-INSERT INTO <META_DB>.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'WEEKLY', 'PREV_CALENDAR_WEEK');
-INSERT INTO <META_DB>.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'WEEKLY2', 'RANGE(WEEK,5,1)');
+INSERT INTO <META_DB>.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'DLY', 'PREV_DAY');
+INSERT INTO <META_DB>.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'WKLY', 'PREV_CALENDAR_WEEK');
+INSERT INTO <META_DB>.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'WKLY2', 'RANGE(WEEK,5,1)');
 ```
 
 Codes, counted from the scheduled date: `PREV_DAY`, `SAME_DAY`, `PREV_CALENDAR_WEEK` (Monday to Sunday),
