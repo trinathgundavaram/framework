@@ -32,7 +32,7 @@ from compliance_framework.load import (ColumnMapping, LoadContext, PLACEHOLDER, 
 
 log = logging.getLogger(__name__)
 
-TERMINAL_LOAD_STATS = {"REJECTED", "PROMOTED", "SUPERSEDED"}
+TERMINAL_LOAD_STATS = {"REJECTED", "FILE_LOADED", "RELOADED"}
 UNFINISHED_LOAD_STATS = ("RECEIVED", "STAGING", "STAGED")
 STALE_LOCK = timedelta(minutes=30)
 DEFER_WAIT_SECONDS = 30
@@ -150,7 +150,7 @@ class IngestPipeline:
         info = self.store.head(share, path)
         done = self._unmoved(info)
         if done is not None:
-            self._archive(info, done["load_id"], rejected=done["load_stat"] not in ("PROMOTED", "SUPERSEDED"))
+            self._archive(info, done["load_id"], rejected=done["load_stat"] not in ("FILE_LOADED", "RELOADED"))
             return IngestOutcome(done["load_id"], "MOVE_RETRIED",
                                  message="already processed; only the move to Archive / Error was tried again")
         load_id = self._register(info)
@@ -265,7 +265,7 @@ class IngestPipeline:
         return {
             "stale_loads": q(
                 """SELECT Load_ID, File_Path, Load_Stat, Updated_Dtts FROM ComplianceFileLoad
-                    WHERE Load_Stat IN ('RECEIVED','STAGING','STAGED','RULES_RUNNING','FAILED_TECHNICAL')
+                    WHERE Load_Stat IN ('RECEIVED','STAGING','STAGED','RULES_RUNNING','PROCESS_FAILURE')
                       AND Updated_Dtts < %s ORDER BY Load_ID""", stale_before),
             "rejected_by_reason": q("""SELECT Reject_Rsn_Cd, count(*) AS n FROM ComplianceFileLoad
                                           WHERE Load_Stat='REJECTED' GROUP BY Reject_Rsn_Cd ORDER BY n DESC"""),
@@ -285,18 +285,18 @@ class IngestPipeline:
         """A new load row for this pickup of the file (the caller holds the file lock).
 
         Every pickup is a new delivery, whatever happened to the file before. A load of the same file left unfinished
-        (a run that stopped) is closed as FAILED_TECHNICAL.
+        (a run that stopped) is closed as PROCESS_FAILURE.
         """
         now = self.clock.now()
         key = db.file_hash(info.share, info.path, f"{info.version}#{uuid.uuid4().hex}")
         marks, unfinished = db.in_list(UNFINISHED_LOAD_STATS)
         with self.conn.transaction():
             self.conn.execute(
-                f"""UPDATE ComplianceFileLoad SET Load_Stat='FAILED_TECHNICAL', Error_Txt=%s, Updated_Dtts=%s
+                f"""UPDATE ComplianceFileLoad SET Load_Stat='PROCESS_FAILURE', Error_Txt=%s, Updated_Dtts=%s
                      WHERE File_Share=%s AND File_Path=%s AND Load_Stat IN ({marks})""",
                 ["not finished; the file was picked up again", now, info.share, info.path, *unfinished])
-            self.conn.execute("""UPDATE ComplianceFileLoad SET Load_Stat='SUPERSEDED', Updated_Dtts=%s
-                                  WHERE File_Share=%s AND File_Path=%s AND Load_Stat='DEFERRED'""",
+            self.conn.execute("""UPDATE ComplianceFileLoad SET Load_Stat='RELOADED', Updated_Dtts=%s
+                                  WHERE File_Share=%s AND File_Path=%s AND Load_Stat='LOAD_INCOMPLETE'""",
                               (now, info.share, info.path))
             self.conn.execute(
                 """INSERT INTO ComplianceFileLoad (File_Hash, File_Share, File_Path, File_Version,
@@ -359,8 +359,8 @@ class IngestPipeline:
         lock = self.conn.execute("SELECT Owner_ID, Acquired_Dtts FROM ComplianceLock WHERE Lock_Key=%s", (key,)).fetchone()
         now = self.clock.now()
         with self.conn.transaction():
-            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='DEFERRED', Error_Txt=%s, Updated_Dtts=%s "
-                              "WHERE Load_ID=%s", (text, now, load_id))
+            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='LOAD_INCOMPLETE', Reject_Rsn_Cd='STAGING_TABLE_BUSY', "
+                              "Error_Txt=%s, Updated_Dtts=%s WHERE Load_ID=%s", (text, now, load_id))
             if lock and lock["acquired_dtts"] and now - lock["acquired_dtts"] >= STALE_LOCK:
                 detail = (f"{busy} has been locked since {lock['acquired_dtts']} by {lock['owner_id']}; its files and "
                           f"pulls wait. If that run no longer exists: release-lock --key {key}")
@@ -489,7 +489,7 @@ class IngestPipeline:
                 self.conn.execute(
                     """UPDATE ComplianceRequestControl SET Resolution_Ty=%s, Req_Stat=%s, Reuse_Btch_ID=NULL,
                               Updated_Dtts=%s WHERE Req_ID=%s""", ("NEW_FILE" if rows else "NO_DATA", to_stat, now, req_id))
-                self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='PROMOTED', Rules_Stat='NOT_RUN', Updated_Dtts=%s "
+                self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='FILE_LOADED', Rules_Stat='NOT_RUN', Updated_Dtts=%s "
                                   "WHERE Load_ID=%s", (now, load_id))
                 if d.action == Action.PROMOTE_REPLACE:
                     self.logger.batch_event(
@@ -528,8 +528,8 @@ class IngestPipeline:
                                 detail=f"reuse of {b['reuse_btch_id']} replaced by load {load_id}")
 
     def _supersede(self, load_id: int) -> None:
-        self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='SUPERSEDED', Updated_Dtts=%s "
-                          "WHERE Load_ID=%s AND Load_Stat='PROMOTED'", (self.clock.now(), load_id))
+        self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='RELOADED', Updated_Dtts=%s "
+                          "WHERE Load_ID=%s AND Load_Stat='FILE_LOADED'", (self.clock.now(), load_id))
 
     def _rejected_closed(self, load_id, detail, now) -> None:
         self.conn.execute(
@@ -593,7 +593,7 @@ class IngestPipeline:
             with self.conn.transaction():
                 marks, terminal = db.in_list(sorted(TERMINAL_LOAD_STATS))
                 self.conn.execute(
-                    f"""UPDATE ComplianceFileLoad SET Load_Stat='FAILED_TECHNICAL', Error_Txt=%s, Updated_Dtts=%s
+                    f"""UPDATE ComplianceFileLoad SET Load_Stat='PROCESS_FAILURE', Error_Txt=%s, Updated_Dtts=%s
                         WHERE Load_ID=%s AND Load_Stat NOT IN ({marks})""",
                     [sanitize_db_error(db.error_text(err)), self.clock.now(), load_id, *terminal])
                 if isinstance(err, RowCountMismatch):
@@ -612,13 +612,22 @@ class IngestPipeline:
                  FROM ComplianceFileLoad f LEFT JOIN ComplianceRequestControl c ON c.Req_ID = f.Req_ID
                 WHERE f.Load_ID=%s""", (load_id,)).fetchone() or {}
         self.logger.audit("FILE_TECHNICAL_FAILURE", load_id=load_id, req_id=row.get("req_id"), btch_id=row.get("btch_id"),
-                          file_ref=self.store.uri(row["file_share"], row["file_path"]) if row.get("file_path") else None,
+                          file_ref=_load_ref(self.store, row),
                           project_cd=row.get("project_cd") or self._scope_project, table_nm=row.get("table_nm"),
                           src_id=row.get("src_id"), run_ty=row.get("run_ty"),
                           description=sanitize_db_error(db.error_text(err))[:500])
 
 
 # source_load: SOURCE_LOAD: pull a batch's data from an internal source with its own SELECT (ComplianceInternalSourceConfig).
+
+def _load_ref(store, row: dict) -> Optional[str]:
+    """Where a load came from: the file's location, or the pull's source (a pull has no file on the NAS)."""
+    if not row.get("file_path"):
+        return None
+    if str(row.get("file_share") or "").startswith(QUERY_PREFIX):
+        return f"{row['file_share']} {row['file_path']}"
+    return store.uri(row["file_share"], row["file_path"])
+
 
 FRAMEWORK_KEYS = ("BATCH_ID", "SOURCE_ID", "LOAD_ID")
 

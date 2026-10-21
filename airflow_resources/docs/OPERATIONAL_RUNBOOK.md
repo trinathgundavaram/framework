@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.61 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.62 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -473,8 +473,8 @@ columns you map. A run-type column (mapped to `RUN_TYPE`) lets staging be cleare
 | 1 | The name is matched to its file config and its open batch; a `ComplianceFileLoad` row is written | `RECEIVED` |
 | 2 | File checks (5.9) | Failed: `REJECTED`, file to `Error/`, error log in `ErrorLog/`, email |
 | 3 | The batch's earlier staging rows of the source are removed, the file's records inserted with the derived columns | `STAGED`, `Stg_Rcd_Cnt` |
-| 4 | Every text staging value whose core column has another type is test-converted to the core column's type and `FORMAT` (from `DBC.ColumnsV`) | A value that does not convert, or an empty NOT NULL column: `REJECTED` (`CORE_TYPE_MISMATCH`, column named), staged rows removed, core untouched |
-| 5 | One transaction: the batch's core rows of the source are removed and the staged rows copied in (converted as in step 4); the copied count must equal the staged count | `PROMOTED`, batch `SOURCE_DATA_READY` |
+| 4 | Every NOT NULL core column must get a value; every text staging value whose core column has another type is test-converted to the core column's type and `FORMAT` (from `DBC.ColumnsV`) | A NOT NULL core column with no staging column, a value that does not convert, or an empty value for a NOT NULL column: `REJECTED` (`CORE_TYPE_MISMATCH`, columns named), staged rows removed, core untouched |
+| 5 | One transaction: the batch's core rows of the source are removed and the staged rows copied in (converted as in step 4); the copied count must equal the staged count | `FILE_LOADED`, batch `SOURCE_DATA_READY` |
 | 6 | The file moves to `Archive/`, a line goes to the control report | |
 
 Conversion rules: an empty value becomes NULL; dates and times use the core column's own `FORMAT` (a DATE column
@@ -482,7 +482,9 @@ without one has the system default, often `YY/MM/DD` or `YYYY-MM-DD`, so give it
 `DATE FORMAT 'MM/DD/YYYY'`); the load date / time and the report dates are written in each table's own type (a date
 in a `TIMESTAMP` column is its midnight); columns of the same kind in both tables are copied as they are. Internal
 source pulls (SOURCE_LOAD) follow steps 3 to 5. A database error at any step (a missing table, the database down) is
-`FAILED_TECHNICAL`: nothing is half done, the file stays in the inbound folder and is tried again on the next run.
+`PROCESS_FAILURE`: nothing is half done, the file stays in the inbound folder and is tried again on the next run.
+
+**Which staging column fills which core column:** a core column takes the staging column of the same name; a derived column (5.10) the staging column with the same value code. The data columns whose names differ are paired **in table order**: the first such staging column fills the first such core column, and so on (e.g. staging `MemberFirstName, MemberID` → core `EnrolleeFirstName, EnrolleeID`), so keep those columns in the same order in both tables. Core columns left over stay empty (or get the load time with `LOAD_TIMESTAMP`); staging columns left over are not copied. The pairs with different names are written to the task log (`staging -> core by column position: ...`), and `validate-config` writes them too.
 
 ### 5.8 ComplianceInternalSourceConfig (internal sources, optional)
 
@@ -957,12 +959,12 @@ close date).
 | `Load_Stat` | Meaning | Report status |
 |---|---|---|
 | `RECEIVED`, `STAGING`, `STAGED` | In progress | – |
-| `PROMOTED` | Loaded into core: the batch's current data | ACCEPTED |
-| `SUPERSEDED` | Was loaded, replaced by a newer load | ACCEPTED |
+| `FILE_LOADED` | Loaded into core: the batch's current data (files and internal source pulls) | ACCEPTED |
+| `RELOADED` | Was loaded, replaced by a newer load (or a carry-forward) | ACCEPTED |
 | `REJECTED` | Rejected (`Reject_Rsn_Cd` says why); file moved to `Error` | REJECTED |
-| `FAILED_TECHNICAL` | System problem; tried again next run | FAILED |
+| `PROCESS_FAILURE` | System problem; tried again next run | FAILED |
 | `NO_DATA_YET` | Internal source had no rows before the close date; tried again | WAITING |
-| `DEFERRED` | Another run was loading into the same staging table; the next run picks the file / pull up (no error) | WAITING |
+| `LOAD_INCOMPLETE` | Another run was loading into the same staging table (`Reject_Rsn_Cd = STAGING_TABLE_BUSY`); the next run picks the file / pull up (no error) | WAITING |
 
 | `Rules_Stat` | Meaning |
 |---|---|
@@ -1291,7 +1293,7 @@ ORDER BY c.Src_ID, d.Detail_ID;
 ```sql
 SELECT Load_ID, File_Path, Btch_ID, Load_Stat, Reject_Rsn_Cd, Error_Txt, Updated_Dtts
 FROM HSABC_DEV.ComplianceFileLoad
-WHERE Load_Stat IN ('REJECTED', 'RULES_FAILED', 'FAILED_TECHNICAL') AND Updated_Dtts >= CURRENT_TIMESTAMP - INTERVAL '7' DAY
+WHERE Load_Stat IN ('REJECTED', 'RULES_FAILED', 'PROCESS_FAILURE') AND Updated_Dtts >= CURRENT_TIMESTAMP - INTERVAL '7' DAY
 ORDER BY Updated_Dtts DESC;
 ```
 
@@ -1358,7 +1360,7 @@ INFO - SOURCE_LOAD | 20261020_CMSUNIV_SNPCC1_DLY source 11 | Src_Sql_Txt on SQL_
 | Version error in the name | `{VERSION}` ≠ `File_Vrsn_Cd` | Fix `File_Vrsn_Cd` or the file name |
 | Column count / header problems | File layout changed | Check `HEADER_NAMES` / `COLUMN_COUNT` / `TARGET_COLUMNS` |
 | File rejected `CORE_TYPE_MISMATCH` | A value does not convert to its core column's type or `FORMAT` (the message names the column and type), or a NOT NULL core column is empty | Fix the file, or the core column's type / `FORMAT` (5.7), then resend |
-| Load `FAILED_TECHNICAL`, "Object '…' does not exist" (error 3807) | A framework table (`sql/schema.sql`) or a staging / core table is missing, or the user has no rights | Create the table / grant; the next run loads the file |
+| Load `PROCESS_FAILURE`, "Object '…' does not exist" (error 3807) | A framework table (`sql/schema.sql`) or a staging / core table is missing, or the user has no rights | Create the table / grant; the next run loads the file |
 | File rejected `FILE_PARSE_ERROR` "line n" with "Invalid date" / "Invalid timestamp" | A typed **staging** column cannot take the file's value (staging is not converted) | Make the staging column text (5.7), or fix the file; the error log shows the record |
 | Load fails "must return one row" (SQL column) | `{btch_id}` lookup returns one row per source | Add `AND Src_ID = {src_id}` or use `{req_id}` |
 | "needs a column mapped to SOURCE_ID" | Staging / core / export table without source column | Add the column and a `SOURCE_ID` row (5.10) |

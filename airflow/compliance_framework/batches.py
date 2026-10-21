@@ -83,7 +83,7 @@ def has_data(conn: Connection, batch: dict) -> bool:
 
 def promoted_load(conn: Connection, req_id: int) -> Optional[dict]:
     """The batch's PROMOTED load, if any."""
-    return conn.execute("SELECT * FROM ComplianceFileLoad WHERE Req_ID=%s AND Load_Stat='PROMOTED'",
+    return conn.execute("SELECT * FROM ComplianceFileLoad WHERE Req_ID=%s AND Load_Stat='FILE_LOADED'",
                         (req_id,)).fetchone()
 
 
@@ -828,7 +828,7 @@ class DecisionProcessor:
         check_transition(b["req_stat"], SOURCE_DATA_CARRY_FORWARD)
         empty = promoted_load(self.conn, b["req_id"])
         if empty is not None:
-            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='SUPERSEDED', Updated_Dtts=%s WHERE Load_ID=%s",
+            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='RELOADED', Updated_Dtts=%s WHERE Load_ID=%s",
                               (self.clock.now(), empty["load_id"]))
         self.conn.execute(
             """UPDATE ComplianceRequestControl SET Resolution_Ty='CARRY_FORWARD', Reuse_Btch_ID=%s,

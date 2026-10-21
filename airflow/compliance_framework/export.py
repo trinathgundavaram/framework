@@ -298,7 +298,7 @@ class RulesRunner:
         rows = self.conn.execute(
             "SELECT f.Load_ID, f.Req_ID, f.Btch_ID, c.Project_Cd, c.Table_Nm FROM ComplianceFileLoad f "
             "JOIN ComplianceRequestControl c ON c.Req_ID = f.Req_ID "
-            "WHERE f.Load_Stat = 'PROMOTED' AND f.Rules_Stat IN ('NOT_RUN', 'ERROR')" + where + " ORDER BY f.Load_ID",
+            "WHERE f.Load_Stat = 'FILE_LOADED' AND f.Rules_Stat IN ('NOT_RUN', 'ERROR')" + where + " ORDER BY f.Load_ID",
             params).fetchall()
         self._exports = {(e.project_cd, e.table_nm): e for e in cfgmod.active_export_configs(self.conn, self.settings)}
         waiting = self._not_exported([r["load_id"] for r in rows
@@ -339,7 +339,7 @@ class RulesRunner:
 
     def _run_load(self, load_id: int, s: RulesSummary) -> None:
         load = self.conn.execute("SELECT * FROM ComplianceFileLoad WHERE Load_ID=%s", (load_id,)).fetchone()
-        if load["load_stat"] != "PROMOTED" or load["rules_stat"] not in PENDING_RULES_STATS:
+        if load["load_stat"] != "FILE_LOADED" or load["rules_stat"] not in PENDING_RULES_STATS:
             return
         s.evaluated += 1
         b = get_batch(self.conn, load["req_id"])

@@ -44,6 +44,7 @@ class Column:
     nullable: bool = True
     temporal: Optional[str] = None
     cast: Optional[str] = None
+    default: bool = False
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,8 @@ class LoadContext:
              "LOAD_DATE": self.loaded_at.astimezone(ZoneInfo(self.tz)).date(),
              "PROJECT": self.project_cd, "TABLE": self.table_nm, "RPT_START": self.rpt_start, "RPT_END": self.rpt_end,
              "REQ_ID": self.req_id}[value_cd]
+        if temporal == "TIMESTAMP" and not text and isinstance(v, date):
+            return f"{v.isoformat()} 00:00:00"
         return str(v) if text and v is not None and not isinstance(v, str) else v
 
     def sql_params(self) -> dict:
@@ -199,31 +202,50 @@ class Layout:
         return next((c for c in getattr(self, table) if self.mapping.get(c.name) == value_cd), None)
 
     def core_plan(self) -> list[tuple[Column, str, Optional[str]]]:
-        """[(core column, 'copy' | 'cast' | 'flag' | 'batch' | 'timestamp' | 'value', None)]: how each inserted core
-        column gets its value; 'value' = a date the framework fills, staged as text, sent in the core column's own type;
-        'cast' = a text staging value converted to the core column's type (and FORMAT)."""
-        staged = {c.name: c for c in self.stage}
+        """[(core column, 'copy' | 'cast' | 'flag' | 'batch' | 'timestamp' | 'value', staging column)]: how each
+        inserted core column gets its value.
+
+        A core column takes the staging column of the same name; a derived one (ComplianceTargetColumnConfig) the
+        staging column with the same value code. The data columns left on both sides (names that differ) are paired
+        in table order: the n-th of them in staging fills the n-th of them in core; core columns left after that stay
+        empty. 'value' = a date the framework fills, staged as text, sent in the core column's own type; 'cast' = a
+        text staging value converted to the core column's type (and FORMAT).
+        """
+        by_name = {c.name.casefold(): c for c in self.stage}
+        by_code = {self.mapping[c.name]: c for c in self.stage if c.name in self.mapping}
+        core_names = {c.name.casefold() for c in self.core}
+        left_stage = [c for c in self.stage if c.name.casefold() not in core_names and c.name not in self.mapping
+                      and c.name != BATCH_COLUMN]
+        left_core = [c for c in self.core if c.name.casefold() not in by_name and c.name not in self.mapping
+                     and c.name != BATCH_COLUMN]
+        source = {c.name: by_name.get(c.name.casefold()) or by_code.get(self.mapping.get(c.name)) for c in self.core}
+        source.update(zip((c.name for c in left_core), left_stage))
         plan = []
         for c in self.core:
             value_cd = self.mapping.get(c.name)
+            s = source.get(c.name)
             if value_cd == "END_TIMESTAMP":
                 continue
             if value_cd == "CURRENT_FLAG":
                 plan.append((c, "flag", None))
-            elif c.name not in staged and c.name == self.core_batch:
-                plan.append((c, "batch", None))
-            elif c.name in staged and value_cd in TEMPORAL_CODES and c.temporal and staged[c.name].text:
-                plan.append((c, "value", None))
-            elif c.name in staged and staged[c.name].text and not c.text and c.cast:
-                plan.append((c, "cast", None))
-            elif c.name in staged:
-                plan.append((c, "copy", None))
+            elif c.name == self.core_batch:
+                plan.append((c, "batch", self.stage_batch))
+            elif s and self.mapping.get(s.name) in TEMPORAL_CODES and c.temporal and s.text:
+                plan.append((c, "value", s.name))
+            elif s and s.text and not c.text and c.cast:
+                plan.append((c, "cast", s.name))
+            elif s:
+                plan.append((c, "copy", s.name))
             elif value_cd == "LOAD_TIMESTAMP":
                 plan.append((c, "timestamp", None))
             elif value_cd:
                 raise ConfigError(f"{self.label}: core column {c.name} ({value_cd}) must also be a column of the "
                                   "staging table")
         return plan
+
+    def renamed(self) -> list[str]:
+        """'staging -> core' for the pairs whose names differ."""
+        return [f"{s} -> {c.name}" for c, _, s in self.core_plan() if s and s.casefold() != c.name.casefold()]
 
     def fixed_value(self, c: Column, ctx: LoadContext, resolved: Optional[dict] = None):
         """The value of a derived staging column that is the same on every row of a load."""
@@ -288,7 +310,9 @@ def build_layout(label: str, stage_cols: list[Column], core_cols: list[Column], 
     if wanted and wanted > len(layout.free_cols):
         raise LookupError(f"{label}: {source} {wanted} data columns, staging table {stage_name} has "
                           f"{len(layout.free_cols)} for the file's data")
-    layout.core_plan()
+    renamed = layout.renamed()
+    if renamed:
+        log.info("%s | staging -> core by column position: %s", label, ", ".join(renamed))
     return layout
 
 
@@ -315,7 +339,8 @@ def columns(conn: Connection, schema: str, table: str) -> list[Column]:
         out.append(Column(r["columnname"].strip().lower(), bool((r["idcoltype"] or "").strip()),
                           kind in ("CV", "CF", "CO"), length, kind in ("I", "I1", "I2", "I8", "D", "F", "N"),
                           (r["nullable"] or "Y").strip().upper() != "N",
-                          {"DA": "DATE", "TS": "TIMESTAMP", "SZ": "TIMESTAMP_TZ"}.get(kind), _cast_type(kind, r)))
+                          {"DA": "DATE", "TS": "TIMESTAMP", "SZ": "TIMESTAMP_TZ"}.get(kind), _cast_type(kind, r),
+                          bool((r.get("defaultvalue") or "").strip())))
     return out
 
 
@@ -757,8 +782,9 @@ def _temporal_value(v, temporal: str, tz: str):
     return at.strftime(TIMESTAMP_TEXT) if temporal == "TIMESTAMP" else at.isoformat(sep=" ", timespec="seconds")
 
 
-def _converted(c: Column) -> str:
-    return f"CAST(NULLIF(TRIM({db.ident(c.name)}), '') AS {c.cast})"
+def _converted(c: Column, staged: str) -> str:
+    """The staging column `staged` converted to core column `c`'s type."""
+    return f"CAST(NULLIF(TRIM({db.ident(staged)}), '') AS {c.cast})"
 
 
 def _staged(layout: Layout, ctx: LoadContext) -> tuple[str, list]:
@@ -774,24 +800,28 @@ def _staged(layout: Layout, ctx: LoadContext) -> tuple[str, list]:
 
 
 def check_core_types(conn, cfg, layout: Layout, ctx: LoadContext) -> None:
-    """Every staged text value that goes to a core column of another type converts to that type (and FORMAT), and a
-    NOT NULL core column gets a value. Otherwise the load's staged rows are removed and the load is rejected."""
+    """Every NOT NULL core column gets a value, every staged text value that goes to a core column of another type
+    converts to that type (and FORMAT). Otherwise the load's staged rows are removed and the load is rejected."""
     stg = _table(cfg.stg_schema_nm, cfg.stg_table_nm)
     where, keys = _staged(layout, ctx)
-    problems = []
-    for c, kind, _ in layout.core_plan():
+    plan = layout.core_plan()
+    filled = {c.name for c, _, _ in plan}
+    problems = [f"core column {c.name} is NOT NULL but gets no value (no staging column at its position)"
+                for c in layout.core if not c.nullable and not c.default and c.name not in filled]
+    for c, kind, staged in plan:
         if kind != "cast":
             continue
         try:
-            conn.execute(f"SELECT COUNT({_converted(c)}) AS n FROM {stg} WHERE {where}", keys).fetchone()
+            conn.execute(f"SELECT COUNT({_converted(c, staged)}) AS n FROM {stg} WHERE {where}", keys).fetchone()
         except Exception as e:  # noqa: BLE001
             if conn.in_transaction:
                 raise
-            problems.append(f"{c.name}: a value cannot be converted to {c.cast} ({sanitize_db_error(db.error_line(e))})")
+            problems.append(f"{staged} -> {c.name}: a value cannot be converted to {c.cast} "
+                            f"({sanitize_db_error(db.error_line(e))})")
             continue
         if not c.nullable and conn.execute(f"SELECT COUNT(*) AS n FROM {stg} WHERE {where} AND "
-                                           f"NULLIF(TRIM({db.ident(c.name)}), '') IS NULL", keys).fetchone()["n"]:
-            problems.append(f"{c.name}: empty value for a NOT NULL column")
+                                           f"NULLIF(TRIM({db.ident(staged)}), '') IS NULL", keys).fetchone()["n"]:
+            problems.append(f"{staged} -> {c.name}: empty value for a NOT NULL column")
     if problems:
         with conn.transaction():
             conn.execute(f"DELETE FROM {stg} WHERE {where}", keys)
@@ -812,19 +842,19 @@ def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_row
     deleted = conn.execute(f"DELETE FROM {core} WHERE {db.ident(layout.core_batch)} = %s AND {db.ident(core_src.name)} = %s",
                            (ctx.btch_id, ctx.value("SOURCE_ID", core_src.text, core_src.temporal))).rowcount
     names, exprs, values = [], [], []
-    for c, kind, _ in layout.core_plan():
+    for c, kind, staged in layout.core_plan():
         names.append(db.ident(c.name))
         if kind == "copy":
-            exprs.append(db.ident(c.name))
+            exprs.append(db.ident(staged))
         elif kind == "cast":
-            exprs.append(_converted(c))
+            exprs.append(_converted(c, staged))
         elif kind == "batch":
-            exprs.append(db.ident(layout.stage_batch))
+            exprs.append(db.ident(staged))
         elif kind == "flag":
             exprs.append("'1'" if c.text else "1")
         elif kind == "value":
             exprs.append(_TEMPORAL_CAST[c.temporal])
-            values.append(_temporal_value(ctx.value(layout.mapping[c.name], False, c.temporal), c.temporal, ctx.tz))
+            values.append(_temporal_value(ctx.value(layout.mapping[staged], False, c.temporal), c.temporal, ctx.tz))
         else:
             exprs.append("CAST(%s AS VARCHAR(50))" if c.text else _TEMPORAL_CAST[c.temporal or "TIMESTAMP_TZ"])
             values.append(ctx.value("LOAD_TIMESTAMP", c.text, c.temporal or "TIMESTAMP_TZ"))
@@ -841,11 +871,11 @@ def swap(conn, cfg: "FileConfig", layout: Layout, ctx: LoadContext, expected_row
 
 HEADER = ("Source_System", "File_Name", "Status", "Total_Rows_In_File", "Total_Rows_Loaded", "File_Submitted_Date",
           "File_Processed_Date", "Error_Message")
-ACCEPTED = ("PROMOTED", "SUPERSEDED")
+ACCEPTED = ("FILE_LOADED", "RELOADED")
 QUERY_PREFIX = "QUERY:"
 REJECTED = ("REJECTED",)
-FAILED = ("FAILED_TECHNICAL",)
-WAITING = ("NO_DATA_YET", "DEFERRED")
+FAILED = ("PROCESS_FAILURE",)
+WAITING = ("NO_DATA_YET", "LOAD_INCOMPLETE")
 MESSAGES = {
     "FILE_REJECTED_UNPARSEABLE": "The file name does not follow the agreed naming format.",
     "FILE_REJECTED_AMBIGUOUS_TEMPLATE": "The file name fits more than one file setup, so the file could not be identified.",
@@ -864,8 +894,8 @@ MESSAGES = {
     "SOURCE_DATA_REJECTED": "The source data is not in the expected format.",
     "CORE_TYPE_MISMATCH": "Some values cannot be converted to the type of their column in the core table.",
     "NO_DATA_YET": "The source has no data for this request yet; it is checked again on the next runs until the due date.",
-    "DEFERRED": "Another run was loading into the same table; this is picked up by the next run.",
-    "FAILED_TECHNICAL": "The file could not be processed because of a system issue. It will be tried again automatically.",
+    "LOAD_INCOMPLETE": "Another run was loading into the same table; this is picked up by the next run.",
+    "PROCESS_FAILURE": "The file could not be processed because of a system issue. It will be tried again automatically.",
 }
 DEFAULT_MESSAGE = "The file could not be loaded."
 WITH_LINE = ("FILE_PARSE_ERROR", "FILE_COLUMN_COUNT_MISMATCH", "FILE_CONTENT_CHECK_FAILED")

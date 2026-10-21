@@ -198,7 +198,7 @@ def report(out: ModuleOutcome) -> dict:
     if out.module == "SOURCE_LOAD":
         counts = _summary(r.files)
         not_loaded = counts["rejected"] + counts["failed"]
-        deferred = sum(f["status"] == "WAITING" and f.get("reason") == MESSAGES["DEFERRED"] for f in r.files)
+        deferred = sum(f["status"] == "WAITING" and f.get("reason") == MESSAGES["LOAD_INCOMPLETE"] for f in r.files)
         waiting = sum(f["status"] == "WAITING" for f in r.files) - deferred
         return {"step": "SOURCE_LOAD", "result": ("NO BATCHES TO PULL" if not r.files and not r.errors
                                                    else f"{not_loaded or len(r.errors)} BATCH(ES) NOT LOADED"

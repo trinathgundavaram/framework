@@ -92,6 +92,10 @@ apply to the command line).
    `{{META_DB}}` with the metadata database). The framework never creates or alters tables.
    Tables created before 0.3.60: `ALTER TABLE <META_DB>.ComplianceFileLoad RENAME Quarantine_Rsn_Cd TO Reject_Rsn_Cd;` and
    `UPDATE <META_DB>.ComplianceFileLoad SET Load_Stat = 'REJECTED' WHERE Load_Stat = 'QUARANTINED';`
+   Tables created before 0.3.62: `UPDATE <META_DB>.ComplianceFileLoad SET Reject_Rsn_Cd = CASE WHEN Load_Stat =
+   'DEFERRED' THEN 'STAGING_TABLE_BUSY' ELSE Reject_Rsn_Cd END, Load_Stat = CASE Load_Stat WHEN 'PROMOTED' THEN
+   'FILE_LOADED' WHEN 'SUPERSEDED' THEN 'RELOADED' WHEN 'FAILED_TECHNICAL' THEN 'PROCESS_FAILURE' WHEN 'DEFERRED' THEN
+   'LOAD_INCOMPLETE' END WHERE Load_Stat IN ('PROMOTED', 'SUPERSEDED', 'FAILED_TECHNICAL', 'DEFERRED');`
 5. Load the configuration tables, then run `validate-config` from the command line (below).
 
 Another project (or another cadence) gets its own DAGs: copy each step's DAG file, give the copy its own `dag_id`
@@ -213,7 +217,7 @@ entries without `schedule_interval` work as before: one task each, all in every 
   run (technical error) is tried once more after 5 minutes (`retries`, default 1); a task whose step reported
   problems fails at once (no retry). Every step is idempotent, so a retry or the next run picks up. DAGs that
   overlap are safe (locks, below): a file or pull whose staging table another run is loading waits up to 30 seconds,
-  then is left for the next run (`DEFERRED`, no error). A staging lock held for 30 minutes or more (a crashed run's)
+  then is left for the next run (`LOAD_INCOMPLETE`, `Reject_Rsn_Cd = STAGING_TABLE_BUSY`, no error). A staging lock held for 30 minutes or more (a crashed run's)
   is reported once (`STAGING_LOCK_STALE`, emailed) with the `release-lock` command that frees it. A file whose move
   to `Archive` / `Error` failed is not loaded again: the next runs only try the move (`FILE_MOVE_FAILED`, emailed
   once).
@@ -479,8 +483,8 @@ batch). `DATA_NOT_PROVIDED` is a final status like `REQUEST_COMPLETE`. Not close
 (`REUSE`) needs its override applied by OVERRIDE_DECISIONS before BATCH_CLOSE runs on the close date; after the
 close, data still comes in with a `LATE_ARRIVAL` override or a `REOPEN`. A file that is rejected does not
 change the batch status. `Allow_Zero_Rcd_Ind` is no longer used: a file with no data rows is always accepted as
-the source's delivery. The loads themselves keep their own status (`ComplianceFileLoad.Load_Stat`: `PROMOTED`,
-`SUPERSEDED`, `REJECTED`, ...).
+the source's delivery. The loads themselves keep their own status (`ComplianceFileLoad.Load_Stat`: `FILE_LOADED`,
+`RELOADED`, `REJECTED`, ...).
 
 **Reopening a closed batch (`REOPEN` override).** A late or corrected file can always be loaded into a closed
 batch with an approved `LATE_ARRIVAL` / `CORRECTION` override (the batch stays closed). To open the batch again
@@ -537,7 +541,7 @@ A path with its own server uses that server with the NAS Connection's login. `$e
   `ComplianceFileLoad` (a new `Load_ID`) and is processed from the start, whatever happened to a file of the same
   name before: the same name and path may come back with updated data, after a rejection or after a load. For an
   open batch it replaces the batch's data; a closed batch still needs the usual override. Earlier rows stay as
-  history. A load of the same file left unfinished by a run that stopped is closed as `FAILED_TECHNICAL`.
+  history. A load of the same file left unfinished by a run that stopped is closed as `PROCESS_FAILURE`.
 - There is no reject path and no archive path to configure. The subfolders are created when first
   needed and are never swept. Their names are the `ARCHIVE_FOLDER` / `ERROR_FOLDER` settings; with
   `ARCHIVE_BY_YEAR = true` a loaded file goes to `Archive/<year>/`.
@@ -763,7 +767,7 @@ The rules engine is not part of the load. `FILE_LOAD` validates the file, stages
 core; it never calls the rules engine and never waits for it.
 
 `FILE_RULES` is a separate step. It takes every file that is loaded to core and has not had its rules
-yet (`ComplianceFileLoad.Load_Stat = PROMOTED`, `Rules_Stat = NOT_RUN`), runs the rules bound to it in
+yet (`ComplianceFileLoad.Load_Stat = FILE_LOADED`, `Rules_Stat = NOT_RUN`), runs the rules bound to it in
 `ComplianceRuleBinding`, and records the outcome:
 
 | Outcome | `Rules_Stat` | What else happens |
@@ -1056,7 +1060,8 @@ Rules:
 - The rows need no order. Where a column sits in the table decides its place: derived columns can be at the
   start, at the end or between file columns, and the file's values fill the remaining columns left to right.
 - A row for one table wins over the project's `*` row for the same column.
-- The same column can have different types in staging and core. `LOAD_DATE`, `LOAD_TIMESTAMP`, `RPT_START` and `RPT_END` are written to each table in that table's type (a date in a timestamp column is its midnight). Any other text staging column whose core column is a number, date, time or timestamp is converted to the core column's type as `DBC.ColumnsV` gives it, dates and times with the column's own `FORMAT` (e.g. `DATE FORMAT 'MM/DD/YYYY'`); an empty value becomes NULL. If a value does not convert (or a NOT NULL core column would be empty), the file or pull is rejected (`CORE_TYPE_MISMATCH`, the column named, no data shown), its staged rows are removed and core is not touched. Columns of the same kind in both tables are copied as they are.
+- **Which staging column fills which core column:** a core column takes the staging column of the same name; a derived column (this table) the staging column with the same value code. The data columns whose names differ are paired **in table order**: the first such staging column fills the first such core column, and so on (e.g. staging `MemberFirstName, MemberID` → core `EnrolleeFirstName, EnrolleeID`), so keep those columns in the same order in both tables. Core columns left over stay empty (or get the load time with `LOAD_TIMESTAMP`); staging columns left over are not copied. The pairs with different names are written to the task log (`staging -> core by column position: ...`), and `validate-config` writes them too.
+- The same column can have different types in staging and core. `LOAD_DATE`, `LOAD_TIMESTAMP`, `RPT_START` and `RPT_END` are written to each table in that table's type (a date in a timestamp column is its midnight). Any other text staging column whose core column is a number, date, time or timestamp is converted to the core column's type as `DBC.ColumnsV` gives it, dates and times with the column's own `FORMAT` (e.g. `DATE FORMAT 'MM/DD/YYYY'`); an empty value becomes NULL. If a value does not convert (or a NOT NULL core column would get no value or an empty one), the file or pull is rejected (`CORE_TYPE_MISMATCH`, the column named, no data shown), its staged rows are removed and core is not touched. Columns of the same kind in both tables are copied as they are.
 - **How the file's fields reach the table.** The columns in `ComplianceTargetColumnConfig` (and `Btch_ID`) are
   filled by the framework wherever they are in the table. The file's fields fill the other columns, decided by the
   first of these that applies to the file's source:
