@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.65 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.66 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -681,7 +681,7 @@ VALUES ('CMSUNIV', 'ODAG3', '51', 'CMSAuth_MedHOK_PYMT_C_{VERSION}_{RUNTY}_{RPTS
 
 **Staging and core tables** are yours (DDL by your DBA). They need: the file's columns; `Btch_ID VARCHAR(250)`;
 a **source column** (e.g. `Src_Data_Key`) mapped to `SOURCE_ID` in `ComplianceTargetColumnConfig`; and the derived
-columns you map. A run-type column (mapped to `RUN_TYPE`) lets staging be cleared per run type. Staging (e.g. the
+columns you map. Staging is cleared per source and run type before each load (per source and batch without a run-type column, mapped to `RUN_TYPE`): another source's rows stay, so a file and an internal pull of the same table do not remove each other's rows. Staging (e.g. the
 `..._FILELAND_...` database) can keep every column as text; core can use real types (`DATE`, `TIMESTAMP(0)`,
 `DECIMAL`, `INTEGER` …): the framework converts on the way to core (below).
 
@@ -691,7 +691,7 @@ columns you map. A run-type column (mapped to `RUN_TYPE`) lets staging be cleare
 |---|---|---|
 | 1 | The name is matched to its file config and its open batch; a `ComplianceFileLoad` row is written | `RECEIVED` |
 | 2 | File checks (5.9) | Failed: `REJECTED`, file to `Error/`, error log in `ErrorLog/`, email |
-| 3 | The batch's earlier staging rows of the source are removed, the file's records inserted with the derived columns | `STAGED`, `Stg_Rcd_Cnt` |
+| 3 | The source's earlier staging rows of the run type are removed (of the batch, without a run-type column), the file's records inserted with the derived columns | `STAGED`, `Stg_Rcd_Cnt` |
 | 4 | Every NOT NULL core column must get a value; every text staging value whose core column has another type is test-converted to the core column's type and `FORMAT` (from `DBC.ColumnsV`) | A NOT NULL core column with no staging column, a value that does not convert, or an empty value for a NOT NULL column: `REJECTED` (`CORE_TYPE_MISMATCH`, columns named), staged rows removed, core untouched |
 | 5 | One transaction: the batch's core rows of the source are removed and the staged rows copied in (converted as in step 4); the copied count must equal the staged count | `FILE_LOADED`, batch `SOURCE_DATA_READY` |
 | 6 | The file moves to `Archive/`, a line goes to the control report | |

@@ -1,6 +1,6 @@
 # Compliance Batch Framework (Airflow / Teradata): open items
 
-State at version 0.3.65. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
+State at version 0.3.66. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
 everything they list that is not below is done. Tested: 25 scenarios on Python 3.13 and 3.9 against a PostgreSQL
 stand-in for Teradata; the 9 DAG files parse and a step DAG runs (stubbed step) on Airflow 3.3.0. **Nothing has run on Teradata, the NAS or a real
 Airflow deployment yet.**

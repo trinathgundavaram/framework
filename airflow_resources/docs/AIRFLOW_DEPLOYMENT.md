@@ -1100,9 +1100,11 @@ Rules:
   source in the core table, those rows are deleted by `Btch_ID` and the source column (the one mapped to
   `SOURCE_ID`, required in the staging and core table) and the new rows are inserted, in one transaction. The core table
   needs no flag or end-date column; rows of other batches are not touched.
-- **Staging is cleared before a load by run type**: every staging row of the file's run type is removed,
-  then the file is loaded (the staging table needs a `RUN_TYPE` column for this, as in the example below).
-  Rows of other run types are not touched. A staging table without a run type column is cleared by batch and source.
+- **Staging is cleared before a load by source and run type**: the staging rows of the file's (or pull's) source and
+  run type are removed, then the new rows are loaded (with a column mapped to `RUN_TYPE`, as in the example below).
+  Rows of other sources and other run types are not touched, so a file and an internal pull of the same table, or
+  two sources of one batch, keep their own rows. A staging table without a run type column is cleared by batch and
+  source.
 - **`SQL` columns.** `Value_Txt` is a single `SELECT` that returns one row with one column, for example
   `SELECT CURRENT_DATE` or a lookup such as `SELECT Audit_ID FROM <db>.Audit_Run WHERE Btch_ID = {btch_id} AND Src_ID = {src_id}`
   (a `Btch_ID` covers every source of the table: add `{src_id}`, or use `{req_id}`; `validate-config` warns).

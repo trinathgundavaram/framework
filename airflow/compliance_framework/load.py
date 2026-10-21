@@ -595,14 +595,17 @@ def next_sequence(conn, cfg: "FileConfig", layout: Layout) -> int:
 
 
 def _clean_stage(conn, table: str, cfg: "FileConfig", layout: Layout, ctx: LoadContext) -> None:
-    """Remove the staging rows of the file's run type; of its batch when the table has no run type column."""
+    """Remove the staging rows of the file's source and run type (of its batch and source when the table has no run
+    type column): another source's rows of the same batch or run type stay."""
+    src = layout.column("SOURCE_ID")
+    source = ctx.value("SOURCE_ID", src.text, src.temporal)
     col = layout.column("RUN_TYPE")
     if col:
-        conn.execute(f"DELETE FROM {table} WHERE {db.ident(col.name)} = %s", (ctx.value("RUN_TYPE", col.text),))
+        conn.execute(f"DELETE FROM {table} WHERE {db.ident(col.name)} = %s AND {db.ident(src.name)} = %s",
+                     (ctx.value("RUN_TYPE", col.text), source))
     else:
-        src = layout.column("SOURCE_ID")
         conn.execute(f"DELETE FROM {table} WHERE {db.ident(layout.stage_batch)} = %s AND {db.ident(src.name)} = %s",
-                     (ctx.btch_id, ctx.value("SOURCE_ID", src.text, src.temporal)))
+                     (ctx.btch_id, source))
 
 
 def stage(conn: Connection, settings: "Settings", *, file_path: str, cfg: "FileConfig", layout: Layout,
