@@ -330,6 +330,23 @@ def active_query_configs(conn: Connection, settings=None) -> list[QueryConfig]:
 EXPORT_PROC_PARAMS = ("btch_id", "data_btch_id", "exp_btch_id", "reused_btch_ids", "project_cd", "table_nm", "src_id",
                       "run_ty", "version", "req_id", "req_dt", "rpt_start", "rpt_end")
 DEFAULT_EXPORT_PROC_PARAMS = ("btch_id", "data_btch_id", "exp_btch_id")
+EXPORT_BATCH_PARAMS = ("btch_id", "exp_btch_id", "project_cd", "table_nm", "run_ty", "version", "req_dt", "rpt_start",
+                       "rpt_end", "exp_schema_nm", "exp_table_nm")
+EXPORT_SQL_PLACEHOLDER = re.compile(r"\{(\w+)\}")
+
+
+def export_statement(label: str, text: str, allowed: tuple, select: bool = False) -> str:
+    """A configured export statement, checked: one statement (a SELECT for Exp_Sql_Txt), only known {names}."""
+    body = text.strip().rstrip(";").strip()
+    if ";" in body:
+        raise ConfigError(f"{label} must be one statement (put several steps in a procedure)")
+    if select and not re.match(r"^(SELECT|SEL|WITH)\b", body, re.IGNORECASE):
+        raise ConfigError(f"{label} must be a SELECT statement")
+    unknown = sorted({n.lower() for n in EXPORT_SQL_PLACEHOLDER.findall(body)} - set(allowed))
+    if unknown:
+        raise ConfigError(f"{label} uses {', '.join('{' + n + '}' for n in unknown)}; available: "
+                          f"{', '.join('{' + n + '}' for n in allowed)}")
+    return body
 
 
 @dataclass(frozen=True)
@@ -343,6 +360,9 @@ class ExportConfig:
     exp_btch_col: str = "exp_btch_id"
     proc_nm: Optional[str] = None
     proc_params: tuple = DEFAULT_EXPORT_PROC_PARAMS
+    sql_txt: Optional[str] = None
+    pre_sql: Optional[str] = None
+    post_sql: Optional[str] = None
 
     @property
     def label(self) -> str:
@@ -355,7 +375,8 @@ class ExportConfig:
                    r["active_ind"] == 1, (_text(r.get("exp_btch_col_nm")) or "Exp_Btch_ID").lower(),
                    name(_text(r.get("exp_proc_nm"))) if _text(r.get("exp_proc_nm")) else None,
                    tuple(t.strip().strip("{}").strip().lower() for t in r["exp_proc_parm_txt"].split(",") if t.strip())
-                   if _text(r.get("exp_proc_parm_txt")) else DEFAULT_EXPORT_PROC_PARAMS)
+                   if _text(r.get("exp_proc_parm_txt")) else DEFAULT_EXPORT_PROC_PARAMS,
+                   _text(r.get("exp_sql_txt")), _text(r.get("exp_pre_sql_txt")), _text(r.get("exp_post_sql_txt")))
 
 
 def active_export_configs(conn: Connection, settings=None) -> list[ExportConfig]:
@@ -909,6 +930,16 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
                                  f"{', '.join('{' + n + '}' for n in EXPORT_PROC_PARAMS)}")
         if e.proc_nm and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}(\.[A-Za-z_][A-Za-z0-9_]{0,127})?", e.proc_nm):
             add("EXPORT_CONFIG", f"{label}: Exp_Proc_Nm {e.proc_nm!r} must be [database.]procedure")
+        for what, text, allowed, select in (("Exp_Sql_Txt", e.sql_txt, EXPORT_PROC_PARAMS, True),
+                                            ("Exp_Pre_Sql_Txt", e.pre_sql, EXPORT_BATCH_PARAMS, False),
+                                            ("Exp_Post_Sql_Txt", e.post_sql, EXPORT_BATCH_PARAMS, False)):
+            if text:
+                try:
+                    export_statement(f"{label}: {what}", text, allowed, select)
+                except ConfigError as err:
+                    add("EXPORT_CONFIG", str(err))
+        if e.proc_nm and e.sql_txt:
+            add("EXPORT_CONFIG", f"{label}: Exp_Proc_Nm and Exp_Sql_Txt are both set; the procedure is used", "WARNING")
         exp = {c.name for c in columns(conn, e.exp_schema_nm, e.exp_table_nm) if not c.auto}
         if not exp:
             add("EXPORT_CONFIG", f"{label}: export table {e.exp_schema_nm}.{e.exp_table_nm} not found")
@@ -917,7 +948,7 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
                                  f"{BATCH_COLUMN} (or a column mapped to BATCH_ID)")
         else:
             missing = sorted(exp - {c.name for c in columns(conn, src.core_schema_nm, src.core_table_nm)} - {e.exp_btch_col})
-            if missing:
+            if missing and not (e.proc_nm or e.sql_txt):
                 add("EXPORT_CONFIG", f"{label}: export columns not in core {src.core_schema_nm}.{src.core_table_nm} "
                                      f"(loaded as NULL): {', '.join(missing)}", "WARNING")
 

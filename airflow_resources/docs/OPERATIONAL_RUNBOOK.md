@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.66 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.67 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -251,6 +251,8 @@ columns or by calling the export procedure with the batch's values.
 - **Which data:** the newest batch of the period whose resolution is `NEW_FILE`, `CARRY_FORWARD` or `NO_DATA`. A
   re-export replaces the batch's own export rows (`Exp_Btch_ID`); a batch is exported again only when it has new
   data since its last export.
+- **How:** procedure, custom SELECT (`Exp_Sql_Txt`) or plain copy, with optional pre / post statements once per batch
+  (5.11).
 - Timeline `EXPORT_LOADED`; a failure is rolled back and reported (`EXPORT_LOAD_FAILED`, exit 1).
 - Options: the scope, `batch`, `release`, `hold`, `as_of`.
 
@@ -813,6 +815,9 @@ The export table of a core table (EXPORT_LOAD). One row per project + table.
 | `Exp_Btch_Col_Nm` | No | Column name | Column that gets the batch ID again (default `Exp_Btch_ID`, filled only if present) |
 | `Exp_Proc_Nm` | No | `database.procedure`; `$env` allowed | A procedure that does the export instead of the framework (it deletes and inserts that source's rows itself) |
 | `Exp_Proc_Parm_Txt` | No | e.g. `{btch_id}, {data_btch_id}, {src_id}` | The procedure's parameters in order (section 8.10); empty = `{btch_id}, {data_btch_id}, {exp_btch_id}` |
+| `Exp_Sql_Txt` | No | One `SELECT` | Used when there is no procedure: its rows are the export rows of a batch + source, instead of the plain copy from core. Name each column after an export column (`AS`); the batch column, `Exp_Btch_Col_Nm` and the source column are always filled by the framework. Placeholders as for the procedure (8.10), e.g. `{data_btch_id}` (the batch holding the data: the batch itself, or the one it carries forward) and `{src_id}` |
+| `Exp_Pre_Sql_Txt` | No | One statement: `CALL`, `UPDATE`, `INSERT`, `DELETE`, `MERGE` … | Runs **once per batch**, before its sources are exported |
+| `Exp_Post_Sql_Txt` | No | One statement | Runs **once per batch**, after all its sources are exported |
 | `Active_Ind` | Default 1 | | |
 
 ```sql
@@ -821,6 +826,31 @@ VALUES ('CMSUNIV', 'ODAG3', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG_DE_TABLE3_2022_EXP', 
 -- the export table (DBA):
 -- CREATE MULTISET TABLE CMSUNIV_EXPORT_DEV_T.ODAG_DE_TABLE3_2022_EXP AS CMSUNIV_CORE_DEV_T.ODAG_DE_TABLE3_2022 WITH NO DATA;
 -- ALTER TABLE CMSUNIV_EXPORT_DEV_T.ODAG_DE_TABLE3_2022_EXP ADD Exp_Btch_ID VARCHAR(100);
+```
+
+**How a batch is exported**, for each batch + source, in this order of choice:
+
+| Mode | When | What writes the export rows |
+|---|---|---|
+| Procedure | `Exp_Proc_Nm` set | The procedure (it removes and inserts that source's rows itself) |
+| Custom SELECT | `Exp_Sql_Txt` set, no procedure | The framework removes the source's earlier rows of the period, then inserts the SELECT's rows, stamped with the batch and source |
+| Copy | Neither | The framework removes the source's earlier rows of the period, then copies the core columns with the same names from the source's core table |
+
+**Pre / post statements.** With `Exp_Pre_Sql_Txt` or `Exp_Post_Sql_Txt`, a batch is exported as one transaction:
+pre, then every source of the batch (in any mode), then post. If any of them fails, all of it is rolled back, every
+source of the batch is reported `FAILED` (`EXPORT_LOAD_FAILED`, emailed) and it is tried again on the next run.
+Without them, each source is exported on its own as before. Placeholders of pre / post (batch level): `{btch_id}`,
+`{exp_btch_id}`, `{project_cd}`, `{table_nm}`, `{run_ty}`, `{version}`, `{req_dt}`, `{rpt_start}`, `{rpt_end}`,
+`{exp_schema_nm}`, `{exp_table_nm}`. All three texts: one statement (no `;` inside; several steps go in a
+procedure), placeholders passed as parameters (write `{btch_id}`, not `'{btch_id}'`), `$env` not replaced, every
+statement written to the task log with its values; `validate-config` checks them.
+
+```sql
+UPDATE HSABC_DEV.ComplianceExportConfig
+SET Exp_Sql_Txt = 'SELECT Row_ID, EnrolleeID AS Member_Key, PlanType FROM CMSUNIV_CORE_DEV_T.SNPCC_HS_TABLE1_2022 WHERE Btch_ID = {data_btch_id} AND Src_Data_Key = CAST({src_id} AS SMALLINT)',
+    Exp_Pre_Sql_Txt = 'CALL CMSUNIV_EXPORT_DEV_T.SP_EXPORT_PREP({btch_id}, {run_ty})',
+    Exp_Post_Sql_Txt = 'UPDATE CMSUNIV_EXPORT_DEV_T.SNPCC1_EXPORT SET Export_Dt = CURRENT_DATE WHERE Btch_ID = {btch_id}'
+WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'SNPCC1';
 ```
 
 What the export holds: per source, run type and report period, the latest batch with data (or with "no data" from the
@@ -1718,6 +1748,7 @@ the statements of every version after yours, in order (replace `HSABC_DEV`):
 | 0.3.60 | `ALTER TABLE HSABC_DEV.ComplianceFileLoad RENAME Quarantine_Rsn_Cd TO Reject_Rsn_Cd;` `UPDATE HSABC_DEV.ComplianceFileLoad SET Load_Stat = 'REJECTED' WHERE Load_Stat = 'QUARANTINED';` |
 | 0.3.62 | the `Load_Stat` renames below |
 | 0.3.63 | the timeline event renames below |
+| 0.3.67 | `ALTER TABLE HSABC_DEV.ComplianceExportConfig ADD Exp_Sql_Txt VARCHAR(8000), ADD Exp_Pre_Sql_Txt VARCHAR(8000), ADD Exp_Post_Sql_Txt VARCHAR(8000);` |
 
 ```sql
 -- 0.3.62: load statuses

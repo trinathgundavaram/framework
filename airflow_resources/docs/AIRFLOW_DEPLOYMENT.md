@@ -378,6 +378,12 @@ and inserts the export rows itself. `Exp_Proc_Parm_Txt` lists its parameters in 
 `{table_nm}`, `{src_id}`, `{run_ty}`, `{version}`, `{req_id}`, `{req_dt}`, `{rpt_start}`, `{rpt_end}`. Existing
 tables: `ALTER TABLE <META_DB>.ComplianceExportConfig ADD Exp_Proc_Nm VARCHAR(256), ADD Exp_Proc_Parm_Txt VARCHAR(1000);`.
 
+**Custom SELECT and pre / post statements** (`Exp_Sql_Txt`, `Exp_Pre_Sql_Txt`, `Exp_Post_Sql_Txt`; runbook 5.11): without a
+procedure, `Exp_Sql_Txt` gives the export rows of a batch + source (the framework stamps the batch and source columns);
+pre / post run once per batch, in one transaction with all its sources' exports (a failure rolls the batch back).
+Tables created before 0.3.67: `ALTER TABLE <META_DB>.ComplianceExportConfig ADD Exp_Sql_Txt VARCHAR(8000), ADD
+Exp_Pre_Sql_Txt VARCHAR(8000), ADD Exp_Post_Sql_Txt VARCHAR(8000);`.
+
 Each batch is exported in one transaction (delete, then `INSERT ... SELECT` on Teradata; no row passes through
 Airflow) and recorded as `EXPORT_LOADED` in `ComplianceRequestFileDetail`. A batch that fails is rolled back and
 reported (`EXPORT_LOAD_FAILED`, emailed); the others are still exported and the task fails at the end, so

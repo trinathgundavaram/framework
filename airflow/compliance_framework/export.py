@@ -64,27 +64,74 @@ class ExportLoader:
                           s, release, bool(batches))
         log.info("EXPORT_LOAD | %s | %s batch(es) to export%s", scope.label(), len(todo),
                  ": " + ", ".join(b["btch_id"] for b in todo[:50]) if todo else "")
+        groups: dict[str, list[dict]] = {}
         for b in todo:
-            e = exports[(b["project_cd"], b["table_nm"])]
-            try:
-                with db.held(self.conn, db.req_key(b), self.settings.lock_timeout_seconds), \
-                        db.held(self.conn, db.batch_key(f"EXPORT {e.exp_schema_nm}.{e.exp_table_nm}".upper()),
-                                self.settings.lock_timeout_seconds):
-                    item = self._export(e, b)
-            except Exception as err:  # noqa: BLE001
-                s.failed += 1
-                s.errors.append(f"{b['btch_id']}: {db.error_text(err)}")
-                item = {"batch": b["btch_id"], "status": "FAILED", "detail": db.error_text(err)}
-                with self.conn.transaction():
-                    self.logger.audit("EXPORT_LOAD_FAILED", description=db.error_text(err), project_cd=b["project_cd"],
-                                      table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"],
-                                      req_id=b["req_id"], btch_id=b["btch_id"])
-            s.batches.append(item)
-            if item["status"] == "EXPORTED":
-                s.exported += 1
-            elif item["status"] == "SKIPPED":
-                s.skipped += 1
+            groups.setdefault(b["btch_id"], []).append(b)
+        for rows in groups.values():
+            e = exports[(rows[0]["project_cd"], rows[0]["table_nm"])]
+            if e.pre_sql or e.post_sql:
+                self._export_with_steps(e, rows, s)
+                continue
+            for b in rows:
+                try:
+                    with db.held_all(self.conn, [db.req_key(b), self._table_key(e)], self.settings.lock_timeout_seconds):
+                        item = self._export(e, b)
+                except Exception as err:  # noqa: BLE001
+                    item = self._failed(b, err, s)
+                self._count(item, s)
         return s
+
+    @staticmethod
+    def _table_key(e) -> str:
+        return db.batch_key(f"EXPORT {e.exp_schema_nm}.{e.exp_table_nm}".upper())
+
+    def _export_with_steps(self, e, rows: list[dict], s: ExportSummary) -> None:
+        """A batch with Exp_Pre_Sql_Txt / Exp_Post_Sql_Txt: pre, every source's export, post, as one transaction; a
+        failure rolls the whole batch back (every source FAILED)."""
+        b = rows[0]
+        params = {"btch_id": b["btch_id"], "exp_btch_id": b["btch_id"], "project_cd": b["project_cd"],
+                  "table_nm": b["table_nm"], "run_ty": b["run_ty"], "version": b["cmplnc_vrsn"],
+                  "req_dt": _as_date(b["req_dt_key"]), "rpt_start": _as_date(b["rpt_start_dt_key"]),
+                  "rpt_end": _as_date(b["rpt_end_dt_key"]), "exp_schema_nm": e.exp_schema_nm,
+                  "exp_table_nm": e.exp_table_nm}
+        items = []
+        try:
+            with db.held_all(self.conn, [*(db.req_key(r) for r in rows), self._table_key(e)],
+                             self.settings.lock_timeout_seconds), self.conn.transaction():
+                if e.pre_sql:
+                    self._step(e, "Exp_Pre_Sql_Txt", e.pre_sql, params)
+                items = [self._export(e, r) for r in rows]
+                if e.post_sql:
+                    self._step(e, "Exp_Post_Sql_Txt", e.post_sql, params)
+        except Exception as err:  # noqa: BLE001
+            items = [self._failed(r, err, s) for r in rows]
+        for item in items:
+            self._count(item, s)
+
+    def _step(self, e, what: str, text: str, params: dict) -> None:
+        body = cfgmod.export_statement(f"{e.label}: {what}", text, cfgmod.EXPORT_BATCH_PARAMS)
+        names = [n.lower() for n in cfgmod.EXPORT_SQL_PLACEHOLDER.findall(body)]
+        db.log_sql(f"EXPORT_LOAD | {params['btch_id']} | {what}", body, params)
+        n = self.conn.execute_qmark(cfgmod.EXPORT_SQL_PLACEHOLDER.sub("?", body), [params[x] for x in names]).rowcount
+        log.info("EXPORT_LOAD | %s | %s done (%s row(s))", params["btch_id"], what, n if n is not None and n >= 0 else "-")
+
+    def _failed(self, b: dict, err: Exception, s: ExportSummary) -> dict:
+        s.errors.append(f"{b['btch_id']} source {b['src_id']}: {db.error_text(err)}")
+        with self.conn.transaction():
+            self.logger.audit("EXPORT_LOAD_FAILED", description=db.error_text(err), project_cd=b["project_cd"],
+                              table_nm=b["table_nm"], src_id=b["src_id"], run_ty=b["run_ty"],
+                              req_id=b["req_id"], btch_id=b["btch_id"])
+        return {"batch": b["btch_id"], "source": b["src_id"], "status": "FAILED", "detail": db.error_text(err)}
+
+    @staticmethod
+    def _count(item: dict, s: ExportSummary) -> None:
+        s.batches.append(item)
+        if item["status"] == "EXPORTED":
+            s.exported += 1
+        elif item["status"] == "SKIPPED":
+            s.skipped += 1
+        elif item["status"] == "FAILED":
+            s.failed += 1
 
     def _held(self, todo: list[dict], s: ExportSummary, release: bool, named: bool) -> list[dict]:
         """The batches that may be exported now; named batches always are. `release` releases held batches with data."""
@@ -193,6 +240,8 @@ class ExportLoader:
                               "(or a column mapped to BATCH_ID)")
         if e.proc_nm:
             return self._call(e, b, item, export, exp_btch_id, version, chain, by_src, src_val, exp_batch)
+        if e.sql_txt:
+            return self._select(e, b, item, export, exp_all, chain, by_src, src_val, src_col, exp_batch, period, keep)
         core = db.qualified(cfg.core_schema_nm, cfg.core_table_nm)
         core_cols = {c.name for c in columns(self.conn, cfg.core_schema_nm, cfg.core_table_nm) if not c.auto}
         core_batch = batch_column(core_cols, mapping)
@@ -257,6 +306,65 @@ class ExportLoader:
                     rows_exported=rows)
         log.info("EXPORT_LOAD | %s | exported by procedure %s: %s row(s) of the batch in %s", b["btch_id"], e.proc_nm,
                  rows, item["export_table"])
+        return item
+
+    def _select(self, e, b: dict, item: dict, export: str, exp_all: list, chain: list[str], by_src: str, src_val,
+                src_col, exp_batch: str, period: tuple, keep: list[str]) -> dict:
+        """Exp_Sql_Txt exports the batch: the source's earlier export rows of the period are removed and the SELECT's
+        rows inserted (its columns named after export columns); the batch, Exp_Btch_ID and source columns are always
+        the framework's."""
+        source = chain[-1] if chain else None
+        given = {"btch_id": b["btch_id"], "data_btch_id": source, "exp_btch_id": b["btch_id"],
+                 "reused_btch_ids": ",".join(chain[1:]) or None, "project_cd": b["project_cd"], "table_nm": b["table_nm"],
+                 "src_id": b["src_id"], "run_ty": b["run_ty"], "version": b["cmplnc_vrsn"], "req_id": b["req_id"],
+                 "req_dt": _as_date(b["req_dt_key"]), "rpt_start": _as_date(b["rpt_start_dt_key"]),
+                 "rpt_end": _as_date(b["rpt_end_dt_key"])}
+        body = cfgmod.export_statement(f"{e.label}: Exp_Sql_Txt", e.sql_txt, cfgmod.EXPORT_PROC_PARAMS, select=True)
+        names = [n.lower() for n in cfgmod.EXPORT_SQL_PLACEHOLDER.findall(body)]
+        query, values = cfgmod.EXPORT_SQL_PLACEHOLDER.sub("?", body), [given[n] for n in names]
+        db.log_sql(f"EXPORT_LOAD | {b['btch_id']} source {b['src_id']} | Exp_Sql_Txt", body, given)
+        cols = {c.name.casefold(): c for c in exp_all if not c.auto}
+        fixed = {exp_batch.casefold(): b["btch_id"], e.exp_btch_col.casefold(): b["btch_id"], src_col.name.casefold(): None}
+        returned = self.conn.execute_qmark(f"SELECT * FROM ({query}) AS q WHERE 1 = 0", values).columns
+        twice = sorted({n for n in returned if [x.casefold() for x in returned].count(n.casefold()) > 1})
+        unknown = [n for n in returned if n.casefold() not in cols]
+        if twice or unknown:
+            raise ConfigError(f"{e.label}: Exp_Sql_Txt returns " + (f"a column name more than once: {', '.join(twice)}"
+                              if twice else f"columns that are not in {export}: {', '.join(unknown[:10])}"))
+        names_out, exprs, params = [], [], []
+        for n in returned:
+            if n.casefold() not in fixed:
+                names_out.append(db.ident(cols[n.casefold()].name))
+                exprs.append(f'q."{n}"')
+        for key, value in fixed.items():
+            if key in cols:
+                c = cols[key]
+                expr, v = _cast(c, src_val if key == src_col.name.casefold() else value)
+                names_out.append(db.ident(c.name))
+                exprs.append(expr)
+                params.extend(v)
+        filled = {n.strip('"').casefold() for n in names_out}
+        empty = [c.name for c in cols.values() if not c.nullable and not c.default and c.name.casefold() not in filled]
+        if empty:
+            raise ConfigError(f"{e.label}: export columns NOT NULL without a value from Exp_Sql_Txt: {', '.join(empty)}")
+        kept = [k for k in keep if k != b["btch_id"]]
+        with self.conn.transaction():
+            deleted = self.conn.execute_qmark(
+                f"""DELETE FROM {export} WHERE {by_src} AND {db.ident(exp_batch)} IN (
+                      SELECT Btch_ID FROM ComplianceRequestControl WHERE Project_Cd=? AND Table_Nm=? AND Src_ID=?
+                         AND Run_Ty=? AND Rpt_Start_Dt_Key=? AND Rpt_End_Dt_Key=?)"""
+                + (f" AND {db.ident(exp_batch)} NOT IN ({', '.join('?' for _ in kept)})" if kept else ""),
+                [src_val, *period, *kept]).rowcount
+            inserted = 0
+            if source is not None:
+                inserted = self.conn.execute_qmark(
+                    f"INSERT INTO {export} ({', '.join(names_out)}) SELECT {', '.join(exprs)} FROM ({query}) AS q",
+                    [*params, *values]).rowcount
+            self._done(b, f"exported by Exp_Sql_Txt (data of {source or 'no batch'}): inserted={inserted} deleted={deleted}")
+        item.update(status="EXPORTED", export_batch=b["btch_id"], data_from=source or "-", rows_exported=inserted,
+                    rows_removed=deleted)
+        log.info("EXPORT_LOAD | %s | %s row(s) exported to %s by Exp_Sql_Txt, %s earlier row(s) of the period removed",
+                 b["btch_id"], inserted, item["export_table"], deleted)
         return item
 
     def _done(self, b: dict, detail: str) -> None:
