@@ -914,7 +914,7 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
             add("TARGET_COLUMN", f"{t.label}: column {t.column_nm} is in no staging or core table of "
                                  f"{t.project_cd}/{t.table_nm}")
 
-    from compliance_framework.load import BATCH_COLUMN, batch_column, column_mapping
+    from compliance_framework.load import BATCH_COLUMN, batch_column, column_mapping, export_plan
     cores = {(c.project_cd, c.table_nm): c for c in [*cfgs, *queries]}
     for e in active_export_configs(conn, settings):
         label = e.label
@@ -946,11 +946,29 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
         elif not batch_column(exp, column_mapping(src, targets)):
             add("EXPORT_CONFIG", f"{label}: export table {e.exp_schema_nm}.{e.exp_table_nm} lacks the batch column "
                                  f"{BATCH_COLUMN} (or a column mapped to BATCH_ID)")
-        else:
-            missing = sorted(exp - {c.name for c in columns(conn, src.core_schema_nm, src.core_table_nm)} - {e.exp_btch_col})
-            if missing and not (e.proc_nm or e.sql_txt):
-                add("EXPORT_CONFIG", f"{label}: export columns not in core {src.core_schema_nm}.{src.core_table_nm} "
-                                     f"(loaded as NULL): {', '.join(missing)}", "WARNING")
+        elif not (e.proc_nm or e.sql_txt):
+            exp_list = [c for c in columns(conn, e.exp_schema_nm, e.exp_table_nm) if not c.auto]
+            seen = set()
+            for x in [*cfgs, *queries]:
+                if (x.project_cd, x.table_nm) != (e.project_cd, e.table_nm) or (x.core_schema_nm, x.core_table_nm) in seen:
+                    continue
+                seen.add((x.core_schema_nm, x.core_table_nm))
+                mapping = column_mapping(x, targets)
+                core_list = [c for c in columns(conn, x.core_schema_nm, x.core_table_nm) if not c.auto]
+                core_batch = batch_column((c.name for c in core_list), mapping)
+                if not core_list or core_batch is None:
+                    continue
+                plan = export_plan(exp_list, core_list, mapping, batch_column(exp, mapping), e.exp_btch_col, core_batch)
+                where = f"{label}: from core {x.core_schema_nm}.{x.core_table_nm}"
+                renamed = [f"{s} -> {c.name}" for c, s in plan if s and s.casefold() != c.name.casefold()
+                           and mapping.get(c.name) is None and c.name.casefold() != batch_column(exp, mapping).casefold()]
+                if renamed:
+                    log.info("%s by column position: %s", where, ", ".join(renamed))
+                empty = [c.name for c, s in plan if s is None and c.name.casefold() != e.exp_btch_col.casefold()
+                         and mapping.get(c.name) not in ("CURRENT_FLAG", "END_TIMESTAMP")]
+                if empty:
+                    add("EXPORT_CONFIG", f"{where}: export columns with no core column (loaded as NULL): "
+                                         f"{', '.join(empty)}", "WARNING")
 
     for r in conn.execute("SELECT * FROM ComplianceRuleBinding WHERE Active_Ind = 1 "
                           "ORDER BY Project_Cd, Table_Nm, Src_ID, Run_Ty").fetchall():

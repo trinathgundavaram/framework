@@ -16,7 +16,8 @@ from compliance_framework.batches import Releases, get_batch
 from compliance_framework.common import Clock, ConfigError, code
 from compliance_framework.config import Scope
 from compliance_framework.db import Settings, ident
-from compliance_framework.load import BATCH_COLUMN, LoadContext, _cast, batch_column, column_mapping, columns, sanitize_db_error
+from compliance_framework.load import (BATCH_COLUMN, LoadContext, _cast, _converted, batch_column, column_mapping, columns,
+    export_plan, sanitize_db_error)
 
 
 # export: EXPORT_LOAD: copy each batch whose data changed from core into its export table (ComplianceExportConfig).
@@ -243,22 +244,28 @@ class ExportLoader:
         if e.sql_txt:
             return self._select(e, b, item, export, exp_all, chain, by_src, src_val, src_col, exp_batch, period, keep)
         core = db.qualified(cfg.core_schema_nm, cfg.core_table_nm)
-        core_cols = {c.name for c in columns(self.conn, cfg.core_schema_nm, cfg.core_table_nm) if not c.auto}
-        core_batch = batch_column(core_cols, mapping)
-        exp_cols = [c for c in exp_all if not c.auto and (c.name in core_cols or c.name in (e.exp_btch_col, exp_batch))]
-        exprs, values = [], []
-        for c in exp_cols:
+        core_all = [c for c in columns(self.conn, cfg.core_schema_nm, cfg.core_table_nm) if not c.auto]
+        core_batch = batch_column((c.name for c in core_all), mapping)
+        core_src = next((c for c in core_all if mapping.get(c.name) == "SOURCE_ID"), None)
+        if core_batch is None or core_src is None:
+            raise LookupError(f"core table {cfg.core_schema_nm}.{cfg.core_table_nm} lacks the batch or the source column")
+        plan = export_plan([c for c in exp_all if not c.auto], core_all, mapping, exp_batch, e.exp_btch_col, core_batch)
+        exp_cols, exprs, values = [], [], []
+        for c, s_name in plan:
             value_cd = "BATCH_ID" if c.name in (BATCH_COLUMN, exp_batch) else mapping.get(c.name)
             if c.name == e.exp_btch_col:
                 expr, v = _cast(c, exp_btch_id)
-                exprs.append(expr)
-                values.extend(v)
             elif source != b["btch_id"] and (value_cd == "BATCH_ID" or value_cd in BATCH_VALUES):
                 expr, v = _cast(c, ctx.value(value_cd, c.text, c.temporal))
-                exprs.append(expr)
-                values.extend(v)
+            elif s_name is None:
+                continue
             else:
-                exprs.append(db.ident(core_batch if c.name == exp_batch else c.name))
+                s_col = next(x for x in core_all if x.name == s_name)
+                expr, v = (_converted(c, s_name) if s_col.text and not c.text and c.cast else db.ident(s_name)), []
+            exp_cols.append(c)
+            exprs.append(expr)
+            values.extend(v)
+        core_src_val = ctx.value("SOURCE_ID", core_src.text, core_src.temporal)
         with self.conn.transaction():
             kept = [k for k in keep if k != b["btch_id"]]
             marks, kept = db.in_list(kept) if kept else ("", [])
@@ -271,8 +278,9 @@ class ExportLoader:
             inserted = 0
             if source is not None:
                 text = (f"INSERT INTO {export} ({', '.join(db.ident(c.name) for c in exp_cols)}) "
-                        f"SELECT {', '.join(exprs)} FROM {core} WHERE {db.ident(core_batch)} = ? AND {by_src}")
-                inserted = self.conn.execute_qmark(text, [*values, source, src_val]).rowcount
+                        f"SELECT {', '.join(exprs)} FROM {core} WHERE {db.ident(core_batch)} = ? "
+                        f"AND {db.ident(core_src.name)} = ?")
+                inserted = self.conn.execute_qmark(text, [*values, source, core_src_val]).rowcount
             how = ("no data" if source is None else "its own rows" if source == b["btch_id"]
                    else f"a copy of {source}")
             self._done(b, f"exported {how}: inserted={inserted} deleted={deleted}")

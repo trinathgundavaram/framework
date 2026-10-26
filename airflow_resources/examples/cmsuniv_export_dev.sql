@@ -1,5 +1,7 @@
--- CMSUNIV export feed (DEV names: replace _DEV_ for other environments). Run by the DBA, then the
--- ComplianceExportConfig rows in cmsuniv_setup.sql (section 8) point EXPORT_LOAD at these procedures.
+-- CMSUNIV export feed (DEV names: replace _DEV_ for other environments). Run by the DBA: the CREATE TABLE and ALTER TABLE
+-- statements are needed; the procedures are NOT used for now (the ComplianceExportConfig rows in cmsuniv_setup.sql,
+-- section 8, have no Exp_Proc_Nm, so EXPORT_LOAD copies the rows itself). They are kept for a later switch to
+-- procedures (set Exp_Proc_Nm / Exp_Proc_Parm_Txt on the row).
 --
 -- Assumed: one export table per table in CMSUNIV_EXPORT_DEV_T, named <table>_EXPORT, with the columns of the table's core
 -- table plus Exp_Btch_ID. For tables with FDR files that is the file core table (CMSUNIV_CORE_$ENV_T.<x>_DE_TABLE<n>_2022,

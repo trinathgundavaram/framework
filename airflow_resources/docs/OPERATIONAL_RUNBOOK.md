@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.67 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.68 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -834,7 +834,7 @@ VALUES ('CMSUNIV', 'ODAG3', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG_DE_TABLE3_2022_EXP', 
 |---|---|---|
 | Procedure | `Exp_Proc_Nm` set | The procedure (it removes and inserts that source's rows itself) |
 | Custom SELECT | `Exp_Sql_Txt` set, no procedure | The framework removes the source's earlier rows of the period, then inserts the SELECT's rows, stamped with the batch and source |
-| Copy | Neither | The framework removes the source's earlier rows of the period, then copies the core columns with the same names from the source's core table |
+| Copy | Neither | The framework removes the source's earlier rows of the period, then copies the rows from the source's own core table: columns of the same name, the framework's columns by what fills them (batch, source, version …), the rest by column order (a core table with other names, e.g. an internal source's); a text value going into a typed export column is converted; export columns left over stay empty (`validate-config` lists them and the pairs by order) |
 
 **Pre / post statements.** With `Exp_Pre_Sql_Txt` or `Exp_Post_Sql_Txt`, a batch is exported as one transaction:
 pre, then every source of the batch (in any mode), then post. If any of them fails, all of it is rolled back, every
@@ -1708,8 +1708,8 @@ INFO - SOURCE_LOAD | 20261020_CMSUNIV_SNPCC1_DLY source 11 | Src_Sql_Txt on SQL_
 
 ## 15. CMSUNIV setup at a glance
 
-The rows are in `airflow_resources/examples/cmsuniv_setup.sql` (export tables and procedures in
-`cmsuniv_export_dev.sql`, Variables in `cmsuniv_dev/`).
+The rows are in `airflow_resources/examples/cmsuniv_setup.sql` (export tables in `cmsuniv_export_dev.sql`, exported
+by the framework's copy, no procedure, Variables in `cmsuniv_dev/`).
 
 | What | CMSUNIV |
 |---|---|

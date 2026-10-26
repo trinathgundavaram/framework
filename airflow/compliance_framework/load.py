@@ -785,6 +785,30 @@ def _temporal_value(v, temporal: str, tz: str):
     return at.strftime(TIMESTAMP_TEXT) if temporal == "TIMESTAMP" else at.isoformat(sep=" ", timespec="seconds")
 
 
+def export_plan(exp_cols: list, core_cols: list, mapping, exp_batch: str, exp_btch_col: str, core_batch: str) -> list:
+    """[(export column, core column name or None)] for the plain copy: the batch column takes the core batch column;
+    a column takes the core column of the same name, or a derived one (ComplianceTargetColumnConfig) the core column
+    with the same value code; the columns left on both sides are paired in table order (a core table whose names
+    differ, e.g. an internal source's); export columns left over stay empty."""
+    by_name = {c.name.casefold(): c for c in core_cols}
+    by_code = {mapping[c.name]: c for c in core_cols if c.name in mapping}
+    taken, out = {core_batch.casefold(), exp_btch_col.casefold()}, {}
+    for c in exp_cols:
+        if c.name.casefold() in (exp_batch.casefold(), exp_btch_col.casefold()):
+            out[c.name] = core_batch if c.name.casefold() == exp_batch.casefold() else None
+            continue
+        s = by_name.get(c.name.casefold())
+        if s is not None and s.name.casefold() not in taken:
+            out[c.name] = s.name
+            taken.add(s.name.casefold())
+        elif by_code.get(mapping.get(c.name)) is not None:
+            out[c.name] = by_code[mapping[c.name]].name
+    left_exp = [c for c in exp_cols if c.name not in out]
+    left_core = [c for c in core_cols if c.name.casefold() not in taken and c.name not in mapping and c.name != BATCH_COLUMN]
+    out.update(zip((c.name for c in left_exp), (c.name for c in left_core)))
+    return [(c, out.get(c.name)) for c in exp_cols]
+
+
 def _converted(c: Column, staged: str) -> str:
     """The staging column `staged` converted to core column `c`'s type."""
     return f"CAST(NULLIF(TRIM({db.ident(staged)}), '') AS {c.cast})"
