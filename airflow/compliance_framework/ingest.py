@@ -264,9 +264,9 @@ class IngestPipeline:
         stale_before = self.clock.now() - timedelta(minutes=self.settings.heartbeat_stale_minutes)
         return {
             "stale_loads": q(
-                """SELECT Load_ID, File_Path, Load_Stat, Updated_Dtts FROM ComplianceFileLoad
+                """SELECT Load_ID, File_Path, Load_Stat, LastUpdt_Dtts FROM ComplianceFileLoad
                     WHERE Load_Stat IN ('RECEIVED','STAGING','STAGED','RULES_RUNNING','PROCESS_FAILURE')
-                      AND Updated_Dtts < %s ORDER BY Load_ID""", stale_before),
+                      AND LastUpdt_Dtts < %s ORDER BY Load_ID""", stale_before),
             "rejected_by_reason": q("""SELECT Reject_Rsn_Cd, count(*) AS n FROM ComplianceFileLoad
                                           WHERE Load_Stat='REJECTED' GROUP BY Reject_Rsn_Cd ORDER BY n DESC"""),
         }
@@ -292,15 +292,15 @@ class IngestPipeline:
         marks, unfinished = db.in_list(UNFINISHED_LOAD_STATS)
         with self.conn.transaction():
             self.conn.execute(
-                f"""UPDATE ComplianceFileLoad SET Load_Stat='PROCESS_FAILURE', Error_Txt=%s, Updated_Dtts=%s
+                f"""UPDATE ComplianceFileLoad SET Load_Stat='PROCESS_FAILURE', Error_Txt=%s, LastUpdt_Dtts=%s, LastUpdt_ID=USER
                      WHERE File_Share=%s AND File_Path=%s AND Load_Stat IN ({marks})""",
                 ["not finished; the file was picked up again", now, info.share, info.path, *unfinished])
-            self.conn.execute("""UPDATE ComplianceFileLoad SET Load_Stat='RELOADED', Updated_Dtts=%s
+            self.conn.execute("""UPDATE ComplianceFileLoad SET Load_Stat='RELOADED', LastUpdt_Dtts=%s, LastUpdt_ID=USER
                                   WHERE File_Share=%s AND File_Path=%s AND Load_Stat='LOAD_INCOMPLETE'""",
                               (now, info.share, info.path))
             self.conn.execute(
                 """INSERT INTO ComplianceFileLoad (File_Hash, File_Share, File_Path, File_Version,
-                                                  File_Size_Byte, Load_Stat, Rules_Stat, Created_Dtts, Updated_Dtts)
+                                                  File_Size_Byte, Load_Stat, Rules_Stat, Load_Dtts, LastUpdt_Dtts)
                    VALUES (%s,%s,%s,%s,%s,'RECEIVED','NOT_RUN',%s,%s)""",
                 (key, info.share, info.path, info.version, info.size, now, now))
             return self.conn.execute("SELECT Load_ID FROM ComplianceFileLoad WHERE File_Hash=%s", (key,)).fetchone()["load_id"]
@@ -329,7 +329,7 @@ class IngestPipeline:
         with self.conn.transaction():
             self.conn.execute(
                 """UPDATE ComplianceFileLoad SET Cfg_ID=%s, Req_ID=%s, Btch_ID=%s, Load_Stat='STAGING', Reject_Rsn_Cd=NULL, Error_Txt=NULL,
-                          Updated_Dtts=%s WHERE Load_ID=%s""",
+                          LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Load_ID=%s""",
                 (cfg.cfg_id, batch["req_id"], batch["btch_id"], self.clock.now(), load_id))
         if info.size == 0 and cfg.has_header:
             return self._reject_file(load_id, info, "FILE_PARSE_ERROR", "zero-byte file but a header is expected",
@@ -360,7 +360,7 @@ class IngestPipeline:
         now = self.clock.now()
         with self.conn.transaction():
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='LOAD_INCOMPLETE', Reject_Rsn_Cd='STAGING_TABLE_BUSY', "
-                              "Error_Txt=%s, Updated_Dtts=%s WHERE Load_ID=%s", (text, now, load_id))
+                              "Error_Txt=%s, LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Load_ID=%s", (text, now, load_id))
             if lock and lock["acquired_dtts"] and now - lock["acquired_dtts"] >= STALE_LOCK:
                 detail = (f"{busy} has been locked since {lock['acquired_dtts']} by {lock['owner_id']}; its files and "
                           f"pulls wait. If that run no longer exists: release-lock --key {key}")
@@ -413,7 +413,7 @@ class IngestPipeline:
             path = os.path.join(tmp, basename(info.path))
             sha = self.store.download(info.share, info.path, path) or sha256_file(path)
             with self.conn.transaction():
-                self.conn.execute("UPDATE ComplianceFileLoad SET File_Sha256=%s, Updated_Dtts=%s WHERE Load_ID=%s",
+                self.conn.execute("UPDATE ComplianceFileLoad SET File_Sha256=%s, LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Load_ID=%s",
                                   (sha, self.clock.now(), load_id))
             other = self.conn.execute(
                 """SELECT TOP 1 Load_ID, Btch_ID FROM ComplianceFileLoad WHERE File_Sha256=%s AND Req_ID<>%s
@@ -448,7 +448,7 @@ class IngestPipeline:
         except FileRejected as e:
             return self._reject_file(load_id, info, e.event_ty, str(e), cfg, batch)
         with self.conn.transaction():
-            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, Updated_Dtts=%s "
+            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, LastUpdt_Dtts=%s, LastUpdt_ID=USER "
                               "WHERE Load_ID=%s", (staged_rows, self.clock.now(), load_id))
 
         result = self._resolve(load_id, info, cfg, req_id, staged_rows)
@@ -488,8 +488,8 @@ class IngestPipeline:
                 res = swap(self.conn, cfg, *self._load, staged_cnt)
                 self.conn.execute(
                     """UPDATE ComplianceRequestControl SET Resolution_Ty=%s, Req_Stat=%s, Reuse_Btch_ID=NULL,
-                              Updated_Dtts=%s WHERE Req_ID=%s""", ("NEW_FILE" if rows else "NO_DATA", to_stat, now, req_id))
-                self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='FILE_LOADED', Rules_Stat='NOT_RUN', Updated_Dtts=%s "
+                              LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Req_ID=%s""", ("NEW_FILE" if rows else "NO_DATA", to_stat, now, req_id))
+                self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='FILE_LOADED', Rules_Stat='NOT_RUN', LastUpdt_Dtts=%s, LastUpdt_ID=USER "
                                   "WHERE Load_ID=%s", (now, load_id))
                 if d.action == Action.LOAD_REPLACE:
                     self.logger.batch_event(
@@ -520,7 +520,7 @@ class IngestPipeline:
         row = self.conn.execute("SELECT Ovrd_ID FROM ComplianceBatchOverride WHERE Req_ID=%s "
                                 "AND UPPER(Override_Ty)='REUSE' AND UPPER(Apprvl_Stat)='APPROVED'", (b["req_id"],)).fetchone()
         self.conn.execute(
-            """UPDATE ComplianceBatchOverride SET Valid_Thru_Dt_Key=%s, Updated_Dtts=%s, Updated_By='SYSTEM'
+            """UPDATE ComplianceBatchOverride SET Valid_Thru_Dt_Key=%s, LastUpdt_Dtts=%s, LastUpdt_ID=USER
                 WHERE Req_ID=%s AND UPPER(Override_Ty)='REUSE' AND UPPER(Apprvl_Stat)='APPROVED'""",
             (db.as_date(b["req_dt_key"]), now, b["req_id"]))
         self.logger.batch_event("CARRY_FORWARD_REMOVED", req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id,
@@ -528,13 +528,13 @@ class IngestPipeline:
                                 detail=f"reuse of {b['reuse_btch_id']} replaced by load {load_id}")
 
     def _supersede(self, load_id: int) -> None:
-        self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='RELOADED', Updated_Dtts=%s "
+        self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='RELOADED', LastUpdt_Dtts=%s, LastUpdt_ID=USER "
                           "WHERE Load_ID=%s AND Load_Stat='FILE_LOADED'", (self.clock.now(), load_id))
 
     def _rejected_closed(self, load_id, detail, now) -> None:
         self.conn.execute(
             """UPDATE ComplianceFileLoad SET Load_Stat='REJECTED', Reject_Rsn_Cd='FILE_REJECTED_BATCH_CLOSED',
-                      Rules_Stat='NOT_RUN', Error_Txt=%s, Updated_Dtts=%s WHERE Load_ID=%s""",
+                      Rules_Stat='NOT_RUN', Error_Txt=%s, LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Load_ID=%s""",
             (detail[:4000] if detail else detail, now, load_id))
 
     def _reject_file(self, load_id: int, info: FileInfo, event_ty: str, message: str,
@@ -546,7 +546,7 @@ class IngestPipeline:
         with self.conn.transaction():
             self.conn.execute(
                 """UPDATE ComplianceFileLoad SET Load_Stat='REJECTED', Reject_Rsn_Cd=%s, Error_Txt=%s,
-                          Updated_Dtts=%s WHERE Load_ID=%s""", (event_ty, message[:4000], self.clock.now(), load_id))
+                          LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Load_ID=%s""", (event_ty, message[:4000], self.clock.now(), load_id))
             if cfg:
                 self.conn.execute("UPDATE ComplianceFileLoad SET Cfg_ID=%s WHERE Load_ID=%s", (cfg.cfg_id, load_id))
             ctx = {"project_cd": self._scope_project} if self._scope_project else {}
@@ -593,7 +593,7 @@ class IngestPipeline:
             with self.conn.transaction():
                 marks, terminal = db.in_list(sorted(TERMINAL_LOAD_STATS))
                 self.conn.execute(
-                    f"""UPDATE ComplianceFileLoad SET Load_Stat='PROCESS_FAILURE', Error_Txt=%s, Updated_Dtts=%s
+                    f"""UPDATE ComplianceFileLoad SET Load_Stat='PROCESS_FAILURE', Error_Txt=%s, LastUpdt_Dtts=%s, LastUpdt_ID=USER
                         WHERE Load_ID=%s AND Load_Stat NOT IN ({marks})""",
                     [sanitize_db_error(db.error_text(err)), self.clock.now(), load_id, *terminal])
                 if isinstance(err, RowCountMismatch):
@@ -743,7 +743,7 @@ class SourceLoader:
         with self.conn.transaction():
             self.conn.execute(
                 """INSERT INTO ComplianceFileLoad (File_Hash, File_Share, File_Path, File_Version, File_Size_Byte,
-                                                  Load_Stat, Rules_Stat, Created_Dtts, Updated_Dtts)
+                                                  Load_Stat, Rules_Stat, Load_Dtts, LastUpdt_Dtts)
                    VALUES (%s,%s,%s,%s,0,'RECEIVED','NOT_RUN',%s,%s)""", (key, share, path, now.isoformat(), now, now))
             return self.conn.execute("SELECT Load_ID FROM ComplianceFileLoad WHERE File_Hash=%s", (key,)).fetchone()["load_id"]
 
@@ -777,7 +777,7 @@ class SourceLoader:
         ref = f"{q.db_ty} {q.conn_cd or 'same Teradata system'}: {q.project_cd}/{q.table_nm}/{q.src_id} {batch['btch_id']}"
         with self.conn.transaction():
             self.conn.execute("UPDATE ComplianceFileLoad SET Cfg_ID=NULL, Req_ID=%s, Btch_ID=%s, Load_Stat='STAGING', "
-                              "Updated_Dtts=%s WHERE Load_ID=%s", (batch["req_id"], batch["btch_id"], self.clock.now(), load_id))
+                              "LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Load_ID=%s", (batch["req_id"], batch["btch_id"], self.clock.now(), load_id))
         opts = check_options(q, cfgmod.file_checks(self.conn))
         stage_lock = db.batch_key(f"STAGE {q.stg_schema_nm}.{q.stg_table_nm}".upper())
         with db.held(self.conn, db.req_key(batch), self.settings.lock_timeout_seconds):
@@ -816,7 +816,7 @@ class SourceLoader:
         except FileRejected as e:
             return self._reject(load_id, b, q, e.event_ty, str(e), ref)
         with self.conn.transaction():
-            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, Updated_Dtts=%s "
+            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='STAGED', Stg_Rcd_Cnt=%s, LastUpdt_Dtts=%s, LastUpdt_ID=USER "
                               "WHERE Load_ID=%s", (rows, self.clock.now(), load_id))
         self.pipeline._load = (layout, ctx)
         return self.pipeline._resolve(load_id, None, q, b["req_id"], rows, ref=ref)
@@ -863,7 +863,7 @@ class SourceLoader:
         text = f"no rows yet; pulled again on the next runs until {due}"
         with self.conn.transaction():
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='NO_DATA_YET', Stg_Rcd_Cnt=0, Error_Txt=%s, "
-                              "Updated_Dtts=%s WHERE Load_ID=%s", (text, self.clock.now(), load_id))
+                              "LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Load_ID=%s", (text, self.clock.now(), load_id))
             self.logger.batch_event("SOURCE_NO_DATA_YET", req_id=b["req_id"], btch_id=b["btch_id"], load_id=load_id,
                                     detail=text)
         log.info("SOURCE_LOAD | %s | source %s | %s", b["btch_id"], b["src_id"], text)
@@ -875,14 +875,14 @@ class SourceLoader:
         text = "still no rows; pulled again on the next runs until the batch closes"
         with self.conn.transaction():
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='NO_DATA_YET', Stg_Rcd_Cnt=0, Error_Txt=%s, "
-                              "Updated_Dtts=%s WHERE Load_ID=%s", (text, self.clock.now(), load_id))
+                              "LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Load_ID=%s", (text, self.clock.now(), load_id))
         log.info("SOURCE_LOAD | %s | source %s | %s", b["btch_id"], b["src_id"], text)
         return IngestOutcome(load_id, "NO_DATA_YET", message=text, req_id=b["req_id"])
 
     def _reject(self, load_id: int, b: dict, q: QueryConfig, event_ty: str, message: str, ref: str) -> IngestOutcome:
         with self.conn.transaction():
             self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='REJECTED', Reject_Rsn_Cd=%s, Error_Txt=%s, "
-                              "Updated_Dtts=%s WHERE Load_ID=%s", (event_ty, message[:4000], self.clock.now(), load_id))
+                              "LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Load_ID=%s", (event_ty, message[:4000], self.clock.now(), load_id))
             self.logger.audit(event_ty, load_id=load_id, file_ref=ref[:1024], description=message, project_cd=q.project_cd,
                               table_nm=q.table_nm, src_id=q.src_id, run_ty=b["run_ty"], req_id=b["req_id"],
                               btch_id=b["btch_id"])

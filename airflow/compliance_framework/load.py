@@ -979,7 +979,7 @@ def report_line(conn, load: dict, matcher, tz: str, sources: dict) -> list:
     return [sources.get(src, src), name, "ACCEPTED" if accepted else "REJECTED" if stat in REJECTED else "FAILED" if stat in FAILED
             else "WAITING" if stat in WAITING else stat,
             rows, (rows or 0) if accepted else 0, submitted.date() if submitted else None,
-            _local(load["updated_dtts"], tz), None if accepted else business_message(load)]
+            _local(load["lastupdt_dtts"], tz), None if accepted else business_message(load)]
 
 
 def file_details(conn, load_ids: list, matcher, tz: str) -> list[dict]:

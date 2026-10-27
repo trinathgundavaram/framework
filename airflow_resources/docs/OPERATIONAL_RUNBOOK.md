@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.70 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.71 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -17,7 +17,7 @@ reading the code. **Version:** framework 0.3.70 (Airflow 3 / Teradata).
   it is allowed.
 - `Active_Ind = 1` means the row is in use; `0` means the row is ignored as if it did not exist. Use `0` instead of
   deleting a configuration row, so the history stays.
-- The audit columns `Created_Dtts`, `Created_By`, `Updated_Dtts`, `Updated_By` are filled by the database. Leave
+- The audit columns `Load_Dtts`, `LoadUser_ID`, `LastUpdt_Dtts`, `LastUpdt_ID` are filled by the database. Leave
   them out of every INSERT. Columns marked **(framework)** are written by the framework only: never insert or update
   them.
 - After any configuration change, run **validate-config** (section 2.11). It reports every problem it finds.
@@ -466,7 +466,7 @@ A batch is one table + run type + report period + request date. Every **source**
 | `*` | "Every" where the column allows it (`Table_Nm`, `Src_ID`, `Run_Ty`, `Check_Field_Nm`); a specific row wins over `*` |
 | Switching off | `Active_Ind = 0` (configuration rows are not deleted); in the crosswalk also `Include_Ind = 0` with a start date to stop one run type from a day |
 | Changing a row | `UPDATE` it. A change applies from the next run, also to open batches (their report dates do not change). For a change from a given day use the crosswalk's effective dates |
-| Audit columns | `Created_Dtts`, `Created_By`, `Updated_Dtts`, `Updated_By` are filled by the database: leave them out of an INSERT |
+| Audit columns | `Load_Dtts`, `LoadUser_ID`, `LastUpdt_Dtts`, `LastUpdt_ID` are filled by the database: leave them out of an INSERT |
 | Framework tables | `ComplianceRequestControl`, `ComplianceFileLoad`, `ComplianceRequestFileDetail`, `CMS_ComplianceExceptionsAudit`, `ComplianceLock`: not changed by hand, except as a procedure in section 11 says |
 | Staging / core / export tables | Yours (DBA). Staging can be all text; core can be typed (converted on the way, 5.7). Columns with the same name pair by name, the others by order |
 | After every change | Run `validate-config` (2.11) and fix every ERROR |
@@ -755,7 +755,7 @@ then source, then `*`. `Include_Ind = 0` switches an inherited check off.
 | `Table_Nm` | Default `*` | A table or `*` | |
 | `Src_ID` | Default `*` | A source or `*` | |
 | `Check_Cd` | Yes | Section 8.6 | The check |
-| `Check_Field_Nm` | Default `*` | A field name or `*` | For field checks: the field (a `HEADER_NAMES` name, else a staging column). `*` for the other checks |
+| `Check_Field_Nm` | Default `*` | A field name or `*` | For field checks: the field (a `HEADER_NAMES` name, else a staging column). `*` for the other checks. The table's key is project, table, source and `Check_Cd` (not the field), so one field per check for a table + source |
 | `Check_Val_Txt` | Yes when included | Depends on the check | The check's value |
 | `Include_Ind` | Default 1 | `1`, `0` | `1` = applies; `0` = switched off for the files the row covers |
 | `Active_Ind` | Default 1 | | |
@@ -1598,10 +1598,10 @@ ORDER BY c.Src_ID, d.Detail_ID;
 **12.3 Rejected or failed loads (last 7 days)**
 
 ```sql
-SELECT Load_ID, File_Path, Btch_ID, Load_Stat, Reject_Rsn_Cd, Error_Txt, Updated_Dtts
+SELECT Load_ID, File_Path, Btch_ID, Load_Stat, Reject_Rsn_Cd, Error_Txt, LastUpdt_Dtts
 FROM HSABC_DEV.ComplianceFileLoad
-WHERE Load_Stat IN ('REJECTED', 'RULES_FAILED', 'PROCESS_FAILURE') AND Updated_Dtts >= CURRENT_TIMESTAMP - INTERVAL '7' DAY
-ORDER BY Updated_Dtts DESC;
+WHERE Load_Stat IN ('REJECTED', 'RULES_FAILED', 'PROCESS_FAILURE') AND LastUpdt_Dtts >= CURRENT_TIMESTAMP - INTERVAL '7' DAY
+ORDER BY LastUpdt_Dtts DESC;
 ```
 
 **12.4 Open batches past their close date**
@@ -1747,7 +1747,10 @@ named like the tables (`ODAG1` …, `CDAG1` …), variants = run types or empty,
 ## 16. Upgrading an existing installation
 
 `airflow_resources/sql/schema.sql` always has the current tables. For tables created with an earlier version, run
-the statements of every version after yours, in order (replace `HSABC_DEV`):
+the statements of every version after yours, in order (replace `HSABC_DEV`). To find what an installation still
+lacks, run `airflow_resources/sql/schema_check.sql`: it lists every column that is missing or whose NULL / NOT NULL
+differs from `schema.sql` (no rows = up to date). A NOT NULL column that should allow NULL is fixed with
+`ALTER TABLE HSABC_DEV.<table> ADD <column> NULL;`.
 
 | From before | Statements |
 |---|---|
@@ -1756,6 +1759,7 @@ the statements of every version after yours, in order (replace `HSABC_DEV`):
 | 0.3.62 | the `Load_Stat` renames below |
 | 0.3.63 | the timeline event renames below |
 | 0.3.67 | `ALTER TABLE HSABC_DEV.ComplianceExportConfig ADD Exp_Sql_Txt VARCHAR(8000), ADD Exp_Pre_Sql_Txt VARCHAR(8000), ADD Exp_Post_Sql_Txt VARCHAR(8000);` |
+| 0.3.71 | `airflow_resources/sql/upgrade_0.3.71.sql`: the audit columns of every framework table renamed (`Created_Dtts` → `Load_Dtts`, `Created_By` → `LoadUser_ID`, `Updated_Dtts` → `LastUpdt_Dtts`, `Updated_By` → `LastUpdt_ID`); six tables (`ComplianceRunType`, `ComplianceDataSetSourceXwalk`, `ComplianceSourceFileConfig`, `ComplianceRequestControl`, `ComplianceFileLoad`, `CMS_ComplianceExceptionsAudit`) backed up, recreated in the new column order (audit columns last) and filled again, then the backups dropped; `ComplianceRequestControl` and `ComplianceFileLoad` get `LoadUser_ID` / `LastUpdt_ID`. Fill the four `{{NEXT_...}}` start values from step 2.0 first so the IDs are kept. Every framework update now sets `LastUpdt_ID` to the database user. Run it with the DAGs paused, then deploy the code |
 
 ```sql
 -- 0.3.62: load statuses

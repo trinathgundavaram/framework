@@ -392,7 +392,7 @@ FILE_RULES is not triggered on a partial export.
 ## Time zone
 
 Everything runs in Central time (`America/Chicago`, with daylight saving): business dates, schedules, due dates and
-`RELEASE_TIME`. Every timestamp the framework writes (`Created_Dtts`, `Updated_Dtts`, `Event_Dtts`, locks, load
+`RELEASE_TIME`. Every timestamp the framework writes (`Load_Dtts`, `LastUpdt_Dtts`, `Event_Dtts`, locks, load
 times) is the current Central time with its offset (e.g. `2026-10-14 22:59:02-05:00`), not UTC. No Variable needs
 `BUSINESS_TZ` or `schedule_timezone`.
 
@@ -462,9 +462,7 @@ Upgrading an installation from 0.3.37 (DEV: the earlier batches are removed and 
 
 ```sql
 ALTER TABLE <META_DB>.ComplianceRequestControl ADD Cmplnc_Vrsn VARCHAR(10);
-DROP INDEX uq_reqcontrol_btch ON <META_DB>.ComplianceRequestControl;
-CREATE UNIQUE INDEX uq_reqcontrol_btch (Btch_ID, Src_ID) ON <META_DB>.ComplianceRequestControl;
-CREATE INDEX ix_fileload_req (Req_ID) ON <META_DB>.ComplianceFileLoad;
+-- (since 0.3.71 the tables have no secondary indexes: drop any that an older install created)
 -- clear the old batches (then run BATCH_CREATION again, and FILE_LOAD / SOURCE_LOAD for their data)
 DELETE FROM <META_DB>.ComplianceBatchOverride;
 DELETE FROM <META_DB>.ComplianceRequestFileDetail;
@@ -688,7 +686,7 @@ Existing installations (from 0.3.39; the primary index gets `Check_Field_Nm`, so
 RENAME TABLE <META_DB>.ComplianceFileCheckConfig TO <META_DB>.ComplianceFileCheckConfig_Old;
 -- create ComplianceFileCheckConfig from sql/schema.sql, then
 INSERT INTO <META_DB>.ComplianceFileCheckConfig (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt,
-       Include_Ind, Active_Ind, Created_Dtts, Created_By, Updated_Dtts, Updated_By)
+       Include_Ind, Active_Ind, Load_Dtts, LoadUser_ID, LastUpdt_Dtts, LastUpdt_ID)
 SELECT Project_Cd, Table_Nm, Src_ID, Check_Cd, '*', Check_Val_Txt, Include_Ind, Active_Ind, Created_Dtts, Created_By,
        Updated_Dtts, Updated_By FROM <META_DB>.ComplianceFileCheckConfig_Old;
 DROP TABLE <META_DB>.ComplianceFileCheckConfig_Old;
@@ -908,7 +906,7 @@ is copied once. First run the `ComplianceDataSetSourceXwalk` CREATE TABLE of `ai
 ```sql
 INSERT INTO <META_DB>.ComplianceDataSetSourceXwalk_N
   (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt,
-   Rpt_Period_Cd, Include_Ind, Active_Ind, Created_Dtts, Created_By, Updated_Dtts, Updated_By)
+   Rpt_Period_Cd, Include_Ind, Active_Ind, Load_Dtts, LoadUser_ID, LastUpdt_Dtts, LastUpdt_ID)
 SELECT Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt,
        Rpt_Period_Cd, 1, Active_Ind, Created_Dtts, Created_By, Updated_Dtts, Updated_By
 FROM <META_DB>.ComplianceDataSetSourceXwalk;

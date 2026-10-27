@@ -89,7 +89,7 @@ FROM HSABC_DEV.ComplianceRequestFileDetail d JOIN HSABC_DEV.ComplianceRequestCon
 WHERE c.Btch_ID = '<batch>' ORDER BY c.Src_ID, d.Detail_ID;
 
 -- Q4 loads (files and pulls) of a batch, newest first
-SELECT Load_ID, File_Share, File_Path, Load_Stat, Reject_Rsn_Cd, Rules_Stat, Stg_Rcd_Cnt, Error_Txt, Updated_Dtts
+SELECT Load_ID, File_Share, File_Path, Load_Stat, Reject_Rsn_Cd, Rules_Stat, Stg_Rcd_Cnt, Error_Txt, LastUpdt_Dtts
 FROM HSABC_DEV.ComplianceFileLoad WHERE Btch_ID = '<batch>' ORDER BY Load_ID DESC;
 
 -- Q5 alerts (audit) of a batch

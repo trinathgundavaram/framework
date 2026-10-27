@@ -513,7 +513,7 @@ class RulesRunner:
 
     def _set(self, loads: list[dict], rules_stat: str) -> None:
         ids, chunk = db.in_list([l["load_id"] for l in loads])
-        self.conn.execute(f"UPDATE ComplianceFileLoad SET Rules_Stat=%s, Updated_Dtts=%s WHERE Load_ID IN ({ids})",
+        self.conn.execute(f"UPDATE ComplianceFileLoad SET Rules_Stat=%s, LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Load_ID IN ({ids})",
                           [rules_stat, self.clock.now(), *chunk])
 
 

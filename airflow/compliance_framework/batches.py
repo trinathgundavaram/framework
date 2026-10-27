@@ -107,7 +107,7 @@ def _create_batch(conn, clock, logger, x: XwalkRow, rpt_start, rpt_end, req_dt, 
     now = clock.now()
     conn.execute(
         """INSERT INTO ComplianceRequestControl (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Start_Dt_Key,
-             Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Cmplnc_Vrsn, Req_Stat, Batch_Close_Ind, Created_Dtts, Updated_Dtts)
+             Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Cmplnc_Vrsn, Req_Stat, Batch_Close_Ind, Load_Dtts, LastUpdt_Dtts)
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s)""",
         (x.project_cd, x.table_nm, x.src_id, x.run_ty, rpt_start, rpt_end, req_dt, btch, x.cmplnc_vrsn,
          REQUEST_CREATED, now, now))
@@ -558,7 +558,7 @@ class IntakeProcessor:
             where.append(f"UPPER(Table_Nm) IN ({marks})")
             params.extend(names)
         due = self.conn.execute(f"SELECT Intake_ID FROM ComplianceRequestInTake WHERE {' AND '.join(where)} "
-                                "ORDER BY Created_Dtts, Intake_ID", params).fetchall()
+                                "ORDER BY Load_Dtts, Intake_ID", params).fetchall()
         run_types = cfg.run_types(self.conn) if due else {}
         for d in due:
             key = db.row_key("INTAKE", d["intake_id"])
@@ -619,7 +619,7 @@ class IntakeProcessor:
         summary.details.append(f"{it['intake_id']}: FAILED {reason}")
 
     def _mark_run(self, intake_id: int) -> None:
-        self.conn.execute("UPDATE ComplianceRequestInTake SET Last_Run_Dt_Key=%s, Updated_Dtts=%s WHERE Intake_ID=%s",
+        self.conn.execute("UPDATE ComplianceRequestInTake SET Last_Run_Dt_Key=%s, LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Intake_ID=%s",
                           (self.clock.today(self.settings.business_tz), self.clock.now(), intake_id))
 
 
@@ -821,23 +821,23 @@ class DecisionProcessor:
             if not self.conn.execute(
                     "SELECT 1 AS ok FROM CMS_ComplianceExceptionsAudit WHERE Ovrd_ID=%s "
                     "AND Event_Ty='OVERRIDE_INVALID_DETECTED'", (o["ovrd_id"],)).fetchone():
-                self.logger.audit("OVERRIDE_INVALID_DETECTED", actor=o["reviewed_by"] or o["created_by"],
+                self.logger.audit("OVERRIDE_INVALID_DETECTED", actor=o["reviewed_by"] or o["loaduser_id"],
                                   description=f"REUSE: {problem}", **ctx)
             s.invalid.append(o["ovrd_id"])
             return
         check_transition(b["req_stat"], SOURCE_DATA_CARRY_FORWARD)
         empty = current_load(self.conn, b["req_id"])
         if empty is not None:
-            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='RELOADED', Updated_Dtts=%s WHERE Load_ID=%s",
+            self.conn.execute("UPDATE ComplianceFileLoad SET Load_Stat='RELOADED', LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Load_ID=%s",
                               (self.clock.now(), empty["load_id"]))
         self.conn.execute(
             """UPDATE ComplianceRequestControl SET Resolution_Ty='CARRY_FORWARD', Reuse_Btch_ID=%s,
-                      Req_Stat=%s, Updated_Dtts=%s WHERE Req_ID=%s""",
+                      Req_Stat=%s, LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Req_ID=%s""",
             (src["btch_id"], SOURCE_DATA_CARRY_FORWARD, self.clock.now(), b["req_id"]))
         if code(o["reuse_btch_id"]) != src["btch_id"]:
-            self.conn.execute("UPDATE ComplianceBatchOverride SET Reuse_Btch_ID=%s, Updated_Dtts=%s "
+            self.conn.execute("UPDATE ComplianceBatchOverride SET Reuse_Btch_ID=%s, LastUpdt_Dtts=%s, LastUpdt_ID=USER "
                               "WHERE Ovrd_ID=%s", (src["btch_id"], self.clock.now(), o["ovrd_id"]))
-        self.logger.audit("OVERRIDE_APPROVED", actor=o["reviewed_by"] or o.get("created_by") or "SYSTEM",
+        self.logger.audit("OVERRIDE_APPROVED", actor=o["reviewed_by"] or o.get("loaduser_id") or "SYSTEM",
                           description=f"REUSE of {src['btch_id']} valid through {valid_thru}", **ctx)
         self.logger.batch_event("CARRY_FORWARD_APPLIED", req_id=b["req_id"], btch_id=b["btch_id"],
                                 ovrd_id=o["ovrd_id"], actor=o["reviewed_by"] or "SYSTEM",
@@ -849,7 +849,7 @@ class DecisionProcessor:
         (with the open status of its data) until new data arrives; BATCH_CLOSE then closes it."""
         where, params = scope.sql("c")
         rows = self.conn.execute(
-            f"""SELECT o.Ovrd_ID, o.Reviewed_By, o.Created_By, c.Req_ID, c.Btch_ID FROM ComplianceBatchOverride o
+            f"""SELECT o.Ovrd_ID, o.Reviewed_By, o.LoadUser_ID, c.Req_ID, c.Btch_ID FROM ComplianceBatchOverride o
                  JOIN ComplianceRequestControl c ON c.Req_ID = o.Req_ID
                 WHERE UPPER(o.Override_Ty) = 'REOPEN' AND UPPER(o.Apprvl_Stat) = 'APPROVED' AND o.Valid_Thru_Dt_Key >= %s
                   AND c.Batch_Close_Ind = 1 AND NOT EXISTS (SELECT 1 FROM ComplianceRequestFileDetail d
@@ -869,8 +869,8 @@ class DecisionProcessor:
                     check_transition(b["req_stat"], to_stat)
                     self.conn.execute(
                         """UPDATE ComplianceRequestControl SET Batch_Close_Ind = 0, Req_Stat=%s, Resolution_Ty=%s,
-                                  Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, resolution, self.clock.now(), b["req_id"]))
-                    actor = r["reviewed_by"] or r["created_by"] or "SYSTEM"
+                                  LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Req_ID=%s""", (to_stat, resolution, self.clock.now(), b["req_id"]))
+                    actor = r["reviewed_by"] or r["loaduser_id"] or "SYSTEM"
                     detail = f"reopened: {b['req_stat']} / {b['resolution_ty']} -> {to_stat}; open until new data arrives"
                     self.logger.batch_event("BATCH_REOPENED", req_id=b["req_id"], btch_id=b["btch_id"],
                                             ovrd_id=r["ovrd_id"], actor=actor, detail=detail)
@@ -916,7 +916,7 @@ class DecisionProcessor:
         check_transition(b["req_stat"], to_stat)
         self.conn.execute(
             """UPDATE ComplianceRequestControl SET Resolution_Ty=NULL, Reuse_Btch_ID=NULL, Req_Stat=%s,
-                      Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, self.clock.now(), b["req_id"]))
+                      LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Req_ID=%s""", (to_stat, self.clock.now(), b["req_id"]))
         self.logger.audit("OVERRIDE_EXPIRED", ovrd_id=r["ovrd_id"], req_id=b["req_id"], btch_id=b["btch_id"],
                           project_cd=b["project_cd"], table_nm=b["table_nm"],
                           src_id=b["src_id"], run_ty=b["run_ty"],
@@ -930,7 +930,7 @@ class DecisionProcessor:
         q = partial(db.fetch_all, self.conn)
         today = self.clock.today(self.settings.business_tz)
         return {
-            "pending_reviews": q("""SELECT Ovrd_ID, Override_Ty, Req_ID, Btch_ID, Created_Dtts
+            "pending_reviews": q("""SELECT Ovrd_ID, Override_Ty, Req_ID, Btch_ID, Load_Dtts
                                      FROM ComplianceBatchOverride WHERE UPPER(Apprvl_Stat)='PENDING_REVIEW'
                                      ORDER BY Ovrd_ID"""),
             "overrides_expiring_soon": q(
@@ -1102,7 +1102,7 @@ class BatchCloser:
                 check_transition(cur["req_stat"], to_stat)
                 self.conn.execute(
                     """UPDATE ComplianceRequestControl SET Batch_Close_Ind = 1, Req_Stat=%s, Resolution_Ty=%s,
-                              Updated_Dtts=%s WHERE Req_ID=%s""", (to_stat, resolution, self.clock.now(), cur["req_id"]))
+                              LastUpdt_Dtts=%s, LastUpdt_ID=USER WHERE Req_ID=%s""", (to_stat, resolution, self.clock.now(), cur["req_id"]))
                 self.logger.batch_event("BATCH_CLOSED", req_id=cur["req_id"], btch_id=cur["btch_id"], actor=closed_by,
                                         detail=f"{to_stat} / {resolution}")
                 if resolution == "MISSING":
