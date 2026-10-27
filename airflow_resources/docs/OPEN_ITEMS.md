@@ -1,6 +1,6 @@
 # Compliance Batch Framework (Airflow / Teradata): open items
 
-State at version 0.3.68. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
+State at version 0.3.69. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
 everything they list that is not below is done. Tested: 25 scenarios on Python 3.13 and 3.9 against a PostgreSQL
 stand-in for Teradata; the 9 DAG files parse and a step DAG runs (stubbed step) on Airflow 3.3.0. **Nothing has run on Teradata, the NAS or a real
 Airflow deployment yet.**
@@ -9,13 +9,13 @@ Airflow deployment yet.**
 
 ### DEV rehearsal (one full cycle on the real systems)
 
-Create the tables (`sql/schema.sql`), the CMSUNIV staging / core tables, the export tables and procedures
-(`examples/cmsuniv_export_dev.sql`), load `examples/cmsuniv_setup.sql`, the Variables (`examples/cmsuniv_dev`) and
+Create the tables (`sql/schema.sql`), the CMSUNIV staging / core tables (the export goes to the
+existing `EXPORT_FEED_DEV_T.SDO_CMSUNIV_*` tables), load `examples/cmsuniv_setup.sql`, the Variables (`examples/cmsuniv_dev`) and
 the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `smtp_default`). Then:
 
 | # | Case | Expected |
 |---|---|---|
-| 1 | `validate-config` | No ERROR except Facets (210) until its config exists; `HEADER_NAMES_PARTIAL` warnings for the tables without a target list (CDAG1 – 5, FA1 – 4) |
+| 1 | `validate-config` | No ERROR; `HEADER_NAMES_PARTIAL` warnings for the tables without a target list (CDAG1 – 5, FA1 – 4) |
 | 2 | BATCH_CREATION on a Sunday before the 3rd Tuesday | DLY, WKLY, MNT, IN1 batches; FA tables with their fixed dates |
 | 3 | One good and one bad file per file layout (general, MedHOK) | Good: `FILE_LOADED`, file in `Archive/`. Bad: `REJECTED`, file in `Error/`, error log in `ErrorLog/`, FILE_LOAD fails at once (no retry), incident + email |
 | 4 | SOURCE_LOAD for QNXT, AZ, SNPCC before and after the source tables are loaded | Empty first pull = no data, pulled again on the next runs until the batch closes |
@@ -32,7 +32,7 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
 
 ### Still to configure
 
-- Facets (210) `ComplianceInternalSourceConfig` rows for ODAG3 and FA4 (you).
+- Facets (210): the upstream process writing the framework batch ID into `Batch_ID` of `CMSUNIV_CORE_DEV_V.CSF_ODAG_Table3_2022` / `CSF_FA_Table4_2022`, and the staging tables `CMSUNIV_STAGE_$ENV_T.ODAG_CSF_TABLE3_2022` / `FA_CSF_TABLE4_2022` (you).
 - PROD: the PROD Variables (`td_conn_var`, `meta_db`, `load_env`, emails) and the NAS Connection's server.
 - Schedules (`schedule_interval`) when the DAGs go unattended; see section 3.
 

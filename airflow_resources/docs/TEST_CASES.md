@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Test Cases (Airflow / Teradata)
 
-**Version:** framework 0.3.67. **Environment:** CMSUNIV DEV (`HSABC_DEV`, `CMSUNIV_FILELAND_DEV_T`,
-`CMSUNIV_STAGE_DEV_T`, `CMSUNIV_CORE_DEV_T`, `CMSUNIV_EXPORT_DEV_T`, NAS `chs_dms/Dev/OSS_Inbound/External/CMSUNIV`).
+**Version:** framework 0.3.69. **Environment:** CMSUNIV DEV (`HSABC_DEV`, `CMSUNIV_FILELAND_DEV_T`,
+`CMSUNIV_STAGE_DEV_T`, `CMSUNIV_CORE_DEV_T`, `EXPORT_FEED_DEV_T`, NAS `chs_dms/Dev/OSS_Inbound/External/CMSUNIV`).
 Run types `DLY`, `WKLY`, `MNT`, `IN1`, `CMS`. Replace dates, batch IDs and sources with the ones of your run.
 
 **How to use**
@@ -47,7 +47,7 @@ Run types `DLY`, `WKLY`, `MNT`, `IN1`, `CMS`. Replace dates, batch IDs and sourc
 | P1 | Framework 0.3.67 and `rules_engine` deployed in the DAGs folder; 9 DAGs visible, no import errors | Airflow UI → DAGs; Browse → DAG import errors empty |
 | P2 | Metadata tables from `sql/schema.sql` exist in `HSABC_DEV` (20 tables) | Q12 |
 | P3 | CMSUNIV configuration loaded (`examples/cmsuniv_setup.sql`), run types `DLY` / `WKLY` | `SELECT Run_Ty, Sched_Cd, SLA_Days FROM HSABC_DEV.ComplianceRunType;` |
-| P4 | Staging, core, export tables and export procedures created (`examples/cmsuniv_export_dev.sql`) | `SHOW TABLE` on a few |
+| P4 | Staging and core tables created; feed tables `EXPORT_FEED_DEV_T.SDO_CMSUNIV_*` exist with `Btch_ID` and `Src_Data_Key` | `SHOW TABLE` on a few |
 | P5 | Airflow Connections: `DEV` (Teradata), `comp_oper_creds` (NAS), `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `smtp_default` | Admin → Connections |
 | P6 | 9 Airflow Variables from `examples/cmsuniv_dev/` | Admin → Variables |
 | P7 | Pool `gre_rules` with 1 slot; Airflow triggerer running | Admin → Pools; `airflow jobs check --job-type TriggererJob` |
@@ -103,7 +103,7 @@ SELECT Btch_ID, Src_Data_Key, Run_Ty, AuditDataID, COUNT(*) FROM <staging db>.<t
 SELECT Src_Data_Key, COUNT(*), MIN(StagingCreateDate), MAX(Load_Dtts) FROM <core db>.<table> WHERE Btch_ID = '<batch>' GROUP BY 1;
 
 -- Q8 export rows of a batch
-SELECT Src_Data_Key, COUNT(*) FROM CMSUNIV_EXPORT_DEV_T.<table>_EXPORT WHERE Exp_Btch_ID = '<batch>' GROUP BY 1;
+SELECT Src_Data_Key, COUNT(*) FROM EXPORT_FEED_DEV_T.SDO_CMSUNIV_<table>_2022 WHERE Btch_ID = '<batch>' GROUP BY 1;
 
 -- Q9 rules results of a batch
 SELECT r.rule_id, r.status, r.run_key FROM HSABC_DEV.gre_results r WHERE r.run_key = '<batch>' ORDER BY 1;
@@ -292,8 +292,8 @@ feed views (extract).
 | ID | Test | Steps | Expected |
 |---|---|---|---|
 | EX-01 | Not due yet | Open WKLY batch before its close date | Not exported (or listed held); report `NO BATCHES TO EXPORT` |
-| EX-02 | Due on close date | DLY batch with data (SLA 1) | Exported the same day; `EXPORT_LOADED`; Q8 rows = core rows; `Exp_Btch_ID` = batch |
-| EX-03 | Procedure mode | CMSUNIV procedure configured | Log `procedure CMSUNIV_EXPORT_DEV_T.SP_EXPORT_…` with parameters; rows stamped `Btch_ID` / `Exp_Btch_ID` |
+| EX-02 | Due on close date | DLY batch with data (SLA 1) | Exported the same day; `EXPORT_LOADED`; Q8 rows = core rows; `Btch_ID` = batch |
+| EX-03 | Procedure mode | A test table with `Exp_Proc_Nm` set (CMSUNIV itself has no procedure) | Log `procedure <db>.<proc>` with parameters; rows stamped `Btch_ID` (and `Exp_Btch_ID` if present) |
 | EX-04 | All sources | Batch with several sources | Each source exported; one `EXPORT_LOADED` per source row |
 | EX-05 | Re-export replaces | Reload a file (FL-08), export again | Old rows of that source removed, new inserted; no duplicates |
 | EX-06 | Only changed batches | Rerun EXPORT_LOAD without changes | Nothing exported again |
@@ -304,7 +304,7 @@ feed views (extract).
 | EX-11 | Hold | `{"hold": "WKLY"}` | WKLY batches held |
 | EX-12 | Release time | `"settings":{"RELEASE_TIME":"20:00"}` | Due batches exported only from 20:00 on the close date |
 | EX-13 | Named batch | `{"project":"CMSUNIV","batch":"<batch>"}` | Only that batch, even if exported before |
-| EX-14 | Copy mode | Remove `Exp_Proc_Nm` on a test table | Same-name core columns copied; `Exp_Btch_ID` filled; validate warns about export columns missing in core |
+| EX-14 | Copy mode | CMSUNIV export rows as delivered (no procedure) | Core columns copied into `SDO_CMSUNIV_<table>_2022` by name, then value code, then order; `Btch_ID` = batch; validate lists the pairs and warns about feed columns no core column fills |
 | EX-15 | Custom SELECT | `Exp_Sql_Txt` reading core with `{data_btch_id}` / `{src_id}` and aliases | Rows from the SELECT; batch, `Exp_Btch_ID` and source columns stamped by the framework even if the SELECT returns its own; SQL with values in the log |
 | EX-16 | SELECT column not in export | Alias to a non-existing column | Batch `FAILED`: "returns columns that are not in …"; `EXPORT_LOAD_FAILED` |
 | EX-17 | Pre / post once per batch | `Exp_Pre_Sql_Txt` inserting a log row, `Exp_Post_Sql_Txt` updating the batch's rows | Pre and post run once per batch (not per source), in order, logged with values |

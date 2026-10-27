@@ -1,3 +1,5 @@
+-- NOT USED: CMSUNIV exports into the existing EXPORT_FEED_$ENV_T.SDO_CMSUNIV_<table>_2022 tables (cmsuniv_setup.sql,
+-- section 8). Kept only as an example of separate export tables.
 -- CMSUNIV export feed (DEV names: replace _DEV_ for other environments). Run by the DBA: the CREATE TABLE and ALTER TABLE
 -- statements are needed; the procedures are NOT used for now (the ComplianceExportConfig rows in cmsuniv_setup.sql,
 -- section 8, have no Exp_Proc_Nm, so EXPORT_LOAD copies the rows itself). They are kept for a later switch to

@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.68 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.69 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -135,7 +135,8 @@ hand.
 ### 2.2 What every DAG does the same way
 
 - **Tasks:** the step's task (one per `runs` entry), a `trigger_<dag id>` task per `trigger_dags` entry, then
-  `success_email` / `fail_email` to `email_recipient`.
+  `success_email` / `fail_email` to `email_recipient`. FILE_CHECK also has `check_passed` (before the triggers) and
+  `file_check_result` (last; fails when the check failed).
 - **Result of a step** (the JSON report at the end of the task log, the "step report"):
 
 | Exit | Meaning | Task | Next DAGs |
@@ -184,8 +185,11 @@ Checks the files waiting in the inbound folders of the scope's file configs; **l
   dates, the checks of `ComplianceFileCheckConfig` (5.9).
 - Passed: `FILE_CHECK_PASSED` (not emailed). Failed: `FILE_CHECK_FAILED` (emailed by NOTIFY), an error log in
   `ErrorLog/`, and with `CHECK_MOVE_FAILED = true` the file moves to `Error/` (so FILE_LOAD does not pick it up).
-- **One failed file fails the task** (exit 1), so the FILE_LOAD it triggers does not start. Set
-  `"fail_on_problems": false` in its Variable if the good files should still be loaded right away.
+- **One failed file fails the task** (exit 1: ServiceNow incident + failure email). When at least one file passed,
+  the `check_passed` task still starts the triggered FILE_LOAD, so the good files load right away; with no passed
+  file it is skipped. `file_check_result` then keeps the DAG run failed. Keep `CHECK_MOVE_FAILED = true` so
+  FILE_LOAD does not pick up (and reject again) the failed file. `"fail_on_problems": false` makes the task succeed
+  instead (no incident or failure email).
 - Options: the scope, `as_of`. Settings: `CHECK_CONTENT`, `CHECK_MOVE_FAILED` and the file settings of 9.4.
 
 ### 2.5 FILE_LOAD
@@ -822,10 +826,8 @@ The export table of a core table (EXPORT_LOAD). One row per project + table.
 
 ```sql
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG_DE_TABLE3_2022_EXP', NULL, NULL, NULL, 1);
--- the export table (DBA):
--- CREATE MULTISET TABLE CMSUNIV_EXPORT_DEV_T.ODAG_DE_TABLE3_2022_EXP AS CMSUNIV_CORE_DEV_T.ODAG_DE_TABLE3_2022 WITH NO DATA;
--- ALTER TABLE CMSUNIV_EXPORT_DEV_T.ODAG_DE_TABLE3_2022_EXP ADD Exp_Btch_ID VARCHAR(100);
+VALUES ('CMSUNIV', 'ODAG3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG3_2022', NULL, NULL, NULL, 1);
+-- an existing feed table: it needs the batch column (Btch_ID) and the source column (e.g. Src_Data_Key)
 ```
 
 **How a batch is exported**, for each batch + source, in this order of choice:
@@ -848,8 +850,8 @@ statement written to the task log with its values; `validate-config` checks them
 ```sql
 UPDATE HSABC_DEV.ComplianceExportConfig
 SET Exp_Sql_Txt = 'SELECT Row_ID, EnrolleeID AS Member_Key, PlanType FROM CMSUNIV_CORE_DEV_T.SNPCC_HS_TABLE1_2022 WHERE Btch_ID = {data_btch_id} AND Src_Data_Key = CAST({src_id} AS SMALLINT)',
-    Exp_Pre_Sql_Txt = 'CALL CMSUNIV_EXPORT_DEV_T.SP_EXPORT_PREP({btch_id}, {run_ty})',
-    Exp_Post_Sql_Txt = 'UPDATE CMSUNIV_EXPORT_DEV_T.SNPCC1_EXPORT SET Export_Dt = CURRENT_DATE WHERE Btch_ID = {btch_id}'
+    Exp_Pre_Sql_Txt = 'CALL EXPORT_FEED_DEV_T.SP_EXPORT_PREP({btch_id}, {run_ty})',
+    Exp_Post_Sql_Txt = 'UPDATE EXPORT_FEED_DEV_T.SDO_CMSUNIV_SNPCC1_2022 SET Export_Dt = CURRENT_DATE WHERE Btch_ID = {btch_id}'
 WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'SNPCC1';
 ```
 
@@ -1354,7 +1356,7 @@ the framework fills in everything else. A CMSUNIV DEV Variable (`airflow_resourc
 |---|---|---|
 | `schedule_interval` | none (runs only when triggered) | A cron expression in `schedule_timezone`, e.g. `0 6 * * *` (06:00 daily), `*/15 * * * *` (every 15 minutes) |
 | `schedule_timezone` | `America/Chicago` | An IANA time zone name |
-| `trigger_dags` | none | DAG ids started after the step succeeds: a list, or one comma-separated string. Use the project's own DAG ids |
+| `trigger_dags` | none | DAG ids started after the step succeeds (FILE_CHECK: also when it failed but at least one file passed): a list, or one comma-separated string. Use the project's own DAG ids |
 | `runs` | none | A list of scopes, one task each; with `name` and `schedule_interval` per entry they are timed runs (9.6) |
 
 **Task behaviour**
@@ -1678,6 +1680,9 @@ INFO - SOURCE_LOAD | 20261020_CMSUNIV_SNPCC1_DLY source 11 | Src_Sql_Txt on SQL_
 | Step "locked" | Another run is working on it, or a crashed run | Wait; else 11.15 |
 | No alert emails | NOTIFY not scheduled / not triggered, no `email_recipient` in its Variable, no `smtp_default` | Check 12.6 and the NOTIFY Variable |
 | Rules never run | Table has an export and the batch is not exported yet | Normal: rules wait for the export |
+| FILE_CHECK failed but FILE_LOAD started | At least one file passed (`check_passed`); the failed file is in `Error/` (`CHECK_MOVE_FAILED`) with its error log | Expected: the good files load; fix and resend the failed file. `file_check_result` keeps the run failed |
+| FILE_CHECK failed and FILE_LOAD did not start | No file passed (`check_passed` skipped) | Fix and resend the files; the next FILE_CHECK starts FILE_LOAD |
+| Teradata pull fails "Object '…_$ENV_V…' does not exist" | `$env` is not replaced in `Src_Sql_Txt` | Name the environment's database in the query (e.g. `CMSUNIV_CORE_DEV_V`) |
 
 ---
 
@@ -1708,14 +1713,14 @@ INFO - SOURCE_LOAD | 20261020_CMSUNIV_SNPCC1_DLY source 11 | Src_Sql_Txt on SQL_
 
 ## 15. CMSUNIV setup at a glance
 
-The rows are in `airflow_resources/examples/cmsuniv_setup.sql` (export tables in `cmsuniv_export_dev.sql`, exported
-by the framework's copy, no procedure, Variables in `cmsuniv_dev/`).
+The rows are in `airflow_resources/examples/cmsuniv_setup.sql` (exported by the framework's copy into the existing
+feed tables, no procedure, no PROVISIONING_WORK; Variables in `cmsuniv_dev/`).
 
 | What | CMSUNIV |
 |---|---|
-| Project | `CMSUNIV`; metadata `HSABC_DEV`; staging `CMSUNIV_FILELAND_$ENV_T` (files) / `CMSUNIV_STAGE_$ENV_T` (internal), core `CMSUNIV_CORE_$ENV_T`, export `CMSUNIV_EXPORT_$ENV_T` |
+| Project | `CMSUNIV`; metadata `HSABC_DEV`; staging `CMSUNIV_FILELAND_$ENV_T` (files) / `CMSUNIV_STAGE_$ENV_T` (internal), core `CMSUNIV_CORE_$ENV_T`, export `EXPORT_FEED_$ENV_T.SDO_CMSUNIV_<table>_2022` (batch in `Btch_ID`; the run types exported are the EXPORT_LOAD DAG's scope) |
 | Table groups | `ODAG` (ODAG1 – 6), `CDAG` (CDAG1 – 7), `FA` (FA1 – 4), `SNPCC` (SNPCC1) |
-| Sources | 55: FDRs send files to `chs_dms/Dev/OSS_Inbound/External/CMSUNIV`; internal: QNXT 10 (`SQL_CHS`), AZ 40 (`SQL_AZ`), SNPCC 11 (`SQL_SNPCC`), Facets 210 (Teradata, to be configured) |
+| Sources | 55: FDRs send files to `chs_dms/Dev/OSS_Inbound/External/CMSUNIV`; internal: QNXT 10 (`SQL_CHS`), AZ 40 (`SQL_AZ`), SNPCC 11 (`SQL_SNPCC`), Facets 210 (Teradata views `CMSUNIV_CORE_DEV_V.CSF_ODAG_Table3_2022` / `CSF_FA_Table4_2022` on the framework's connection, by `Batch_ID`; staging `CMSUNIV_STAGE_$ENV_T.ODAG_CSF_TABLE3_2022` / `FA_CSF_TABLE4_2022`, IDs by `ROW_SEQUENCE`) |
 | Version | `2200` from 1900-01-01 on every crosswalk row |
 | File names | `CMSAUTH_<source>_<file type>_22_<run type>_<report start>_<report end>_<timestamp>.txt`, e.g. `CMSAUTH_CDHDHMO_PYMT_C_22_DLY_20261019_20261019_20261014104600.txt` |
 

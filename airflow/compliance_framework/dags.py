@@ -14,9 +14,9 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import DAG, Connection, Param, Variable
 try:
-    from airflow.sdk.exceptions import AirflowFailException
+    from airflow.sdk.exceptions import AirflowFailException, AirflowSkipException
 except ImportError:  # Airflow 3.0
-    from airflow.exceptions import AirflowFailException
+    from airflow.exceptions import AirflowFailException, AirflowSkipException
 from airflow.timetables.trigger import MultipleCronTriggerTimetable
 from croniter import croniter
 
@@ -269,8 +269,10 @@ def run_compliance_step(step: str, variable_key: str, overrides: dict = None, sc
         raise RuntimeError(f"{step}: {outcome.get('result') or 'failed'} (exit code 2); the report is above")
     if exit_code == 1 and fail_on_problems:
         logger.error("%s report:\n%s", step, text)
-        raise AirflowFailException(f"{step}: {outcome.get('result') or 'completed with problems'} (exit code 1); the "
-                                   "report is above")
+        problem = AirflowFailException(f"{step}: {outcome.get('result') or 'completed with problems'} (exit code 1); "
+                                       "the report is above")
+        problem.outcome = outcome
+        raise problem
     (logger.warning if exit_code else logger.info)("%s report:\n%s", step, text)
     return outcome
 
@@ -334,6 +336,8 @@ STEP_PARAMS = {
     "NOTIFY": (*SCOPE, "as_of"),
 }
 PASSED_ON = (*SCOPE, "as_of")
+# steps whose triggered DAGs still start when the task fails, if the count under this key of its report is above 0
+TRIGGER_ON_PARTIAL = {"FILE_CHECK": "passed"}
 DEFAULT_ASSIGNMENT_GROUP = "D&AE - EDE Govt Compliance"
 DEFAULT_RETRIES = 1
 DEFAULT_TAGS = ["Compliance", "Compliance_Batch_Framework"]
@@ -458,13 +462,26 @@ def build_step_dag(dag_id: str, step: str, variable_key: str) -> DAG:
     params = {name: Param(None, type=_TEXT) for name in names}
     dag = _dag(dag_id, dag_config, f"compliance batch framework - {step}", params, step.title())
 
+    partial = TRIGGER_ON_PARTIAL.get(step)
+
+    def _passed(context, outcomes: list, ok: bool) -> None:
+        if partial:
+            context["ti"].xcom_push(key="partial", value={"ok": ok, "count": sum(int((o or {}).get(partial) or 0)
+                                                                                 for o in outcomes)})
+
     def run_step(scope_index: int, **context):
-        return run_compliance_step(step, variable_key, overrides=_overrides(context, names), scope_index=scope_index)
+        try:
+            outcome = run_compliance_step(step, variable_key, overrides=_overrides(context, names), scope_index=scope_index)
+        except AirflowFailException as e:
+            _passed(context, [getattr(e, "outcome", None)], False)
+            raise
+        _passed(context, [outcome], True)
+        return outcome
 
     def run_timed(**context):
         """A timed DAG run: the step once for each entry it works with (see chosen_runs)."""
         overrides = {k: v for k, v in _overrides(context, names).items() if k != "run"}
-        outcomes, failed = [], []
+        outcomes, failed, reported = [], [], []
         for index in chosen_runs(_load_variable(variable_key), context["dag_run"]):
             entry = "the Variable's own scope" if index is None else f"runs entry {index + 1}"
             logger.info("%s with %s", step, entry)
@@ -473,6 +490,8 @@ def build_step_dag(dag_id: str, step: str, variable_key: str) -> DAG:
             except Exception as e:  # noqa: BLE001
                 logger.error("%s with %s failed: %s", step, entry, e)
                 failed.append((f"{entry}: {e}", isinstance(e, AirflowFailException)))
+                reported.append(getattr(e, "outcome", None))
+        _passed(context, outcomes + reported, not failed)
         if failed:
             text = f"{step}: {len(failed)} of {len(failed) + len(outcomes)} run(s) failed: {'; '.join(t for t, _ in failed)}"
             # retried only when a run could not run; problems the step reported fail without a retry
@@ -497,10 +516,36 @@ def build_step_dag(dag_id: str, step: str, variable_key: str) -> DAG:
     given = "{{ conf_value(dag_run, params, '%s') }}"
     wait = {"wait_for_completion": True, "deferrable": True, "poke_interval": 60, "allowed_states": ["success"],
             "failed_states": ["failed"]} if _flag(dag_config.get("wait_for_triggered"), False) else {}
+
+    def _found(context) -> list:
+        return [context["ti"].xcom_pull(task_ids=t.task_id, key="partial") or {"ok": False, "count": 0} for t in tasks]
+
+    def check_partial(**context):
+        """After a failed task: start the triggered DAGs only when the step still passed something (e.g. a file)."""
+        found = _found(context)
+        if all(f["ok"] for f in found):
+            return
+        count = sum(f["count"] for f in found)
+        if not count:
+            raise AirflowSkipException(f"{step} failed and no {partial} result; the triggered DAGs do not start")
+        logger.warning("%s failed, but %s result(s) are %s: the triggered DAGs start", step, count, partial)
+
+    def step_result(**context):
+        """Keeps the DAG run failed when the step failed, even though its triggered DAGs started."""
+        if not all(f["ok"] for f in _found(context)):
+            raise AirflowFailException(f"{step} failed; see its task log (the ticket and email are already sent)")
+
     triggers = [TriggerDagRunOperator(task_id=f"trigger_{str(target).lower()}", dag=dag, trigger_dag_id=str(target),
                                       trigger_rule="all_success", conf={k: given % k for k in PASSED_ON}, **wait)
                 for target in _names(dag_config.get("trigger_dags"))]
+    gate = []
+    if partial and triggers:
+        gate = [PythonOperator(task_id=f"check_{partial}", dag=dag, python_callable=check_partial, trigger_rule="all_done")]
+        tasks >> gate[0]
     for trigger in triggers:
-        tasks >> trigger
-    _add_emails(dag, dag_config, [*tasks, *triggers])
+        (gate or tasks) >> trigger
+    if gate:
+        [*tasks, *triggers] >> PythonOperator(task_id=f"{step.lower()}_result", dag=dag, python_callable=step_result,
+                                              trigger_rule="all_done", retries=0, on_failure_callback=None)
+    _add_emails(dag, dag_config, [*tasks, *gate, *triggers])
     return dag

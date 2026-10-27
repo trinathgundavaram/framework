@@ -1,7 +1,9 @@
 -- CMSUNIV project metadata (fresh install). Metadata database: HSABC_DEV (replace for other environments).
 -- Order: run the sections top to bottom. Then run validate-config from the command line
--- (python -m compliance_framework.cli validate-config). Tables: airflow_resources/sql/schema.sql (framework 0.3.67).
--- Not here yet: the Facets (210) internal source rows for ODAG3 and FA4.
+-- (python -m compliance_framework.cli validate-config). Tables: airflow_resources/sql/schema.sql (framework 0.3.69).
+-- Facets (210) pulls for ODAG3 / FA4 read the Teradata views CMSUNIV_CORE_DEV_V.CSF_* by Batch_ID (Src_Sql_Txt has
+-- no $ENV), which the upstream process is still to write (until then they find no rows).
+-- Export: into the existing feed tables EXPORT_FEED_$ENV_T.SDO_CMSUNIV_<table>_2022 (section 8).
 -- Data quality rules (FILE_RULES) need no rows here: each exported batch runs the GRE rule group named like its table
 -- (ODAG1 ... SNPCC1) with the run type as variant; ComplianceRuleBinding only to name other groups.
 
@@ -611,6 +613,10 @@ INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column
 VALUES ('CMSUNIV', 'FA3', 'FA_DE_Table3_2022_ID', 'ROW_SEQUENCE', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES ('CMSUNIV', 'FA4', 'FA_DE_Table4_2022_ID', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', 'ODAG_CSF_Table3_2022_ID', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA4', 'FA_CSF_Table4_2022_ID', 'ROW_SEQUENCE', NULL, 1);
 
 -- ----------------------------------------------------------------------------------------------------
 -- 5a. Internal sources pulled from SQL Server (SOURCE_LOAD)
@@ -619,7 +625,8 @@ VALUES ('CMSUNIV', 'FA4', 'FA_DE_Table4_2022_ID', 'ROW_SEQUENCE', NULL, 1);
 -- Btch_ID, Source_ID, Universe_Version, Run_Ty, Load_Dtts, StagingCreateDate and AuditDataID. Staging
 -- CMSUNIV_STAGE_$ENV_T, core CMSUNIV_CORE_$ENV_T with the same table name. Each returned column is named after its
 -- staging column (AS); the ID comes from the source. Staging -> core: same names by name, the others by column order
--- (SNPCC1: staging Member... -> core Enrollee...).
+-- (SNPCC1: staging Member... -> core Enrollee...). Facets (210): Teradata, on the framework's own connection (no
+-- Src_Conn_Cd); the ID is numbered by the framework (ROW_SEQUENCE, above the highest in staging and core).
 -- ----------------------------------------------------------------------------------------------------
 INSERT INTO HSABC_DEV.ComplianceInternalSourceConfig (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
 VALUES ('CMSUNIV', 'ODAG3', '10', 'SQLSERVER', 'SQL_CHS', 'SELECT ODAG_Table3_ID,EnrolleeFirstName,EnrolleeLastName,EnrolleeID,ContractID,PlanBenefitPackage,FirstTierDownstreamAndRelatedEntity,AuthorizationOrClaimNumber,DateTheRequestWasReceived,AORReceiptDate,WaiverOfLiabilityReceiptDate,WasItACleanClaim,WasTheRequestProcessedAsAnODOrRECON,RequestDetermination,DateOfDetermination,DateClaimReconsiderationWasPaid,DateWrittenNotificationProvidedToEnrollee,DateWrittenNotificationProvidedToProvider,DateForwardedToIRE,WhoMadeTheRequest,IssueDescriptionAndTypeOfService,WasTheInitialOrganizationDeterminationRequestDeniedForLackOfMedicalNecessity,SourceUnique_ID,IDN_Flag FROM Staging.cms2022.ODAG_Table3_2022 WHERE Batch_ID = {btch_id} AND CAST(Source_ID AS VARCHAR(5)) = {src_id}', 'CMSUNIV_STAGE_$ENV_T', 'ODAG_HS_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_HS_TABLE3_2022', 1);
@@ -630,52 +637,57 @@ VALUES ('CMSUNIV', 'ODAG3', '40', 'SQLSERVER', 'SQL_AZ', 'SELECT ODAG_CignaAZ_Ta
 INSERT INTO HSABC_DEV.ComplianceInternalSourceConfig (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
 VALUES ('CMSUNIV', 'FA4', '40', 'SQLSERVER', 'SQL_AZ', 'SELECT FA_CignaAZ_TABLE4_2022_ID,EnrolleeID,EnrolleeFirstName,EnrolleeLastName,DateofBirth,EnrollmentEffectiveDate,EffectiveDisenrollmentDate,CardholderID,ContractID,PlanBenefitPackage,SourceUnique_ID FROM AZCMS.dbo.FA_CignaAZ_TABLE4_2022 WHERE Batch_ID = {btch_id}', 'CMSUNIV_STAGE_$ENV_T', 'FA_CIGNAAZ_TABLE4_2022', 'CMSUNIV_CORE_$ENV_T', 'FA_CIGNAAZ_TABLE4_2022', 1);
 INSERT INTO HSABC_DEV.ComplianceInternalSourceConfig (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '210', 'TERADATA', NULL, 'SELECT A_FirstName AS MemberFirstName, B_LastName AS MemberLastName, C_EnrolleeID AS MemberID, D_ContractID AS ContractID, E_Planid AS PlanBenefitPackage, F_FDR AS FirstTierDownstreamandRelatedEntity, G_Claimid AS AuthorizationorClaimNumber, H_DateReceived AS Datetherequestwasreceived, I_DateAORReceipt AS AORReceiptDate, J_DateWOL AS WaiverofLiabilityReceiptDate, K_CleanClaim AS WasItaCleanClaim, L_ODorRecon AS WasTheRequestProcessedasanODorRecon, M_RequestDetermination AS RequestDetermination, N_DateDetermination AS DateofDetermination, O_DatePaid AS DateClaimReconsiderationwasPaid, P_DateNotifyMember AS DateWrittenNotificationprovidedToMember, Q_DateNotifyProvider AS DateWrittenNotificationProvidedtoProvider, R_DateIRE AS DateForwardedtoIRE, S_WhoMadeRequest AS Whomadetherequest, T_IssueDescTypeOfService AS Issuedescriptionandtypeofservice, U_DeniedMedicalNecessity AS WasTheInitOrgDetReqtDeniedForLackOfMediNecessity, SourceUnique_ID, IDN_Flag FROM CMSUNIV_CORE_DEV_V.CSF_ODAG_Table3_2022 WHERE Batch_ID = {btch_id}', 'CMSUNIV_STAGE_$ENV_T', 'ODAG_CSF_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_CSF_TABLE3_2022', 1);
+INSERT INTO HSABC_DEV.ComplianceInternalSourceConfig (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
+VALUES ('CMSUNIV', 'FA4', '210', 'TERADATA', NULL, 'SELECT A_EnrolleeID AS MemberID, B_FirstName AS MemberFirstName, C_LastName AS MemberLastName, D_DOB AS DateofBirth, E_EffDate AS EnrollmentEffectiveDate, F_TermDate AS EffectiveDisenrollmentDate, G_Cardholder AS CardholderID, H_ContractID AS ContractID, I_PBP AS PlanBenefitPackage, '''' AS FirstTierDownstreamAndRelatedEntity, SourceUnique_ID FROM CMSUNIV_CORE_DEV_V.CSF_FA_Table4_2022 WHERE Batch_ID = {btch_id}', 'CMSUNIV_STAGE_$ENV_T', 'FA_CSF_TABLE4_2022', 'CMSUNIV_CORE_$ENV_T', 'FA_CSF_TABLE4_2022', 1);
+INSERT INTO HSABC_DEV.ComplianceInternalSourceConfig (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
 VALUES ('CMSUNIV', 'SNPCC1', '11', 'SQLSERVER', 'SQL_SNPCC', 'SELECT SNPCC_Table1_ID AS SNPCC_HS_Table1_2022_ID, EnrolleeFirstName AS MemberFirstName, EnrolleeLastName AS MemberLastName, EnrolleeID AS MemberID, ContractID, PlanBenefitPackage, PlanType, EnrollmentEffectiveDate, MostRecentPlanChangeEffectiveDate, DateOfMostRecentHRA, DateOfPreviousHRA, DateInitialHRAWasCompleted, EnrolleeRiskStratificationAuditLetter AS MemberRiskStratificationAuditLetter, DateMostRecentIndividualizedCarePlan, WasICTCreatedIdentified, SourceUnique_ID FROM QUALITY.SNPMOC.Table1_cms2022 WHERE Batch_ID = {btch_id}', 'CMSUNIV_STAGE_$ENV_T', 'SNPCC_HS_TABLE1_2022', 'CMSUNIV_CORE_$ENV_T', 'SNPCC_HS_TABLE1_2022', 1);
 
 -- ----------------------------------------------------------------------------------------------------
--- 8. Export feed: one export table per table (DDL in cmsuniv_export_dev.sql), exported by the framework (no procedure)
+-- 8. Export feed: the existing feed tables EXPORT_FEED_$ENV_T.SDO_CMSUNIV_<table>_2022, exported by the framework (no
+-- procedure, no PROVISIONING_WORK: rows come straight from core; run types are chosen by the EXPORT_LOAD DAG's scope)
 -- For each batch and source that is due (or released), EXPORT_LOAD removes the source's earlier export rows of the
 -- period and copies its rows from the source's own core table: columns of the same name, the framework's columns by
 -- what fills them (batch, source, version, ...), the rest by column order (ODAG3 / FA4 sources 10 and 40 come from
--- their own core tables with other names); Exp_Btch_ID = the batch. validate-config lists the pairs and the export
+-- their own core tables with other names); the feed's batch column (Btch_ID) = the batch. validate-config lists the pairs and the export
 -- columns a core table cannot fill.
 -- ----------------------------------------------------------------------------------------------------
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG1', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG1_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'ODAG1', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG1_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG2', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG2_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'ODAG2', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG2_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG3_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'ODAG3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG3_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG4', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG4_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'ODAG4', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG4_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG5', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG5_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'ODAG5', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG5_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG6', 'CMSUNIV_EXPORT_$ENV_T', 'ODAG6_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'ODAG6', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG6_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG1', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG1_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'CDAG1', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG1_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG2', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG2_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'CDAG2', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG2_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG3', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG3_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'CDAG3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG3_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG4', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG4_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'CDAG4', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG4_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG5', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG5_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'CDAG5', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG5_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG6', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG6_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'CDAG6', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG6_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG7', 'CMSUNIV_EXPORT_$ENV_T', 'CDAG7_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'CDAG7', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG7_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'FA1', 'CMSUNIV_EXPORT_$ENV_T', 'FA1_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'FA1', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_FA1_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'FA2', 'CMSUNIV_EXPORT_$ENV_T', 'FA2_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'FA2', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_FA2_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'FA3', 'CMSUNIV_EXPORT_$ENV_T', 'FA3_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'FA3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_FA3_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'FA4', 'CMSUNIV_EXPORT_$ENV_T', 'FA4_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'FA4', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_FA4_2022', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'SNPCC1', 'CMSUNIV_EXPORT_$ENV_T', 'SNPCC1_EXPORT', 'Exp_Btch_ID', 1);
+VALUES ('CMSUNIV', 'SNPCC1', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_SNPCC1_2022', NULL, 1);
 
 -- ----------------------------------------------------------------------------------------------------
 -- 9. Ad-hoc requests (CMS): one row per source, when a request comes in (example, commented out)
