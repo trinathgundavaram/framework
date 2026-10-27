@@ -122,21 +122,100 @@ SELECT COALESCE(MAX(Req_ID), 0) + 1 AS NEXT_REQ_ID FROM HSABC_DEV.ComplianceRequ
 SELECT COALESCE(MAX(Load_ID), 0) + 1 AS NEXT_LOAD_ID FROM HSABC_DEV.ComplianceFileLoad;
 SELECT COALESCE(MAX(Event_ID), 0) + 1 AS NEXT_EVENT_ID FROM HSABC_DEV.CMS_ComplianceExceptionsAudit;
 
--- Step 2.1: back up (CREATE TABLE AS cannot copy an identity column, so the four ID columns are copied as plain BIGINT)
+-- Step 2.1: back up. CREATE TABLE AS cannot copy a table with an identity column, so the four tables with an ID
+-- column get a plain backup table (the ID as an ordinary BIGINT, other columns nullable) and an INSERT ... SELECT.
 CREATE MULTISET TABLE HSABC_DEV.ComplianceRunType_BKP AS (SELECT * FROM HSABC_DEV.ComplianceRunType) WITH DATA;
 CREATE MULTISET TABLE HSABC_DEV.ComplianceDataSetSourceXwalk_BKP AS (SELECT * FROM HSABC_DEV.ComplianceDataSetSourceXwalk) WITH DATA;
-CREATE MULTISET TABLE HSABC_DEV.ComplianceSourceFileConfig_BKP AS (
-  SELECT CAST(Cfg_ID AS BIGINT) AS Cfg_ID, Project_Cd, Table_Nm, Src_ID, Src_File_Nm_Tmplt, File_Vrsn_Cd, Delmtr_Cd, Src_File_Has_Hdr_Ind, Src_File_Has_Trlr_Ind, Allow_Zero_Rcd_Ind, Src_File_Path, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind, Load_Dtts, LoadUser_ID, LastUpdt_Dtts, LastUpdt_ID
-  FROM HSABC_DEV.ComplianceSourceFileConfig) WITH DATA;
-CREATE MULTISET TABLE HSABC_DEV.ComplianceRequestControl_BKP AS (
-  SELECT CAST(Req_ID AS BIGINT) AS Req_ID, Project_Cd, Table_Nm, Src_ID, Run_Ty, Cmplnc_Vrsn, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Req_Stat, Resolution_Ty, Reuse_Btch_ID, Batch_Close_Ind, Load_Dtts, LastUpdt_Dtts
-  FROM HSABC_DEV.ComplianceRequestControl) WITH DATA;
-CREATE MULTISET TABLE HSABC_DEV.ComplianceFileLoad_BKP AS (
-  SELECT CAST(Load_ID AS BIGINT) AS Load_ID, Cfg_ID, Req_ID, Btch_ID, File_Hash, File_Share, File_Path, File_Version, File_Size_Byte, File_Sha256, Load_Stat, Rules_Stat, Reject_Rsn_Cd, Stg_Rcd_Cnt, Error_Txt, Load_Dtts, LastUpdt_Dtts
-  FROM HSABC_DEV.ComplianceFileLoad) WITH DATA;
-CREATE MULTISET TABLE HSABC_DEV.CMS_ComplianceExceptionsAudit_BKP AS (
-  SELECT CAST(Event_ID AS BIGINT) AS Event_ID, Event_Ty, Sevrty, Project_Cd, Table_Nm, Src_ID, Run_Ty, Req_ID, Load_ID, Ovrd_ID, Intake_ID, Btch_ID, File_Ref, Actor, Event_Txt, Notified_Ind, Event_Dtts
-  FROM HSABC_DEV.CMS_ComplianceExceptionsAudit) WITH DATA;
+CREATE MULTISET TABLE HSABC_DEV.ComplianceSourceFileConfig_BKP (
+  Cfg_ID                 BIGINT NOT NULL,
+  Project_Cd             VARCHAR(30),
+  Table_Nm               VARCHAR(63),
+  Src_ID                 VARCHAR(30),
+  Src_File_Nm_Tmplt      VARCHAR(255),
+  File_Vrsn_Cd           VARCHAR(30),
+  Delmtr_Cd              VARCHAR(10),
+  Src_File_Has_Hdr_Ind   SMALLINT,
+  Src_File_Has_Trlr_Ind  SMALLINT,
+  Allow_Zero_Rcd_Ind     SMALLINT,
+  Src_File_Path          VARCHAR(500),
+  Stg_Schema_Nm          VARCHAR(63),
+  Stg_Table_Nm           VARCHAR(63),
+  Core_Schema_Nm         VARCHAR(63),
+  Core_Table_Nm          VARCHAR(63),
+  Active_Ind             SMALLINT     DEFAULT 1,
+  Load_Dtts           TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
+  LoadUser_ID             VARCHAR(100) DEFAULT USER,
+  LastUpdt_Dtts           TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
+  LastUpdt_ID             VARCHAR(100) DEFAULT USER
+)
+UNIQUE PRIMARY INDEX (Cfg_ID);
+INSERT INTO HSABC_DEV.ComplianceSourceFileConfig_BKP (Cfg_ID, Project_Cd, Table_Nm, Src_ID, Src_File_Nm_Tmplt, File_Vrsn_Cd, Delmtr_Cd, Src_File_Has_Hdr_Ind, Src_File_Has_Trlr_Ind, Allow_Zero_Rcd_Ind, Src_File_Path, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind, Load_Dtts, LoadUser_ID, LastUpdt_Dtts, LastUpdt_ID)
+SELECT Cfg_ID, Project_Cd, Table_Nm, Src_ID, Src_File_Nm_Tmplt, File_Vrsn_Cd, Delmtr_Cd, Src_File_Has_Hdr_Ind, Src_File_Has_Trlr_Ind, Allow_Zero_Rcd_Ind, Src_File_Path, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind, Load_Dtts, LoadUser_ID, LastUpdt_Dtts, LastUpdt_ID FROM HSABC_DEV.ComplianceSourceFileConfig;
+CREATE MULTISET TABLE HSABC_DEV.ComplianceRequestControl_BKP (
+  Req_ID           BIGINT NOT NULL,
+  Project_Cd       VARCHAR(30),
+  Table_Nm         VARCHAR(63),
+  Src_ID           VARCHAR(30),
+  Run_Ty           VARCHAR(20),
+  Cmplnc_Vrsn      VARCHAR(10),
+  Rpt_Start_Dt_Key DATE,
+  Rpt_End_Dt_Key   DATE,
+  Req_Dt_Key       DATE,
+  Btch_ID          VARCHAR(250),
+  Req_Stat         VARCHAR(30),
+  Resolution_Ty    VARCHAR(15),
+  Reuse_Btch_ID    VARCHAR(250),
+  Batch_Close_Ind  SMALLINT     DEFAULT 0,
+  Load_Dtts     TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
+  LastUpdt_Dtts     TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)
+)
+UNIQUE PRIMARY INDEX (Req_ID);
+INSERT INTO HSABC_DEV.ComplianceRequestControl_BKP (Req_ID, Project_Cd, Table_Nm, Src_ID, Run_Ty, Cmplnc_Vrsn, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Req_Stat, Resolution_Ty, Reuse_Btch_ID, Batch_Close_Ind, Load_Dtts, LastUpdt_Dtts)
+SELECT Req_ID, Project_Cd, Table_Nm, Src_ID, Run_Ty, Cmplnc_Vrsn, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key, Btch_ID, Req_Stat, Resolution_Ty, Reuse_Btch_ID, Batch_Close_Ind, Load_Dtts, LastUpdt_Dtts FROM HSABC_DEV.ComplianceRequestControl;
+CREATE MULTISET TABLE HSABC_DEV.ComplianceFileLoad_BKP (
+  Load_ID           BIGINT NOT NULL,
+  Cfg_ID            BIGINT,
+  Req_ID            BIGINT,
+  Btch_ID           VARCHAR(250),
+  File_Hash         CHAR(64),
+  File_Share        VARCHAR(200),
+  File_Path         VARCHAR(1024),
+  File_Version      VARCHAR(200),
+  File_Size_Byte    BIGINT,
+  File_Sha256       CHAR(64),
+  Load_Stat         VARCHAR(25),
+  Rules_Stat        VARCHAR(25)   DEFAULT 'NOT_RUN',
+  Reject_Rsn_Cd     VARCHAR(60),
+  Stg_Rcd_Cnt       BIGINT,
+  Error_Txt         VARCHAR(4000),
+  Load_Dtts      TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
+  LastUpdt_Dtts      TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)
+)
+UNIQUE PRIMARY INDEX (Load_ID);
+INSERT INTO HSABC_DEV.ComplianceFileLoad_BKP (Load_ID, Cfg_ID, Req_ID, Btch_ID, File_Hash, File_Share, File_Path, File_Version, File_Size_Byte, File_Sha256, Load_Stat, Rules_Stat, Reject_Rsn_Cd, Stg_Rcd_Cnt, Error_Txt, Load_Dtts, LastUpdt_Dtts)
+SELECT Load_ID, Cfg_ID, Req_ID, Btch_ID, File_Hash, File_Share, File_Path, File_Version, File_Size_Byte, File_Sha256, Load_Stat, Rules_Stat, Reject_Rsn_Cd, Stg_Rcd_Cnt, Error_Txt, Load_Dtts, LastUpdt_Dtts FROM HSABC_DEV.ComplianceFileLoad;
+CREATE MULTISET TABLE HSABC_DEV.CMS_ComplianceExceptionsAudit_BKP (
+  Event_ID     BIGINT NOT NULL,
+  Event_Ty     VARCHAR(60),
+  Sevrty       VARCHAR(10),
+  Project_Cd   VARCHAR(30),
+  Table_Nm     VARCHAR(63),
+  Src_ID       VARCHAR(30),
+  Run_Ty       VARCHAR(20),
+  Req_ID       BIGINT,
+  Load_ID      BIGINT,
+  Ovrd_ID      BIGINT,
+  Intake_ID    BIGINT,
+  Btch_ID      VARCHAR(250),
+  File_Ref     VARCHAR(1100),
+  Actor        VARCHAR(100),
+  Event_Txt    VARCHAR(4000),
+  Notified_Ind SMALLINT      DEFAULT 0,
+  Event_Dtts   TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)
+)
+UNIQUE PRIMARY INDEX (Event_ID);
+INSERT INTO HSABC_DEV.CMS_ComplianceExceptionsAudit_BKP (Event_ID, Event_Ty, Sevrty, Project_Cd, Table_Nm, Src_ID, Run_Ty, Req_ID, Load_ID, Ovrd_ID, Intake_ID, Btch_ID, File_Ref, Actor, Event_Txt, Notified_Ind, Event_Dtts)
+SELECT Event_ID, Event_Ty, Sevrty, Project_Cd, Table_Nm, Src_ID, Run_Ty, Req_ID, Load_ID, Ovrd_ID, Intake_ID, Btch_ID, File_Ref, Actor, Event_Txt, Notified_Ind, Event_Dtts FROM HSABC_DEV.CMS_ComplianceExceptionsAudit;
 
 -- Step 2.2: drop and create in the new order
 DROP TABLE HSABC_DEV.ComplianceRunType;
