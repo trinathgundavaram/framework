@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.69 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.70 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -1146,8 +1146,8 @@ values (`COLUMN_VALUES REQUIRED` covers those).
 | `SOURCE_ID` | The batch row's `Src_ID` (**required** in every table) |
 | `RUN_TYPE` | The run type |
 | `VERSION` | The batch's compliance version (`Cmplnc_Vrsn`) |
-| `FILE_NAME` | The file name (pulls: project/table/source) |
-| `LOAD_TIMESTAMP` | Load time (timestamp, or text `YYYY-MM-DD HH:MM:SS` in a character column) |
+| `FILE_NAME` | The file name (pulls: `<project>_<table>_<source>_<pull start YYYYMMDDHHMISS>`, e.g. `CMSUNIV_ODAG3_10_20261027143005`) |
+| `LOAD_TIMESTAMP` | Load time (timestamp, or text `YYYY-MM-DD HH:MM:SS` in a character column): taken once when the load (file or pull) starts, so every row of it, in staging, core and the export, has the same value; `LOAD_DATE` is its date |
 | `LOAD_DATE` | Load date (date, or text `YYYY-MM-DD`) |
 | `ROW_SEQUENCE` | Running row number, continuing from the highest in staging and core (row ID) |
 | `LOAD_ID`, `REQ_ID` | The load number, the batch row number |
@@ -1722,6 +1722,8 @@ feed tables, no procedure, no PROVISIONING_WORK; Variables in `cmsuniv_dev/`).
 | Table groups | `ODAG` (ODAG1 – 6), `CDAG` (CDAG1 – 7), `FA` (FA1 – 4), `SNPCC` (SNPCC1) |
 | Sources | 55: FDRs send files to `chs_dms/Dev/OSS_Inbound/External/CMSUNIV`; internal: QNXT 10 (`SQL_CHS`), AZ 40 (`SQL_AZ`), SNPCC 11 (`SQL_SNPCC`), Facets 210 (Teradata views `CMSUNIV_CORE_DEV_V.CSF_ODAG_Table3_2022` / `CSF_FA_Table4_2022` on the framework's connection, by `Batch_ID`; staging `CMSUNIV_STAGE_$ENV_T.ODAG_CSF_TABLE3_2022` / `FA_CSF_TABLE4_2022`, IDs by `ROW_SEQUENCE`) |
 | Version | `2200` from 1900-01-01 on every crosswalk row |
+| Row IDs | Every core ID column has a `ROW_SEQUENCE` row: files and sources whose query returns no ID are numbered by the framework (above the highest in staging and core); an ID the query returns is kept |
+| Export feed columns | `'*'` rows map the feed's own names: `ETL_LOAD_DT_TM` / `ETL_LAST_UPDT_DT_TM` → `LOAD_TIMESTAMP`, `STG_CRET_DTM` → `LOAD_DATE`, `UNVRS_VRSN_CD` → `VERSION`, `FILE_NM` → `FILE_NAME`; `SDO_CMSUNIV_<table>_2022_KEY` → `ROW_SEQUENCE` (copied from the core ID); the data columns pair by column order |
 | File names | `CMSAUTH_<source>_<file type>_22_<run type>_<report start>_<report end>_<timestamp>.txt`, e.g. `CMSAUTH_CDHDHMO_PYMT_C_22_DLY_20261019_20261019_20261014104600.txt` |
 
 | Run type | Category | When created | Report dates | SLA (close) | Who |

@@ -790,9 +790,10 @@ class SourceLoader:
 
     def _pull_locked(self, load_id: int, batch: dict, q: QueryConfig, opts, ref: str) -> IngestOutcome:
         b = get_batch(self.conn, batch["req_id"])
+        pulled = self.clock.now()
         ctx = LoadContext(b["btch_id"], load_id, b["run_ty"],
                           b["cmplnc_vrsn"], q.src_id,
-                          f"{q.project_cd}/{q.table_nm}/{q.src_id}", self.clock.now(), q.project_cd, q.table_nm,
+                          f"{q.project_cd}_{q.table_nm}_{q.src_id}_{pulled:%Y%m%d%H%M%S}", pulled, q.project_cd, q.table_nm,
                           _as_date(b["rpt_start_dt_key"]), _as_date(b["rpt_end_dt_key"]), b["req_id"],
                           self.settings.business_tz)
         try:

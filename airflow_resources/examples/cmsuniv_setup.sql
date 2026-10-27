@@ -617,6 +617,64 @@ INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column
 VALUES ('CMSUNIV', 'ODAG3', 'ODAG_CSF_Table3_2022_ID', 'ROW_SEQUENCE', NULL, 1);
 INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
 VALUES ('CMSUNIV', 'FA4', 'FA_CSF_Table4_2022_ID', 'ROW_SEQUENCE', NULL, 1);
+-- Internal sources: the ID the query returns is kept; without it the framework numbers the rows (ROW_SEQUENCE).
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', 'ODAG_Table3_ID', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', 'ODAG_CignaAZ_Table3_2022_ID', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA4', 'FA_Table4_ID', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA4', 'FA_CignaAZ_TABLE4_2022_ID', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'SNPCC1', 'SNPCC_HS_Table1_2022_ID', 'ROW_SEQUENCE', NULL, 1);
+-- Export feed (EXPORT_FEED_$ENV_T.SDO_CMSUNIV_<table>_2022): its framework columns, and its key = the core row ID.
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', '*', 'ETL_LOAD_DT_TM', 'LOAD_TIMESTAMP', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', '*', 'ETL_LAST_UPDT_DT_TM', 'LOAD_TIMESTAMP', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', '*', 'STG_CRET_DTM', 'LOAD_DATE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', '*', 'UNVRS_VRSN_CD', 'VERSION', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', '*', 'FILE_NM', 'FILE_NAME', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG1', 'SDO_CMSUNIV_ODAG1_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG2', 'SDO_CMSUNIV_ODAG2_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', 'SDO_CMSUNIV_ODAG3_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG4', 'SDO_CMSUNIV_ODAG4_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG5', 'SDO_CMSUNIV_ODAG5_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG6', 'SDO_CMSUNIV_ODAG6_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG1', 'SDO_CMSUNIV_CDAG1_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG2', 'SDO_CMSUNIV_CDAG2_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG3', 'SDO_CMSUNIV_CDAG3_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG4', 'SDO_CMSUNIV_CDAG4_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG5', 'SDO_CMSUNIV_CDAG5_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG6', 'SDO_CMSUNIV_CDAG6_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG7', 'SDO_CMSUNIV_CDAG7_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA1', 'SDO_CMSUNIV_FA1_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA2', 'SDO_CMSUNIV_FA2_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA3', 'SDO_CMSUNIV_FA3_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA4', 'SDO_CMSUNIV_FA4_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceTargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'SNPCC1', 'SDO_CMSUNIV_SNPCC1_2022_KEY', 'ROW_SEQUENCE', NULL, 1);
 
 -- ----------------------------------------------------------------------------------------------------
 -- 5a. Internal sources pulled from SQL Server (SOURCE_LOAD)
