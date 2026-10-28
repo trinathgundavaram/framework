@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.73 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.74 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -230,8 +230,8 @@ Pulls every open batch whose source has a `ComplianceInternalSourceConfig` row (
 | Query or connection failed | `REJECTED` (`SOURCE_QUERY_FAILED`, with the driver's message) | unchanged |
 | Columns do not fit staging / core | `REJECTED` (`SOURCE_DATA_REJECTED` / `CORE_TYPE_MISMATCH`) | unchanged |
 
-- Ad-hoc run types (IN1, CMS) are pulled only when released (`release`, 11.6); held run types (`hold`) are skipped.
-  Both are listed under `held` in the step report.
+- Ad-hoc run types (IN1, CMS) are pulled like scheduled ones, no release needed. Held run types (`hold`) are
+  skipped and listed under `held` in the step report.
 - The query's column names fill the staging columns of the same name (`AS` aliases); a column it returns wins over
   its `ComplianceTargetColumnConfig` row, except the batch, source and load columns.
 - Each query is logged with its parameters and a copy with the values written in.
@@ -250,8 +250,8 @@ An override that cannot apply is reported (`OVERRIDE_INVALID_DETECTED`, emailed)
 Copies the data of each batch that is due into the table's export table (`ComplianceExportConfig`, 5.11), by
 columns or by calling the export procedure with the batch's values.
 
-- **Due:** `SCHEDULED` run types from the close date on (from `RELEASE_TIME` that day, if set); `ADHOC` run types
-  only when released. Held run types wait.
+- **Due:** every run type (`SCHEDULED` and `ADHOC`) from the close date on (from `RELEASE_TIME` that day, if set),
+  or earlier when released. Held run types wait.
 - **Which data:** the newest batch of the period whose resolution is `NEW_FILE`, `CARRY_FORWARD` or `NO_DATA`. A
   re-export replaces the batch's own export rows (`Exp_Btch_ID`); a batch is exported again only when it has new
   data since its last export.
@@ -271,8 +271,11 @@ Closes every open batch whose close date has come:
 | Nothing arrived | `DATA_NOT_PROVIDED` (`MISSING`) | `SOURCE_MISSING_AT_CLOSE` (emailed) |
 | Being loaded right now | stays open, closed by the next run | `BATCH_CLOSE_DEFERRED_LOCKED` (not emailed) |
 
-Held run types (`hold`) and reopened batches still waiting for data stay open. A file after the close needs a
-`LATE_ARRIVAL` (or `REOPEN`) override. Options: the scope, `hold`, `as_of`. It starts BATCH_CREATION (the next day's
+Held run types (`hold`) and reopened batches still waiting for data stay open. A batch of an `ADHOC` run type with
+data (`NEW_FILE` / `CARRY_FORWARD`) stays open until it is released, so it can still be pulled and exported again; one
+without data closes as above. `"release": "true"` releases the scope's open batches with data and closes them in the
+same run (11.6). A file after the close needs a `LATE_ARRIVAL` (or `REOPEN`) override. Options: the scope, `hold`,
+`release`, `as_of`. It starts BATCH_CREATION (the next day's
 batches) and NOTIFY.
 
 ### 2.10 NOTIFY
@@ -741,7 +744,7 @@ VALUES ('CMSUNIV', 'ODAG3', '40', 'SQLSERVER', 'cms_src_appeals_sqlsrv',
 When is it pulled: scheduled run types from the request date on (an empty result before the close date means "no
 data yet" and is tried again on the next runs; empty on or after the close date means "no data", and the batch is
 still pulled again on every run until it closes, so a source table loaded later that day is picked up, e.g. a DLY
-batch with SLA 1); ad hoc only when released (section 11.6).
+batch with SLA 1). Ad hoc run types are pulled the same way.
 
 ### 5.9 ComplianceFileCheckConfig (file checks)
 
@@ -1013,10 +1016,10 @@ locks until they expire (`LOCK_TTL_MINUTES`, default 240) or are released (secti
 
 ### 8.1 Run categories (`ComplianceRunType.Run_Category_Cd`)
 
-| Value | Batches created | Internal sources pulled | Exported |
-|---|---|---|---|
-| `SCHEDULED` | By the schedule (codes or SQL), the calendar, or an intake request | From the request date (empty before the close date = try again) | From the close date (from `RELEASE_TIME` on that day, if set), or when released |
-| `ADHOC` | By intake requests (no crosswalk row needed), and by a schedule if the run type has one, for the crosswalk rows that list it and find a report period (e.g. IN1) | When released | When released |
+| Value | Batches created | Internal sources pulled | Exported | Closed |
+|---|---|---|---|---|
+| `SCHEDULED` | By the schedule (codes or SQL), the calendar, or an intake request | From the request date (empty before the close date = try again) | From the close date (from `RELEASE_TIME` on that day, if set), or when released | From the close date |
+| `ADHOC` | By intake requests (no crosswalk row needed), and by a schedule if the run type has one, for the crosswalk rows that list it and find a report period (e.g. IN1) | As `SCHEDULED` | As `SCHEDULED` | With data: when released (11.6); without data: from the close date |
 
 ### 8.2 Schedule codes (`ComplianceRunType`)
 
@@ -1346,7 +1349,7 @@ the framework fills in everything else. A CMSUNIV DEV Variable (`airflow_resourc
 | `period_file` | BATCH_CREATION | none | A Python file with a custom period function (advanced) |
 | `lookback_days`, `lookback_weeks` | BATCH_CREATION | none | Whole numbers: create the missed batches of the last n days / weeks |
 | `batch` | SOURCE_LOAD, EXPORT_LOAD | all due | One `Btch_ID` |
-| `release` | SOURCE_LOAD, EXPORT_LOAD | `false` | `true`: work on ad-hoc / held batches now (11.6) |
+| `release` | SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE | `false` | `true`: release the scope's batches now: held / not yet due batches are pulled and exported; batches with data close on BATCH_CLOSE (11.6) |
 | `hold` | SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE | none | Run types to leave alone, e.g. `"WKLY"` or `["WKLY", "MNT"]` |
 | `as_of` | all | now | A date or timestamp, `2026-10-18` or `2026-10-18T06:00`: run as if it were then (Central time) |
 | `share`, `file`, `folder` | FILE_LOAD (trigger) | all files | Load one file / folder |
@@ -1435,7 +1438,7 @@ be changed from a trigger (ignored, with a warning in the task log):
 |---|---|---|
 | `project`, `table_group`, `table`, `run_type`, `source` | all | Scope |
 | `batch` | SOURCE_LOAD, EXPORT_LOAD | One or more `Btch_ID`s, comma separated (every source of the batch) |
-| `release` | SOURCE_LOAD, EXPORT_LOAD | `true` = release held batches of the scope now |
+| `release` | SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE | `true` = release the scope's batches now (11.6) |
 | `hold` | SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE | Run types to hold for this run |
 | `period`, `lookback_days`, `lookback_weeks` | BATCH_CREATION | Create batches for a given period now |
 | `as_of` | all | Run as if it were that date / time (missed day) |
@@ -1523,7 +1526,7 @@ something to look at.
 **11.2 Create batches for a missed day.** Trigger BATCH_CREATION with `{"project": "CMSUNIV", "as_of": "2026-10-19"}`.
 
 **11.3 Request an ad-hoc batch.** Insert into `ComplianceRequestInTake` (6.1); the next BATCH_CREATION creates it.
-Ad-hoc batches are pulled / exported only when released (11.6).
+Ad-hoc batches are pulled and exported like scheduled ones; one with data closes only when released (11.6).
 
 **11.4 A file was rejected.** Find the reason (12.3); the file is in `<inbound>\Error\` and its error log in
 `<inbound>\ErrorLog\<name>_errors.txt`. Ask the source to fix and resend, or fix the configuration, then put the file
@@ -1532,9 +1535,12 @@ back into the inbound folder (any name collision gets `_1`, `_2`).
 **11.5 A source will not send (carry-forward).** Before the batch's close run: insert an approved `REUSE` override
 (6.2); OVERRIDE_DECISIONS applies it. The run type needs `Carry_Fwd_Ind = 1`.
 
-**11.6 Release early / export ad hoc.** Trigger EXPORT_LOAD (and SOURCE_LOAD for internal sources) with
-`{"project": "CMSUNIV", "run_type": "WKLY", "release": "true"}` (or `"batch": "<Btch_ID>"`). Released batches with
-data close on the next BATCH_CLOSE.
+**11.6 Release early / close ad hoc.** Ad hoc batches (IN1, CMS) are pulled and exported like scheduled ones and can
+be re-run while open; one with data closes only after a release. To close them: trigger BATCH_CLOSE with
+`{"project": "CMSUNIV", "run_type": "IN1", "release": "true"}` (add `"source"` / `"table"` to narrow it); they are
+released and closed in that run. To export a scheduled batch before its close date: trigger EXPORT_LOAD (and
+SOURCE_LOAD for internal sources) with `{"project": "CMSUNIV", "run_type": "WKLY", "release": "true"}` (or
+`"batch": "<Btch_ID>"`); released batches with data close on the next BATCH_CLOSE.
 
 **11.7 Hold a run type for business reasons.** Add `"hold": "WKLY"` to the SOURCE_LOAD, EXPORT_LOAD and BATCH_CLOSE
 Variables. Remove it to go back to normal. Release single batches with 11.6 meanwhile.
@@ -1702,7 +1708,8 @@ INFO - SOURCE_LOAD | 20261020_CMSUNIV_SNPCC1_DLY source 11 | Src_Sql_Txt on SQL_
 | File rejected `FILE_PARSE_ERROR` "line n" with "Invalid date" / "Invalid timestamp" | A typed **staging** column cannot take the file's value (staging is not converted) | Make the staging column text (5.7), or fix the file; the error log shows the record |
 | Load fails "must return one row" (SQL column) | `{btch_id}` lookup returns one row per source | Add `AND Src_ID = {src_id}` or use `{req_id}` |
 | "needs a column mapped to SOURCE_ID" | Staging / core / export table without source column | Add the column and a `SOURCE_ID` row (5.10) |
-| Batch not exported | Not due yet, held, or ad hoc not released | Step report `held` list; release (11.6) or wait |
+| Batch not exported | Not due yet, or held | Step report `held` list; release (11.6) or wait |
+| Ad hoc batch with data stays open | Not released | Release on BATCH_CLOSE (11.6) |
 | Batch closed as `DATA_NOT_PROVIDED` / `MISSING` | Nothing by the close date | Expected; late data: `LATE_ARRIVAL` or `REOPEN` |
 | Carry-forward refused | Batch closed, run type without `Carry_Fwd_Ind`, no earlier batch with data | Apply before the close run; check 12.7 and the `OVERRIDE_INVALID_DETECTED` text |
 | Internal source `WAITING` | No rows yet before the close date | Normal; tried again each run |
@@ -1762,8 +1769,8 @@ feed tables, no procedure, no PROVISIONING_WORK; Variables in `cmsuniv_dev/`).
 | `DLY` | SCHEDULED | Every day (`Sched_Cd DAILY`) | Previous day (`PREV_DAY`); FA tables their own | 1 (same day) | Every source |
 | `WKLY` | SCHEDULED | Every Sunday (`WEEKLY SUN`) | The 60 days ending the Saturday before (`RANGE(DAY,60,60)`) | 5 (Friday) | Internal sources |
 | `MNT` | SCHEDULED | The Sunday before the 3rd Tuesday (`MONTHLY TUE 3`, offset -2) | Previous calendar month | 5 | Every source |
-| `IN1` | ADHOC with a daily schedule | Every day, SNPCC1 / 11 only | Previous day | 1 | Never released: closes as `DATA_NOT_PROVIDED`, one alert a day |
-| `CMS` | ADHOC | Only from `ComplianceRequestInTake` | The request's dates | 1 | Pulled / exported only when released; the only run type with carry-forward |
+| `IN1` | ADHOC with a daily schedule | Every day, SNPCC1 / 11 only | Previous day | 1 | Pulled / exported daily; with data stays open until released on BATCH_CLOSE, without data closes as `DATA_NOT_PROVIDED`, one alert a day |
+| `CMS` | ADHOC | Only from `ComplianceRequestInTake` | The request's dates | 1 | Pulled / exported like scheduled; closes when released (with data); the only run type with carry-forward |
 
 FA report dates (every run type): FA1 `LAST_DAYS(MONTH,1,14)` (the last 14 days of the previous month), FA2
 `ANNUAL_WINDOW(01-01,01-31)`, FA3 `ANNUAL_WINDOW(11-01,12-31,02-01)`, FA4 `ANNUAL_WINDOW(11-01,01-31)`; FA2 – FA4 move

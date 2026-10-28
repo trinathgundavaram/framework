@@ -297,7 +297,7 @@ def _override_decisions(app, p: dict) -> ModuleOutcome:
 
 def _batch_close(app, p: dict) -> ModuleOutcome:
     """Batches without data (waiting) and locked ones (deferred, closed by the next sweep) are normal."""
-    s = app.closer.run(_scope(app, p), hold=run_type_list(p.get("hold")))
+    s = app.closer.run(_scope(app, p), hold=run_type_list(p.get("hold")), release=wanted(p.get("release")))
     return ModuleOutcome("BATCH_CLOSE", s, 0)
 
 
@@ -354,7 +354,7 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
         "BATCH_CLOSE", "close the batches past their SLA hold that have data or are in exception; "
                        "scope --project / --table / --run-type, or every batch; --hold leaves those run types' "
                        "batches open unless released",
-        required=(), optional=(Param("project"), *SCOPE, Param("hold")), handler=_batch_close),
+        required=(), optional=(Param("project"), *SCOPE, Param("hold"), Param("release")), handler=_batch_close),
     ModuleSpec(
         "NOTIFY", "email pending events: one project's (--project), or every event including those of no project",
         required=(), optional=(Param("project"), *SCOPE), handler=_notify),

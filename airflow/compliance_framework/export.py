@@ -140,7 +140,7 @@ class ExportLoader:
             return todo
         r = Releases(self.conn, self.clock, self.settings, self._hold)
         ready, held = r.split(todo)
-        freed = [b for b in held if b["resolution_ty"] is not None] if release else []
+        freed = [b for b in held + r.unreleased_adhoc(ready) if b["resolution_ty"] is not None] if release else []
         if freed:
             r.release(freed, "EXPORT_LOAD")
             s.released = [b["btch_id"] for b in freed]

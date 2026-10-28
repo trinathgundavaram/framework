@@ -330,10 +330,10 @@ the export and therefore the rules follow the batch's run type (`ComplianceRunTy
 sources of a scheduled run type are pulled from the request date on (an empty result waits until the due date, see
 SOURCE_LOAD); the export:
 
-| Run category | Data exported (and, for ad hoc, internal sources pulled) |
+| Run category | Data exported |
 |---|---|
 | `SCHEDULED` (DLY, WKLY, MNT, ...) | from the batch's due date on: its close date, `Req_Dt_Key + SLA_Days - 1` (WKLY created Sunday 10/18 with `SLA_Days = 6`: Friday 10/23; DAILY with `SLA_Days = 1`: the same day). After that every change is exported at once |
-| `ADHOC` | only when released |
+| `ADHOC` | as `SCHEDULED`; a batch with data closes only when released (`release` = `true` on BATCH_CLOSE) |
 
 `RELEASE_TIME` (setting, `HH:MM` Central time) makes the due date start at that time instead of midnight, e.g.
 `"RELEASE_TIME": "20:00"` in the EXPORT_LOAD Variable: a DLY batch created in the morning is exported from 20:00
@@ -350,7 +350,9 @@ for example `{"project": "CMS_UNIVERSE", "run_type": "WKLY", "release": "true"}`
 
 - `SOURCE_LOAD` releases and pulls the scope's held batches of internal sources (and triggers EXPORT_LOAD);
 - `EXPORT_LOAD` releases and exports the scope's held batches that have data (batches still without data stay
-  held).
+  held);
+- `BATCH_CLOSE` releases the scope's open batches that have data and closes them in the same run (the way to close
+  ad hoc batches with data).
 
 Each released batch gets `BATCH_RELEASED` in its timeline. From then on it is treated as due: later changes are
 exported at once, and BATCH_CLOSE closes it on its next run (or `close-batch`) without waiting for the SLA, once it

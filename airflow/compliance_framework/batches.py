@@ -726,8 +726,9 @@ class Releases:
         self.logger = EventLogger(conn, clock)
 
     def hold(self, b: dict, done: set, due: bool = True) -> Optional[str]:
-        """None when the batch may go now, else until when it waits; due=False: a scheduled run type does not wait
-        for its due date (SOURCE_LOAD pulls from the request date on)."""
+        """None when the batch may go now, else until when it waits; due=False: the batch does not wait for its due
+        date (SOURCE_LOAD pulls from the request date on). Ad hoc run types go like scheduled ones; a release only
+        lets BATCH_CLOSE close them."""
         if b["req_id"] in done:
             return None
         if b["run_ty"] in self.on_hold:
@@ -735,8 +736,6 @@ class Releases:
         rt = self.run_types.get(b["run_ty"])
         if rt is None:
             return None
-        if rt.run_category_cd != SCHEDULED:
-            return f"held until released (run type {b['run_ty']} is ad hoc)"
         if not due:
             return None
         due = earliest_close_date(db.as_date(b["req_dt_key"]), rt.sla_days)
@@ -755,6 +754,13 @@ class Releases:
             else:
                 held.append({**b, "hold": why})
         return ready, held
+
+    def unreleased_adhoc(self, batches: list[dict]) -> list[dict]:
+        """The batches of ad hoc run types not released yet (a release lets BATCH_CLOSE close them)."""
+        adhoc = [b for b in batches if (rt := self.run_types.get(b["run_ty"])) is not None
+                 and rt.run_category_cd != SCHEDULED]
+        done = released(self.conn, (b["req_id"] for b in adhoc)) if adhoc else set()
+        return [{**b, "hold": f"run type {b['run_ty']} is ad hoc"} for b in adhoc if b["req_id"] not in done]
 
     def release(self, batches: list[dict], step: str) -> None:
         """Record the release of held batches."""
@@ -1003,6 +1009,7 @@ class CloseSummary:
     waiting: list[str] = field(default_factory=list)
     deferred: list[str] = field(default_factory=list)
     on_hold: list[str] = field(default_factory=list)
+    released: list[str] = field(default_factory=list)
 
 
 class BatchCloser:
@@ -1027,13 +1034,17 @@ class BatchCloser:
             self._blocked(rows[0], closed_by, "batch is already closed")
         return outs
 
-    def run(self, scope: Optional[Scope] = None, hold: tuple = ()) -> CloseSummary:
+    def run(self, scope: Optional[Scope] = None, hold: tuple = (), release: bool = False) -> CloseSummary:
         """Close the open batches of a scope (a project, a table group or table, a run type) whose hold has passed,
         with or without data (no data: DATA_NOT_PROVIDED / MISSING and a SOURCE_MISSING_AT_CLOSE alert), and the
-        batches with data released early (BATCH_RELEASED). Batches of the run types in `hold` stay open unless
-        released; reopened batches stay open until new data arrives."""
+        batches with data released early (BATCH_RELEASED). A batch of an ad hoc run type with data closes only once
+        released. Batches of the run types in `hold` stay open unless released; reopened batches stay open until new
+        data arrives. `release` first releases the scope's open batches with data, so they close now."""
         s = CloseSummary()
-        rows = self._open_past_hold(scope or Scope(), sweep=True)
+        scope = scope or Scope()
+        if release:
+            s.released = self._release(scope)
+        rows = self._open_past_hold(scope, sweep=True)
         done = released(self.conn, [b["req_id"] for b in rows if b["run_ty"] in hold]) if hold else set()
         for b in rows:
             if b["run_ty"] in hold and b["req_id"] not in done:
@@ -1069,6 +1080,20 @@ class BatchCloser:
             b["hold_dt"] = earliest_close_date(db.as_date(b["req_dt_key"]), 1 if b["sla_days"] is None else b["sla_days"])
         return rows
 
+    def _release(self, scope: Scope) -> list[str]:
+        """Release the scope's open batches with data that are not released yet."""
+        where, params = scope.sql("c")
+        rows = self.conn.execute(
+            f"""SELECT c.* FROM ComplianceRequestControl c
+                 WHERE c.Batch_Close_Ind = 0 AND COALESCE(c.Resolution_Ty, 'NO_DATA') <> 'NO_DATA' AND NOT {REOPENED_AWAITING_DATA}
+                   AND NOT EXISTS (SELECT 1 FROM ComplianceRequestFileDetail d
+                                    WHERE d.Req_ID = c.Req_ID AND d.Event_Ty = '{RELEASED}'){where}
+                 ORDER BY c.Req_ID""", params).fetchall()
+        if rows:
+            Releases(self.conn, self.clock, self.settings).release(
+                [{**b, "hold": "close requested"} for b in rows], "BATCH_CLOSE")
+        return [b["btch_id"] for b in rows]
+
     def _released(self, b: dict) -> bool:
         return b["resolution_ty"] is not None and self.conn.execute(
             "SELECT 1 AS ok FROM ComplianceRequestFileDetail WHERE Req_ID = %s AND Event_Ty = 'BATCH_RELEASED'",
@@ -1080,11 +1105,14 @@ class BatchCloser:
         where, params = scope.sql("c")
         if sweep:
             where = f" AND NOT {REOPENED_AWAITING_DATA}{where}"
-        early = ("""OR (c.Resolution_Ty IS NOT NULL AND EXISTS (SELECT 1 FROM ComplianceRequestFileDetail d
-                          WHERE d.Req_ID = c.Req_ID AND d.Event_Ty = 'BATCH_RELEASED'))""" if sweep else "")
+        is_released = f"""EXISTS (SELECT 1 FROM ComplianceRequestFileDetail d
+                          WHERE d.Req_ID = c.Req_ID AND d.Event_Ty = '{RELEASED}')"""
+        early = f"OR (c.Resolution_Ty IS NOT NULL AND {is_released})" if sweep else ""
         return self.conn.execute(
             f"""SELECT c.* FROM ComplianceRequestControl c JOIN ComplianceRunType r ON UPPER(r.Run_Ty) = c.Run_Ty
-                 WHERE c.Batch_Close_Ind = 0 AND (c.Req_Dt_Key + (r.SLA_Days - 1) <= %s {early}){where} ORDER BY c.Req_ID""",
+                 WHERE c.Batch_Close_Ind = 0 AND (c.Req_Dt_Key + (r.SLA_Days - 1) <= %s {early})
+                   AND NOT (UPPER(r.Run_Category_Cd) <> '{SCHEDULED}' AND COALESCE(c.Resolution_Ty, 'NO_DATA') <> 'NO_DATA'
+                            AND NOT {is_released}){where} ORDER BY c.Req_ID""",
             [last_hold or self._today(), *params]).fetchall()
 
     def _blocked(self, b: dict, closed_by: str, reason: str) -> None:

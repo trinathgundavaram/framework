@@ -332,7 +332,7 @@ STEP_PARAMS = {
     "EXPORT_LOAD": (*SCOPE, "batch", "release", "hold", "as_of"),
     "FILE_RULES": (*SCOPE, "as_of"),
     "OVERRIDE_DECISIONS": (*SCOPE, "as_of"),
-    "BATCH_CLOSE": (*SCOPE, "hold", "as_of"),
+    "BATCH_CLOSE": (*SCOPE, "hold", "release", "as_of"),
     "NOTIFY": (*SCOPE, "as_of"),
 }
 PASSED_ON = (*SCOPE, "as_of")

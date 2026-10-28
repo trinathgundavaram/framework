@@ -723,10 +723,11 @@ class SourceLoader:
             return todo
         r = Releases(self.conn, self.clock, self.settings, self._hold)
         ready, held = r.split([b for b, _ in todo], due=False)
-        if release and held:
-            r.release(held, "SOURCE_LOAD")
-            summary.released = [b["btch_id"] for b in held]
-        elif not named:
+        freed = held + r.unreleased_adhoc(ready) if release else []
+        if freed:
+            r.release(freed, "SOURCE_LOAD")
+            summary.released = [b["btch_id"] for b in freed]
+        elif not named and not release:
             summary.held = [{"batch": b["btch_id"], "hold": b["hold"]} for b in held]
             if held:
                 log.info("SOURCE_LOAD | %s batch(es) held: %s", len(held), ", ".join(b["btch_id"] for b in held[:50]))
