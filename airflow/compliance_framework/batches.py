@@ -411,8 +411,8 @@ class ScheduleSummary:
 def create_batches(conn: Connection, clock: Clock, settings: Settings, *, project_cd: str, run_ty: Optional[str] = None,
                    period: Optional[str] = None, table_nm: Optional[str] = None, period_file: Optional[str] = None,
                    lookback_days: Optional[int] = None, lookback_weeks: Optional[int] = None,
-                   tables: Optional[tuple] = None) -> ScheduleSummary:
-    """The scheduled batches due on the run date for the project's effective crosswalk rows.
+                   tables: Optional[tuple] = None, sources: Optional[tuple] = None) -> ScheduleSummary:
+    """The scheduled batches due on the run date for the project's effective crosswalk rows (of `sources` when given).
 
     The run type's schedule (Sched_Cd ..., else Batch_Schedule_Sql_Txt) says whether batches are due on the run date;
     the crosswalk row's Rpt_Period_Cd (else Rpt_Dt_Sql_Txt) gives its report dates (rows of ADHOC run types only when
@@ -430,8 +430,8 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
     logger = EventLogger(conn, clock)
     rows = [x for x in cfg.xwalk_rows(conn, project_cd=project_cd, table_nm=table_nm, run_ty=run_ty)
             if x.effective_on(s.run_date) and scheduled(run_types.get(x.run_ty), x)
-            and (tables is None or x.table_nm in tables)]
-    if not rows and (run_ty or table_nm or tables is not None):
+            and (tables is None or x.table_nm in tables) and (sources is None or x.src_id in sources)]
+    if not rows and (run_ty or table_nm or tables is not None or sources is not None):
         s.errors.append(f"no effective crosswalk rows for {project_cd}/{table_nm or '*'}/{run_ty or '*'} on {s.run_date}")
     cache: dict = {}
 
@@ -473,11 +473,12 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
             s.existing += 1
         s.batches.append(f"{label} {dates[0]}..{dates[1]}: {'created' if res.created else 'exists'}")
     if not period:
-        _from_calendar(conn, clock, settings, logger, s, project_cd, run_ty, table_nm, tables, run_types)
+        _from_calendar(conn, clock, settings, logger, s, project_cd, run_ty, table_nm, tables, run_types, sources)
     return s
 
 
-def _from_calendar(conn, clock, settings, logger, s, project_cd, run_ty, table_nm, tables, run_types) -> None:
+def _from_calendar(conn, clock, settings, logger, s, project_cd, run_ty, table_nm, tables, run_types,
+                   sources=None) -> None:
     """The batches ComplianceBatchCalendar lists for the run date: every effective crosswalk source of the run type
     (and table, when the row names one) gets a batch for the row's report dates."""
     for c in cfg.calendar_rows(conn, project_cd, s.run_date):
@@ -485,7 +486,8 @@ def _from_calendar(conn, clock, settings, logger, s, project_cd, run_ty, table_n
         if (run_ty and c.run_ty != code(run_ty)) or rt is None or not rt.active:
             continue
         for x in cfg.effective_sources(conn, c.project_cd, None if c.table_nm == "*" else c.table_nm, c.run_ty, s.run_date):
-            if (table_nm and x.table_nm != code(table_nm)) or (tables is not None and x.table_nm not in tables):
+            if ((table_nm and x.table_nm != code(table_nm)) or (tables is not None and x.table_nm not in tables)
+                    or (sources is not None and x.src_id not in sources)):
                 continue
             label = f"{x.project_cd}/{x.table_nm}/{x.src_id}/{x.run_ty}"
             res = create_batch(conn, clock, logger, xwalk=x, rpt_start=c.rpt_start, rpt_end=c.rpt_end,
@@ -544,7 +546,7 @@ class IntakeProcessor:
         self.logger = EventLogger(conn, clock)
 
     def run(self, project_cd: Optional[str] = None, run_ty: Optional[str] = None,
-            tables: Optional[tuple] = None) -> IntakeSummary:
+            tables: Optional[tuple] = None, sources: Optional[tuple] = None) -> IntakeSummary:
         """Sweep the requests due today; each request is claimed with its own lock."""
         summary = IntakeSummary(run_date=self.clock.today(self.settings.business_tz))
         where = ["%s BETWEEN Req_Start_Dt_Key AND Req_End_Dt_Key", "(Last_Run_Dt_Key IS NULL OR Last_Run_Dt_Key <> %s)"]
@@ -556,6 +558,10 @@ class IntakeProcessor:
         if tables is not None:
             marks, names = db.in_list(tables or ("",))
             where.append(f"UPPER(Table_Nm) IN ({marks})")
+            params.extend(names)
+        if sources is not None:
+            marks, names = db.in_list(sources)
+            where.append(f"UPPER(Src_ID) IN ({marks})")
             params.extend(names)
         due = self.conn.execute(f"SELECT Intake_ID FROM ComplianceRequestInTake WHERE {' AND '.join(where)} "
                                 "ORDER BY Load_Dtts, Intake_ID", params).fetchall()

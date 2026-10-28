@@ -991,34 +991,40 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
     return issues
 
 
-# scope: What a step works on: a project, one table group or one table of it, and optionally one run type.
+# scope: What a step works on: a project, one table group or one table of it, and optionally one run type and some
+# sources.
 
 log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class Scope:
-    """`tables` = the tables of the table group (or the one table); None = every table of the project(s)."""
+    """`tables` = the tables of the table group (or the one table); None = every table of the project(s).
+    `src_ids` = the Src_IDs of the sources given; None = every source."""
     project_cd: Optional[str] = None
     table_group: Optional[str] = None
     table_nm: Optional[str] = None
     run_ty: Optional[str] = None
     tables: Optional[tuple] = None
+    src_ids: Optional[tuple] = None
 
     @property
     def narrowed(self) -> bool:
         """Only part of a project's files belong to this run."""
-        return self.tables is not None or self.run_ty is not None
+        return self.tables is not None or self.run_ty is not None or self.src_ids is not None
 
-    def covers(self, project_cd: Optional[str], table_nm: Optional[str] = None, run_ty: Optional[str] = None) -> bool:
+    def covers(self, project_cd: Optional[str], table_nm: Optional[str] = None, run_ty: Optional[str] = None,
+               src_id: Optional[str] = None) -> bool:
         if self.project_cd and code(project_cd) != self.project_cd:
             return False
         if self.tables is not None and table_nm is not None and code(table_nm) not in self.tables:
             return False
+        if self.src_ids is not None and src_id is not None and code(src_id) not in self.src_ids:
+            return False
         return not (self.run_ty and run_ty is not None and code(run_ty) != self.run_ty)
 
     def sql(self, alias: str = "", run_type: bool = True) -> tuple[str, list]:
-        """(' AND ...' conditions, parameters) on Project_Cd / Table_Nm / Run_Ty of a table or alias."""
+        """(' AND ...' conditions, parameters) on Project_Cd / Table_Nm / Run_Ty / Src_ID of a table or alias."""
         a = f"{alias}." if alias else ""
         parts, params = [], []
         if self.project_cd:
@@ -1033,6 +1039,9 @@ class Scope:
         if run_type and self.run_ty:
             parts.append(f"{a}Run_Ty = %s")
             params.append(self.run_ty)
+        if self.src_ids is not None:
+            parts.append(f"{a}Src_ID IN ({', '.join(['%s'] * len(self.src_ids))})")
+            params.extend(self.src_ids)
         return "".join(f" AND {p}" for p in parts), params
 
     def label(self) -> str:
@@ -1043,12 +1052,37 @@ class Scope:
             parts.append(f"table {self.table_nm}")
         if self.run_ty:
             parts.append(f"run type {self.run_ty}")
+        if self.src_ids is not None:
+            parts.append(f"source {', '.join(self.src_ids)}")
         return ", ".join(parts)
 
 
+def source_list(value) -> tuple:
+    """The sources of a `source` input ('10, QNXT' or a list)."""
+    items = value if isinstance(value, (list, tuple)) else str(value or "").strip("[] ").split(",")
+    return tuple(code(str(v).strip(" '\"")) for v in items if str(v).strip(" '\""))
+
+
+def source_ids(conn, values: tuple) -> tuple:
+    """The Src_IDs of sources given by Src_ID or by Src_Nm (a name may stand for several IDs)."""
+    try:
+        rows = conn.execute("SELECT Src_ID, Src_Nm FROM ComplianceSourceSystem").fetchall()
+    except Exception as e:  # noqa: BLE001
+        raise ConfigError(f"source {', '.join(values)}: ComplianceSourceSystem could not be read: {db.error_line(e)}") from None
+    ids = []
+    for v in values:
+        found = ([code(r["src_id"]) for r in rows if code(r["src_id"]) == v]
+                 or [code(r["src_id"]) for r in rows if code(r["src_nm"]) == v])
+        if not found:
+            raise ConfigError(f"source {v} is neither a Src_ID nor a Src_Nm of ComplianceSourceSystem")
+        ids.extend(found)
+    return tuple(dict.fromkeys(ids))
+
+
 def resolve_scope(conn, project: Optional[str] = None, table_group: Optional[str] = None,
-                  table: Optional[str] = None, run_type: Optional[str] = None) -> Scope:
-    """The scope of a run. A table group is looked up in ComplianceTable only when one is given."""
+                  table: Optional[str] = None, run_type: Optional[str] = None, source=None) -> Scope:
+    """The scope of a run. A table group is looked up in ComplianceTable only when one is given; a source (one or a
+    list, by Src_ID or Src_Nm) in ComplianceSourceSystem."""
     project, table_group, table, run_type = (code(v) or None for v in (project, table_group, table, run_type))
     if (table_group or table) and not project:
         raise ConfigError("a table group or a table needs its project")
@@ -1067,7 +1101,8 @@ def resolve_scope(conn, project: Optional[str] = None, table_group: Optional[str
         if not tables:
             log.warning("table group %s of project %s has no active table in ComplianceTable: nothing to do",
                         table_group, project)
-    return Scope(project, table_group, table, run_type, tables)
+    sources = source_list(source)
+    return Scope(project, table_group, table, run_type, tables, source_ids(conn, sources) if sources else None)
 
 
 # filecheck_options: Which content checks a file gets (ComplianceFileCheckConfig); read by FILE_CHECK and by the load.

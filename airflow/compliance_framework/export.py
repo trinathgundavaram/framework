@@ -159,7 +159,7 @@ class ExportLoader:
             rows = self.conn.execute("SELECT * FROM ComplianceRequestControl WHERE Btch_ID = %s ORDER BY Req_ID",
                                      (code(name),)).fetchall()
             found = [b for b in rows if (b["project_cd"], b["table_nm"]) in exports
-                     and scope.covers(b["project_cd"], b["table_nm"], b["run_ty"])]
+                     and scope.covers(b["project_cd"], b["table_nm"], b["run_ty"], b["src_id"])]
             if not rows:
                 s.errors.append(f"{name}: no such batch")
             elif not found:

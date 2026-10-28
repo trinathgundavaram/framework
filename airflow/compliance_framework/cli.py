@@ -53,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--table-group")
         sp.add_argument("--table")
         sp.add_argument("--run-type", required=project_required)
+        sp.add_argument("--source", help="Src_IDs or source names, comma separated")
 
     add("list-modules", "list the modules that 'run --module' can call, with their parameters")
     sp = add("run", "run one module by name (see list-modules)")
@@ -141,7 +142,7 @@ def _dispatch(app: App, args) -> int:
                     "CONFIG_VALIDATION_FAILED", description="; ".join(f"{i.code}: {i.message}" for i in errors)[:4000])
         return 1 if errors else 0
     if c == "run":
-        params = {k: getattr(args, k) for k in ("project", "table_group", "table", "run_type", "period", "period_file",
+        params = {k: getattr(args, k) for k in ("project", "table_group", "table", "run_type", "source", "period", "period_file",
                                                 "lookback_days", "lookback_weeks", "share", "file", "folder", "batch")}
         out = run_module(app, args.module, params)
         _print(report(out))
@@ -151,7 +152,8 @@ def _dispatch(app: App, args) -> int:
         _print(s)
         return 1 if s.invalid else 0
     if c == "close-batches":
-        s = app.closer.run(resolve_scope(app.conn, args.project, args.table_group, args.table, args.run_type))
+        s = app.closer.run(resolve_scope(app.conn, args.project, args.table_group, args.table, args.run_type,
+                                         args.source))
         _print(s)
         return 1 if s.deferred else 0
     if c == "close-batch":

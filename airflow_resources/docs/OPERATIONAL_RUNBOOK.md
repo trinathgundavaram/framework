@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.71 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.72 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -149,8 +149,8 @@ hand.
   created twice, a file never loaded twice, an export replaces its own rows).
 - **Never twice at once:** a DAG waits for its own previous run; different DAGs can overlap (batch and table locks
   keep them apart; a busy staging table makes a file or pull `LOAD_INCOMPLETE`, picked up by the next run).
-- **Scope:** `project`, `table_group`, `table`, `run_type` narrow what a run works on (Variable, `runs` entry or
-  trigger: 9.3, 9.5). `as_of` runs it as if it were another day (a missed day).
+- **Scope:** `project`, `table_group`, `table`, `run_type`, `source` narrow what a run works on (Variable, `runs`
+  entry or trigger: 9.3, 9.5). `as_of` runs it as if it were another day (a missed day).
 - **Logs:** each step writes its progress (`FILE_LOAD | <file> | load 1 | 4 data row(s) staged …`), every configured
   SQL with its parameters (section 13), and the step report.
 
@@ -306,7 +306,7 @@ two rules runs never write the GRE tables at the same time.
 | The batch has no data rows | `SKIPPED` (the GRE is not called) | — | Success |
 | A rule could not run, or the GRE failed | `ERROR`, tried again on the next run | `RULES_ENGINE_TECHNICAL_FAILURE` (emailed once) | Fails at the end; the other batches still run |
 
-Options: the scope (`project`, `table_group`, `table`, `run_type`), `as_of`. Each rule's final SQL is in the task log.
+Options: the scope (`project`, `table_group`, `table`, `run_type`, `source`), `as_of`. Each rule's final SQL is in the task log.
 
 ### 2.11 Command line (admin)
 
@@ -1341,6 +1341,7 @@ the framework fills in everything else. A CMSUNIV DEV Variable (`airflow_resourc
 | `table_group` | all | all | A `Table_Group_Cd` of `ComplianceTable`, e.g. `ODAG`, `SNPCC` |
 | `table` | all | all | A `Table_Nm`, e.g. `ODAG3` |
 | `run_type` | all | all | A `Run_Ty`, e.g. `DLY`, `WKLY`, `MNT` |
+| `source` | all | all | One or more sources, by `Src_ID` or `Src_Nm` of `ComplianceSourceSystem`: `"QNXT"`, `"10,11"` or `["10", "SNPCC"]` (a name stands for every source ID with that name). Only those sources' batches, files and events; an unknown source stops the run |
 | `period` | BATCH_CREATION | from the schedule codes | A period code (8.4), e.g. `PREV_DAY`: create batches with these report dates now |
 | `period_file` | BATCH_CREATION | none | A Python file with a custom period function (advanced) |
 | `lookback_days`, `lookback_weeks` | BATCH_CREATION | none | Whole numbers: create the missed batches of the last n days / weeks |
@@ -1432,7 +1433,7 @@ be changed from a trigger (ignored, with a warning in the task log):
 
 | Key | Steps | Meaning |
 |---|---|---|
-| `project`, `table_group`, `table`, `run_type` | all | Scope |
+| `project`, `table_group`, `table`, `run_type`, `source` | all | Scope |
 | `batch` | SOURCE_LOAD, EXPORT_LOAD | One or more `Btch_ID`s, comma separated (every source of the batch) |
 | `release` | SOURCE_LOAD, EXPORT_LOAD | `true` = release held batches of the scope now |
 | `hold` | SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE | Run types to hold for this run |
@@ -1462,7 +1463,7 @@ export FRAMEWORK_METADATA_SCHEMA=HSABC_DEV FRAMEWORK_ENVIRONMENT=DEV
 | `python -m compliance_framework.cli close-batch --btch-id <Btch_ID> --closed-by <you> [--src-id <Src_ID>]` | Closes a batch (or one source of it) by hand |
 | `python -m compliance_framework.cli test-connection --source <Src_Conn_Cd> --db-type SQLSERVER` | Tests an internal source's connection (the Airflow Connection must be available, e.g. `AIRFLOW_CONN_<ID>`) |
 | `python -m compliance_framework.cli show-config` | The settings in effect and where each came from |
-| `python -m compliance_framework.cli run --module <STEP> --project CMSUNIV [--as-of <date>]` | Runs any step by hand, also `FILE_RULES` |
+| `python -m compliance_framework.cli run --module <STEP> --project CMSUNIV [--source QNXT,SNPCC] [--as-of <date>]` | Runs any step by hand, also `FILE_RULES` |
 
 ### 9.6 One DAG at several times (timed runs)
 
@@ -1552,8 +1553,12 @@ batch needs its override).
 **11.12 Close a batch by hand.** `close-batch` from the command line (2.11); every open source of the batch, or `--src-id` for
 one. Refused before the close date unless released.
 
-**11.13 Run the step for one table group / table / run type.** Trigger with `table_group` or `table`, and/or
-`run_type`.
+**11.13 Run the step for one table group / table / run type / source.** Trigger with `table_group` or `table`,
+and/or `run_type`, and/or `source`. A table runs all its sources; `source` picks sources across tables, e.g. only
+QNXT and SNPCC in SOURCE_LOAD (not AZ or Facets of the same tables): `{"project": "CMSUNIV", "source": "QNXT,SNPCC"}`.
+In a Variable, `"source": ["QNXT", "SNPCC"]`, or one task per source with `"runs": [{"source": "QNXT"},
+{"source": "SNPCC"}]`. A trigger's scope is passed on to the DAGs it starts; a Variable's is not, so put the same
+`source` in the next DAG's Variable (e.g. EXPORT_LOAD) when it should also work on those sources only.
 
 **11.14 An alert email arrived.** Look up the event in 8.15 and the batch in 12.1 / 12.2.
 

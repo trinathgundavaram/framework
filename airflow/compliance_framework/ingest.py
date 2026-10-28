@@ -204,7 +204,7 @@ class IngestPipeline:
     def _scope_locations(self, scope: Scope) -> tuple[list[tuple[str, str]], set, TemplateMatcher]:
         """(the scope's inbound locations, the ones file configs outside the scope also use, the scope's templates)."""
         cfgs = cfgmod.active_file_configs(self.conn, self.settings)
-        mine = [c for c in cfgs if scope.covers(c.project_cd, c.table_nm)]
+        mine = [c for c in cfgs if scope.covers(c.project_cd, c.table_nm, src_id=c.src_id)]
         locations = sorted({parse_uri(c.src_file_path) for c in mine})
         shared = {parse_uri(c.src_file_path) for c in cfgs if c not in mine} & set(locations)
         return locations, shared, TemplateMatcher(mine)
@@ -657,7 +657,7 @@ class SourceLoader:
         wait until due, ad-hoc ones until released, and run types in `hold` until released, unless `release` releases them now."""
         scope = scope or Scope()
         cfgs = {(q.project_cd, q.table_nm, q.src_id): q for q in cfgmod.active_query_configs(self.conn, self.settings)
-                if scope.covers(q.project_cd, q.table_nm)}
+                if scope.covers(q.project_cd, q.table_nm, src_id=q.src_id)}
         summary = PathIngestSummary(locations=sorted({f"{q.db_ty} {q.conn_cd or 'same Teradata system'}"
                                                       for q in cfgs.values()}))
         self._hold = hold
@@ -698,7 +698,7 @@ class SourceLoader:
                                          (code(name),)).fetchall()
                 found = [(b, cfgs[(b["project_cd"], b["table_nm"], b["src_id"])]) for b in rows
                          if (b["project_cd"], b["table_nm"], b["src_id"]) in cfgs
-                         and scope.covers(b["project_cd"], b["table_nm"], b["run_ty"])]
+                         and scope.covers(b["project_cd"], b["table_nm"], b["run_ty"], b["src_id"])]
                 if not rows:
                     summary.errors.append(f"{name}: no such batch")
                 elif not found:

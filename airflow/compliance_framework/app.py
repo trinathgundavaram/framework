@@ -130,11 +130,12 @@ class ModuleSpec:
 
 
 CODE_PARAMS = ("project", "run_type", "table", "table_group")
-SCOPE = (Param("table_group"), Param("table"), Param("run_type"))
+SCOPE = (Param("table_group"), Param("table"), Param("run_type"), Param("source"))
 
 
 def _scope(app, p: dict):
-    return resolve_scope(app.conn, p.get("project"), p.get("table_group"), p.get("table"), p.get("run_type"))
+    return resolve_scope(app.conn, p.get("project"), p.get("table_group"), p.get("table"), p.get("run_type"),
+                         p.get("source"))
 
 
 def normalize(name: str) -> str:
@@ -159,7 +160,8 @@ def _batch_creation(app, p: dict) -> ModuleOutcome:
     period_args = ("period", "period_file", "lookback_days", "lookback_weeks")
     scheduled_kw = dict(project_cd=project, table_nm=p.get("table"), run_ty=run_type, period=p.get("period"),
                         period_file=p.get("period_file"), lookback_days=p.get("lookback_days"),
-                        lookback_weeks=p.get("lookback_weeks"), tables=scope.tables if p.get("table_group") else None)
+                        lookback_weeks=p.get("lookback_weeks"), tables=scope.tables if p.get("table_group") else None,
+                        sources=scope.src_ids)
     scheduled = None
     if run_type:
         rt = cfgmod.run_type(app.conn, run_type)
@@ -172,7 +174,7 @@ def _batch_creation(app, p: dict) -> ModuleOutcome:
                               f"--lookback-* only apply to a run type with a schedule")
     else:
         scheduled = app.create_batches(**scheduled_kw)
-    adhoc = app.intake.run(project_cd=project, run_ty=run_type, tables=scope.tables)
+    adhoc = app.intake.run(project_cd=project, run_ty=run_type, tables=scope.tables, sources=scope.src_ids)
     errors = bool(scheduled and scheduled.errors) or bool(adhoc.failed)
     return ModuleOutcome("BATCH_CREATION", BatchCreationSummary(scheduled, adhoc), 1 if errors else 0)
 
@@ -242,7 +244,7 @@ def _file_load(app, p: dict) -> ModuleOutcome:
     from compliance_framework.ingest import PathIngestSummary
 
     share, file, folder, project = p.get("share"), p.get("file"), p.get("folder"), p.get("project")
-    if (project or p.get("table_group") or p.get("table") or p.get("run_type")) and (share or file or folder):
+    if (project or p.get("table_group") or p.get("table") or p.get("run_type") or p.get("source")) and (share or file or folder):
         raise ConfigError("FILE_LOAD takes --project (that project's configured folders) or "
                           "--share/--file/--folder, not both")
     if file:

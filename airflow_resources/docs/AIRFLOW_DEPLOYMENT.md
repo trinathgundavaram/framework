@@ -162,7 +162,7 @@ default is right (the examples carry only what differs: connections, `load_env`,
 | `load_env` | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); falls back to `environment`, then `gre.environment`, else `DEV` |
 | `schedule_interval` | Cron expression of the DAG; leave out for a DAG that is only triggered |
 | `schedule_timezone` | Optional; schedules run in Central time (`America/Chicago`, with daylight saving) |
-| `trigger_dags` | DAG ids to start when the step succeeds (a list, or one comma-separated string); the scope (`project`, `table_group`, `table`, `run_type`) and `as_of` of this run are passed on, so a chain started for one table group stays on it |
+| `trigger_dags` | DAG ids to start when the step succeeds (a list, or one comma-separated string); the scope (`project`, `table_group`, `table`, `run_type`, `source`) and `as_of` of this run are passed on, so a chain started for one table group stays on it |
 | `email_recipient` | Who gets the DAG's success / failure emails (`success_email`, `fail_email` tasks). Without it the DAG has no email tasks |
 | `snow_assignment_group` | ServiceNow assignment group of the incident opened when a task fails (default `D&AE - EDE Govt Compliance`) |
 | `owner`, `tags` | DAG owner (default `oss`) and tags (a list, or one comma-separated string) |

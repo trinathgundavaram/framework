@@ -41,7 +41,7 @@ STEPS = ("BATCH_CREATION", "FILE_CHECK", "FILE_LOAD", "SOURCE_LOAD", "EXPORT_LOA
 FAIL_ON_PROBLEMS = {"BATCH_CREATION": True, "FILE_CHECK": True, "FILE_LOAD": True, "SOURCE_LOAD": True, "EXPORT_LOAD": True, "FILE_RULES": True, "OVERRIDE_DECISIONS": False,
                     "BATCH_CLOSE": True, "NOTIFY": True}
 SCOPE_KEYS = ("project", "table_group", "run_type", "period", "table", "period_file", "lookback_days", "lookback_weeks",
-              "share", "file", "folder", "batch", "release", "hold")
+              "share", "file", "folder", "batch", "release", "hold", "source")
 _GRE_ENV = {"environment": "GRE_ENVIRONMENT", "meta_db": "GRE_META_DB", "log_level": "GRE_LOG_LEVEL",
             "log_dir": "GRE_LOG_DIR", "max_parallel_rules": "GRE_MAX_PARALLEL_RULES",
             "package_dir": "GRE_PACKAGE_DIR", "project_name": "GRE_PROJECT_NAME", "process_name": "GRE_PROCESS_NAME",
@@ -323,7 +323,7 @@ if __name__ == "__main__":
 STEP_TIMEOUT = {"BATCH_CREATION": timedelta(hours=1), "FILE_CHECK": timedelta(hours=1), "FILE_LOAD": timedelta(hours=2), "SOURCE_LOAD": timedelta(hours=2), "EXPORT_LOAD": timedelta(hours=2), "FILE_RULES": timedelta(hours=2),
                 "OVERRIDE_DECISIONS": timedelta(minutes=30), "BATCH_CLOSE": timedelta(minutes=30),
                 "NOTIFY": timedelta(minutes=30)}
-SCOPE = ("project", "table_group", "table", "run_type")
+SCOPE = ("project", "table_group", "table", "run_type", "source")
 STEP_PARAMS = {
     "BATCH_CREATION": (*SCOPE, "period", "lookback_days", "lookback_weeks", "as_of"),
     "FILE_CHECK": (*SCOPE, "as_of"),
@@ -418,7 +418,8 @@ def _task_id(step: str, scope: dict, index: int, scopes: list) -> str:
         return step.lower()
 
     def base(s: dict, i: int) -> str:
-        name = "_".join(str(s[k]) for k in ("project", "table_group", "table", "run_type") if s.get(k)) or str(i + 1)
+        name = "_".join("_".join(map(str, s[k])) if isinstance(s[k], (list, tuple)) else str(s[k])
+                        for k in ("project", "table_group", "table", "run_type", "source") if s.get(k)) or str(i + 1)
         return f"{step.lower()}_{''.join(c if c.isalnum() else '_' for c in name).lower()}"
     names = [base(s, i) for i, s in enumerate(scopes)]
     return names[index] if names.count(names[index]) == 1 else f"{names[index]}_{index + 1}"
