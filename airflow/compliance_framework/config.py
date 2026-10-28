@@ -1057,8 +1057,8 @@ class Scope:
         return ", ".join(parts)
 
 
-def source_list(value) -> tuple:
-    """The sources of a `source` input ('10, QNXT' or a list)."""
+def code_list(value) -> tuple:
+    """The codes of a scope input that takes several: 'ODAG, FA', a list, or a list as text ("['ODAG', 'FA']")."""
     items = value if isinstance(value, (list, tuple)) else str(value or "").strip("[] ").split(",")
     return tuple(code(str(v).strip(" '\"")) for v in items if str(v).strip(" '\""))
 
@@ -1081,28 +1081,34 @@ def source_ids(conn, values: tuple) -> tuple:
 
 def resolve_scope(conn, project: Optional[str] = None, table_group: Optional[str] = None,
                   table: Optional[str] = None, run_type: Optional[str] = None, source=None) -> Scope:
-    """The scope of a run. A table group is looked up in ComplianceTable only when one is given; a source (one or a
-    list, by Src_ID or Src_Nm) in ComplianceSourceSystem."""
-    project, table_group, table, run_type = (code(v) or None for v in (project, table_group, table, run_type))
-    if (table_group or table) and not project:
+    """The scope of a run. Table groups, tables and sources are one or a list each. A table group is looked up in
+    ComplianceTable only when one is given; a source (by Src_ID or Src_Nm) in ComplianceSourceSystem."""
+    project, run_type = (code(v) or None for v in (project, run_type))
+    groups, names = code_list(table_group), code_list(table)
+    if (groups or names) and not project:
         raise ConfigError("a table group or a table needs its project")
-    if table_group and table:
-        raise ConfigError("give a table group or a table, not both")
+    if groups and names:
+        raise ConfigError("give table groups or tables, not both")
     tables = None
-    if table:
-        tables = (table,)
-    elif table_group:
+    if names:
+        tables = tuple(dict.fromkeys(names))
+    elif groups:
+        marks, values = db.in_list(groups)
         try:
-            rows = conn.execute("SELECT Table_Nm FROM ComplianceTable WHERE UPPER(Project_Cd) = %s "
-                                "AND UPPER(Table_Grp_Cd) = %s AND Active_Ind = 1", (project, table_group)).fetchall()
+            rows = conn.execute(f"SELECT Table_Nm, Table_Grp_Cd FROM ComplianceTable WHERE UPPER(Project_Cd) = %s "
+                                f"AND UPPER(Table_Grp_Cd) IN ({marks}) AND Active_Ind = 1", (project, *values)).fetchall()
         except Exception as e:  # noqa: BLE001
-            raise ConfigError(f"table group {table_group}: ComplianceTable could not be read: {db.error_line(e)}") from None
+            raise ConfigError(f"table group {', '.join(groups)}: ComplianceTable could not be read: "
+                              f"{db.error_line(e)}") from None
         tables = tuple(sorted({code(r["table_nm"]) for r in rows}))
-        if not tables:
-            log.warning("table group %s of project %s has no active table in ComplianceTable: nothing to do",
-                        table_group, project)
-    sources = source_list(source)
-    return Scope(project, table_group, table, run_type, tables, source_ids(conn, sources) if sources else None)
+        found = {code(r["table_grp_cd"]) for r in rows}
+        for g in groups:
+            if g not in found:
+                log.warning("table group %s of project %s has no active table in ComplianceTable: nothing to do for it",
+                            g, project)
+    sources = code_list(source)
+    return Scope(project, ", ".join(dict.fromkeys(groups)) or None, ", ".join(dict.fromkeys(names)) or None, run_type,
+                 tables, source_ids(conn, sources) if sources else None)
 
 
 # filecheck_options: Which content checks a file gets (ComplianceFileCheckConfig); read by FILE_CHECK and by the load.

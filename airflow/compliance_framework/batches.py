@@ -432,7 +432,8 @@ def create_batches(conn: Connection, clock: Clock, settings: Settings, *, projec
             if x.effective_on(s.run_date) and scheduled(run_types.get(x.run_ty), x)
             and (tables is None or x.table_nm in tables) and (sources is None or x.src_id in sources)]
     if not rows and (run_ty or table_nm or tables is not None or sources is not None):
-        s.errors.append(f"no effective crosswalk rows for {project_cd}/{table_nm or '*'}/{run_ty or '*'} on {s.run_date}")
+        shown = table_nm or (",".join(tables) if tables else "*")
+        s.errors.append(f"no effective crosswalk rows for {project_cd}/{shown}/{run_ty or '*'} on {s.run_date}")
     cache: dict = {}
 
     def dates_on(x: XwalkRow, day: date) -> Optional[tuple[date, date]]:

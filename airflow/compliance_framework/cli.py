@@ -50,8 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     def scope(sp, project_required=False):
         sp.add_argument("--project", required=project_required)
-        sp.add_argument("--table-group")
-        sp.add_argument("--table")
+        sp.add_argument("--table-group", help="table groups, comma separated")
+        sp.add_argument("--table", help="tables, comma separated")
         sp.add_argument("--run-type", required=project_required)
         sp.add_argument("--source", help="Src_IDs or source names, comma separated")
 

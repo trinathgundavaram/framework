@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.72 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.73 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -1338,8 +1338,8 @@ the framework fills in everything else. A CMSUNIV DEV Variable (`airflow_resourc
 | Key | Steps | Default | Values |
 |---|---|---|---|
 | `project` | all | every project | A `Project_Cd`, e.g. `CMSUNIV`. Leave it out only in a NOTIFY that should send the events of every project |
-| `table_group` | all | all | A `Table_Group_Cd` of `ComplianceTable`, e.g. `ODAG`, `SNPCC` |
-| `table` | all | all | A `Table_Nm`, e.g. `ODAG3` |
+| `table_group` | all | all | One or more `Table_Grp_Cd` of `ComplianceTable`: `"ODAG"`, `"ODAG,FA"` or `["ODAG", "FA"]` (every active table of those groups) |
+| `table` | all | all | One or more `Table_Nm`: `"ODAG3"`, `"ODAG3,FA4"` or `["ODAG3", "FA4"]`. Give table groups or tables, not both |
 | `run_type` | all | all | A `Run_Ty`, e.g. `DLY`, `WKLY`, `MNT` |
 | `source` | all | all | One or more sources, by `Src_ID` or `Src_Nm` of `ComplianceSourceSystem`: `"QNXT"`, `"10,11"` or `["10", "SNPCC"]` (a name stands for every source ID with that name). Only those sources' batches, files and events; an unknown source stops the run |
 | `period` | BATCH_CREATION | from the schedule codes | A period code (8.4), e.g. `PREV_DAY`: create batches with these report dates now |
@@ -1553,8 +1553,10 @@ batch needs its override).
 **11.12 Close a batch by hand.** `close-batch` from the command line (2.11); every open source of the batch, or `--src-id` for
 one. Refused before the close date unless released.
 
-**11.13 Run the step for one table group / table / run type / source.** Trigger with `table_group` or `table`,
-and/or `run_type`, and/or `source`. A table runs all its sources; `source` picks sources across tables, e.g. only
+**11.13 Run the step for some table groups / tables / a run type / some sources.** Trigger with `table_group` or
+`table`, and/or `run_type`, and/or `source`; table groups, tables and sources take one value or a list, e.g.
+`{"project": "CMSUNIV", "table_group": "ODAG,FA"}` (one task for both; `"runs": [{"table_group": "ODAG"},
+{"table_group": "FA"}]` gives one task each). A table runs all its sources; `source` picks sources across tables, e.g. only
 QNXT and SNPCC in SOURCE_LOAD (not AZ or Facets of the same tables): `{"project": "CMSUNIV", "source": "QNXT,SNPCC"}`.
 In a Variable, `"source": ["QNXT", "SNPCC"]`, or one task per source with `"runs": [{"source": "QNXT"},
 {"source": "SNPCC"}]`. A trigger's scope is passed on to the DAGs it starts; a Variable's is not, so put the same

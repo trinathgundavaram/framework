@@ -158,10 +158,9 @@ def _batch_creation(app, p: dict) -> ModuleOutcome:
     project, run_type = p["project"], p.get("run_type")
     scope = _scope(app, p)
     period_args = ("period", "period_file", "lookback_days", "lookback_weeks")
-    scheduled_kw = dict(project_cd=project, table_nm=p.get("table"), run_ty=run_type, period=p.get("period"),
+    scheduled_kw = dict(project_cd=project, run_ty=run_type, period=p.get("period"),
                         period_file=p.get("period_file"), lookback_days=p.get("lookback_days"),
-                        lookback_weeks=p.get("lookback_weeks"), tables=scope.tables if p.get("table_group") else None,
-                        sources=scope.src_ids)
+                        lookback_weeks=p.get("lookback_weeks"), tables=scope.tables, sources=scope.src_ids)
     scheduled = None
     if run_type:
         rt = cfgmod.run_type(app.conn, run_type)
