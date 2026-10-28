@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.75 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.76 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -821,7 +821,7 @@ The export table of a core table (EXPORT_LOAD). One row per project + table.
 | `Exp_Schema_Nm`, `Exp_Table_Nm` | Yes | Database and table; `$env` allowed | The export table: the core table's columns (row ID included), `Btch_ID`, the source column, optionally `Exp_Btch_ID` |
 | `Exp_Btch_Col_Nm` | No | Column name | Column that gets the batch ID again (default `Exp_Btch_ID`, filled only if present) |
 | `Exp_Proc_Nm` | No | `database.procedure`; `$env` allowed | A procedure that does the export instead of the framework (it deletes and inserts that source's rows itself) |
-| `Exp_Proc_Parm_Txt` | No | e.g. `{btch_id}, {data_btch_id}, {src_id}` or `'PROVISIONING_WORK$ENV', {run_ty}, MSG` | The procedure's arguments in order: placeholders, fixed values in quotes and the OUT parameter's name (section 8.10); empty = `{btch_id}, {data_btch_id}, {exp_btch_id}` |
+| `Exp_Proc_Parm_Txt` | No | e.g. `{btch_id}, {data_btch_id}, {src_id}` or `'PROVISIONING_WORK_$ENV', {run_ty}, MSG` | The procedure's arguments in order: placeholders, fixed values in quotes and the OUT parameter's name (section 8.10); empty = `{btch_id}, {data_btch_id}, {exp_btch_id}` |
 | `Exp_Sql_Txt` | No | One `SELECT` | Used when there is no procedure: its rows are the export rows of a batch + source, instead of the plain copy from core. Name each column after an export column (`AS`); the batch column, `Exp_Btch_Col_Nm` and the source column are always filled by the framework. Placeholders as for the procedure (8.10), e.g. `{data_btch_id}` (the batch holding the data: the batch itself, or the one it carries forward) and `{src_id}` |
 | `Exp_Pre_Sql_Txt` | No | One statement: `CALL`, `UPDATE`, `INSERT`, `DELETE`, `MERGE` … | Runs **once per batch**, before its sources are exported |
 | `Exp_Post_Sql_Txt` | No | One statement | Runs **once per batch**, after all its sources are exported |
@@ -1198,16 +1198,16 @@ Besides placeholders, `Exp_Proc_Parm_Txt` takes, in any position:
 
 | Item | Example | Passed as |
 |---|---|---|
-| Fixed value, in quotes (a quote inside doubled) | `'PROVISIONING_WORK$ENV'`, `'(''1''=''1'')'` | The text between the quotes, as written (`$ENV` is not replaced; `''` is one quote), as a parameter |
+| Fixed value, in quotes (a quote inside doubled) | `'EXPORT_FEED_$ENV_T'`, `'(''1''=''1'')'` | The text between the quotes (`''` is one quote), as a parameter. Only a value with `$ENV` changes, and only at the token: it is replaced at runtime (`EXPORT_FEED_DEV_T` in DEV; in UAT / PROD, where it is empty, the underscore next to it goes too: `EXPORT_FEED_T`), so one row serves every environment. Every other value, e.g. the filter, is passed as written |
 | OUT parameter, its name without quotes or braces | `MSG` | Written into the `CALL`; its value is written to the task log and the step report (`procedure_output`) |
 
 ```sql
 UPDATE HSABC_DEV.ComplianceExportConfig
 SET Exp_Proc_Nm = 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV',
-    Exp_Proc_Parm_Txt = '''PROVISIONING_WORK$ENV'', ''CMSUNIV_CDAG_Table1_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_CDAG1_2022'', ''CDAG1'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG'
+    Exp_Proc_Parm_Txt = '''PROVISIONING_WORK_$ENV'', ''CMSUNIV_CDAG_Table1_2022'', ''EXPORT_FEED_$ENV_T'', ''SDO_CMSUNIV_CDAG1_2022'', ''CDAG1'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG'
 WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'CDAG1';
--- EXPORT_LOAD calls: CALL HSPROCS_DEV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV('PROVISIONING_WORK$ENV', 'CMSUNIV_CDAG_Table1_2022',
---   'EXPORT_FEED$ENV_T', 'SDO_CMSUNIV_CDAG1_2022', 'CDAG1', <run type>, <version>, '(''1''=''1'')', MSG)
+-- EXPORT_LOAD in DEV calls: CALL HSPROCS_DEV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV('PROVISIONING_WORK_DEV', 'CMSUNIV_CDAG_Table1_2022',
+--   'EXPORT_FEED_DEV_T', 'SDO_CMSUNIV_CDAG1_2022', 'CDAG1', <run type>, <version>, '(''1''=''1'')', MSG)
 ```
 
 A name without braces that is a placeholder (e.g. `btch_id`) is still the placeholder; any other name is an OUT
@@ -1363,7 +1363,7 @@ the framework fills in everything else. A CMSUNIV DEV Variable (`airflow_resourc
 | `table_group` | all | all | One or more `Table_Grp_Cd` of `ComplianceTable`: `"ODAG"`, `"ODAG,FA"` or `["ODAG", "FA"]` (every active table of those groups) |
 | `table` | all | all | One or more `Table_Nm`: `"ODAG3"`, `"ODAG3,FA4"` or `["ODAG3", "FA4"]`. Give table groups or tables, not both |
 | `run_type` | all | all | A `Run_Ty`, e.g. `DLY`, `WKLY`, `MNT` |
-| `source` | all | all | One or more sources, by `Src_ID` or `Src_Nm` of `ComplianceSourceSystem`: `"QNXT"`, `"10,11"` or `["10", "SNPCC"]` (a name stands for every source ID with that name). Only those sources' batches, files and events; an unknown source stops the run |
+| `source` | all | all | One or more sources, by `Src_ID` or `Src_Nm` of `ComplianceSourceSystem`: `"QNXT"`, `"10,11"` or `["10", "DatamartSNPMOC"]` (a name stands for every source ID with that name). Only those sources' batches, files and events; an unknown source stops the run |
 | `period` | BATCH_CREATION | from the schedule codes | A period code (8.4), e.g. `PREV_DAY`: create batches with these report dates now |
 | `period_file` | BATCH_CREATION | none | A Python file with a custom period function (advanced) |
 | `lookback_days`, `lookback_weeks` | BATCH_CREATION | none | Whole numbers: create the missed batches of the last n days / weeks |
@@ -1445,7 +1445,7 @@ come from the Variable: `NOTIFY_BACKEND = airflow`, `DEFAULT_NOTIFY_EMAILS` = `e
 | `NOTIFY_BACKEND` | `airflow` (command line: `log`) | `airflow` (email through `smtp_default`) or `log` (write the alert to the log only) |
 | `DEFAULT_NOTIFY_EMAILS` | `email_recipient` | Alert recipients, comma-separated |
 | `NOTIFY_FROM_EMAIL` | first `email_recipient` | Sender address of the alerts |
-| `ENV_VALUE` | from `load_env` | Value of `$env` when it should differ from `load_env` |
+| `ENV_VALUE` | from `load_env` | Value of `$env` when it should differ from `load_env`. `$env` in a name is `dev` / `qa` in DEV / QA and empty in UAT / PROD; an empty one leaves no extra underscore (`EXPORT_FEED_$ENV_T` → `EXPORT_FEED_T`, `HSPROCS_$ENV.proc` → `HSPROCS.proc`, `PROVISIONING_WORK_$ENV` → `PROVISIONING_WORK`) |
 
 ### 9.5 Triggering a DAG by hand (JSON)
 
@@ -1485,7 +1485,7 @@ export FRAMEWORK_METADATA_SCHEMA=HSABC_DEV FRAMEWORK_ENVIRONMENT=DEV
 | `python -m compliance_framework.cli close-batch --btch-id <Btch_ID> --closed-by <you> [--src-id <Src_ID>]` | Closes a batch (or one source of it) by hand |
 | `python -m compliance_framework.cli test-connection --source <Src_Conn_Cd> --db-type SQLSERVER` | Tests an internal source's connection (the Airflow Connection must be available, e.g. `AIRFLOW_CONN_<ID>`) |
 | `python -m compliance_framework.cli show-config` | The settings in effect and where each came from |
-| `python -m compliance_framework.cli run --module <STEP> --project CMSUNIV [--source QNXT,SNPCC] [--as-of <date>]` | Runs any step by hand, also `FILE_RULES` |
+| `python -m compliance_framework.cli run --module <STEP> --project CMSUNIV [--source 10,11] [--as-of <date>]` | Runs any step by hand, also `FILE_RULES` |
 
 ### 9.6 One DAG at several times (timed runs)
 
@@ -1582,9 +1582,9 @@ one. Refused before the close date unless released.
 `table`, and/or `run_type`, and/or `source`; table groups, tables and sources take one value or a list, e.g.
 `{"project": "CMSUNIV", "table_group": "ODAG,FA"}` (one task for both; `"runs": [{"table_group": "ODAG"},
 {"table_group": "FA"}]` gives one task each). A table runs all its sources; `source` picks sources across tables, e.g. only
-QNXT and SNPCC in SOURCE_LOAD (not AZ or Facets of the same tables): `{"project": "CMSUNIV", "source": "QNXT,SNPCC"}`.
-In a Variable, `"source": ["QNXT", "SNPCC"]`, or one task per source with `"runs": [{"source": "QNXT"},
-{"source": "SNPCC"}]`. A trigger's scope is passed on to the DAGs it starts; a Variable's is not, so put the same
+QNXT (10) and SNPCC (11, whose `Src_Nm` is `DatamartSNPMOC`) in SOURCE_LOAD (not AZ or Facets of the same tables):
+`{"project": "CMSUNIV", "source": "10,11"}`. In a Variable, `"source": ["10", "11"]`, or one task per source with
+`"runs": [{"source": "10"}, {"source": "11"}]`. A trigger's scope is passed on to the DAGs it starts; a Variable's is not, so put the same
 `source` in the next DAG's Variable (e.g. EXPORT_LOAD) when it should also work on those sources only.
 
 **11.14 An alert email arrived.** Look up the event in 8.15 and the batch in 12.1 / 12.2.

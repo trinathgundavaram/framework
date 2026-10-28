@@ -302,14 +302,15 @@ class ExportLoader:
                  "req_dt": _as_date(b["req_dt_key"]), "rpt_start": _as_date(b["rpt_start_dt_key"]),
                  "rpt_end": _as_date(b["rpt_end_dt_key"])}
         proc = ".".join(db.ident(p) for p in e.proc_nm.split("."))
+        args = [a._replace(value=self.settings.resolve_env(a.value, identifier=False)) if a.kind == "TEXT" else a for a in e.proc_params]
         shown = [("{" + a.value + "}") if a.kind == "PARAM" else ("'" + a.value.replace("'", "''") + "'")
-                 if a.kind == "TEXT" else a.value for a in e.proc_params]
+                 if a.kind == "TEXT" else a.value for a in args]
         db.log_sql(f"EXPORT_LOAD | {b['btch_id']} source {b['src_id']} | procedure {e.proc_nm}",
                    f"CALL {proc}({', '.join(shown)})", given)
         with self.conn.transaction():
             out = self.conn.execute_qmark(
-                f"CALL {proc}({', '.join(a.value if a.kind == 'OUT' else '?' for a in e.proc_params)})",
-                [given[a.value] if a.kind == "PARAM" else a.value for a in e.proc_params if a.kind != "OUT"]).fetchone()
+                f"CALL {proc}({', '.join(a.value if a.kind == 'OUT' else '?' for a in args)})",
+                [given[a.value] if a.kind == "PARAM" else a.value for a in args if a.kind != "OUT"]).fetchone()
             if out:
                 item["procedure_output"] = out
                 log.info("EXPORT_LOAD | %s | procedure %s returned %s", b["btch_id"], e.proc_nm, out)

@@ -1,11 +1,12 @@
 """The application object and the steps (modules) it runs."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Any, Callable, Mapping, Optional
 
-from compliance_framework import config as cfgmod
+from compliance_framework import __version__, config as cfgmod
 from compliance_framework.adapters import FileStore, RuleEngine, build_channel, build_file_store, build_rule_engine, dirname
 from compliance_framework.audit import NotificationDispatcher
 from compliance_framework.batches import (BatchCloser, DecisionProcessor, IntakeProcessor, ScheduleSummary, create_batches,
@@ -18,6 +19,7 @@ from compliance_framework.filecheck import FileChecker
 from compliance_framework.ingest import IngestPipeline
 from compliance_framework.load import MESSAGES
 
+log = logging.getLogger(__name__)
 
 # app: Service wiring (design §15.3 for the operational health report).
 
@@ -409,4 +411,5 @@ def _coerce(spec: ModuleSpec, params: Mapping[str, Any]) -> dict[str, Any]:
 def run_module(app, name: str, params: Optional[Mapping[str, Any]] = None) -> ModuleOutcome:
     """Identify the module by name, validate its parameters and run it on `app`."""
     spec = resolve_module(name)
+    log.info("compliance_framework %s | %s", __version__, spec.name)
     return spec.handler(app, _coerce(spec, params or {}))

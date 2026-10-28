@@ -62,17 +62,22 @@ _ENV_TOKEN = re.compile(r"\$env", re.IGNORECASE)
 
 
 def resolve_env(text: Optional[str], environment: str, value: Optional[str] = None, identifier: bool = True):
-    """Replace $env / $ENV / $Env with the environment's value in the token's own casing (GRE convention)."""
+    """Replace $env / $ENV / $Env with the environment's value in the token's own casing (GRE convention). In a name,
+    an empty value leaves no doubled, leading or trailing underscore (HSPROCS_$ENV.x -> HSPROCS.x in PROD); in other
+    text only the token changes, an empty one with the underscore next to it (EXPORT_FEED_$ENV_T -> EXPORT_FEED_T)."""
     if not text or not _ENV_TOKEN.search(text):
         return text
     low = (value if value is not None else ENV_TOKEN_VALUES.get(environment.upper(), environment.lower())).lower()
+    if not identifier and not low:
+        return re.sub(r"_\$env|\$env_?", "", text, flags=re.IGNORECASE)
 
     def sub(m):
         token = m.group(0)[1:]
         return low.upper() if token.isupper() else low if token.islower() else low.capitalize()
 
     out = _ENV_TOKEN.sub(sub, text)
-    return re.sub(r"_{2,}", "_", out) if identifier else out
+    return re.sub(r"_+(?=\.|$)|(?<=\.)_+|^_+", "", re.sub(r"_{2,}", "_", out)) if identifier and not low else \
+        re.sub(r"_{2,}", "_", out) if identifier else out
 
 
 
