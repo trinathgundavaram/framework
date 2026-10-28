@@ -293,7 +293,7 @@ feed views (extract).
 |---|---|---|---|
 | EX-01 | Not due yet | Open WKLY batch before its close date | Not exported (or listed held); report `NO BATCHES TO EXPORT` |
 | EX-02 | Due on close date | DLY batch with data (SLA 1) | Exported the same day; `EXPORT_LOADED`; Q8 rows = core rows; `Btch_ID` = batch |
-| EX-03 | Procedure mode | A test table with `Exp_Proc_Nm` set (CMSUNIV itself has no procedure) | Log `procedure <db>.<proc>` with parameters; rows stamped `Btch_ID` (and `Exp_Btch_ID` if present) |
+| EX-03 | Procedure mode | A test table with `Exp_Proc_Nm` set (CMSUNIV itself has no procedure) | Log `procedure <db>.<proc>` with parameters; rows stamped `Btch_ID` |
 | EX-04 | All sources | Batch with several sources | Each source exported; one `EXPORT_LOADED` per source row |
 | EX-05 | Re-export replaces | Reload a file (FL-08), export again | Old rows of that source removed, new inserted; no duplicates |
 | EX-06 | Only changed batches | Rerun EXPORT_LOAD without changes | Nothing exported again |
@@ -305,7 +305,7 @@ feed views (extract).
 | EX-12 | Release time | `"settings":{"RELEASE_TIME":"20:00"}` | Due batches exported only from 20:00 on the close date |
 | EX-13 | Named batch | `{"project":"CMSUNIV","batch":"<batch>"}` | Only that batch, even if exported before |
 | EX-14 | Copy mode | CMSUNIV export rows as delivered (no procedure) | Core columns copied into `SDO_CMSUNIV_<table>_2022` by name, then value code, then order; `Btch_ID` = batch; validate lists the pairs and warns about feed columns no core column fills |
-| EX-15 | Custom SELECT | `Exp_Sql_Txt` reading core with `{data_btch_id}` / `{src_id}` and aliases | Rows from the SELECT; batch, `Exp_Btch_ID` and source columns stamped by the framework even if the SELECT returns its own; SQL with values in the log |
+| EX-15 | Custom SELECT | `Exp_Sql_Txt` reading core with `{data_btch_id}` / `{src_id}` and aliases | Rows from the SELECT; batch and source columns stamped by the framework even if the SELECT returns its own; SQL with values in the log |
 | EX-16 | SELECT column not in export | Alias to a non-existing column | Batch `FAILED`: "returns columns that are not in …"; `EXPORT_LOAD_FAILED` |
 | EX-17 | Pre / post once per batch | `Exp_Pre_Sql_Txt` inserting a log row, `Exp_Post_Sql_Txt` updating the batch's rows | Pre and post run once per batch (not per source), in order, logged with values |
 | EX-18 | Rollback | Make post fail (bad table) | Pre, every source's export and post rolled back; every source `FAILED`; old export rows still there; retried next run |

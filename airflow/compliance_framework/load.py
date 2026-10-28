@@ -785,17 +785,17 @@ def _temporal_value(v, temporal: str, tz: str):
     return at.strftime(TIMESTAMP_TEXT) if temporal == "TIMESTAMP" else at.isoformat(sep=" ", timespec="seconds")
 
 
-def export_plan(exp_cols: list, core_cols: list, mapping, exp_batch: str, exp_btch_col: str, core_batch: str) -> list:
+def export_plan(exp_cols: list, core_cols: list, mapping, exp_batch: str, core_batch: str) -> list:
     """[(export column, core column name or None)] for the plain copy: the batch column takes the core batch column;
     a column takes the core column of the same name, or a derived one (ComplianceTargetColumnConfig) the core column
     with the same value code; the columns left on both sides are paired in table order (a core table whose names
     differ, e.g. an internal source's); export columns left over stay empty."""
     by_name = {c.name.casefold(): c for c in core_cols}
     by_code = {mapping[c.name]: c for c in core_cols if c.name in mapping}
-    taken, out = {core_batch.casefold(), exp_btch_col.casefold()}, {}
+    taken, out = {core_batch.casefold()}, {}
     for c in exp_cols:
-        if c.name.casefold() in (exp_batch.casefold(), exp_btch_col.casefold()):
-            out[c.name] = core_batch if c.name.casefold() == exp_batch.casefold() else None
+        if c.name.casefold() == exp_batch.casefold():
+            out[c.name] = core_batch
             continue
         s = by_name.get(c.name.casefold())
         if s is not None and s.name.casefold() not in taken:

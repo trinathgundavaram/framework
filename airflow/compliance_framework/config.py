@@ -327,7 +327,7 @@ def active_query_configs(conn: Connection, settings=None) -> list[QueryConfig]:
     return [QueryConfig.from_row(r, settings) for r in rows]
 
 
-EXPORT_PROC_PARAMS = ("btch_id", "data_btch_id", "exp_btch_id", "reused_btch_ids", "project_cd", "table_nm", "src_id",
+EXPORT_PROC_PARAMS = ("btch_id", "data_btch_id", "reused_btch_ids", "project_cd", "table_nm", "src_id",
                       "run_ty", "version", "req_id", "req_dt", "rpt_start", "rpt_end")
 
 
@@ -356,8 +356,8 @@ def proc_args(text: str) -> tuple:
     return tuple(args)
 
 
-DEFAULT_EXPORT_PROC_PARAMS = tuple(ProcArg("PARAM", n) for n in ("btch_id", "data_btch_id", "exp_btch_id"))
-EXPORT_BATCH_PARAMS = ("btch_id", "exp_btch_id", "project_cd", "table_nm", "run_ty", "version", "req_dt", "rpt_start",
+DEFAULT_EXPORT_PROC_PARAMS = tuple(ProcArg("PARAM", n) for n in ("btch_id", "data_btch_id"))
+EXPORT_BATCH_PARAMS = ("btch_id", "project_cd", "table_nm", "run_ty", "version", "req_dt", "rpt_start",
                        "rpt_end", "exp_schema_nm", "exp_table_nm")
 EXPORT_SQL_PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
@@ -384,7 +384,6 @@ class ExportConfig:
     exp_schema_nm: str
     exp_table_nm: str
     active: bool = True
-    exp_btch_col: str = "exp_btch_id"
     proc_nm: Optional[str] = None
     proc_params: tuple = DEFAULT_EXPORT_PROC_PARAMS
     sql_txt: Optional[str] = None
@@ -399,7 +398,7 @@ class ExportConfig:
     def from_row(cls, r: dict, settings=None) -> "ExportConfig":
         name = settings.resolve_env if settings else (lambda text, identifier=True: text)
         return cls(code(r["project_cd"]), code(r["table_nm"]), name(r["exp_schema_nm"]), r["exp_table_nm"],
-                   r["active_ind"] == 1, (_text(r.get("exp_btch_col_nm")) or "Exp_Btch_ID").lower(),
+                   r["active_ind"] == 1,
                    name(_text(r.get("exp_proc_nm"))) if _text(r.get("exp_proc_nm")) else None,
                    proc_args(r["exp_proc_parm_txt"]) if _text(r.get("exp_proc_parm_txt")) else DEFAULT_EXPORT_PROC_PARAMS,
                    _text(r.get("exp_sql_txt")), _text(r.get("exp_pre_sql_txt")), _text(r.get("exp_post_sql_txt")))
@@ -988,13 +987,13 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
                 core_batch = batch_column((c.name for c in core_list), mapping)
                 if not core_list or core_batch is None:
                     continue
-                plan = export_plan(exp_list, core_list, mapping, batch_column(exp, mapping), e.exp_btch_col, core_batch)
+                plan = export_plan(exp_list, core_list, mapping, batch_column(exp, mapping), core_batch)
                 where = f"{label}: from core {x.core_schema_nm}.{x.core_table_nm}"
                 renamed = [f"{s} -> {c.name}" for c, s in plan if s and s.casefold() != c.name.casefold()
                            and mapping.get(c.name) is None and c.name.casefold() != batch_column(exp, mapping).casefold()]
                 if renamed:
                     log.info("%s by column position: %s", where, ", ".join(renamed))
-                empty = [c.name for c, s in plan if s is None and c.name.casefold() != e.exp_btch_col.casefold()
+                empty = [c.name for c, s in plan if s is None
                          and mapping.get(c.name) not in ("CURRENT_FLAG", "END_TIMESTAMP")]
                 if empty:
                     add("EXPORT_CONFIG", f"{where}: export columns with no core column (loaded as NULL): "

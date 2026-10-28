@@ -32,7 +32,6 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceExportConfig (
   Table_Nm        VARCHAR(63)    NOT NULL,
   Exp_Schema_Nm   VARCHAR(128)   NOT NULL,
   Exp_Table_Nm    VARCHAR(63)    NOT NULL,
-  Exp_Btch_Col_Nm VARCHAR(128),
   Exp_Proc_Nm     VARCHAR(256),
   Exp_Proc_Parm_Txt VARCHAR(1000),
   Exp_Sql_Txt       VARCHAR(8000),

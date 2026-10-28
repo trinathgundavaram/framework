@@ -40,7 +40,6 @@ airflow_resources/                (not deployed with the DAGs)
   sql/schema.sql                  Teradata DDL ({{META_DB}} template)
   examples/cmsuniv_dev            one Variable per DAG (the CMSUNIV project, DEV)
   examples/cmsuniv_setup.sql      every metadata row of the CMSUNIV project
-  examples/cmsuniv_export_dev.sql the CMSUNIV export tables and procedures (DBA)
   requirements.txt                Python packages for the workers
 ```
 
@@ -308,8 +307,7 @@ export row can be traced back to core.
 
 **Batch and source in the export.** `Btch_ID` is the table-level batch (every source of the table and run type), so
 the export table needs the column mapped to `SOURCE_ID` too: a batch's export rows are replaced per source. The
-optional column `Exp_Btch_ID` (another name: `Exp_Btch_Col_Nm` in `ComplianceExportConfig`) is filled with the same
-`Btch_ID`; the rules receive it as `exp_btch_id`. A carried-forward copy gets the `Btch_ID` of the batch it is
+rules receive the batch as `btch_id`. A carried-forward copy gets the `Btch_ID` of the batch it is
 copied to. An export procedure gets `{src_id}`: it deletes and inserts only that source's rows and fills the source
 column.
 
@@ -374,9 +372,9 @@ examples: 22:00), so a batch is exported before it closes.
 which batches to export (changes, hold, release, latest batch of the period), takes the locks, runs the call in one
 transaction, counts the batch's rows in the export table afterwards and records `EXPORT_LOADED`; the procedure deletes
 and inserts the export rows itself. `Exp_Proc_Parm_Txt` lists its parameters in order, e.g.
-`{btch_id}, {data_btch_id}, {exp_btch_id}` (the default when empty). Available: `{btch_id}` (the batch exported),
+`{btch_id}, {data_btch_id}` (the default when empty). Available: `{btch_id}` (the batch exported),
 `{data_btch_id}` (the batch whose core rows are its data: itself, the batch it reuses, or NULL when it has no data),
-`{exp_btch_id}`, `{reused_btch_ids}` (the batches it reuses, comma separated, whose rows must stay), `{project_cd}`,
+`{reused_btch_ids}` (the batches it reuses, comma separated, whose rows must stay), `{project_cd}`,
 `{table_nm}`, `{src_id}`, `{run_ty}`, `{version}`, `{req_id}`, `{req_dt}`, `{rpt_start}`, `{rpt_end}`. Existing
 tables: `ALTER TABLE <META_DB>.ComplianceExportConfig ADD Exp_Proc_Nm VARCHAR(256), ADD Exp_Proc_Parm_Txt VARCHAR(1000);`.
 
@@ -573,8 +571,7 @@ A path with its own server uses that server with the NAS Connection's login. `$e
 
 Every metadata row of the CMSUNIV project, in load order, is in `examples/cmsuniv_setup.sql`: the project, 55
 sources, run types and report periods, the crosswalk, file sources (one per FDR source and table), internal sources
-(QNXT, AZ, SNPCC), derived columns, file checks, table groups and the export feed. Its export tables and procedures
-are in `examples/cmsuniv_export_dev.sql`. The override templates (REUSE, LATE_ARRIVAL, CORRECTION, REOPEN, approve,
+(QNXT, AZ, SNPCC), derived columns, file checks, table groups and the export feed (the universes' export procedure). The override templates (REUSE, LATE_ARRIVAL, CORRECTION, REOPEN, approve,
 reject, stop) are in the runbook (`OPERATIONAL_RUNBOOK.md`, section 6.2).
 
 ## File names (`Src_File_Nm_Tmplt`)
@@ -1257,7 +1254,7 @@ String comparisons follow the session's transaction mode (Teradata mode is not c
 With `RULE_ENGINE=gre` and `GRE_ENTRYPOINT=compliance_framework.export:run_gre`, each
 `ComplianceRuleBinding` of a file runs that GRE `rule_group` (and `rule_variant`; `*` = all) through the
 GRE's `run_rules()`, with `run_key = CBF_LOAD_<Load_ID>` and the file's context as `run_params`
-(`{btch_id}`, `{load_id}`, `{stg_schema_nm}`, `{stg_table_nm}`, `{core_schema_nm}`, `{core_table_nm}`, `{exp_schema_nm}`, `{exp_table_nm}`, `{exp_btch_id}` (only with an export table), `{project_cd}`, `{table_nm}`, `{src_id}`,
+(`{btch_id}`, `{load_id}`, `{stg_schema_nm}`, `{stg_table_nm}`, `{core_schema_nm}`, `{core_table_nm}`, `{exp_schema_nm}`, `{exp_table_nm}`, `{project_cd}`, `{table_nm}`, `{src_id}`,
 `{run_ty}`, `{rpt_start_dt_key}`, `{rpt_end_dt_key}`, `{req_dt_key}`). The verdict of each rule is read
 from `<gre meta_db>.gre_results`: `PASS` / `WARN` pass, `FAIL` marks the file's rules as failed (or as
 warnings under ANNOTATE), anything else is a technical failure that is retried. This happens in the

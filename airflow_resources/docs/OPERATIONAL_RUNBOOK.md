@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.76 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.77 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -253,7 +253,7 @@ columns or by calling the export procedure with the batch's values.
 - **Due:** every run type (`SCHEDULED` and `ADHOC`) from the close date on (from `RELEASE_TIME` that day, if set),
   or earlier when released. Held run types wait.
 - **Which data:** the newest batch of the period whose resolution is `NEW_FILE`, `CARRY_FORWARD` or `NO_DATA`. A
-  re-export replaces the batch's own export rows (`Exp_Btch_ID`); a batch is exported again only when it has new
+  re-export replaces the batch's own export rows (`Btch_ID` + source column); a batch is exported again only when it has new
   data since its last export.
 - **How:** procedure, custom SELECT (`Exp_Sql_Txt`) or plain copy, with optional pre / post statements once per batch
   (5.11).
@@ -818,18 +818,17 @@ The export table of a core table (EXPORT_LOAD). One row per project + table.
 | Column | Required | Values | Meaning |
 |---|---|---|---|
 | `Project_Cd`, `Table_Nm` | Yes | | |
-| `Exp_Schema_Nm`, `Exp_Table_Nm` | Yes | Database and table; `$env` allowed | The export table: the core table's columns (row ID included), `Btch_ID`, the source column, optionally `Exp_Btch_ID` |
-| `Exp_Btch_Col_Nm` | No | Column name | Column that gets the batch ID again (default `Exp_Btch_ID`, filled only if present) |
+| `Exp_Schema_Nm`, `Exp_Table_Nm` | Yes | Database and table; `$env` allowed | The export table: the core table's columns (row ID included), `Btch_ID` and the source column |
 | `Exp_Proc_Nm` | No | `database.procedure`; `$env` allowed | A procedure that does the export instead of the framework (it deletes and inserts that source's rows itself) |
-| `Exp_Proc_Parm_Txt` | No | e.g. `{btch_id}, {data_btch_id}, {src_id}` or `'PROVISIONING_WORK_$ENV', {run_ty}, MSG` | The procedure's arguments in order: placeholders, fixed values in quotes and the OUT parameter's name (section 8.10); empty = `{btch_id}, {data_btch_id}, {exp_btch_id}` |
-| `Exp_Sql_Txt` | No | One `SELECT` | Used when there is no procedure: its rows are the export rows of a batch + source, instead of the plain copy from core. Name each column after an export column (`AS`); the batch column, `Exp_Btch_Col_Nm` and the source column are always filled by the framework. Placeholders as for the procedure (8.10), e.g. `{data_btch_id}` (the batch holding the data: the batch itself, or the one it carries forward) and `{src_id}` |
+| `Exp_Proc_Parm_Txt` | No | e.g. `{btch_id}, {data_btch_id}, {src_id}` or `'PROVISIONING_WORK_$ENV', {run_ty}, MSG` | The procedure's arguments in order: placeholders, fixed values in quotes and the OUT parameter's name (section 8.10); empty = `{btch_id}, {data_btch_id}` |
+| `Exp_Sql_Txt` | No | One `SELECT` | Used when there is no procedure: its rows are the export rows of a batch + source, instead of the plain copy from core. Name each column after an export column (`AS`); the batch column and the source column are always filled by the framework. Placeholders as for the procedure (8.10), e.g. `{data_btch_id}` (the batch holding the data: the batch itself, or the one it carries forward) and `{src_id}` |
 | `Exp_Pre_Sql_Txt` | No | One statement: `CALL`, `UPDATE`, `INSERT`, `DELETE`, `MERGE` … | Runs **once per batch**, before its sources are exported |
 | `Exp_Post_Sql_Txt` | No | One statement | Runs **once per batch**, after all its sources are exported |
 | `Active_Ind` | Default 1 | | |
 
 ```sql
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG3_2022', NULL, NULL, NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG3_2022', NULL, NULL, 1);
 -- an existing feed table: it needs the batch column (Btch_ID) and the source column (e.g. Src_Data_Key)
 ```
 
@@ -845,7 +844,7 @@ VALUES ('CMSUNIV', 'ODAG3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG3_2022', NULL
 pre, then every source of the batch (in any mode), then post. If any of them fails, all of it is rolled back, every
 source of the batch is reported `FAILED` (`EXPORT_LOAD_FAILED`, emailed) and it is tried again on the next run.
 Without them, each source is exported on its own as before. Placeholders of pre / post (batch level): `{btch_id}`,
-`{exp_btch_id}`, `{project_cd}`, `{table_nm}`, `{run_ty}`, `{version}`, `{req_dt}`, `{rpt_start}`, `{rpt_end}`,
+`{project_cd}`, `{table_nm}`, `{run_ty}`, `{version}`, `{req_dt}`, `{rpt_start}`, `{rpt_end}`,
 `{exp_schema_nm}`, `{exp_table_nm}`. All three texts: one statement (no `;` inside; several steps go in a
 procedure), placeholders passed as parameters (write `{btch_id}`, not `'{btch_id}'`), `$env` not replaced, every
 statement written to the task log with its values; `validate-config` checks them.
@@ -1189,7 +1188,7 @@ Bound as parameters (never pasted into the text).
 ### 8.10 Export procedure parameters (`Exp_Proc_Parm_Txt`)
 
 `{btch_id}` (the batch exported), `{data_btch_id}` (the batch whose core rows are its data: itself, the batch it
-reuses, or NULL when no data), `{exp_btch_id}` (= the batch ID), `{reused_btch_ids}` (batches it reuses, comma
+reuses, or NULL when no data), `{reused_btch_ids}` (batches it reuses, comma
 separated: keep their rows), `{project_cd}`, `{table_nm}`, `{src_id}`, `{run_ty}`, `{version}`, `{req_id}`,
 `{req_dt}`, `{rpt_start}`, `{rpt_end}`. The procedure deletes and inserts only that source's rows and fills the source
 column.
@@ -1519,7 +1518,7 @@ scope) plus what the trigger gives.
 3. **Report dates and crosswalk**: one `ComplianceRunTypePeriod` row per scheduled run type (5.5), then one crosswalk
    row per table + source listing its run types (5.6), plus rows for one run type where a source differs.
 4. **Staging, core, export tables** (DBA): file columns, `Btch_ID`, a source column, derived columns; export =
-   core's columns + `Exp_Btch_ID` (optional).
+   core's columns (with `Btch_ID` and the source column).
 5. **How data arrives**: a file config per file source (5.7), a query config per internal source (5.8).
 6. **Derived columns**: section 5.10 – at least `SOURCE_ID`; usually `RUN_TYPE`, `VERSION`, `FILE_NAME`,
    `LOAD_TIMESTAMP`, `ROW_SEQUENCE`.
@@ -1816,6 +1815,7 @@ differs from `schema.sql` (no rows = up to date). A NOT NULL column that should 
 | 0.3.62 | the `Load_Stat` renames below |
 | 0.3.63 | the timeline event renames below |
 | 0.3.67 | `ALTER TABLE HSABC_DEV.ComplianceExportConfig ADD Exp_Sql_Txt VARCHAR(8000), ADD Exp_Pre_Sql_Txt VARCHAR(8000), ADD Exp_Post_Sql_Txt VARCHAR(8000);` |
+| 0.3.77 | `ALTER TABLE HSABC_DEV.ComplianceExportConfig DROP Exp_Btch_Col_Nm;` The extra export batch column (`Exp_Btch_ID`) and the `{exp_btch_id}` placeholder are gone: export tables carry the batch in `Btch_ID` only. Rows whose `Exp_Proc_Parm_Txt` / `Exp_Pre_Sql_Txt` / `Exp_Post_Sql_Txt` use `{exp_btch_id}` change it to `{btch_id}` (`validate-config` lists them); an empty `Exp_Proc_Parm_Txt` now means `{btch_id}, {data_btch_id}` |
 | 0.3.71 | `airflow_resources/sql/upgrade_0.3.71.sql`: the audit columns of every framework table renamed (`Created_Dtts` → `Load_Dtts`, `Created_By` → `LoadUser_ID`, `Updated_Dtts` → `LastUpdt_Dtts`, `Updated_By` → `LastUpdt_ID`); six tables (`ComplianceRunType`, `ComplianceDataSetSourceXwalk`, `ComplianceSourceFileConfig`, `ComplianceRequestControl`, `ComplianceFileLoad`, `CMS_ComplianceExceptionsAudit`) backed up, recreated in the new column order (audit columns last) and filled again, then the backups dropped; `ComplianceRequestControl` and `ComplianceFileLoad` get `LoadUser_ID` / `LastUpdt_ID`. Fill the four `{{NEXT_...}}` start values from step 2.0 first so the IDs are kept. Every framework update now sets `LastUpdt_ID` to the database user. Run it with the DAGs paused, then deploy the code |
 
 ```sql
