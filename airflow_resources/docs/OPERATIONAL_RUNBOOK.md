@@ -1563,6 +1563,7 @@ one. Refused before the close date unless released.
 **11.16 Change a version.** For every run type of the source: end the crosswalk row (`Effective_End_Dt_Key`) and
 add a new row with the new `Cmplnc_Vrsn` from the next day. For one run type only: add a row for that run type with
 the new version from its start date (it replaces the list's entry). Update `File_Vrsn_Cd` if file names change.
+For a yearly protocol change with new tables see 11.20.
 
 **11.17 Stop a source or table.** Set `Active_Ind = 0` on its crosswalk rows (and file / query config). To stop
 one run type of a source: remove it from the row's list, or add a row for that run type with `Include_Ind = 0`.
@@ -1572,6 +1573,29 @@ one run type of a source: remove it from the row's list, or add a row for that r
 
 **11.19 Change the report dates of a run type.** Update `Rpt_Period_Cd` of its `ComplianceRunTypePeriod` row (the
 project's `*` row, or add a row for one table). Batches already created keep their dates.
+
+**11.20 Yearly protocol version change (e.g. CMSUNIV 2200 → 2300).** The project and its table names (`Table_Nm`)
+stay. Only the tables the new protocol changes move to the new version; the others keep the old version and are
+not touched. A changed table gets new staging, core and export tables and a new file version, named like the old
+ones with the year changed (`ODAG_DE_TABLE1_2022` → `ODAG_DE_TABLE1_2023`); a query source reads new source tables
+(`Staging.cms2022.ODAG_Table3_2022` → `Staging.cms2023.ODAG_Table3_2023`). Old-version files do not arrive after
+the cutover. Use `airflow_resources/sql/version_cutover_template.sql`:
+
+| Step | When | What |
+|---|---|---|
+| Fill the placeholders | – | `{{PROJECT}}`, `{{TABLES}}` (the changed tables), old / new compliance and file version, `{{OLD_TAG}}` / `{{NEW_TAG}}` (the year in the names), `{{CUTOVER_DT}}`. Search for `{{` before running |
+| DBA | Before Part 1 | Create the new staging, core and export tables |
+| Part 0 | First | Preview: the new table, column and source names, the new queries, the crosswalk rows that move, and the file name templates without `{VERSION}`. Changes nothing |
+| Part 1 | Any day before the cutover | Crosswalk rows with the new version from `{{CUTOVER_DT}}` (the old ones end the day before); file configs of the new file version on the new tables; the new table-named columns (`..._2023_ID`, `..._2023_KEY`). Safe to rerun |
+| Part 2 | Cutover day, after the last old-version files are loaded and their batches exported | One transaction: old file configs off (new ones on); query sources to the new staging / core tables and source tables; export to the new export table. Uncomment 2.2b / 2.4 only where a query's columns or a file check (header names) change |
+| Part 3 | After Part 2 | Check the file, query and export configs and the crosswalk windows |
+| Validate | After Part 2 | `validate-config` (11.1) |
+
+`{{CUTOVER_DT}}` is the first batch creation date of the new version: a batch takes the version effective on the
+day it is created, not on its report period (a December monthly batch created in January gets the new version).
+Old batches keep the old version and stay in the old tables; anything reading core directly picks the table by
+year. The template replaces the year everywhere in a name or query; check Part 0 for text that holds it otherwise
+(a date literal, a filter value) and correct that row by hand.
 
 ---
 
