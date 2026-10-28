@@ -292,7 +292,7 @@ class ExportLoader:
     def _call(self, e, b: dict, item: dict, export: str, exp_btch_id: str, version, chain: list[str], by_src: str,
               src_val, exp_batch: str = BATCH_COLUMN) -> dict:
         """The configured procedure exports the batch (deletes and inserts its export rows itself)."""
-        unknown = [n for n in e.proc_params if n not in cfgmod.EXPORT_PROC_PARAMS]
+        unknown = [a.value for a in e.proc_params if a.kind == "PARAM" and a.value not in cfgmod.EXPORT_PROC_PARAMS]
         if unknown:
             raise ConfigError(f"{e.label}: Exp_Proc_Parm_Txt uses {', '.join(unknown)}")
         source = chain[-1] if chain else None
@@ -302,11 +302,17 @@ class ExportLoader:
                  "req_dt": _as_date(b["req_dt_key"]), "rpt_start": _as_date(b["rpt_start_dt_key"]),
                  "rpt_end": _as_date(b["rpt_end_dt_key"])}
         proc = ".".join(db.ident(p) for p in e.proc_nm.split("."))
+        shown = [("{" + a.value + "}") if a.kind == "PARAM" else ("'" + a.value.replace("'", "''") + "'")
+                 if a.kind == "TEXT" else a.value for a in e.proc_params]
         db.log_sql(f"EXPORT_LOAD | {b['btch_id']} source {b['src_id']} | procedure {e.proc_nm}",
-                   f"CALL {proc}({', '.join('{' + n + '}' for n in e.proc_params)})", given)
+                   f"CALL {proc}({', '.join(shown)})", given)
         with self.conn.transaction():
-            self.conn.execute_qmark(f"CALL {proc}({', '.join('?' for _ in e.proc_params)})",
-                                    [given[n] for n in e.proc_params])
+            out = self.conn.execute_qmark(
+                f"CALL {proc}({', '.join(a.value if a.kind == 'OUT' else '?' for a in e.proc_params)})",
+                [given[a.value] if a.kind == "PARAM" else a.value for a in e.proc_params if a.kind != "OUT"]).fetchone()
+            if out:
+                item["procedure_output"] = out
+                log.info("EXPORT_LOAD | %s | procedure %s returned %s", b["btch_id"], e.proc_nm, out)
             rows = self.conn.execute_qmark(f"SELECT COUNT(*) AS n FROM {export} WHERE {db.ident(exp_batch)} = ? "
                                            f"AND {by_src}", [b["btch_id"], src_val]).fetchone()["n"]
             self._done(b, f"exported by {e.proc_nm} (data of {source or 'no batch'}): {rows} row(s) of the batch in the export")

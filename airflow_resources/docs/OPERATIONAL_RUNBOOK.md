@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.74 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.75 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -821,7 +821,7 @@ The export table of a core table (EXPORT_LOAD). One row per project + table.
 | `Exp_Schema_Nm`, `Exp_Table_Nm` | Yes | Database and table; `$env` allowed | The export table: the core table's columns (row ID included), `Btch_ID`, the source column, optionally `Exp_Btch_ID` |
 | `Exp_Btch_Col_Nm` | No | Column name | Column that gets the batch ID again (default `Exp_Btch_ID`, filled only if present) |
 | `Exp_Proc_Nm` | No | `database.procedure`; `$env` allowed | A procedure that does the export instead of the framework (it deletes and inserts that source's rows itself) |
-| `Exp_Proc_Parm_Txt` | No | e.g. `{btch_id}, {data_btch_id}, {src_id}` | The procedure's parameters in order (section 8.10); empty = `{btch_id}, {data_btch_id}, {exp_btch_id}` |
+| `Exp_Proc_Parm_Txt` | No | e.g. `{btch_id}, {data_btch_id}, {src_id}` or `'PROVISIONING_WORK$ENV', {run_ty}, MSG` | The procedure's arguments in order: placeholders, fixed values in quotes and the OUT parameter's name (section 8.10); empty = `{btch_id}, {data_btch_id}, {exp_btch_id}` |
 | `Exp_Sql_Txt` | No | One `SELECT` | Used when there is no procedure: its rows are the export rows of a batch + source, instead of the plain copy from core. Name each column after an export column (`AS`); the batch column, `Exp_Btch_Col_Nm` and the source column are always filled by the framework. Placeholders as for the procedure (8.10), e.g. `{data_btch_id}` (the batch holding the data: the batch itself, or the one it carries forward) and `{src_id}` |
 | `Exp_Pre_Sql_Txt` | No | One statement: `CALL`, `UPDATE`, `INSERT`, `DELETE`, `MERGE` … | Runs **once per batch**, before its sources are exported |
 | `Exp_Post_Sql_Txt` | No | One statement | Runs **once per batch**, after all its sources are exported |
@@ -1193,6 +1193,25 @@ reuses, or NULL when no data), `{exp_btch_id}` (= the batch ID), `{reused_btch_i
 separated: keep their rows), `{project_cd}`, `{table_nm}`, `{src_id}`, `{run_ty}`, `{version}`, `{req_id}`,
 `{req_dt}`, `{rpt_start}`, `{rpt_end}`. The procedure deletes and inserts only that source's rows and fills the source
 column.
+
+Besides placeholders, `Exp_Proc_Parm_Txt` takes, in any position:
+
+| Item | Example | Passed as |
+|---|---|---|
+| Fixed value, in quotes (a quote inside doubled) | `'PROVISIONING_WORK$ENV'`, `'(''1''=''1'')'` | The text between the quotes, as written (`$ENV` is not replaced; `''` is one quote), as a parameter |
+| OUT parameter, its name without quotes or braces | `MSG` | Written into the `CALL`; its value is written to the task log and the step report (`procedure_output`) |
+
+```sql
+UPDATE HSABC_DEV.ComplianceExportConfig
+SET Exp_Proc_Nm = 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV',
+    Exp_Proc_Parm_Txt = '''PROVISIONING_WORK$ENV'', ''CMSUNIV_CDAG_Table1_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_CDAG1_2022'', ''CDAG1'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG'
+WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'CDAG1';
+-- EXPORT_LOAD calls: CALL HSPROCS_DEV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV('PROVISIONING_WORK$ENV', 'CMSUNIV_CDAG_Table1_2022',
+--   'EXPORT_FEED$ENV_T', 'SDO_CMSUNIV_CDAG1_2022', 'CDAG1', <run type>, <version>, '(''1''=''1'')', MSG)
+```
+
+A name without braces that is a placeholder (e.g. `btch_id`) is still the placeholder; any other name is an OUT
+parameter, so a fixed value needs its quotes (`validate-config` reports a name that is not one word).
 
 ### 8.11 Batch statuses (`ComplianceRequestControl.Req_Stat`)
 
@@ -1600,7 +1619,7 @@ the cutover. Use `airflow_resources/sql/version_cutover_template.sql`:
 | DBA | Before Part 1 | Create the new staging, core and export tables |
 | Part 0 | First | Preview: the new table, column and source names, the new queries, the crosswalk rows that move, and the file name templates without `{VERSION}`. Changes nothing |
 | Part 1 | Any day before the cutover | Crosswalk rows with the new version from `{{CUTOVER_DT}}` (the old ones end the day before); file configs of the new file version on the new tables; the new table-named columns (`..._2023_ID`, `..._2023_KEY`). Safe to rerun |
-| Part 2 | Cutover day, after the last old-version files are loaded and their batches exported | One transaction: old file configs off (new ones on); query sources to the new staging / core tables and source tables; export to the new export table. Uncomment 2.2b / 2.4 only where a query's columns or a file check (header names) change |
+| Part 2 | Cutover day, after the last old-version files are loaded and their batches exported | One transaction: old file configs off (new ones on); query sources to the new staging / core tables and source tables; export to the new export table (and the table names in the export procedure's parameters, e.g. the provisioning table). Uncomment 2.2b / 2.4 only where a query's columns or a file check (header names) change |
 | Part 3 | After Part 2 | Check the file, query and export configs and the crosswalk windows |
 | Validate | After Part 2 | `validate-config` (11.1) |
 

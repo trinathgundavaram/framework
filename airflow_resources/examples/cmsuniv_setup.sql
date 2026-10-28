@@ -702,50 +702,48 @@ INSERT INTO HSABC_DEV.ComplianceInternalSourceConfig (Project_Cd, Table_Nm, Src_
 VALUES ('CMSUNIV', 'SNPCC1', '11', 'SQLSERVER', 'SQL_SNPCC', 'SELECT SNPCC_Table1_ID AS SNPCC_HS_Table1_2022_ID, EnrolleeFirstName AS MemberFirstName, EnrolleeLastName AS MemberLastName, EnrolleeID AS MemberID, ContractID, PlanBenefitPackage, PlanType, EnrollmentEffectiveDate, MostRecentPlanChangeEffectiveDate, DateOfMostRecentHRA, DateOfPreviousHRA, DateInitialHRAWasCompleted, EnrolleeRiskStratificationAuditLetter AS MemberRiskStratificationAuditLetter, DateMostRecentIndividualizedCarePlan, WasICTCreatedIdentified, SourceUnique_ID FROM QUALITY.SNPMOC.Table1_cms2022 WHERE Batch_ID = {btch_id}', 'CMSUNIV_STAGE_$ENV_T', 'SNPCC_HS_TABLE1_2022', 'CMSUNIV_CORE_$ENV_T', 'SNPCC_HS_TABLE1_2022', 1);
 
 -- ----------------------------------------------------------------------------------------------------
--- 8. Export feed: the existing feed tables EXPORT_FEED_$ENV_T.SDO_CMSUNIV_<table>_2022, exported by the framework (no
--- procedure, no PROVISIONING_WORK: rows come straight from core; run types are chosen by the EXPORT_LOAD DAG's scope)
--- For each batch and source that is due (or released), EXPORT_LOAD removes the source's earlier export rows of the
--- period and copies its rows from the source's own core table: columns of the same name, the framework's columns by
--- what fills them (batch, source, version, ...), the rest by column order (ODAG3 / FA4 sources 10 and 40 come from
--- their own core tables with other names); the feed's batch column (Btch_ID) = the batch. validate-config lists the pairs and the export
--- columns a core table cannot fill.
+-- 8. Export feed: the existing feed tables EXPORT_FEED_$ENV_T.SDO_CMSUNIV_<table>_2022, loaded by the universes' export
+-- procedure HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV from PROVISIONING_WORK$ENV.CMSUNIV_<group>_Table<n>_2022.
+-- For each batch and source that is due (or released) EXPORT_LOAD calls it with, in order: the fixed values in quotes
+-- (passed as written, $ENV included: the procedure resolves it), the batch's run type and version, the filter (all rows:
+-- the procedure deletes and reloads the whole export table) and the OUT parameter MSG (written to the task log).
 -- ----------------------------------------------------------------------------------------------------
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG1', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG1_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG2', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG2_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG3_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG4', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG4_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG5', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG5_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'ODAG6', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG6_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG1', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG1_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG2', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG2_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG3_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG4', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG4_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG5', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG5_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG6', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG6_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'CDAG7', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG7_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'FA1', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_FA1_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'FA2', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_FA2_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'FA3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_FA3_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'FA4', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_FA4_2022', NULL, 1);
-INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Active_Ind)
-VALUES ('CMSUNIV', 'SNPCC1', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_SNPCC1_2022', NULL, 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG1', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG1_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_ODAG_Table1_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_ODAG1_2022'', ''ODAG1'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG2', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG2_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_ODAG_Table2_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_ODAG2_2022'', ''ODAG2'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG3_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_ODAG_Table3_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_ODAG3_2022'', ''ODAG3'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG4', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG4_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_ODAG_Table4_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_ODAG4_2022'', ''ODAG4'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG5', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG5_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_ODAG_Table5_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_ODAG5_2022'', ''ODAG5'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG6', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG6_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_ODAG_Table6_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_ODAG6_2022'', ''ODAG6'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG1', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG1_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_CDAG_Table1_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_CDAG1_2022'', ''CDAG1'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG2', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG2_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_CDAG_Table2_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_CDAG2_2022'', ''CDAG2'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG3_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_CDAG_Table3_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_CDAG3_2022'', ''CDAG3'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG4', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG4_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_CDAG_Table4_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_CDAG4_2022'', ''CDAG4'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG5', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG5_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_CDAG_Table5_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_CDAG5_2022'', ''CDAG5'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG6', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG6_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_CDAG_Table6_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_CDAG6_2022'', ''CDAG6'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'CDAG7', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_CDAG7_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_CDAG_Table7_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_CDAG7_2022'', ''CDAG7'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA1', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_FA1_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_FA_Table1_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_FA1_2022'', ''FA1'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA2', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_FA2_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_FA_Table2_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_FA2_2022'', ''FA2'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_FA3_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_FA_Table3_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_FA3_2022'', ''FA3'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'FA4', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_FA4_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_FA_Table4_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_FA4_2022'', ''FA4'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
+INSERT INTO HSABC_DEV.ComplianceExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Btch_Col_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'SNPCC1', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_SNPCC1_2022', NULL, 'HSPROCS_$ENV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_CMSUNIV', '''PROVISIONING_WORK$ENV'', ''CMSUNIV_SNPCC_Table1_2022'', ''EXPORT_FEED$ENV_T'', ''SDO_CMSUNIV_SNPCC1_2022'', ''SNPCC1'', {run_ty}, {version}, ''(''''1''''=''''1'''')'', MSG', 1);
 
 -- ----------------------------------------------------------------------------------------------------
 -- 9. Ad-hoc requests (CMS): one row per source, when a request comes in (example, commented out)

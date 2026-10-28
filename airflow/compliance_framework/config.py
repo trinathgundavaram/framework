@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from itertools import combinations
-from typing import Iterable, Mapping, Optional, Sequence
+from typing import Iterable, Mapping, NamedTuple, Optional, Sequence
 
 from compliance_framework import db
 from compliance_framework.adapters import parse_uri
@@ -329,7 +329,34 @@ def active_query_configs(conn: Connection, settings=None) -> list[QueryConfig]:
 
 EXPORT_PROC_PARAMS = ("btch_id", "data_btch_id", "exp_btch_id", "reused_btch_ids", "project_cd", "table_nm", "src_id",
                       "run_ty", "version", "req_id", "req_dt", "rpt_start", "rpt_end")
-DEFAULT_EXPORT_PROC_PARAMS = ("btch_id", "data_btch_id", "exp_btch_id")
+
+
+class ProcArg(NamedTuple):
+    """One argument of the export procedure: PARAM (a placeholder), TEXT (a fixed value) or OUT (a parameter name)."""
+    kind: str
+    value: str
+
+
+def proc_args(text: str) -> tuple:
+    """Exp_Proc_Parm_Txt -> its arguments in order: {placeholder}, 'fixed text' (quotes inside doubled) or the name of
+    an OUT parameter. A name without braces that is a placeholder stays one."""
+    args, rest = [], text.strip()
+    while rest:
+        m = re.match(r"'((?:[^']|'')*)'\s*(?:,|$)", rest)
+        if m:
+            args.append(ProcArg("TEXT", m.group(1).replace("''", "'")))
+        else:
+            m = re.match(r"([^,]*)(?:,|$)", rest)
+            token = m.group(1).strip()
+            name = token.strip("{}").strip()
+            if name:
+                param = token.startswith("{") or name.lower() in EXPORT_PROC_PARAMS
+                args.append(ProcArg("PARAM", name.lower()) if param else ProcArg("OUT", name))
+        rest = rest[m.end():].strip()
+    return tuple(args)
+
+
+DEFAULT_EXPORT_PROC_PARAMS = tuple(ProcArg("PARAM", n) for n in ("btch_id", "data_btch_id", "exp_btch_id"))
 EXPORT_BATCH_PARAMS = ("btch_id", "exp_btch_id", "project_cd", "table_nm", "run_ty", "version", "req_dt", "rpt_start",
                        "rpt_end", "exp_schema_nm", "exp_table_nm")
 EXPORT_SQL_PLACEHOLDER = re.compile(r"\{(\w+)\}")
@@ -374,8 +401,7 @@ class ExportConfig:
         return cls(code(r["project_cd"]), code(r["table_nm"]), name(r["exp_schema_nm"]), r["exp_table_nm"],
                    r["active_ind"] == 1, (_text(r.get("exp_btch_col_nm")) or "Exp_Btch_ID").lower(),
                    name(_text(r.get("exp_proc_nm"))) if _text(r.get("exp_proc_nm")) else None,
-                   tuple(t.strip().strip("{}").strip().lower() for t in r["exp_proc_parm_txt"].split(",") if t.strip())
-                   if _text(r.get("exp_proc_parm_txt")) else DEFAULT_EXPORT_PROC_PARAMS,
+                   proc_args(r["exp_proc_parm_txt"]) if _text(r.get("exp_proc_parm_txt")) else DEFAULT_EXPORT_PROC_PARAMS,
                    _text(r.get("exp_sql_txt")), _text(r.get("exp_pre_sql_txt")), _text(r.get("exp_post_sql_txt")))
 
 
@@ -924,10 +950,14 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
         if src is None:
             add("EXPORT_CONFIG", f"{label}: the table has no active file or query config", "WARNING")
             continue
-        unknown = [n for n in e.proc_params if n not in EXPORT_PROC_PARAMS]
+        unknown = [a.value for a in e.proc_params if a.kind == "PARAM" and a.value not in EXPORT_PROC_PARAMS]
         if e.proc_nm and unknown:
             add("EXPORT_CONFIG", f"{label}: Exp_Proc_Parm_Txt uses {', '.join(unknown)}; available: "
                                  f"{', '.join('{' + n + '}' for n in EXPORT_PROC_PARAMS)}")
+        outs = [a.value for a in e.proc_params if a.kind == "OUT"]
+        if e.proc_nm and any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", o) for o in outs):
+            add("EXPORT_CONFIG", f"{label}: Exp_Proc_Parm_Txt has {', '.join(outs)} as OUT parameter name(s); "
+                                 "a fixed value needs quotes ('...'), a placeholder braces ({...})")
         if e.proc_nm and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}(\.[A-Za-z_][A-Za-z0-9_]{0,127})?", e.proc_nm):
             add("EXPORT_CONFIG", f"{label}: Exp_Proc_Nm {e.proc_nm!r} must be [database.]procedure")
         for what, text, allowed, select in (("Exp_Sql_Txt", e.sql_txt, EXPORT_PROC_PARAMS, True),

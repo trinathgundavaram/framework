@@ -41,7 +41,7 @@ ORDER BY Table_Nm, Src_ID;
 
 -- Export tables
 SELECT Table_Nm, Exp_Table_Nm, OREPLACE(Exp_Table_Nm, '{{OLD_TAG}}', '{{NEW_TAG}}') AS New_Exp_Table_Nm,
-       Exp_Sql_Txt, Exp_Pre_Sql_Txt, Exp_Post_Sql_Txt
+       OREPLACE(Exp_Proc_Parm_Txt, '{{OLD_TAG}}', '{{NEW_TAG}}') AS New_Exp_Proc_Parm_Txt, Exp_Sql_Txt, Exp_Pre_Sql_Txt, Exp_Post_Sql_Txt
 FROM HSABC_DEV.ComplianceExportConfig
 WHERE Project_Cd = '{{PROJECT}}' AND Table_Nm IN ({{TABLES}})
 ORDER BY Table_Nm;
@@ -138,9 +138,10 @@ WHERE Project_Cd = '{{PROJECT}}' AND Table_Nm IN ({{TABLES}}) AND Active_Ind = 1
 -- SET Src_Sql_Txt = '{{NEW_QUERY}}', LastUpdt_Dtts = CURRENT_TIMESTAMP(6), LastUpdt_ID = USER
 -- WHERE Project_Cd = '{{PROJECT}}' AND Table_Nm = '{{TABLE}}' AND Src_ID = '{{SRC_ID}}';
 
--- 2.3 Export: the new export table
+-- 2.3 Export: the new export table (and the table names among the export procedure's parameters)
 UPDATE HSABC_DEV.ComplianceExportConfig
 SET Exp_Table_Nm = OREPLACE(Exp_Table_Nm, '{{OLD_TAG}}', '{{NEW_TAG}}'),
+    Exp_Proc_Parm_Txt = OREPLACE(Exp_Proc_Parm_Txt, '{{OLD_TAG}}', '{{NEW_TAG}}'),
     LastUpdt_Dtts = CURRENT_TIMESTAMP(6), LastUpdt_ID = USER
 WHERE Project_Cd = '{{PROJECT}}' AND Table_Nm IN ({{TABLES}}) AND Exp_Table_Nm LIKE '%{{OLD_TAG}}%';
 
