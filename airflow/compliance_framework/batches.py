@@ -938,18 +938,20 @@ class DecisionProcessor:
                                 ovrd_id=r["ovrd_id"], detail=f"reuse of {b['reuse_btch_id']} expired")
         s.expired.append(r["ovrd_id"] or b["req_id"])
 
-    def health(self) -> dict[str, list[dict]]:
-        """Pending reviews and approved overrides expiring within a week."""
+    def health(self, project_cd: Optional[str] = None) -> dict[str, list[dict]]:
+        """Pending reviews and approved overrides expiring within a week; of one project's batches when given."""
         q = partial(db.fetch_all, self.conn)
         today = self.clock.today(self.settings.business_tz)
+        own, mine = ("", ()) if not project_cd else (
+            " AND Req_ID IN (SELECT Req_ID FROM ComplianceRequestControl WHERE Project_Cd = %s)", (code(project_cd),))
         return {
-            "pending_reviews": q("""SELECT Ovrd_ID, Override_Ty, Req_ID, Btch_ID, Load_Dtts
-                                     FROM ComplianceBatchOverride WHERE UPPER(Apprvl_Stat)='PENDING_REVIEW'
-                                     ORDER BY Ovrd_ID"""),
+            "pending_reviews": q(f"""SELECT Ovrd_ID, Override_Ty, Req_ID, Btch_ID, Load_Dtts
+                                     FROM ComplianceBatchOverride WHERE UPPER(Apprvl_Stat)='PENDING_REVIEW'{own}
+                                     ORDER BY Ovrd_ID""", *mine),
             "overrides_expiring_soon": q(
-                """SELECT Ovrd_ID, Override_Ty, Btch_ID, Valid_Thru_Dt_Key FROM ComplianceBatchOverride
-                    WHERE UPPER(Apprvl_Stat)='APPROVED' AND Valid_Thru_Dt_Key BETWEEN %s AND %s
-                    ORDER BY Valid_Thru_Dt_Key""", today, today + timedelta(days=7)),
+                f"""SELECT Ovrd_ID, Override_Ty, Btch_ID, Valid_Thru_Dt_Key FROM ComplianceBatchOverride
+                    WHERE UPPER(Apprvl_Stat)='APPROVED' AND Valid_Thru_Dt_Key BETWEEN %s AND %s{own}
+                    ORDER BY Valid_Thru_Dt_Key""", today, today + timedelta(days=7), *mine),
         }
 
     def _reuse_problem(self, o: dict, b: dict, src: Optional[dict], rt: Optional[cfgmod.RunType]) -> Optional[str]:
@@ -1059,12 +1061,13 @@ class BatchCloser:
             (s.closed if out else s.waiting).append(b["btch_id"])
         return s
 
-    def health(self) -> dict[str, list[dict]]:
-        """Open batches past their SLA hold (design §15.3)."""
+    def health(self, project_cd: Optional[str] = None) -> dict[str, list[dict]]:
+        """Open batches past their SLA hold (design §15.3); of one project when given."""
         return {"batches_past_hold_not_closed": [
             {k: b[k] for k in ("req_id", "btch_id", "project_cd", "table_nm", "src_id", "run_ty", "req_dt_key",
                                "req_stat", "resolution_ty")}
-            for b in self._open_past_hold(Scope(), last_hold=self._today() - timedelta(days=1))]}
+            for b in self._open_past_hold(Scope(project_cd=code(project_cd) or None),
+                                          last_hold=self._today() - timedelta(days=1))]}
 
     def _today(self) -> date:
         return self.clock.today(self.settings.business_tz)

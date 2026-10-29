@@ -347,7 +347,8 @@ class FileChecker:
         else:
             locations = self.pipeline._configured_locations()
         summary.locations = [f"{s}/{f}" for s, f in locations]
-        matcher = self.pipeline._load_config()
+        matcher = self.pipeline._load_config(project_cd)
+        others = self.pipeline._others(project_cd)
         for share, folder in locations:
             try:
                 files = self.store.list_files(share, folder)
@@ -358,6 +359,11 @@ class FileChecker:
                      ": " + ", ".join(basename(i.path) for i in files[:50]) + (" ..." if len(files) > 50 else "") if files else "")
             for info in files:
                 if not self.pipeline.belongs(basename(info.path), (share, folder), shared, own, scope):
+                    summary.skipped += 1
+                    continue
+                left = self.pipeline.elsewhere(basename(info.path), (info.share, dirname(info.path)), matcher, others)
+                if left:
+                    log.info("FILE_CHECK | %s | not checked: %s", basename(info.path), left)
                     summary.skipped += 1
                     continue
                 try:
@@ -385,7 +391,7 @@ class FileChecker:
         checked = True
         notes: list[str] = []
         try:
-            m = matcher.match(name)
+            m = matcher.match(name, lambda found: self.pipeline.choose(found, (info.share, dirname(info.path))))
         except MatchError as e:
             m, cfg = None, e.cfg
             findings.append(("FILE_NAME", str(e)))

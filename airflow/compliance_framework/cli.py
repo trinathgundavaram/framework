@@ -83,7 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     add("locks", "list the locks currently held (a crashed run leaves its locks until they expire)")
     sp = add("release-lock", "remove a lock left behind by a run that no longer exists")
     sp.add_argument("--key", required=True, help="Lock_Key as printed by 'locks'")
-    add("health", "print operational health report")
+    sp = add("health", "print operational health report")
+    sp.add_argument("--project", help="one project's loads, overrides and batches (default every project)")
     return p
 
 
@@ -170,7 +171,7 @@ def _dispatch(app: App, args) -> int:
         _print({"released": release_lock(app.conn, args.key)})
         return 0
     if c == "health":
-        _print(app.health())
+        _print(app.health(args.project))
         return 0
     raise AssertionError(c)
 

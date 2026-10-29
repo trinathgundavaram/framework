@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.77 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.78 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -1272,7 +1272,7 @@ Emailed by NOTIFY unless marked "no".
 | Event | Severity | Emailed | Meaning |
 |---|---|---|---|
 | `FILE_REJECTED_UNPARSEABLE` | ERROR | yes | File name does not follow the agreed format |
-| `FILE_REJECTED_AMBIGUOUS_TEMPLATE` | ERROR | yes | File name fits more than one file config |
+| `FILE_REJECTED_AMBIGUOUS_TEMPLATE` | ERROR | yes | File name fits more than one file config and neither the inbound folder, the crosswalk run type nor the batch tells which (the message names the projects) |
 | `FILE_REJECTED_INVALID_TOKEN` | ERROR | yes | Invalid date or version in the name |
 | `FILE_REJECTED_NO_BATCH` | ERROR | yes | No batch for that run type and period |
 | `FILE_REJECTED_BATCH_CLOSED` | ERROR | yes | Batch closed and no valid override |
@@ -1478,7 +1478,7 @@ export FRAMEWORK_METADATA_SCHEMA=HSABC_DEV FRAMEWORK_ENVIRONMENT=DEV
 | Command | What it does |
 |---|---|
 | `python -m compliance_framework.cli validate-config` | Checks every configuration table (section 11.1) |
-| `python -m compliance_framework.cli health` | Open batches past their close date and other health checks |
+| `python -m compliance_framework.cli health [--project <project>]` | Open batches past their close date and other health checks; of one project with `--project` |
 | `python -m compliance_framework.cli locks` | Locks held by running (or crashed) steps |
 | `python -m compliance_framework.cli release-lock --key <Lock_Key>` | Removes a lock left by a run that no longer exists |
 | `python -m compliance_framework.cli close-batch --btch-id <Btch_ID> --closed-by <you> [--src-id <Src_ID>]` | Closes a batch (or one source of it) by hand |
@@ -1815,6 +1815,7 @@ differs from `schema.sql` (no rows = up to date). A NOT NULL column that should 
 | 0.3.62 | the `Load_Stat` renames below |
 | 0.3.63 | the timeline event renames below |
 | 0.3.67 | `ALTER TABLE HSABC_DEV.ComplianceExportConfig ADD Exp_Sql_Txt VARCHAR(8000), ADD Exp_Pre_Sql_Txt VARCHAR(8000), ADD Exp_Post_Sql_Txt VARCHAR(8000);` |
+| 0.3.78 | No database change. A project's FILE_LOAD / FILE_CHECK identifies files with that project's file configs only and leaves another project's file (same template and folder) in place; runs without a project pick between projects by inbound folder, crosswalk run type and batch. `TEMPLATE_OVERLAP` across projects is now the warning `TEMPLATE_OVERLAP_PROJECTS`. `health` takes `--project` |
 | 0.3.77 | `ALTER TABLE HSABC_DEV.ComplianceExportConfig DROP Exp_Btch_Col_Nm;` The extra export batch column (`Exp_Btch_ID`) and the `{exp_btch_id}` placeholder are gone: export tables carry the batch in `Btch_ID` only. Rows whose `Exp_Proc_Parm_Txt` / `Exp_Pre_Sql_Txt` / `Exp_Post_Sql_Txt` use `{exp_btch_id}` change it to `{btch_id}` (`validate-config` lists them); an empty `Exp_Proc_Parm_Txt` now means `{btch_id}, {data_btch_id}` |
 | 0.3.71 | `airflow_resources/sql/upgrade_0.3.71.sql`: the audit columns of every framework table renamed (`Created_Dtts` → `Load_Dtts`, `Created_By` → `LoadUser_ID`, `Updated_Dtts` → `LastUpdt_Dtts`, `Updated_By` → `LastUpdt_ID`); six tables (`ComplianceRunType`, `ComplianceDataSetSourceXwalk`, `ComplianceSourceFileConfig`, `ComplianceRequestControl`, `ComplianceFileLoad`, `CMS_ComplianceExceptionsAudit`) backed up, recreated in the new column order (audit columns last) and filled again, then the backups dropped; `ComplianceRequestControl` and `ComplianceFileLoad` get `LoadUser_ID` / `LastUpdt_ID`. Fill the four `{{NEXT_...}}` start values from step 2.0 first so the IDs are kept. Every framework update now sets `LastUpdt_ID` to the database user. Run it with the DAGs paused, then deploy the code |
 

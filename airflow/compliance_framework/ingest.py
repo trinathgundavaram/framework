@@ -19,7 +19,7 @@ from compliance_framework.audit import EventLogger
 from compliance_framework.batches import Releases, REOPENED_AWAITING_DATA, get_batch, has_data, current_load
 from compliance_framework.common import (DATA_NOT_PROVIDED, REQUEST_COMPLETE, SOURCE_DATA_READY, SOURCE_DATA_READY_NO_DATA, Clock,
                      FileRejected, RowCountMismatch, check_transition, code, earliest_close_date)
-from compliance_framework.config import FileConfig, MatchError, QueryConfig, Scope, TemplateMatcher, check_options
+from compliance_framework.config import FileConfig, MatchError, MatchResult, QueryConfig, Scope, TemplateMatcher, check_options
 from compliance_framework.db import Connection, Settings, source_connection
 from compliance_framework.filecheck import check_content, error_rows, file_columns
 from compliance_framework.load import (ColumnMapping, LoadContext, PLACEHOLDER, QUERY_PREFIX, build_layout, check_core_types, column_mapping,
@@ -118,6 +118,10 @@ class PathIngestSummary:
             self.other += 1
 
 
+def _where(found: list) -> str:
+    return ", ".join(f"{m.cfg.project_cd}/{m.cfg.table_nm}/{m.cfg.src_id}" for m in found)
+
+
 def _as_date(value):
     return value.date() if hasattr(value, "hour") else value
 
@@ -181,10 +185,10 @@ class IngestPipeline:
         summary = PathIngestSummary(locations=[f"{b}/{p}" for b, p in locations])
         if (project_cd or scope.narrowed) and not locations:
             summary.errors.append(f"{scope.label()}: no active file config")
-        self._sweep_config = self._load_config()
+        self._sweep_config = self._load_config(project_cd)
         self._scope_project = project_cd
         try:
-            self._sweep(locations, summary, shared, own, scope)
+            self._sweep(locations, summary, shared, own, scope, self._others(project_cd))
         finally:
             summary.reports, summary.files = self.control_report()
             self._sweep_config = self._scope_project = None
@@ -225,7 +229,7 @@ class IngestPipeline:
         return True
 
     def _sweep(self, locations: list[tuple[str, str]], summary: PathIngestSummary, shared: set,
-               own: Optional[TemplateMatcher], scope: Scope) -> None:
+               own: Optional[TemplateMatcher], scope: Scope, others: Optional[TemplateMatcher]) -> None:
         for loc_share, loc_folder in locations:
             try:
                 files = self.store.list_files(loc_share, loc_folder)
@@ -240,6 +244,11 @@ class IngestPipeline:
                 if not self.belongs(basename(info.path), (loc_share, loc_folder), shared, own, scope):
                     summary.skipped += 1
                     continue
+                left = self.elsewhere(basename(info.path), (info.share, dirname(info.path)), self._sweep_config, others)
+                if left:
+                    log.info("FILE_LOAD | %s | left in place: %s", basename(info.path), left)
+                    summary.skipped += 1
+                    continue
                 try:
                     out = self.process_file(loc_share, info.path, listed=True)
                 except Exception as e:  # noqa: BLE001
@@ -250,25 +259,90 @@ class IngestPipeline:
                     continue
                 summary.tally(out)
 
-    def _load_config(self) -> TemplateMatcher:
-        """The compiled filename templates of every active file config."""
-        return TemplateMatcher(cfgmod.active_file_configs(self.conn, self.settings))
+    def _load_config(self, project_cd: Optional[str] = None) -> TemplateMatcher:
+        """The compiled filename templates of the project's active file configs, or of every project's."""
+        return TemplateMatcher([c for c in cfgmod.active_file_configs(self.conn, self.settings)
+                                if not project_cd or c.project_cd == project_cd])
+
+    def _others(self, project_cd: Optional[str]) -> Optional[TemplateMatcher]:
+        """The templates of the other projects' active file configs (None in a run of every project)."""
+        return TemplateMatcher([c for c in cfgmod.active_file_configs(self.conn, self.settings)
+                                if c.project_cd != project_cd]) if project_cd else None
+
+    def _in_xwalk(self, m: MatchResult) -> bool:
+        """Whether the config's crosswalk has the file's run type, effective on the file's report start date."""
+        return any(x.effective_start_dt <= m.rpt_start and (x.effective_end_dt is None or m.rpt_start <= x.effective_end_dt)
+                   for x in cfgmod.xwalk_rows(self.conn, project_cd=m.cfg.project_cd, table_nm=m.cfg.table_nm,
+                                              src_id=m.cfg.src_id, run_ty=code(m.run_ty)))
+
+    def _has_batch(self, m: MatchResult) -> bool:
+        """Whether the config's project has a batch (open or closed) for the file's run type and report dates."""
+        return self._select_batch(m.cfg, code(m.run_ty), m.rpt_start, m.rpt_end) != (None, None)
+
+    def choose(self, found: list[MatchResult], location: Optional[tuple] = None) -> tuple[list[MatchResult], str]:
+        """A name that fits several templates: the configs whose inbound folder is the file's (`location`), of those
+        the ones whose crosswalk has the file's run type, and when that still leaves several, the one with a batch for
+        the file's report dates."""
+        if location:
+            here = [r for r in found if parse_uri(r.cfg.src_file_path) == location]
+            if len(here) == 1:
+                return here, f"only {_where(here)} has {location[0]}/{location[1]} as its inbound folder"
+            found = here or found
+        if not found:
+            return [], ""
+        m = found[0]
+        typed = [r for r in found if self._in_xwalk(r)]
+        why = f"run type {code(m.run_ty)} is in the crosswalk of {_where(typed) or 'none of them'}"
+        if len(typed) < 2:
+            return typed, why
+        dated = [r for r in typed if self._has_batch(r)]
+        if len(dated) == 1:
+            return dated, why
+        return typed, f"{why}; a batch for {m.rpt_start}..{m.rpt_end} exists in {_where(dated) or 'none of them'}"
+
+    def elsewhere(self, name: str, location: tuple, mine: Optional[TemplateMatcher],
+                  others: Optional[TemplateMatcher]) -> Optional[str]:
+        """In a project's run: why a file is left in place for another project whose config has the same inbound folder
+        and fits the name: this project's crosswalk lacks the file's run type and the other's has it, or this project
+        has no batch for the file's report dates and the other has one. None = this project handles the file (a file
+        no project can take is rejected as before)."""
+        if mine is None or others is None:
+            return None
+        theirs = [r for r in others.readings(name) if parse_uri(r.cfg.src_file_path) == location]
+        if not theirs:
+            return None
+        try:
+            m = mine.match(name, lambda found: self.choose(found, location))
+        except MatchError:
+            return None
+        typed = [r for r in theirs if self._in_xwalk(r)]
+        if not self._in_xwalk(m):
+            why, takers = f"run type {code(m.run_ty)} is not in the crosswalk of {_where([m])}", typed
+        elif not self._has_batch(m):
+            why = f"{_where([m])} has no {code(m.run_ty)} batch for {m.rpt_start}..{m.rpt_end}"
+            takers = [r for r in typed if self._has_batch(r)]
+        else:
+            return None
+        return f"{why}; left for {_where(takers)}" if takers else None
 
     def _configured_locations(self) -> list[tuple[str, str]]:
         """The distinct (share, folder) inbound locations of every active file config."""
         return sorted({parse_uri(c.src_file_path) for c in cfgmod.active_file_configs(self.conn, self.settings)})
 
-    def health(self) -> dict[str, list[dict]]:
-        """Loads stuck mid-pipeline, and current reject counts by reason (design §15.3)."""
+    def health(self, project_cd: Optional[str] = None) -> dict[str, list[dict]]:
+        """Loads stuck mid-pipeline, and current reject counts by reason (design §15.3); of one project's file configs
+        when given."""
         q = partial(db.fetch_all, self.conn)
         stale_before = self.clock.now() - timedelta(minutes=self.settings.heartbeat_stale_minutes)
+        own, mine = ("", ()) if not project_cd else (
+            " AND Cfg_ID IN (SELECT Cfg_ID FROM ComplianceSourceFileConfig WHERE UPPER(Project_Cd) = %s)", (code(project_cd),))
         return {
             "stale_loads": q(
-                """SELECT Load_ID, File_Path, Load_Stat, LastUpdt_Dtts FROM ComplianceFileLoad
+                f"""SELECT Load_ID, File_Path, Load_Stat, LastUpdt_Dtts FROM ComplianceFileLoad
                     WHERE Load_Stat IN ('RECEIVED','STAGING','STAGED','RULES_RUNNING','PROCESS_FAILURE')
-                      AND LastUpdt_Dtts < %s ORDER BY Load_ID""", stale_before),
-            "rejected_by_reason": q("""SELECT Reject_Rsn_Cd, count(*) AS n FROM ComplianceFileLoad
-                                          WHERE Load_Stat='REJECTED' GROUP BY Reject_Rsn_Cd ORDER BY n DESC"""),
+                      AND LastUpdt_Dtts < %s{own} ORDER BY Load_ID""", stale_before, *mine),
+            "rejected_by_reason": q(f"""SELECT Reject_Rsn_Cd, count(*) AS n FROM ComplianceFileLoad
+                                          WHERE Load_Stat='REJECTED'{own} GROUP BY Reject_Rsn_Cd ORDER BY n DESC""", *mine),
         }
 
     def _unmoved(self, info: FileInfo) -> Optional[dict]:
@@ -309,7 +383,7 @@ class IngestPipeline:
         name = basename(info.path)
         matcher = self._sweep_config or self._load_config()
         try:
-            m = matcher.match(name)
+            m = matcher.match(name, lambda found: self.choose(found, (info.share, dirname(info.path))))
         except MatchError as e:
             return self._reject_file(load_id, info, e.event_ty, str(e), e.cfg)
         cfg = m.cfg

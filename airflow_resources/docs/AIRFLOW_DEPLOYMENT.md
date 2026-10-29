@@ -606,8 +606,21 @@ Examples:
 | `CLAIMS_WKL_01052026_01112026.csv` | `CLAIMS_{RUNTY}_{RPTSTART:MMDDYYYY}_{RPTEND:MMDDYYYY}.csv` | |
 | `ENR_MNT_202602_batch-7.txt` | `ENR_{RUNTY}_{RPTMONTH}_{ANY}.txt` | |
 
-`validate-config` reports a template that is not valid (`TEMPLATE`) and two rows whose templates can
-match the same name (`TEMPLATE_OVERLAP`).
+`validate-config` reports a template that is not valid (`TEMPLATE`) and two rows of one project whose templates
+can match the same name (`TEMPLATE_OVERLAP`, an error). Rows of different projects may share a template; they get
+the warning `TEMPLATE_OVERLAP_PROJECTS` when both projects' crosswalks have a run type in common for the source.
+
+**Which project a file is.** A `FILE_LOAD` / `FILE_CHECK` run with a `project` identifies files with that
+project's file configs only. A file that also fits another project's config with the same inbound folder is left
+in place, untouched, when the other project can take it and this one cannot: this project's crosswalk lacks the
+file's run type (effective on its report start date) and the other's has it, or this project has no batch for the
+file's report dates and the other has one. A file no project can take is rejected as before. A run without a
+`project` (every project, or one `share` / `file` / `folder`) uses every project's configs; when a name fits
+several, it keeps the configs whose inbound folder is the file's, then those whose crosswalk has the file's run
+type, then the one with a batch for the file's report dates. If more than one is still left the file is rejected
+as `FILE_REJECTED_AMBIGUOUS_TEMPLATE`, with the projects and the reason in the message. Two projects sharing a
+template, a folder and a run type (and both having the batch) are told apart by neither: the first project run to
+find the file loads it; give such a source its own folder, or the run type to one project only.
 
 ## Optional file check before the load (`FILE_CHECK`)
 

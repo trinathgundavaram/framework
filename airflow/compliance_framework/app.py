@@ -97,9 +97,10 @@ class App:
     def notifier(self, channel=None) -> NotificationDispatcher:
         return NotificationDispatcher(self.conn, self.settings, channel or build_channel(self.settings))
 
-    def health(self) -> dict[str, list[dict]]:
-        """Operational report (design §15.3), composed from the service that owns each set of tables."""
-        return {**self.pipeline.health(), **self.decisions.health(), **self.closer.health(),
+    def health(self, project_cd: Optional[str] = None) -> dict[str, list[dict]]:
+        """Operational report (design §15.3), composed from the service that owns each set of tables; of one project
+        when given (the locks are always every lock)."""
+        return {**self.pipeline.health(project_cd), **self.decisions.health(project_cd), **self.closer.health(project_cd),
                 "locks_held": held_locks(self.conn)}
 
 

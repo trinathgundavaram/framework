@@ -970,7 +970,7 @@ def report_line(conn, load: dict, matcher, tz: str, sources: dict) -> list:
         cfg = conn.execute("SELECT Src_ID FROM ComplianceSourceFileConfig WHERE Cfg_ID=%s", (load["cfg_id"],)).fetchone()
         src = code(cfg["src_id"]) if cfg else None
     try:
-        submitted = matcher.match(name).file_ts
+        submitted = matcher.match(name, lambda found: ([m for m in found if m.cfg.cfg_id == load["cfg_id"]], "")).file_ts
     except MatchError:
         pass
     stat = code(load["load_stat"])

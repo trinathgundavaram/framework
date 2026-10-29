@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from itertools import combinations
-from typing import Iterable, Mapping, NamedTuple, Optional, Sequence
+from typing import Callable, Iterable, Mapping, NamedTuple, Optional, Sequence
 
 from compliance_framework import db
 from compliance_framework.adapters import parse_uri
@@ -647,15 +647,36 @@ class TemplateMatcher:
                           f"{name}: version {near[0][1]!r} in the file name is not the configured version "
                           f"({', '.join(expected)})", near[0][0] if len(near) == 1 else None)
 
-    def match(self, name: str) -> MatchResult:
+    def match(self, name: str, choose: Optional[Callable[[list[MatchResult]], tuple[list[MatchResult], str]]] = None
+              ) -> MatchResult:
+        """The file config of a name. When several templates fit, `choose` may keep one of them: it gets every fitting
+        config's reading of the name and returns the ones it keeps and why."""
         found = self.candidates(name)
         if not found:
             raise self._wrong_version(name) or MatchError("FILE_REJECTED_UNPARSEABLE",
                                                           f"{name} matches no active filename template")
-        if len(found) > 1:
-            ids = [c.cfg_id for c, _ in found]
-            raise MatchError("FILE_REJECTED_AMBIGUOUS_TEMPLATE", f"{name} matches several templates (Cfg_ID {ids})")
-        cfg, m = found[0]
+        if len(found) == 1:
+            return self._result(name, *found[0])
+        why = ""
+        if choose:
+            kept, why = choose(self.readings(name))
+            if len(kept) == 1:
+                return kept[0]
+        ids = [c.cfg_id for c, _ in found]
+        raise MatchError("FILE_REJECTED_AMBIGUOUS_TEMPLATE",
+                         f"{name} matches several templates (Cfg_ID {ids})" + (f"; {why}" if why else ""))
+
+    def readings(self, name: str) -> list[MatchResult]:
+        """Every fitting config's reading of a name (those whose dates or timestamp in the name are valid)."""
+        read = []
+        for c, m in self.candidates(name):
+            try:
+                read.append(self._result(name, c, m))
+            except MatchError:
+                pass
+        return read
+
+    def _result(self, name: str, cfg: FileConfig, m: re.Match) -> MatchResult:
         formats = next(f for c, _, f in self._compiled if c is cfg)
         got = m.groupdict()
         try:
@@ -1014,9 +1035,17 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
         for rt in sorted({x.run_ty for x in xw_by_source.get((c.project_cd, c.table_nm, c.src_id), ())}) or ["X1"]:
             name = render(c.src_file_nm_tmplt, runty=rt, rpt_start=date(2026, 1, 1), rpt_end=date(2026, 1, 31),
                           ts=datetime(2026, 2, 1, 9, 30, 0), parts=c.name_parts)
-            others = [o.cfg_id for o, _ in matcher.candidates(name) if o.cfg_id != c.cfg_id]
-            if others:
-                add("TEMPLATE_OVERLAP", f"file config {c.cfg_id}: sample name {name} also matches {others}")
+            others = [o for o, _ in matcher.candidates(name) if o.cfg_id != c.cfg_id]
+            same = [o.cfg_id for o in others if o.project_cd == c.project_cd]
+            if same:
+                add("TEMPLATE_OVERLAP", f"file config {c.cfg_id}: sample name {name} also matches {same}")
+            # another project's file of the same run type: both projects' runs would take it
+            shared = [o.cfg_id for o in others if o.project_cd != c.project_cd and rt != "X1"
+                      and rt in {x.run_ty for x in xw_by_source.get((o.project_cd, o.table_nm, o.src_id), ())}]
+            if shared:
+                add("TEMPLATE_OVERLAP_PROJECTS", f"file config {c.cfg_id} ({c.project_cd}): sample name {name} also "
+                    f"matches {shared} of another project with run type {rt}; when both projects have a batch for "
+                    "the file's dates, the first project run to find it loads it", "WARNING")
     return issues
 
 

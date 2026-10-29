@@ -133,7 +133,13 @@ SELECT TableName FROM DBC.TablesV WHERE DatabaseName = 'HSABC_DEV' AND (TableNam
 | CFG-06 | Crosswalk row with code and SQL | Both on one crosswalk row | `RPT_PERIOD` "not both" |
 | CFG-07 | Export statement checks | `Exp_Pre_Sql_Txt` with `{batch}`; `Exp_Post_Sql_Txt` with two statements; `Exp_Sql_Txt` an UPDATE | `EXPORT_CONFIG` errors: unknown placeholder, "one statement", "must be a SELECT" |
 | CFG-08 | Staging ↔ core pairing shown | Validate with SNPCC1 (staging `Member…`, core `Enrollee…`) | Log line `staging -> core by column position: memberfirstname -> enrolleefirstname, …` |
-| CFG-09 | Template overlap | Two file configs whose templates match the same name | `TEMPLATE_OVERLAP` |
+| CFG-09 | Template overlap | Two file configs of one project whose templates match the same name | `TEMPLATE_OVERLAP` |
+| CFG-09a | Template shared by projects | The same template for two projects, both with run type DLY for the source | Warning `TEMPLATE_OVERLAP_PROJECTS` (no error) |
+| FL-SP1 | Project run, other project's run type | Shared template and folder; a WKLY file (only UMCM has WKLY); FILE_LOAD with `project` CMSUNIV, then UMCM | CMSUNIV leaves it in place (log "left in place"); UMCM loads it |
+| FL-SP2 | Project run, no batch here | DLY file; only CMSUNIV has the DLY batch; FILE_LOAD with `project` UMCM, then CMSUNIV | UMCM leaves it; CMSUNIV loads it |
+| FL-SP3 | No project can take it | MNT file for a period without a batch | The project with MNT rejects it `FILE_REJECTED_NO_BATCH`; the other leaves it |
+| FL-SP4 | Run of every project | DLY file, both projects have the batch, same folder | `FILE_REJECTED_AMBIGUOUS_TEMPLATE` naming both projects |
+| FL-SP5 | Folder decides | As FL-SP4, but one project's config has its own folder and the file is there | Loaded for that project |
 | CFG-10 | Test connections | `test-connection` | Teradata and NAS OK; failures show the reason, no password |
 | CFG-11 | Missing framework table | Rename `ComplianceFileLoad` (DEV only), run FILE_LOAD, rename back | Load `PROCESS_FAILURE` / step "COULD NOT RUN" with error 3807; retried; nothing half done |
 | CFG-12 | Variables minimal | Open each Variable | Only `td_conn_var`, `meta_db`, `load_env`, `email_recipient`, `project` (+ `trigger_dags`, FILE_CHECK `settings`, FILE_RULES `pool`, EXPORT_LOAD `wait_for_triggered`) |
@@ -396,7 +402,7 @@ Trigger BATCH_CLOSE on / after the close date. Check Q1 / Q2 / Q5.
 | ID | Command | Expected |
 |---|---|---|
 | AD-01 | `validate-config` | Full list of issues |
-| AD-02 | `health` | Loads in progress for long, rejected counts by reason |
+| AD-02 | `health` / `health --project UMCM` | Loads in progress for long, rejected counts by reason; with `--project` only that project's |
 | AD-03 | `locks` / `release-lock --key <key>` | Lists locks; removes the given one |
 | AD-04 | `close-batch`, `close-batches` | Closes as CL-10 |
 | AD-05 | `run --module FILE_RULES --project CMSUNIV` | Same as the DAG step |
