@@ -1,0 +1,124 @@
+REPLACE PROCEDURE HSPROCS_DEV.sp_OSS_DA_PROV_TO_EXPORT_LOAD_UMCM
+(
+ IN p_BtchId VARCHAR(255),
+ IN p_DataBtchId VARCHAR(255),
+ IN p_RunType VARCHAR(30),
+ OUT PROC_MSG VARCHAR(250)
+)
+
+SQL SECURITY INVOKER
+MAIN: BEGIN
+
+  DECLARE v_SoftDeleted INTEGER DEFAULT 0;
+  DECLARE v_Inserted INTEGER DEFAULT 0;
+
+--Validation of Input Parameters
+
+  IF ( p_BtchId = '' OR p_BtchId IS NULL ) THEN
+    SET PROC_MSG = '1|INVALID PARAMETER - p_BtchId IS REQUIRED!' ;
+    SIGNAL SqlState '45000'
+      SET Message_Text = '1|INVALID PARAMETER - p_BtchId IS REQUIRED!' ;
+  END IF;
+
+  IF ( p_RunType = '' OR p_RunType IS NULL ) THEN
+    SET PROC_MSG = '1|INVALID PARAMETER - p_RunType IS REQUIRED!' ;
+    SIGNAL SqlState '45000'
+      SET Message_Text = '1|INVALID PARAMETER - p_RunType IS REQUIRED!' ;
+  END IF;
+
+/*RELEASE MLOAD For Export Table */
+
+  CALL HSPROCS_DEV.UTL_RELEASE_MLOAD_CMS('EXPORT_FEED_DEV_T', 'SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1', :PROC_MSG);
+
+/*Soft delete the current rows of the batch and run type */
+
+  UPDATE EXPORT_FEED_DEV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1
+  SET ETL_IS_CURR_IND = 'N',
+      ETL_IS_DEL_IND = 'Y',
+      ETL_LAST_UPDT_DT_TM = CURRENT_TIMESTAMP(6)
+  WHERE BTCH_ID = :p_BtchId
+    AND RUN_TY = :p_RunType
+    AND ETL_IS_CURR_IND = 'Y';
+
+  SET v_SoftDeleted = ACTIVITY_COUNT;
+
+/*INSERT DATA INTO Export Feed TABLE */
+
+  INSERT INTO EXPORT_FEED_DEV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 (SRC_DATA_KEY, MBR_FRST_NM, MBR_LAST_NM, MBR_ID, CNTRCT_NUM,
+  PBP_NUM, FDR_NM, AUTHZN_ID, AUTHZN_REQ_DT, AUTHZN_REQ_DT_TM, PART_B_DRUG_REQ_IND, AOR_NOTFTN_RCPT_DT, AOR_NOTFTN_RCPT_DT_TM,
+  AUTHZN_REQ_DETRMTN_TY, AUTHZN_REQ_STD_OR_EXPDT_IND, TIMEFRAME_EXT_IND, DETRMTN_NOTFTN_DT, DETRMTN_NOTFTN_DT_TM,
+  MBR_ORAL_NOTFTN_DT, MBR_ORAL_NOTFTN_DT_TM, MBR_WRTN_NOTFTN_DT, MBR_WRTN_NOTFTN_DT_TM, REQSTR_TY_CD,
+  ISS_DESC, AUTHZN_REQ_EXPDT_PROCS_STD_IND, REQ_DENY_FOR_LACK_OF_MED_NECTY_IND, SVC_PROV_TY, WTHDRL_DESC,
+  AUTHZN_CONCURNT_REVW_TY, AUTHZN_CRITR_REVW_TY, REOPEN_RSN_DESC, DISCHRG_DT, DISCHRG_DISPO_DESC, REQ_PROV_TY,
+  DISCHRG_ICD_DIAG_CD, EFFUATION_DT, PROV_WRTN_NOTFTN_DT, SVC_CTGRY_CD, AUTHZN_STAT_RSN_DESC, ETL_IS_CURR_IND, ETL_IS_DEL_IND,
+  ETL_LOAD_DT_TM, ETL_LAST_UPDT_DT_TM, BTCH_ID, SourceUnique_ID, UNVRS_VRSN_CD, RUN_TY, FILE_NM)
+  SELECT DISTINCT
+  a.SRC_DATA_KEY,
+  a.MemberFirstName,
+  a.MemberLastName,
+  a.MemberID,
+  a.ContractID,
+  a.PlanBenefitPackage,
+  a.FirstTierDownstreamandRelatedEntity,
+  a.AuthorizationorClaimNumber,
+  a.Datetherequestwasreceived,
+  a.Timetherequestwasreceived,
+  a.PartBDrugRequest,
+  a.AORReceiptDate,
+  a.AORReceiptTime,
+  a.RequestDetermination,
+  a.WasTheRequestProcessedAsStdOrExpt,
+  a.Wasatimeframeextensiontaken,
+  a.DateOfDetermination,
+  a.TimeOfDetermination,
+  a.DateoralnotificationprovidedtoMember,
+  a.TimeoralnotificationprovidedtoMember,
+  a.DateWrittenNotificationprovidedToMember,
+  a.TimeWrittenNotificationprovidedToMember,
+  a.Whomadetherequest,
+  a.Issuedescriptionandtypeofservice,
+  a.WasAnExptRequestMadeButProcessedAsStd,
+  a.WasTheRequestDeniedForLackOfMedicalNecessity,
+  c.SERVICINGPROVIDERSTATUS AS SVC_Provider_Type,
+  CASE WHEN c.AUTHSTATUSREASON = 'Withdrawn' THEN 'Withdrawal' ELSE c.AUTHSTATUSREASON END AS Withdrawals,
+  d.AUTHREVIEWTYPE AS Concurrent_Review,
+  d.AUTHCRITERIA AS Criteria_used,
+  d.REOPENREASON AS Material_Reopens,
+  c.DISCHARGEDATE AS IP_Discharge_date,
+  c.DISCHARGEDISPOSITION AS IP_Discharge_Disposition,
+  c.REQUESTINGPROVIDERSTATUS AS Req_Provider_Type,
+  d.DIAGNOSISCODE AS Diagnosis_Code,
+  d.EFFECTUATIONDATE AS Effectuation_Date,
+  d.PROVIDERWRITTENNOTIFY AS Date_Written_Notification_Provided_to_Provider,
+  e.ServiceGroupCode,
+  d.STATUSREASON,
+  'Y' AS ETL_IS_CURR_IND,
+  'N' AS ETL_IS_DEL_IND,
+  CURRENT_TIMESTAMP(6) AS ETL_LOAD_DT_TM,
+  CURRENT_TIMESTAMP(6) AS ETL_LAST_UPDT_DT_TM,
+  :p_BtchId AS BTCH_ID,
+  a.SourceUnique_ID,
+  a.Universe_Vrsn,
+  a.RUN_TY,
+  a.FileName
+  FROM CMSUNIV_CORE_DEV_V.odag_de_table1_2022 a
+  INNER JOIN OSS_PROVISIONING_DEV_V.VCOREMEDHOK_MHK_AUTHORIZATIONS_FILTERED c
+    ON a.AuthorizationorClaimNumber = c.AUTHORIZATIONNUMBER
+  INNER JOIN OSS_PROVISIONING_DEV_V.vCoreMEDHOK_MHK_AuthorizationReview_Filtered d
+    ON c.MHKAUTHORIZATIONINTERNALID = d.MHKAUTHORIZATIONINTERNALID
+  INNER JOIN MEDHOK_CORE_DEV_V.MEDHOK_MHK_AUTHORIZATIONPROCEDURE_FILTERED e
+    ON e.MHKAUTHORIZATIONINTERNALID = d.MHKAuthorizationInternalID
+  WHERE c.ETL_IS_CURR_IND = 'Y'
+    AND d.ETL_IS_CURR_IND = 'Y'
+    AND a.BTCH_ID = :p_DataBtchId
+    AND a.RUN_TY = :p_RunType;
+
+  SET v_Inserted = ACTIVITY_COUNT;
+
+/*COLLECT STATS For Export Table */
+
+  CALL DBC.SYSEXECSQL('COLLECT STATS ON EXPORT_FEED_DEV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1');
+
+  SET PROC_MSG = 'SUCCESS|SOFT DELETED ' || CAST(v_SoftDeleted AS VARCHAR(20)) || '|INSERTED ' || CAST(v_Inserted AS VARCHAR(20));
+
+END MAIN;
