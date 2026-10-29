@@ -244,6 +244,10 @@ Trigger FILE_LOAD. Check Q4 (load), Q6 (staging), Q7 (core), Q3 (timeline), file
 | FL-20 | Archive by year | `"settings":{"ARCHIVE_BY_YEAR":true}` in a trigger | File in `Archive/<year>/` |
 | FL-21 | One file from trigger | `{"project":"CMSUNIV","file":"<name>"}` | Only that file |
 | FL-22 | Chain | FILE_LOAD succeeds | OVERRIDE_DECISIONS and EXPORT_LOAD triggered; with a rejected file the task fails and they are not |
+| FL-23 | FastLoad | Large GOOD file, `"settings":{"LOAD_ENGINE":"FASTLOAD"}` | Loaded; log "staged into ... with FASTLOAD in N s"; no `<staging table>_W<Load_ID>` table left |
+| FL-24 | FastLoad not allowed | As FL-23 with an account without CREATE TABLE in the staging database | Loaded with batched inserts in the same run; log WARNING "FastLoad not used"; load message `FASTLOAD not used: ... could not be created` |
+| FL-25 | FastLoad, value too long | BAD_VALUE (too long for the staging column) with `LOAD_ENGINE` `FASTLOAD` | `REJECTED` `FILE_PARSE_ERROR` (no batched retry); no work table left |
+| FL-26 | AUTO | `LOAD_ENGINE` `AUTO`: one file under `FASTLOAD_MIN_BYTES`, one over | The small file "with batched inserts", the large one "with FASTLOAD" |
 
 ---
 
@@ -461,7 +465,7 @@ For an installation created before the version shown (runbook section 16).
 | BC | 21 | | | | | |
 | IN | 7 | | | | | |
 | FC | 10 | | | | | |
-| FL | 22 | | | | | |
+| FL | 26 | | | | | |
 | SL | 14 | | | | | |
 | OV | 8 | | | | | |
 | EX | 23 | | | | | |

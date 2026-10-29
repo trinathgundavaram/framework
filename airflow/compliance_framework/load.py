@@ -6,6 +6,7 @@ import csv
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Iterable, Iterator, Mapping, Optional, TYPE_CHECKING
@@ -608,16 +609,38 @@ def _clean_stage(conn, table: str, cfg: "FileConfig", layout: Layout, ctx: LoadC
                      (ctx.btch_id, source))
 
 
+class FastLoadUnavailable(Exception):
+    """FastLoad could not be used for the load (not permitted, no utility slot, ...); nothing reached staging."""
+
+
+def load_engine(settings: "Settings", file_path: str) -> str:
+    """FASTLOAD or BATCH for this file: LOAD_ENGINE, where AUTO = FastLoad from FASTLOAD_MIN_BYTES on."""
+    if settings.load_engine == "AUTO":
+        return "FASTLOAD" if os.path.getsize(file_path) >= settings.fastload_min_bytes else "BATCH"
+    return settings.load_engine
+
+
 def stage(conn: Connection, settings: "Settings", *, file_path: str, cfg: "FileConfig", layout: Layout,
-          ctx: LoadContext, opts: Optional[CheckOptions] = None) -> int:
-    """Clear the staging rows (of the batch, or of its run type) and load the file; returns the row count."""
+          ctx: LoadContext, opts: Optional[CheckOptions] = None) -> tuple[int, str]:
+    """Clear the staging rows (of the batch, or of its run type) and load the file; returns (the row count, how it
+    was loaded). FastLoad that cannot be used falls back to batched inserts in the same run."""
     table = _table(cfg.stg_schema_nm, cfg.stg_table_nm)
-    records = read_file(file_path, cfg, len(layout.file_cols), settings, opts)
     cols = [c.name for c in layout.stage]
     names = ", ".join(db.ident(c) for c in cols)
     resolved = sql_values(conn, layout, ctx)
-    if settings.load_engine == "FASTLOAD":
-        return _stage_fastload(conn, settings, cfg, layout, ctx, records, resolved, table, names, len(cols))
+    note = ""
+    started = time.monotonic()
+    if load_engine(settings, file_path) == "FASTLOAD":
+        try:
+            count = _stage_fastload(conn, settings, cfg, layout, ctx,
+                                    read_file(file_path, cfg, len(layout.file_cols), settings, opts),
+                                    resolved, table, names, len(cols))
+            return count, f"FASTLOAD in {time.monotonic() - started:.0f} s"
+        except FastLoadUnavailable as e:
+            log.warning("FILE_LOAD | load %s | FastLoad not used, loading with batched inserts: %s", ctx.load_id, e)
+            note = f"; FASTLOAD not used: {e}"
+            started = time.monotonic()
+    records = read_file(file_path, cfg, len(layout.file_cols), settings, opts)
     insert = f"INSERT INTO {table} ({names}) VALUES ({', '.join(['%s'] * len(cols))})"
     try:
         with conn.transaction():
@@ -633,7 +656,7 @@ def stage(conn: Connection, settings: "Settings", *, file_path: str, cfg: "FileC
         where = row_position(file_path, cfg, settings, _rejected_row(conn, insert, e))
         raise FileRejected("FILE_PARSE_ERROR", f"value does not fit staging column types{' at ' + where if where else ''}: "
                                                f"{sanitize_db_error(db.error_line(e))}")
-    return count
+    return count, f"batched inserts in {time.monotonic() - started:.0f} s{note}"
 
 
 def stage_rows(conn: Connection, settings: "Settings", *, cfg, layout: Layout, ctx: LoadContext, records: Rows) -> int:
@@ -722,14 +745,18 @@ def stage_query(conn: Connection, *, cfg, layout_for, ctx: LoadContext, sql: str
 
 def _stage_fastload(conn: Connection, settings: "Settings", cfg: "FileConfig", layout: Layout, ctx: LoadContext,
                     records: Rows, resolved: dict, table: str, names: str, width: int) -> int:
-    """LOAD_ENGINE=FASTLOAD: FastLoad into a work table of this load, then one INSERT ... SELECT into staging.
+    """FastLoad into a work table of this load, then one INSERT ... SELECT into staging.
 
-    The work table (<staging table>_W<Load_ID>, in the staging database) is dropped afterwards.
+    The work table (<staging table>_W<Load_ID>, in the staging database) is dropped afterwards. FastLoadUnavailable =
+    the work table could not be made or FastLoad could not be used; staging is untouched then.
     """
     work = _table(cfg.stg_schema_nm, f"{cfg.stg_table_nm}_W{ctx.load_id}")
     _drop(conn, work)
     start = next_sequence(conn, cfg, layout)
-    conn.execute(f"CREATE MULTISET TABLE {work} AS (SELECT {names} FROM {table}) WITH NO DATA NO PRIMARY INDEX")
+    try:
+        conn.execute(f"CREATE MULTISET TABLE {work} AS (SELECT {names} FROM {table}) WITH NO DATA NO PRIMARY INDEX")
+    except Exception as e:  # noqa: BLE001
+        raise FastLoadUnavailable(f"work table {work} could not be created: {sanitize_db_error(db.error_line(e))}") from e
     try:
         try:
             sent = conn.fastload(f"INSERT INTO {work} ({names}) VALUES ({', '.join(['%s'] * width)})",
@@ -739,7 +766,7 @@ def _stage_fastload(conn: Connection, settings: "Settings", cfg: "FileConfig", l
             raise
         except Exception as e:  # noqa: BLE001
             if not (isinstance(e, db.FastLoadRejected) or db.is_data_error(e)):
-                raise
+                raise FastLoadUnavailable(sanitize_db_error(db.error_line(e))) from e
             raise FileRejected("FILE_PARSE_ERROR", "value does not fit staging column types: "
                                                    f"{sanitize_db_error(db.error_line(e))}")
         with conn.transaction():

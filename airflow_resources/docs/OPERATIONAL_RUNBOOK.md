@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.78 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.79 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -1432,7 +1432,8 @@ come from the Variable: `NOTIFY_BACKEND = airflow`, `DEFAULT_NOTIFY_EMAILS` = `e
 | `CHECK_ON_LOAD` | `false` | `true`: FILE_LOAD runs the content checks itself before loading |
 | `WRITE_ERROR_FILE` | `true` | Write an error log for a rejected file |
 | `WRITE_CONTROL_REPORT` | `true` | Write the control report of each FILE_LOAD run |
-| `LOAD_ENGINE` | `BATCH` | `BATCH` (inserts in batches) or `FASTLOAD` (very large files; test first) |
+| `LOAD_ENGINE` | `BATCH` | `BATCH` (inserts in batches), `FASTLOAD` (Teradata FastLoad; batched inserts in the same run when FastLoad is not allowed) or `AUTO` (FastLoad for files of `FASTLOAD_MIN_BYTES` and more) |
+| `FASTLOAD_MIN_BYTES` | `100000000` | With `LOAD_ENGINE = AUTO`: the file size (bytes) from which FastLoad is used |
 | `INSERT_BATCH_ROWS`, `INSERT_BATCH_BYTES` | `2000`, `500000` | Rows / bytes per insert batch |
 | `RULE_ENGINE` | `gre` | `gre` or `none` (no data quality rules) |
 | `GRE_ENTRYPOINT` | `compliance_framework.export:run_gre` | The function that runs a batch's rules (the framework's GRE bridge) |
@@ -1815,6 +1816,7 @@ differs from `schema.sql` (no rows = up to date). A NOT NULL column that should 
 | 0.3.62 | the `Load_Stat` renames below |
 | 0.3.63 | the timeline event renames below |
 | 0.3.67 | `ALTER TABLE HSABC_DEV.ComplianceExportConfig ADD Exp_Sql_Txt VARCHAR(8000), ADD Exp_Pre_Sql_Txt VARCHAR(8000), ADD Exp_Post_Sql_Txt VARCHAR(8000);` |
+| 0.3.79 | No database change. `LOAD_ENGINE` takes `AUTO` (FastLoad from `FASTLOAD_MIN_BYTES`, default 100 MB). FastLoad is now required of the driver: when it cannot be used (work table not allowed, FastLoad refused) the file loads with batched inserts in the same run, with a log warning and the reason in the load message. The log line "staged into" names the method and its seconds |
 | 0.3.78 | No database change. A project's FILE_LOAD / FILE_CHECK identifies files with that project's file configs only and leaves another project's file (same template and folder) in place; runs without a project pick between projects by inbound folder, crosswalk run type and batch. `TEMPLATE_OVERLAP` across projects is now the warning `TEMPLATE_OVERLAP_PROJECTS`. `health` takes `--project` |
 | 0.3.77 | `ALTER TABLE HSABC_DEV.ComplianceExportConfig DROP Exp_Btch_Col_Nm;` The extra export batch column (`Exp_Btch_ID`) and the `{exp_btch_id}` placeholder are gone: export tables carry the batch in `Btch_ID` only. Rows whose `Exp_Proc_Parm_Txt` / `Exp_Pre_Sql_Txt` / `Exp_Post_Sql_Txt` use `{exp_btch_id}` change it to `{btch_id}` (`validate-config` lists them); an empty `Exp_Proc_Parm_Txt` now means `{btch_id}, {data_btch_id}` |
 | 0.3.71 | `airflow_resources/sql/upgrade_0.3.71.sql`: the audit columns of every framework table renamed (`Created_Dtts` → `Load_Dtts`, `Created_By` → `LoadUser_ID`, `Updated_Dtts` → `LastUpdt_Dtts`, `Updated_By` → `LastUpdt_ID`); six tables (`ComplianceRunType`, `ComplianceDataSetSourceXwalk`, `ComplianceSourceFileConfig`, `ComplianceRequestControl`, `ComplianceFileLoad`, `CMS_ComplianceExceptionsAudit`) backed up, recreated in the new column order (audit columns last) and filled again, then the backups dropped; `ComplianceRequestControl` and `ComplianceFileLoad` get `LoadUser_ID` / `LastUpdt_ID`. Fill the four `{{NEXT_...}}` start values from step 2.0 first so the IDs are kept. Every framework update now sets `LastUpdt_ID` to the database user. Run it with the DAGs paused, then deploy the code |

@@ -42,7 +42,7 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
 |---|---|---|
 | C1 | `ROW_SEQUENCE` reads `MAX()` of the core table on every load | Mapped on every CMSUNIV file table; one scan per file |
 | C3 | EXPORT_LOAD reads the whole batch timeline (`ComplianceRequestFileDetail`) every run | The timeline is never purged |
-| C5 | Staging insert batch size (2,000 rows / 500 KB), single transaction per file | Large files; `LOAD_ENGINE=FASTLOAD` is untested on Teradata |
+| C5 | Staging insert batch size (2,000 rows / 500 KB), single transaction per file | Large files; `LOAD_ENGINE=FASTLOAD` / `AUTO` (falls back to batched inserts) is untested on Teradata |
 | – | `execution_timeout_minutes` per step | FILE_LOAD of several large files |
 
 ## 2. Decisions still open (business)

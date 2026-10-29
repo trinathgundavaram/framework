@@ -511,12 +511,12 @@ class IngestPipeline:
             log.info("FILE_LOAD | %s | load %s | batch %s | %s bytes read", basename(info.path), load_id, batch["btch_id"],
                      info.size)
             try:
-                staged_rows = stage(self.conn, self.settings, file_path=path, cfg=cfg, layout=layout, ctx=ctx,
-                                    opts=opts)
+                staged_rows, how = stage(self.conn, self.settings, file_path=path, cfg=cfg, layout=layout, ctx=ctx,
+                                         opts=opts)
             except FileRejected as e:
                 return self._reject_file(load_id, info, e.event_ty, str(e), cfg, batch, local_path=path)
-        log.info("FILE_LOAD | %s | load %s | %s data row(s) staged into %s.%s", basename(info.path), load_id, staged_rows,
-                 cfg.stg_schema_nm, cfg.stg_table_nm)
+        log.info("FILE_LOAD | %s | load %s | %s data row(s) staged into %s.%s with %s", basename(info.path), load_id,
+                 staged_rows, cfg.stg_schema_nm, cfg.stg_table_nm, how)
         try:
             check_core_types(self.conn, cfg, layout, ctx)
         except FileRejected as e:
@@ -526,6 +526,8 @@ class IngestPipeline:
                               "WHERE Load_ID=%s", (staged_rows, self.clock.now(), load_id))
 
         result = self._resolve(load_id, info, cfg, req_id, staged_rows)
+        if "FASTLOAD not used" in how:
+            result.message = "; ".join(m for m in (result.message, how[how.index("FASTLOAD not used"):]) if m)
         self._archive(info, load_id, rejected=result.result not in LOADED_RESULTS)
         return result
 

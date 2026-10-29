@@ -249,12 +249,13 @@ class Connection:
                  batch_bytes: int = INSERT_CHUNK_BYTES) -> int:
         """Insert with Teradata FastLoad into an empty table, as one unit; returns the number of rows sent.
 
-        The driver falls back to ordinary batched inserts when FastLoad is not possible for the table.
-        FastLoadRejected = the database refused rows (they are not loaded; nothing is committed).
+        FastLoad is required: when it is not possible (not permitted, no utility slot, ...) the driver raises an error
+        instead of inserting row by row. FastLoadRejected = the database refused rows (they are not loaded; nothing is
+        committed).
         """
         if self.in_transaction:
             raise RuntimeError("FastLoad runs outside a transaction")
-        text = "{fn teradata_try_fastload}" + _PARAM.sub("?", query)
+        text = "{fn teradata_require_fastload}" + _PARAM.sub("?", query)
         sent = 0
         self._autocommit(False)
         cur = self._raw.cursor()
@@ -598,6 +599,7 @@ class Settings:
     check_on_load: bool = False
 
     load_engine: str = "BATCH"
+    fastload_min_bytes: int = 100_000_000
     insert_batch_rows: int = 2000
     insert_batch_bytes: int = 500000
 
@@ -663,7 +665,7 @@ class Settings:
         if self.rule_engine.strip().lower() in ("gre", "none"):
             self.rule_engine = self.rule_engine.strip().lower()
         for name, allowed in (("file_rules_mode", ("GATE", "ANNOTATE")),
-                              ("load_engine", ("BATCH", "FASTLOAD")),
+                              ("load_engine", ("BATCH", "FASTLOAD", "AUTO")),
                               ("notify_backend", ("log", "airflow")), ("file_store", ("nas", "local"))):
             if getattr(self, name) not in allowed:
                 raise ConfigError(f"{name.upper()} must be one of {allowed}, got {getattr(self, name)!r}")
@@ -672,6 +674,8 @@ class Settings:
                 raise ConfigError(f"{name.upper()} {getattr(self, name)!r} must be a plain folder name")
         if self.nas_min_age_seconds < 0:
             raise ConfigError("NAS_MIN_AGE_SECONDS must be >= 0")
+        if self.fastload_min_bytes < 0:
+            raise ConfigError("FASTLOAD_MIN_BYTES must be >= 0")
         if self.insert_batch_rows < 1 or self.insert_batch_bytes < 1:
             raise ConfigError("INSERT_BATCH_ROWS and INSERT_BATCH_BYTES must be >= 1")
         if self.lock_ttl_minutes < 1:
