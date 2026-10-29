@@ -1,0 +1,28 @@
+{
+  "td_conn_var": "DEV",
+  "meta_db": "HSABC_DEV",
+  "load_env": "DEV",
+  "email_recipient": "TRINATH_gundavaram@example.com",
+  "project": "UMCM",
+  "trigger_dags": [
+    "COMPLIANCE_UMCM_FILE_RULES"
+  ],
+  "wait_for_triggered": true,
+  "runs": [
+    {
+      "name": "DLY",
+      "run_type": "DLY",
+      "schedule_interval": "0 20 * * *"
+    },
+    {
+      "name": "WKLY",
+      "run_type": "WKLY",
+      "schedule_interval": "0 20 * * 0"
+    },
+    {
+      "name": "MNTH",
+      "run_type": "MNTH",
+      "schedule_interval": "0 20 3 * *"
+    }
+  ]
+}

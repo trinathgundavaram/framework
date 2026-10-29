@@ -1,0 +1,13 @@
+{
+  "td_conn_var": "DEV",
+  "meta_db": "HSABC_DEV",
+  "load_env": "DEV",
+  "email_recipient": "TRINATH_gundavaram@example.com",
+  "project": "UMCM",
+  "settings": {
+    "CHECK_MOVE_FAILED": true
+  },
+  "trigger_dags": [
+    "COMPLIANCE_UMCM_FILE_LOAD"
+  ]
+}
