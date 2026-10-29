@@ -13,14 +13,15 @@ from compliance_framework import config as cfgmod, db
 from compliance_framework.adapters import ERROR, RuleEngine
 from compliance_framework.audit import EventLogger
 from compliance_framework.batches import Releases, get_batch
-from compliance_framework.common import Clock, ConfigError, code
+from compliance_framework.common import OPEN_STATUSES, Clock, ConfigError, code
 from compliance_framework.config import Scope
 from compliance_framework.db import Settings, ident
 from compliance_framework.load import (BATCH_COLUMN, LoadContext, _cast, _converted, batch_column, column_mapping, columns,
     export_plan, sanitize_db_error)
 
 
-# export: EXPORT_LOAD: copy each batch whose data changed from core into its export table (ComplianceExportConfig).
+# export: EXPORT_LOAD: copy each open batch (every run) and each batch whose data changed from core into its export
+# table (ComplianceExportConfig).
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +54,8 @@ class ExportLoader:
 
     def run(self, scope: Optional[Scope] = None, batches: Optional[list[str]] = None,
             release: bool = False, hold: tuple = ()) -> ExportSummary:
-        """Export the scope's batches whose data changed since their last export, or the batches named. Batches of
+        """Export every open batch of the scope (again on each run) and any batch with new data since its last export
+        (e.g. a correction of a closed batch), or the batches named. Batches of
         scheduled run types wait until due, ad-hoc ones until released, and run types in `hold` until released, unless `release`
         releases the ones with data now."""
         scope = scope or Scope()
@@ -61,7 +63,7 @@ class ExportLoader:
                    if scope.covers(e.project_cd, e.table_nm)}
         s = ExportSummary(tables=sorted(f"{e.exp_schema_nm}.{e.exp_table_nm}" for e in exports.values()))
         self._hold = hold
-        todo = self._held(self._named(exports, scope, batches, s) if batches else self._changed(exports, scope),
+        todo = self._held(self._named(exports, scope, batches, s) if batches else self._due(exports, scope),
                           s, release, bool(batches))
         log.info("EXPORT_LOAD | %s | %s batch(es) to export%s", scope.label(), len(todo),
                  ": " + ", ".join(b["btch_id"] for b in todo[:50]) if todo else "")
@@ -167,24 +169,28 @@ class ExportLoader:
             out.extend(found)
         return out
 
-    def _changed(self, exports: dict, scope: Scope) -> list[dict]:
-        """Batches whose data (or the data of the batch they reuse) changed after their last export."""
+    def _due(self, exports: dict, scope: Scope) -> list[dict]:
+        """Every open batch of the scope (exported again on each run, with its data or none yet), and any other batch
+        whose data (or the data of the batch it reuses) changed after its last export (a late arrival or correction
+        of a closed batch)."""
         if not exports:
             return []
         where, params = scope.sql("c")
         marks, changes = db.in_list(CHANGES)
+        open_marks, stats = db.in_list(OPEN_STATUSES)
         rows = self.conn.execute(
             f"""SELECT c.* FROM ComplianceRequestControl c
-                  JOIN (SELECT Req_ID, MAX(Event_Dtts) AS changed_at FROM ComplianceRequestFileDetail
+                  LEFT JOIN (SELECT Req_ID, MAX(Event_Dtts) AS changed_at FROM ComplianceRequestFileDetail
                          WHERE Event_Ty IN ({marks}) GROUP BY Req_ID) ch ON ch.Req_ID = c.Req_ID
                   LEFT JOIN ComplianceRequestControl r ON r.Btch_ID = c.Reuse_Btch_ID AND r.Src_ID = c.Src_ID
                   LEFT JOIN (SELECT Req_ID, MAX(Event_Dtts) AS changed_at FROM ComplianceRequestFileDetail
                               WHERE Event_Ty IN ({marks}) GROUP BY Req_ID) rch ON rch.Req_ID = r.Req_ID
                   LEFT JOIN (SELECT Req_ID, MAX(Event_Dtts) AS exported_at FROM ComplianceRequestFileDetail
                               WHERE Event_Ty = 'EXPORT_LOADED' GROUP BY Req_ID) ex ON ex.Req_ID = c.Req_ID
-                 WHERE (ex.exported_at IS NULL OR ch.changed_at > ex.exported_at
+                 WHERE ((c.Req_Stat IN ({open_marks}) AND COALESCE(c.Batch_Close_Ind, 0) = 0)
+                        OR (ch.changed_at IS NOT NULL AND (ex.exported_at IS NULL OR ch.changed_at > ex.exported_at))
                         OR (c.Resolution_Ty = 'CARRY_FORWARD' AND rch.changed_at > ex.exported_at)){where}
-                 ORDER BY c.Req_ID""", [*changes, *changes, *params]).fetchall()
+                 ORDER BY c.Req_ID""", [*changes, *changes, *stats, *params]).fetchall()
         return [b for b in rows if (b["project_cd"], b["table_nm"]) in exports]
 
     def _data_chain(self, b: dict) -> list[str]:

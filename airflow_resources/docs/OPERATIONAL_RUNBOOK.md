@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.79 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.80 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -253,8 +253,9 @@ columns or by calling the export procedure with the batch's values.
 - **Due:** every run type (`SCHEDULED` and `ADHOC`) from the close date on (from `RELEASE_TIME` that day, if set),
   or earlier when released. Held run types wait.
 - **Which data:** the newest batch of the period whose resolution is `NEW_FILE`, `CARRY_FORWARD` or `NO_DATA`. A
-  re-export replaces the batch's own export rows (`Btch_ID` + source column); a batch is exported again only when it has new
-  data since its last export.
+  re-export replaces the batch's own export rows (`Btch_ID` + source column). Every run exports every open batch
+  of the scope again (a source without data yet too: its earlier rows of the period are removed, none inserted); a
+  closed batch only when it has new data since its last export (late arrival, correction) or is named in `batch`.
 - **How:** procedure, custom SELECT (`Exp_Sql_Txt`) or plain copy, with optional pre / post statements once per batch
   (5.11).
 - Timeline `EXPORT_LOADED`; a failure is rolled back and reported (`EXPORT_LOAD_FAILED`, exit 1).
@@ -1816,6 +1817,7 @@ differs from `schema.sql` (no rows = up to date). A NOT NULL column that should 
 | 0.3.62 | the `Load_Stat` renames below |
 | 0.3.63 | the timeline event renames below |
 | 0.3.67 | `ALTER TABLE HSABC_DEV.ComplianceExportConfig ADD Exp_Sql_Txt VARCHAR(8000), ADD Exp_Pre_Sql_Txt VARCHAR(8000), ADD Exp_Post_Sql_Txt VARCHAR(8000);` |
+| 0.3.80 | No database change. EXPORT_LOAD exports every open batch of its scope on every run, not only batches with new data (a source without data yet is exported with no rows; with a procedure the procedure is called for it). Closed batches are exported when they get new data (late arrival, correction) or are named. Holds and due dates are unchanged |
 | 0.3.79 | No database change. `LOAD_ENGINE` takes `AUTO` (FastLoad from `FASTLOAD_MIN_BYTES`, default 100 MB). FastLoad is now required of the driver: when it cannot be used (work table not allowed, FastLoad refused) the file loads with batched inserts in the same run, with a log warning and the reason in the load message. The log line "staged into" names the method and its seconds |
 | 0.3.78 | No database change. A project's FILE_LOAD / FILE_CHECK identifies files with that project's file configs only and leaves another project's file (same template and folder) in place; runs without a project pick between projects by inbound folder, crosswalk run type and batch. `TEMPLATE_OVERLAP` across projects is now the warning `TEMPLATE_OVERLAP_PROJECTS`. `health` takes `--project` |
 | 0.3.77 | `ALTER TABLE HSABC_DEV.ComplianceExportConfig DROP Exp_Btch_Col_Nm;` The extra export batch column (`Exp_Btch_ID`) and the `{exp_btch_id}` placeholder are gone: export tables carry the batch in `Btch_ID` only. Rows whose `Exp_Proc_Parm_Txt` / `Exp_Pre_Sql_Txt` / `Exp_Post_Sql_Txt` use `{exp_btch_id}` change it to `{btch_id}` (`validate-config` lists them); an empty `Exp_Proc_Parm_Txt` now means `{btch_id}, {data_btch_id}` |

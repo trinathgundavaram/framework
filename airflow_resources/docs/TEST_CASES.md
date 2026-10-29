@@ -306,7 +306,8 @@ feed views (extract).
 | EX-03 | Procedure mode | A test table with `Exp_Proc_Nm` set (CMSUNIV itself has no procedure) | Log `procedure <db>.<proc>` with parameters; rows stamped `Btch_ID` |
 | EX-04 | All sources | Batch with several sources | Each source exported; one `EXPORT_LOADED` per source row |
 | EX-05 | Re-export replaces | Reload a file (FL-08), export again | Old rows of that source removed, new inserted; no duplicates |
-| EX-06 | Only changed batches | Rerun EXPORT_LOAD without changes | Nothing exported again |
+| EX-06 | Open batches every run | Rerun EXPORT_LOAD without changes | Every open, due batch exported again (rows replaced, no duplicates); a source without a file exported with 0 rows; a closed batch not exported |
+| EX-06b | Correction of a closed batch | Load an approved CORRECTION file, run EXPORT_LOAD | The closed batch exported once; the next run leaves it |
 | EX-07 | Newest batch of the period | Two batches same dates; later one `MISSING` | The later one `SKIPPED` ("the period's data is batch …"); data of the earlier one kept |
 | EX-08 | No data batch | `NO_DATA` batch | Earlier export rows of the period removed, nothing inserted |
 | EX-09 | Carry-forward copy | OV-01 batch | `data_from` = reused batch; rows inserted under the new batch ID; reused batch's rows kept |
@@ -468,7 +469,7 @@ For an installation created before the version shown (runbook section 16).
 | FL | 26 | | | | | |
 | SL | 14 | | | | | |
 | OV | 8 | | | | | |
-| EX | 23 | | | | | |
+| EX | 24 | | | | | |
 | RU | 15 | | | | | |
 | CL | 10 | | | | | |
 | NT | 5 | | | | | |

@@ -274,7 +274,7 @@ def _source_load(app, p: dict) -> ModuleOutcome:
 
 
 def _export_load(app, p: dict) -> ModuleOutcome:
-    """Copy the batches whose data changed into the export tables; exit 1 when a batch could not be exported."""
+    """Copy every open batch, and every batch whose data changed, into the export tables; exit 1 when a batch could not be exported."""
     names = [n.strip() for n in (p.get("batch") or "").split(",") if n.strip()]
     s = app.exporter.run(_scope(app, p), names or None, release=wanted(p.get("release")),
                                    hold=run_type_list(p.get("hold")))
@@ -333,7 +333,8 @@ MODULES: dict[str, ModuleSpec] = {m.name: m for m in (
                        "--release true; --hold (run types) holds them until released",
         required=(), optional=(Param("project"), *SCOPE, Param("batch"), Param("release"), Param("hold")), handler=_source_load),
     ModuleSpec(
-        "EXPORT_LOAD", "copy each batch whose data changed (load, carry-forward, late arrival, correction) from core "
+        "EXPORT_LOAD", "copy every open batch (again on each run) and each batch whose data changed (a late arrival or "
+                       "correction of a closed batch) from core "
                        "into its export table (ComplianceExportConfig): the batch's rows replace the earlier rows of "
                        "that source and report period; a carried-forward batch gets a copy of the reused rows under "
                        "its own batch; --batch exports named batches again; scheduled run types wait "

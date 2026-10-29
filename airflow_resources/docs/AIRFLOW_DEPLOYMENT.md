@@ -311,9 +311,11 @@ rules receive the batch as `btch_id`. A carried-forward copy gets the `Btch_ID` 
 copied to. An export procedure gets `{src_id}`: it deletes and inserts only that source's rows and fills the source
 column.
 
-**Which batches are exported.** With the scope: every batch whose data changed after its last export (a load,
-late arrival, correction, carry-forward applied or removed, or a change of the batch it reuses), for every run
-type. With `batch`: exactly those batches, again.
+**Which batches are exported.** With the scope: every open batch, on every run (a source without data yet too:
+its earlier export rows of the period are removed and none inserted, or the procedure is called for it), and any
+closed batch whose data changed after its last export (a late arrival or correction, a carry-forward applied or
+removed, or a change of the batch it reuses), for every run type; due dates and holds apply. With `batch`: exactly
+those batches, again.
 
 **What the export holds.** Per source, run type and report dates, the latest batch with data: exporting it removes
 the rows of the other batches of that period and inserts its own. A carried-forward batch gets a copy of the
