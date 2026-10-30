@@ -1,7 +1,7 @@
 # Compliance Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.80 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.81 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -1817,6 +1817,7 @@ differs from `schema.sql` (no rows = up to date). A NOT NULL column that should 
 | 0.3.62 | the `Load_Stat` renames below |
 | 0.3.63 | the timeline event renames below |
 | 0.3.67 | `ALTER TABLE HSABC_DEV.ComplianceExportConfig ADD Exp_Sql_Txt VARCHAR(8000), ADD Exp_Pre_Sql_Txt VARCHAR(8000), ADD Exp_Post_Sql_Txt VARCHAR(8000);` |
+| 0.3.81 | No database change. Every file FILE_LOAD skips has its reason in the task log (`<file> | skipped: <reason>`) and in the report's `skipped_files`: shared folder and the name fits no template of the run's scope, another run type, left in place for another project, already moved by another run (e.g. FILE_CHECK moved it to `Error/`), being loaded by another run. FILE_CHECK logs `not checked: <reason>` (also when a folder cannot be listed or the config is not set up correctly). Every step now logs what it skipped or left for the next run, with the reason, and each technical failure as it happens (ERROR): FILE_LOAD / SOURCE_LOAD / EXPORT_LOAD `<file or batch> | failed: <error>`, named batches not found `not run: ...`, FILE_RULES `waiting for EXPORT_LOAD` / `left for the next run` / `skipped: no rules ran`, BATCH_CLOSE `not closed: <reason>`, BATCH_CREATION intake `skipped: <reason>`, OVERRIDE_DECISIONS `left for the next run: batch ... is busy`, NOTIFY `skipped: being sent by another run`. No file data in the log. A skip does not fail the run |
 | 0.3.80 | No database change. EXPORT_LOAD exports every open batch of its scope on every run, not only batches with new data (a source without data yet is exported with no rows; with a procedure the procedure is called for it). Closed batches are exported when they get new data (late arrival, correction) or are named. Holds and due dates are unchanged |
 | 0.3.79 | No database change. `LOAD_ENGINE` takes `AUTO` (FastLoad from `FASTLOAD_MIN_BYTES`, default 100 MB). FastLoad is now required of the driver: when it cannot be used (work table not allowed, FastLoad refused) the file loads with batched inserts in the same run, with a log warning and the reason in the load message. The log line "staged into" names the method and its seconds |
 | 0.3.78 | No database change. A project's FILE_LOAD / FILE_CHECK identifies files with that project's file configs only and leaves another project's file (same template and folder) in place; runs without a project pick between projects by inbound folder, crosswalk run type and batch. `TEMPLATE_OVERLAP` across projects is now the warning `TEMPLATE_OVERLAP_PROJECTS`. `health` takes `--project` |

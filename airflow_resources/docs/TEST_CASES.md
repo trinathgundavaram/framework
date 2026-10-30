@@ -248,6 +248,7 @@ Trigger FILE_LOAD. Check Q4 (load), Q6 (staging), Q7 (core), Q3 (timeline), file
 | FL-24 | FastLoad not allowed | As FL-23 with an account without CREATE TABLE in the staging database | Loaded with batched inserts in the same run; log WARNING "FastLoad not used"; load message `FASTLOAD not used: ... could not be created` |
 | FL-25 | FastLoad, value too long | BAD_VALUE (too long for the staging column) with `LOAD_ENGINE` `FASTLOAD` | `REJECTED` `FILE_PARSE_ERROR` (no batched retry); no work table left |
 | FL-26 | AUTO | `LOAD_ENGINE` `AUTO`: one file under `FASTLOAD_MIN_BYTES`, one over | The small file "with batched inserts", the large one "with FASTLOAD" |
+| FL-27 | Skip reason | Run FILE_CHECK (with `CHECK_MOVE_FAILED`) and FILE_LOAD together on a failing file; a file of no template in a shared folder | FILE_LOAD log `skipped: already moved by another run ...` / `skipped: the folder is also the inbound folder ...`; report `skipped_files` with the reasons; run not failed |
 
 ---
 
@@ -466,7 +467,7 @@ For an installation created before the version shown (runbook section 16).
 | BC | 21 | | | | | |
 | IN | 7 | | | | | |
 | FC | 10 | | | | | |
-| FL | 26 | | | | | |
+| FL | 27 | | | | | |
 | SL | 14 | | | | | |
 | OV | 8 | | | | | |
 | EX | 24 | | | | | |

@@ -105,8 +105,14 @@ class PathIngestSummary:
     outcomes: list[IngestOutcome] = field(default_factory=list)
     held: list[dict] = field(default_factory=list)
     released: list[str] = field(default_factory=list)
+    skipped_files: list[dict] = field(default_factory=list)
 
-    def tally(self, outcome: IngestOutcome) -> None:
+    def skip(self, name: str, reason: str) -> None:
+        self.skipped += 1
+        self.skipped_files.append({"file": name, "reason": reason})
+        log.info("FILE_LOAD | %s | skipped: %s", name, reason)
+
+    def tally(self, outcome: IngestOutcome, name: Optional[str] = None) -> None:
         self.outcomes.append(outcome)
         if outcome.result in LOADED_RESULTS:
             self.loaded += 1
@@ -116,6 +122,11 @@ class PathIngestSummary:
             self.rejected_closed += 1
         else:
             self.other += 1
+            if name and outcome.message:
+                self.skipped_files.append({k: v for k, v in (("file", name), ("load_id", outcome.load_id),
+                                                             ("result", outcome.result), ("reason", outcome.message))
+                                           if v is not None})
+                log.info("FILE_LOAD | %s | %s: %s", name, outcome.result, outcome.message)
 
 
 def _where(found: list) -> str:
@@ -217,16 +228,24 @@ class IngestPipeline:
     def belongs(name: str, location: tuple, shared: set, own: Optional[TemplateMatcher], scope: Scope) -> bool:
         """Whether a listed file is the scope's: in a folder shared with other file configs it must fit one of the
         scope's templates; with a run type, its name must carry that run type. Other files are left in place."""
+        return not IngestPipeline.not_ours(name, location, shared, own, scope)
+
+    @staticmethod
+    def not_ours(name: str, location: tuple, shared: set, own: Optional[TemplateMatcher], scope: Scope) -> str:
+        """Why a listed file is not the scope's (see belongs); "" when it is."""
         if own is None:
-            return True
+            return ""
         if location in shared and not own.candidates(name):
-            return False
+            return (f"the folder is also the inbound folder of other file configs and the name fits no file name "
+                    f"template of {scope.label()}")
         if scope.run_ty:
             try:
-                return code(own.match(name).run_ty) == scope.run_ty
+                run_ty = code(own.match(name).run_ty)
             except MatchError:
-                return False
-        return True
+                return f"the name fits no file name template of {scope.label()}, so its run type is not known"
+            if run_ty != scope.run_ty:
+                return f"its run type {run_ty} is not this run's run type {scope.run_ty}"
+        return ""
 
     def _sweep(self, locations: list[tuple[str, str]], summary: PathIngestSummary, shared: set,
                own: Optional[TemplateMatcher], scope: Scope, others: Optional[TemplateMatcher]) -> None:
@@ -241,23 +260,24 @@ class IngestPipeline:
                      ": " + ", ".join(basename(i.path) for i in files[:50]) + (" ..." if len(files) > 50 else "") if files else "")
             for info in files:
                 summary.scanned += 1
-                if not self.belongs(basename(info.path), (loc_share, loc_folder), shared, own, scope):
-                    summary.skipped += 1
+                why = self.not_ours(basename(info.path), (loc_share, loc_folder), shared, own, scope)
+                if why:
+                    summary.skip(basename(info.path), why)
                     continue
                 left = self.elsewhere(basename(info.path), (info.share, dirname(info.path)), self._sweep_config, others)
                 if left:
-                    log.info("FILE_LOAD | %s | left in place: %s", basename(info.path), left)
-                    summary.skipped += 1
+                    summary.skip(basename(info.path), f"left in place: {left}")
                     continue
                 try:
                     out = self.process_file(loc_share, info.path, listed=True)
                 except Exception as e:  # noqa: BLE001
+                    log.error("FILE_LOAD | %s | failed: %s", basename(info.path), db.error_text(e))
                     summary.errors.append(f"{loc_share}/{info.path}: {db.error_text(e)}")
                     continue
                 if out.result == "GONE":
-                    summary.skipped += 1
+                    summary.skip(basename(info.path), f"{out.message} (no longer in the folder when its turn came)")
                     continue
-                summary.tally(out)
+                summary.tally(out, basename(info.path))
 
     def _load_config(self, project_cd: Optional[str] = None) -> TemplateMatcher:
         """The compiled filename templates of the project's active file configs, or of every project's."""
@@ -750,6 +770,7 @@ class SourceLoader:
                     handled.append(load_id)
                     summary.tally(self._pull(load_id, batch, q))
                 except Exception as e:  # noqa: BLE001
+                    log.error("SOURCE_LOAD | %s source %s | failed: %s", batch["btch_id"], batch["src_id"], db.error_text(e))
                     summary.errors.append(f"{batch['btch_id']}: {db.error_text(e)}")
                     if load_id is not None:
                         self.pipeline._mark_technical_failure(load_id, e)
@@ -776,8 +797,10 @@ class SourceLoader:
                          if (b["project_cd"], b["table_nm"], b["src_id"]) in cfgs
                          and scope.covers(b["project_cd"], b["table_nm"], b["run_ty"], b["src_id"])]
                 if not rows:
+                    log.warning("SOURCE_LOAD | %s | not run: no such batch", name)
                     summary.errors.append(f"{name}: no such batch")
                 elif not found:
+                    log.warning("SOURCE_LOAD | %s | not run: no query source of this batch in %s", name, scope.label())
                     summary.errors.append(f"{name}: no query source of this batch in {scope.label()}")
                 out.extend(found)
             return out

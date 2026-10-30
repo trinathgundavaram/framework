@@ -126,11 +126,13 @@ class NotificationDispatcher:
         for p in pending:
             key = db.row_key("EVT", p["event_id"])
             if not db.try_lock(self.conn, key):
+                log.info("NOTIFY | event %s | skipped: being sent by another run", p["event_id"])
                 continue
             try:
                 r = self.conn.execute("SELECT * FROM CMS_ComplianceExceptionsAudit WHERE Event_ID=%s "
                                       "AND Notified_Ind = 0", (p["event_id"],)).fetchone()
                 if r is None:
+                    log.info("NOTIFY | event %s | skipped: already sent by another run", p["event_id"])
                     continue
                 if self._send(r):
                     self.conn.execute("UPDATE CMS_ComplianceExceptionsAudit SET Notified_Ind = 1 WHERE Event_ID=%s",

@@ -430,7 +430,10 @@ At the end of every step the task log has one report, indented (JSON), instead o
   (`files_found`, `accepted`, `rejected`, `failed`, `skipped`), the control reports written, then one block per
   file: `file`, `status` (`ACCEPTED` / `REJECTED` / `FAILED`, as in the control report), `source`, `load_id`,
   `batch`, `batch_status`, `rows_in_file`, `rows_loaded`, `file_date`, `processed`, and for a file that was not
-  loaded `reason` (plain language), `detail` (technical) and `error_log`.
+  loaded `reason` (plain language), `detail` (technical) and `error_log`. When files were skipped, `skipped_files`
+  lists each one with its `reason` (shared folder and the name fits no template of the run's scope, another run
+  type, left in place for another project, already moved by another run, being loaded by another run); the task log
+  has the same as `<file> | skipped: <reason>`. A skipped file does not fail the run.
 - `FILE_CHECK`: `result` (`ALL FILES PASSED`, `n FILE(S) WITH PROBLEMS`, `NO FILES`), the counts (`files_checked`,
   `passed`, `failed`, `not_checked`), then one block per file: `file`, `result`, `source`, `run_type`, `version`,
   `report_dates`, `batch`, `lines`, `data_rows`, `rows_validated`, `value_rules`, `problems`, `notes`, `error_log`,

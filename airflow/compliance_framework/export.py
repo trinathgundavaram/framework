@@ -119,6 +119,7 @@ class ExportLoader:
         log.info("EXPORT_LOAD | %s | %s done (%s row(s))", params["btch_id"], what, n if n is not None and n >= 0 else "-")
 
     def _failed(self, b: dict, err: Exception, s: ExportSummary) -> dict:
+        log.error("EXPORT_LOAD | %s source %s | failed: %s", b["btch_id"], b["src_id"], db.error_text(err))
         s.errors.append(f"{b['btch_id']} source {b['src_id']}: {db.error_text(err)}")
         with self.conn.transaction():
             self.logger.audit("EXPORT_LOAD_FAILED", description=db.error_text(err), project_cd=b["project_cd"],
@@ -163,8 +164,10 @@ class ExportLoader:
             found = [b for b in rows if (b["project_cd"], b["table_nm"]) in exports
                      and scope.covers(b["project_cd"], b["table_nm"], b["run_ty"], b["src_id"])]
             if not rows:
+                log.warning("EXPORT_LOAD | %s | not run: no such batch", name)
                 s.errors.append(f"{name}: no such batch")
             elif not found:
+                log.warning("EXPORT_LOAD | %s | not run: its table has no export table in %s", name, scope.label())
                 s.errors.append(f"{name}: its table has no export table in {scope.label()}")
             out.extend(found)
         return out
@@ -438,10 +441,12 @@ class RulesRunner:
             batches.setdefault(r["btch_id"], []).append(r)
         for btch_id, loads in batches.items():
             if any(r["load_id"] in waiting for r in loads):
+                log.info("FILE_RULES | %s | waiting for EXPORT_LOAD: the batch was not exported since its load", btch_id)
                 s.waiting_for_export.append(btch_id)
                 continue
             key = f"RULES:{btch_id}"
             if not db.try_lock(self.conn, key):
+                log.info("FILE_RULES | %s | left for the next run: another run is evaluating it", btch_id)
                 s.deferred.append(btch_id)
                 continue
             try:
@@ -503,6 +508,7 @@ class RulesRunner:
                 s.errors.append(f"{btch_id}: {detail}")
                 return
             if outcome.rules_run == 0:
+                log.info("FILE_RULES | %s | skipped: no rules ran for it", btch_id)
                 self._set(loads, "SKIPPED")
                 s.skipped.append(btch_id)
                 return

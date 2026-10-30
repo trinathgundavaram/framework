@@ -198,7 +198,7 @@ def report(out: ModuleOutcome) -> dict:
                 "folders": r.locations, "files_found": r.scanned, **counts, "skipped": r.skipped + r.other,
                 "control_reports": r.reports,
                 "files": [{k: v for k, v in f.items() if k not in ("share", "folder") and v is not None} for f in r.files],
-                "problems": r.errors}
+                **({"skipped_files": r.skipped_files} if r.skipped_files else {}), "problems": r.errors}
     if out.module == "SOURCE_LOAD":
         counts = _summary(r.files)
         not_loaded = counts["rejected"] + counts["failed"]

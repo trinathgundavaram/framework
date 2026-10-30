@@ -353,12 +353,15 @@ class FileChecker:
             try:
                 files = self.store.list_files(share, folder)
             except Exception as e:  # noqa: BLE001
+                log.warning("FILE_CHECK | %s | could not list: %s", self.store.uri(share, folder), db.error_text(e))
                 summary.errors.append(f"{share}/{folder}: {db.error_text(e)}")
                 continue
             log.info("FILE_CHECK | %s | %s file(s) found%s", self.store.uri(share, folder), len(files),
                      ": " + ", ".join(basename(i.path) for i in files[:50]) + (" ..." if len(files) > 50 else "") if files else "")
             for info in files:
-                if not self.pipeline.belongs(basename(info.path), (share, folder), shared, own, scope):
+                why = self.pipeline.not_ours(basename(info.path), (share, folder), shared, own, scope)
+                if why:
+                    log.info("FILE_CHECK | %s | not checked: %s", basename(info.path), why)
                     summary.skipped += 1
                     continue
                 left = self.pipeline.elsewhere(basename(info.path), (info.share, dirname(info.path)), matcher, others)
@@ -472,6 +475,8 @@ class FileChecker:
                 expected_cols = expected_cols or len(columns) + (1 if opts.record_types else 0)
                 field_positions(opts, header_columns(cfg, opts), columns, 1 if opts.record_types else 0)
         except (ConfigError, LookupError) as e:
+            log.warning("FILE_CHECK | %s | not checked: %s/%s/%s is not set up correctly: %s", name, cfg.project_cd,
+                        cfg.table_nm, cfg.src_id, e)
             self._config_errors.setdefault(f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}", str(e))
             return None
         with tempfile.TemporaryDirectory() as tmp:

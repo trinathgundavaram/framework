@@ -570,11 +570,14 @@ class IntakeProcessor:
         for d in due:
             key = db.row_key("INTAKE", d["intake_id"])
             if not db.try_lock(self.conn, key):
+                log.info("BATCH_CREATION | intake %s | skipped: another run is handling it", d["intake_id"])
                 continue
             try:
                 it = self.conn.execute("SELECT * FROM ComplianceRequestInTake WHERE Intake_ID=%s",
                                        (d["intake_id"],)).fetchone()
                 if it is None or db.as_date(it["last_run_dt_key"]) == summary.run_date:
+                    log.info("BATCH_CREATION | intake %s | skipped: %s", d["intake_id"],
+                             "no longer there" if it is None else f"already handled on {summary.run_date}")
                     continue
                 summary.handled += 1
                 try:
@@ -810,6 +813,8 @@ class DecisionProcessor:
         for r in rows:
             key = db.req_key(r)
             if not db.try_lock(self.conn, key):
+                log.info("OVERRIDE_DECISIONS | override %s | left for the next run: batch %s is busy", r.get("ovrd_id") or "-",
+                         r.get("btch_id") or r["req_id"])
                 continue
             try:
                 with self.conn.transaction():
@@ -871,11 +876,15 @@ class DecisionProcessor:
         for r in rows:
             key = db.req_key(r)
             if not db.try_lock(self.conn, key):
+                log.info("OVERRIDE_DECISIONS | override %s | left for the next run: batch %s is busy", r.get("ovrd_id") or "-",
+                         r.get("btch_id") or r["req_id"])
                 continue
             try:
                 with self.conn.transaction():
                     b = get_batch(self.conn, r["req_id"])
                     if b["batch_close_ind"] != 1:
+                        log.info("OVERRIDE_DECISIONS | override %s | reopen skipped: batch %s is no longer closed",
+                                 r["ovrd_id"], b["btch_id"])
                         continue
                     to_stat = REOPEN_STATUS.get(b["resolution_ty"], REQUEST_CREATED)
                     resolution = None if b["resolution_ty"] == "MISSING" else b["resolution_ty"]
@@ -908,6 +917,8 @@ class DecisionProcessor:
         for r in rows:
             key = db.req_key(r)
             if not db.try_lock(self.conn, key):
+                log.info("OVERRIDE_DECISIONS | override %s | left for the next run: batch %s is busy", r.get("ovrd_id") or "-",
+                         r.get("btch_id") or r["req_id"])
                 continue
             try:
                 with self.conn.transaction():
@@ -1050,14 +1061,20 @@ class BatchCloser:
         done = released(self.conn, [b["req_id"] for b in rows if b["run_ty"] in hold]) if hold else set()
         for b in rows:
             if b["run_ty"] in hold and b["req_id"] not in done:
+                log.info("BATCH_CLOSE | %s source %s | not closed: run type %s is held by this run's hold input",
+                         b["btch_id"], b["src_id"], b["run_ty"])
                 s.on_hold.append(b["btch_id"])
                 continue
             s.evaluated += 1
             try:
                 out = self._close_locked(b, "SYSTEM")
             except CloseDeferred:
+                log.info("BATCH_CLOSE | %s source %s | not closed: another run is working on the batch; left for the next run",
+                         b["btch_id"], b["src_id"])
                 s.deferred.append(b["btch_id"])
                 continue
+            if not out:
+                log.info("BATCH_CLOSE | %s source %s | not closed: already closed or no longer open", b["btch_id"], b["src_id"])
             (s.closed if out else s.waiting).append(b["btch_id"])
         return s
 
