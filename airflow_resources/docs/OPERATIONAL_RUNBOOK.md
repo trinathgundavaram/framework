@@ -43,6 +43,26 @@ reading the code. **Version:** framework 0.3.81 (Airflow 3 / Teradata).
 15. CMSUNIV setup at a glance
 16. Upgrading an existing installation
 
+**Diagrams.** [`diagrams/compliance_framework.drawio`](diagrams/compliance_framework.drawio) holds one page per flow
+of this runbook. Open it in draw.io (desktop, or app.diagrams.net) and pick the page at the bottom:
+
+| Page | Shows | Runbook |
+|---|---|---|
+| 1 Architecture | Sources, NAS, Airflow (scheduler, triggerer, DAGs, workers, GRE), Teradata databases, emails and incidents | 1, 9 |
+| 2 Daily flow (DAGs) | The 10 DAGs, their schedules and triggers | 2, 2.1 |
+| 3 DAG run and result | What every DAG does: tasks, exit codes 0 / 1 / 2, retries, `wait_for_triggered` | 2.2 |
+| 4 BATCH_CREATION | Where batches come from, due / exists checks | 2.3 |
+| 5 FILE_CHECK | Checks of a file, passed / failed, start of FILE_LOAD | 2.4 |
+| 6 FILE_LOAD | A file from the NAS to core: skip reasons, rejections, staging, core | 2.5, 5.7 |
+| 7 SOURCE_LOAD | An internal source pulled by query | 2.6 |
+| 8 OVERRIDE_DECISIONS | REUSE, REOPEN, expired carry-forward | 2.7, 6.2 |
+| 9 EXPORT_LOAD | Which batches are exported, procedure / SELECT / plain copy | 2.8, 5.11 |
+| 10 FILE_RULES | Data quality rules of an exported batch | 2.12 |
+| 11 BATCH_CLOSE | How a batch closes and with which status | 2.9 |
+| 12 NOTIFY | Alert emails | 2.10 |
+| 13 Batch lifecycle | Statuses of a batch row | 3 |
+| 14 Metadata tables | The tables, who fills them, how they connect | 4 |
+
 ---
 
 ## 1. What the framework does (business view)
@@ -1630,6 +1650,41 @@ Old batches keep the old version and stay in the old tables; anything reading co
 year. The template replaces the year everywhere in a name or query; check Part 0 for text that holds it otherwise
 (a date literal, a filter value) and correct that row by hand.
 
+**11.21 Load a large file faster.** The FILE_LOAD log line `… data row(s) staged into <staging table> with …` names
+the method and its time, e.g. `BATCH in 1566 s` (batched inserts, about 3,000 rows a second) or `FASTLOAD in 95 s`.
+For large files set in the FILE_LOAD Variable's `settings` (9.4):
+
+| Setting | Value | Why |
+|---|---|---|
+| `LOAD_ENGINE` | `AUTO` (or `FASTLOAD` for every file) | FastLoad for files of `FASTLOAD_MIN_BYTES` (100 MB) and more; smaller files keep batched inserts |
+| `INSERT_BATCH_ROWS`, `INSERT_BATCH_BYTES` | e.g. `10000`, `4000000` | Fewer round trips for the batched inserts (small files, and the fallback) |
+
+FastLoad loads into a work table `<staging table>_W<Load_ID>` in the staging database, which is dropped afterwards:
+the Teradata user needs CREATE TABLE and DROP TABLE there, and a free FastLoad utility slot. When FastLoad cannot be
+used, the file loads with batched inserts in the same run: the log shows a WARNING `FastLoad not used, loading with
+batched inserts: <reason>` and the load message ends with `FASTLOAD not used: <reason>`. Ask the DBA for the right or
+slot named in the reason. Downloading the file from the NAS and copying staging to core take seconds; the staging
+load is the part that grows with the file.
+
+**11.22 Copy a file to the NAS safely.** FILE_CHECK and FILE_LOAD leave a file alone while it was modified in the last
+`NAS_MIN_AGE_SECONDS` (120 s, 9.4), so a copy in progress is not picked up. For large files or slow links:
+
+- Copy into a subfolder of the inbound folder (e.g. `<inbound>\Incoming\`), then move the file up into the inbound
+  folder when the copy is complete. Subfolders are not read, and a move on the same share is instant. Do not copy
+  under a temporary name into the inbound folder itself: a name that fits no template is rejected
+  (`FILE_REJECTED_UNPARSEABLE`) unless the folder is shared with other file configs.
+- Or raise `NAS_MIN_AGE_SECONDS` in the FILE_CHECK and FILE_LOAD Variables to more than the longest pause of a copy.
+- Compare the size (or row count) of the copy with the original before it is picked up. A cut-off copy fails with
+  `MALFORMED … field larger than field limit (131072)` or a bad last line (13); a `TRAILER` check with a row count
+  (`DATA_ROW_COUNT` / `TOTAL_ROW_COUNT`, 8.6) catches a short file before it loads (`FILE_TRAILER_COUNT_MISMATCH`).
+
+**11.23 A file was skipped.** Skipped files are not errors: the run does not fail and nothing is written for them. The
+FILE_LOAD report lists them under `skipped_files`, and the log has one line per file with the reason: still arriving
+(`NAS_MIN_AGE_SECONDS`), another project's or another run type's file, a name that fits no template in a folder shared
+with other file configs, already moved by
+another run (FILE_CHECK with `CHECK_MOVE_FAILED`, or a FILE_LOAD running at the same time), or already loaded. Act only
+when the reason is not expected (13).
+
 ---
 
 ## 12. Monitoring queries
@@ -1740,6 +1795,12 @@ INFO - SOURCE_LOAD | 20261020_CMSUNIV_SNPCC1_DLY source 11 | Src_Sql_Txt on SQL_
 | Rules never run | Table has an export and the batch is not exported yet | Normal: rules wait for the export |
 | FILE_CHECK failed but FILE_LOAD started | At least one file passed (`check_passed`); the failed file is in `Error/` (`CHECK_MOVE_FAILED`) with its error log | Expected: the good files load; fix and resend the failed file. `file_check_result` keeps the run failed |
 | FILE_CHECK failed and FILE_LOAD did not start | No file passed (`check_passed` skipped) | Fix and resend the files; the next FILE_CHECK starts FILE_LOAD |
+| File in the FILE_LOAD report's `skipped_files` | The reason is in the log (11.23): still arriving, another project's or run type's file, no template fits (shared folder), moved or loaded by another run | Expected for most reasons; for a file that should have loaded, fix the name / template or wait for the copy to finish (11.22) |
+| File rejected, check `MALFORMED` "line n: field larger than field limit (131072)" | A field never ends: the copy of the file was cut off, or a quote (`QUOTE_CHAR`) is opened and never closed | Compare the file with the original and copy it again (11.22); if the file has unmatched `"` in its data, set `QUOTE_CHAR` to empty (9.4) |
+| Large file takes long to stage ("staged into … with BATCH in n s") | Batched inserts | `LOAD_ENGINE` `AUTO` / `FASTLOAD` and larger insert batches (11.21) |
+| WARNING "FastLoad not used, loading with batched inserts: …" | No CREATE / DROP TABLE right in the staging database, or no FastLoad slot | The file still loads; ask the DBA for what the reason names (11.21) |
+| EXPORT_LOAD says `NO BATCHES TO EXPORT` | No open batch in the scope (all closed or not created yet), the run type is held, or the Variable's `table` / `source` / `run_type` scope matches nothing | Check 12.1 for open batches of the scope and the Variable's scope; closed batches are exported again only when new data arrives |
+| Export by procedure writes 0 rows | The procedure reads another table than the framework fills (e.g. a provisioning table nobody loads), or filters on values the batch does not have | Run the CALL from the log (13, top) by hand; fix `Exp_Proc_Parm_Txt` or the table the procedure reads |
 | Teradata pull fails "Object '…_$ENV_V…' does not exist" | `$env` is not replaced in `Src_Sql_Txt` | Name the environment's database in the query (e.g. `CMSUNIV_CORE_DEV_V`) |
 
 ---
