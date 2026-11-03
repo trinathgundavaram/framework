@@ -44,24 +44,26 @@ reading the code. **Version:** framework 0.3.81 (Airflow 3 / Teradata).
 16. Upgrading an existing installation
 
 **Diagrams.** [`diagrams/compliance_framework.drawio`](diagrams/compliance_framework.drawio) holds one page per flow
-of this runbook. Open it in draw.io (desktop, or app.diagrams.net) and pick the page at the bottom:
+of this runbook; open it in draw.io (desktop, or app.diagrams.net) and pick the page at the bottom. Each page is also
+a file of its own in `diagrams/pages/` (to edit) and a picture in `diagrams/png/` (to view, e.g. on GitHub). After
+changing the combined file, export the pages again so the three stay the same.
 
-| Page | Shows | Runbook |
-|---|---|---|
-| 1 Architecture | Sources, NAS, Airflow (scheduler, triggerer, DAGs, workers, GRE), Teradata databases, emails and incidents | 1, 9 |
-| 2 Daily flow (DAGs) | The 10 DAGs, their schedules and triggers | 2, 2.1 |
-| 3 DAG run and result | What every DAG does: tasks, exit codes 0 / 1 / 2, retries, `wait_for_triggered` | 2.2 |
-| 4 BATCH_CREATION | Where batches come from, due / exists checks | 2.3 |
-| 5 FILE_CHECK | Checks of a file, passed / failed, start of FILE_LOAD | 2.4 |
-| 6 FILE_LOAD | A file from the NAS to core: skip reasons, rejections, staging, core | 2.5, 5.7 |
-| 7 SOURCE_LOAD | An internal source pulled by query | 2.6 |
-| 8 OVERRIDE_DECISIONS | REUSE, REOPEN, expired carry-forward | 2.7, 6.2 |
-| 9 EXPORT_LOAD | Which batches are exported, procedure / SELECT / plain copy | 2.8, 5.11 |
-| 10 FILE_RULES | Data quality rules of an exported batch | 2.12 |
-| 11 BATCH_CLOSE | How a batch closes and with which status | 2.9 |
-| 12 NOTIFY | Alert emails | 2.10 |
-| 13 Batch lifecycle | Statuses of a batch row | 3 |
-| 14 Metadata tables | The tables, who fills them, how they connect | 4 |
+| Page | Shows | Runbook | Picture |
+|---|---|---|---|
+| 1 Architecture | Sources, NAS, Airflow (scheduler, triggerer, DAGs, workers, GRE), Teradata databases, emails and incidents | 1, 9 | [png](diagrams/png/01_architecture.png) · [drawio](diagrams/pages/01_architecture.drawio) |
+| 2 Daily flow (DAGs) | The 10 DAGs, their schedules and triggers | 2, 2.1 | [png](diagrams/png/02_daily_flow_dags.png) · [drawio](diagrams/pages/02_daily_flow_dags.drawio) |
+| 3 DAG run and result | What every DAG does: tasks, exit codes 0 / 1 / 2, retries, `wait_for_triggered` | 2.2 | [png](diagrams/png/03_dag_run_and_result.png) · [drawio](diagrams/pages/03_dag_run_and_result.drawio) |
+| 4 BATCH_CREATION | Where batches come from, due / exists checks | 2.3 | [png](diagrams/png/04_batch_creation.png) · [drawio](diagrams/pages/04_batch_creation.drawio) |
+| 5 FILE_CHECK | Checks of a file, passed / failed, start of FILE_LOAD | 2.4 | [png](diagrams/png/05_file_check.png) · [drawio](diagrams/pages/05_file_check.drawio) |
+| 6 FILE_LOAD | A file from the NAS to core: skip reasons, rejections, staging, core | 2.5, 5.7 | [png](diagrams/png/06_file_load.png) · [drawio](diagrams/pages/06_file_load.drawio) |
+| 7 SOURCE_LOAD | An internal source pulled by query | 2.6 | [png](diagrams/png/07_source_load.png) · [drawio](diagrams/pages/07_source_load.drawio) |
+| 8 OVERRIDE_DECISIONS | REUSE, REOPEN, expired carry-forward | 2.7, 6.2 | [png](diagrams/png/08_override_decisions.png) · [drawio](diagrams/pages/08_override_decisions.drawio) |
+| 9 EXPORT_LOAD | Which batches are exported, procedure / SELECT / plain copy | 2.8, 5.11 | [png](diagrams/png/09_export_load.png) · [drawio](diagrams/pages/09_export_load.drawio) |
+| 10 FILE_RULES | Data quality rules of an exported batch | 2.12 | [png](diagrams/png/10_file_rules.png) · [drawio](diagrams/pages/10_file_rules.drawio) |
+| 11 BATCH_CLOSE | How a batch closes and with which status | 2.9 | [png](diagrams/png/11_batch_close.png) · [drawio](diagrams/pages/11_batch_close.drawio) |
+| 12 NOTIFY | Alert emails | 2.10 | [png](diagrams/png/12_notify.png) · [drawio](diagrams/pages/12_notify.drawio) |
+| 13 Batch lifecycle | Statuses of a batch row | 3 | [png](diagrams/png/13_batch_lifecycle.png) · [drawio](diagrams/pages/13_batch_lifecycle.drawio) |
+| 14 Metadata tables | The tables, who fills them, how they connect | 4 | [png](diagrams/png/14_metadata_tables.png) · [drawio](diagrams/pages/14_metadata_tables.drawio) |
 
 ---
 
