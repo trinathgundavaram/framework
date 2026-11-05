@@ -10,9 +10,10 @@ from . import db
 from .adapters import ERROR, RuleEngine
 from .audit import EventLogger
 from .batches import get_batch
-from .common import Clock, code
+from .common import Clock
 from .load import sanitize_db_error
 from .settings import Settings
+from .scope import Scope
 
 log = logging.getLogger(__name__)
 
@@ -38,12 +39,10 @@ class RulesRunner:
         self.conn, self.clock, self.settings, self.rules = conn, clock, settings, rule_engine
         self.logger = EventLogger(conn, clock)
 
-    def run(self, project_cd: Optional[str] = None) -> RulesSummary:
-        """One project's loaded files, or every project's when project_cd is None."""
+    def run(self, scope: Optional[Scope] = None) -> RulesSummary:
+        """The loaded files of a scope (a project, a table group or table, a run type), or of every project."""
         s = RulesSummary()
-        where, params = "", []
-        if project_cd is not None:
-            where, params = " AND c.Project_Cd = %s", [code(project_cd)]
+        where, params = (scope or Scope()).sql("c")
         rows = self.conn.execute(
             "SELECT f.Load_ID, f.Btch_ID FROM ComplianceFileLoad f JOIN ComplianceRequestControl c ON c.Req_ID = f.Req_ID "
             "WHERE f.Load_Stat = 'PROMOTED' AND f.Rules_Stat IN ('NOT_RUN', 'ERROR')" + where + " ORDER BY f.Load_ID",

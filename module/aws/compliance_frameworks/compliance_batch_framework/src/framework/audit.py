@@ -7,7 +7,7 @@ from typing import NamedTuple, Optional
 import psycopg
 
 from .adapters import Channel, Message
-from .common import Clock, ConfigError, code
+from .common import Clock, ConfigError
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ AUDIT_EVENTS: dict[str, AuditEvent] = {
     **dict.fromkeys(("FILE_REJECTED_UNPARSEABLE", "FILE_REJECTED_AMBIGUOUS_TEMPLATE", "FILE_REJECTED_INVALID_TOKEN",
                      "FILE_REJECTED_NO_BATCH", "FILE_REJECTED_BATCH_CLOSED",
                      "FILE_PARSE_ERROR", "FILE_COLUMN_COUNT_MISMATCH", "FILE_TRAILER_COUNT_MISMATCH",
-                     "FILE_ZERO_RECORDS_REJECTED", "FILE_TYPE_NOT_SUPPORTED"), _EXC_ERROR),
+                     "FILE_TYPE_NOT_SUPPORTED"), _EXC_ERROR),
     "FILE_CONTENT_CHECK_FAILED": _EXC_ERROR,
     "FILE_SAME_CONTENT_OTHER_BATCH": _EXC_WARN,
     "FILE_CHECK_FAILED": _EXC_WARN,
@@ -65,7 +65,7 @@ class EventLogger:
             """INSERT INTO ComplianceRequestFileDetail (Req_ID, Btch_ID, Load_ID, Ovrd_ID, Intake_ID, Event_Ty, Actor,
                  Event_Txt, Event_Dtts) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (req_id, btch_id, load_id, ovrd_id, intake_id, event_ty, actor, detail, self.clock.now()))
-        log.info("batch_event %s req_id=%s btch_id=%s load_id=%s %s", event_ty, req_id, btch_id, load_id, detail or "")
+        log.info("batch %s | %s | load %s | %s", btch_id, event_ty, load_id if load_id is not None else "-", detail or "")
 
     def audit(self, event_ty: str, *, actor: str = "SYSTEM", severity: Optional[str] = None,
               description: Optional[str] = None, project_cd: Optional[str] = None,
@@ -84,7 +84,9 @@ class EventLogger:
             (event_ty, sev, project_cd, table_nm, src_id, run_ty, req_id, load_id, ovrd_id, intake_id,
              btch_id, file_ref, actor, description, self.clock.now(), 0 if et.notify else 1))
         level = logging.ERROR if sev == "ERROR" else logging.WARNING if sev == "WARNING" else logging.INFO
-        log.log(level, "audit %s req=%s load=%s %s", event_ty, req_id, load_id, description or "")
+        where = btch_id or "/".join(x for x in (project_cd, table_nm, src_id) if x) or "-"
+        log.log(level, "%s | %s | load %s | %s", event_ty, where, load_id if load_id is not None else "-",
+                description or "")
 
 
 _BODY_KEYS = ("event_id", "event_ty", "event_dtts", "project_cd", "table_nm", "src_id", "run_ty", "btch_id",
@@ -98,17 +100,18 @@ class NotificationDispatcher:
         self.conn, self.settings, self.channel = conn, settings, channel
         self.failed: list[int] = []
 
-    def run(self, limit: int = 500, project_cd: Optional[str] = None) -> int:
-        """Send up to `limit` events - of one project, or of every project (and none) when project_cd is None."""
+    def run(self, limit: int = 500, scope=None) -> int:
+        """Send up to `limit` events of a scope (a project, a table group or table, a run type), or of every project
+        and of none."""
+        cond, params = scope.sql("") if scope is not None else ("", [])
         sent, self.failed = 0, []
         for _ in range(limit):
             with self.conn.transaction():
                 r = self.conn.execute(
-                    """SELECT * FROM CMS_ComplianceExceptionsAudit
-                        WHERE Notified_Ind = 0 AND (%(p)s::text IS NULL OR Project_Cd = %(p)s)
-                          AND NOT (Event_ID = ANY(%(failed)s))
+                    f"""SELECT * FROM CMS_ComplianceExceptionsAudit
+                        WHERE Notified_Ind = 0{cond} AND NOT (Event_ID = ANY(%s))
                         ORDER BY Event_ID LIMIT 1 FOR UPDATE SKIP LOCKED""",
-                    {"p": code(project_cd), "failed": self.failed}).fetchone()
+                    [*params, self.failed]).fetchone()
                 if r is None:
                     break
                 if self._send(r):

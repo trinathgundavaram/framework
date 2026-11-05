@@ -9,11 +9,13 @@ import psycopg
 
 from . import db
 from .audit import EventLogger
-from .common import (COMPLETED, COMPLETED_WITH_EXCEPTION, DATA_NOT_PROVIDED, EXCEPTION_PENDING, Clock,
+from .common import (COMPLETED_WITH_EXCEPTION, DATA_NOT_PROVIDED, EXCEPTION_PENDING, REQUEST_COMPLETE, Clock,
                      CloseBlocked, CloseDeferred, check_transition, earliest_close_date, code)
 from .settings import Settings
+from .scope import Scope
 
 HAS_DATA = ("NEW_FILE", "CARRY_FORWARD")
+DELIVERED = (*HAS_DATA, "NO_DATA")
 
 
 def close_resolution(batch: dict) -> tuple[str, str]:
@@ -21,12 +23,14 @@ def close_resolution(batch: dict) -> tuple[str, str]:
     if batch["req_stat"] == EXCEPTION_PENDING:
         return COMPLETED_WITH_EXCEPTION, batch["resolution_ty"] or "MISSING"
     if batch["resolution_ty"] in HAS_DATA:
-        return COMPLETED, batch["resolution_ty"]
+        return REQUEST_COMPLETE, batch["resolution_ty"]
+    if batch["resolution_ty"] == "NO_DATA":
+        return DATA_NOT_PROVIDED, "NO_DATA"
     return DATA_NOT_PROVIDED, "MISSING"
 
 
 def closes_automatically(batch: dict) -> bool:
-    return batch["resolution_ty"] in HAS_DATA or batch["req_stat"] == EXCEPTION_PENDING
+    return batch["resolution_ty"] in DELIVERED or batch["req_stat"] == EXCEPTION_PENDING
 
 
 @dataclass
@@ -63,11 +67,10 @@ class BatchCloser:
             self._blocked(b, closed_by, "batch is already closed")
         return out
 
-    def run(self, project_cd: Optional[str] = None, table_nm: Optional[str] = None,
-            run_ty: Optional[str] = None) -> CloseSummary:
-        """Sweep the open batches in the job's scope whose hold has passed."""
+    def run(self, scope: Optional[Scope] = None) -> CloseSummary:
+        """Sweep the open batches of a scope (a project, a table group or table, a run type) whose hold has passed."""
         s = CloseSummary()
-        for b in self._open_past_hold(project_cd, table_nm, run_ty):
+        for b in self._open_past_hold(scope or Scope()):
             s.evaluated += 1
             if not closes_automatically(b):
                 s.waiting.append(b["btch_id"])
@@ -85,7 +88,7 @@ class BatchCloser:
         return {"batches_past_hold_not_closed": [
             {k: b[k] for k in ("req_id", "btch_id", "project_cd", "table_nm", "src_id", "run_ty", "req_dt_key",
                                "req_stat", "resolution_ty")}
-            for b in self._open_past_hold(None, None, None, last_hold=self._today() - timedelta(days=1))]}
+            for b in self._open_past_hold(Scope(), last_hold=self._today() - timedelta(days=1))]}
 
     def _today(self) -> date:
         return self.clock.today(self.settings.business_tz)
@@ -98,13 +101,13 @@ class BatchCloser:
             b["hold_dt"] = earliest_close_date(b["req_dt_key"], 1 if b["sla_days"] is None else b["sla_days"])
         return b
 
-    def _open_past_hold(self, project_cd, table_nm, run_ty, last_hold: Optional[date] = None) -> list[dict]:
+    def _open_past_hold(self, scope: Scope, last_hold: Optional[date] = None) -> list[dict]:
         """Open batches in scope whose hold ends on or before `last_hold` (default today)."""
-        sql, params = _scope_sql(
-            """SELECT c.* FROM ComplianceRequestControl c JOIN ComplianceRunType r ON UPPER(r.Run_Ty) = c.Run_Ty
-                WHERE c.Batch_Close_Ind = 0 AND c.Req_Dt_Key + (r.SLA_Days - 1) <= %(last_hold)s""",
-            "ORDER BY c.Req_ID", project_cd, table_nm, run_ty, last_hold=last_hold or self._today())
-        return self.conn.execute(sql, params).fetchall()
+        where, params = scope.sql("c")
+        return self.conn.execute(
+            f"""SELECT c.* FROM ComplianceRequestControl c JOIN ComplianceRunType r ON UPPER(r.Run_Ty) = c.Run_Ty
+                 WHERE c.Batch_Close_Ind = 0 AND c.Req_Dt_Key + (r.SLA_Days - 1) <= %s{where} ORDER BY c.Req_ID""",
+            [last_hold or self._today(), *params]).fetchall()
 
     def _blocked(self, b: dict, closed_by: str, reason: str) -> None:
         with self.conn.transaction():
@@ -140,13 +143,3 @@ class BatchCloser:
 
 def _ctx(b: dict) -> dict:
     return {k: b[k] for k in ("req_id", "btch_id", "project_cd", "table_nm", "src_id", "run_ty")}
-
-
-def _scope_sql(sql: str, order_by: str, project_cd, table_nm, run_ty, **params) -> tuple[str, dict]:
-    """Append the optional project / table / run type scope of a scheduled job."""
-    for col, name, value in (("c.Project_Cd", "p", project_cd), ("c.Table_Nm", "t", table_nm), ("c.Run_Ty", "r", run_ty)):
-        if value is not None:
-            sql += f" AND {col} = %({name})s"
-            params[name] = code(value)
-    return f"{sql} {order_by}", params
-

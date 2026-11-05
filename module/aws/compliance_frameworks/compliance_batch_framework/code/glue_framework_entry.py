@@ -3,8 +3,8 @@ import os
 import shlex
 import sys
 
-CONTEXT = (("project", "FW_PROJECT", "--project"), ("run_type", "FW_RUN_TYPE", "--run-type"),
-           ("period", "FW_PERIOD", "--period"), ("table", "FW_TABLE", "--table"))
+CONTEXT = (("project", "FW_PROJECT", "--project"), ("table_group", "FW_TABLE_GROUP", "--table-group"),
+           ("run_type", "FW_RUN_TYPE", "--run-type"), ("period", "FW_PERIOD", "--period"), ("table", "FW_TABLE", "--table"))
 
 
 def glue_arguments(argv: list) -> dict:

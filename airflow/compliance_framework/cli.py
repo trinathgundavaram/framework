@@ -8,15 +8,13 @@ import sys
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 
-from .app import App
-from .audit import EventLogger
-from .common import FrameworkError, parse_as_of
-from .config import validate_all
-from .db import held_locks, release_lock, schema_exists
-from .modules import describe_modules, run_module
-from .settings import Settings
+from compliance_framework.app import App, describe_modules, report, run_module
+from compliance_framework.audit import EventLogger
+from compliance_framework.common import FrameworkError, parse_as_of
+from compliance_framework.config import resolve_scope, validate_all
+from compliance_framework.db import Settings, held_locks, release_lock, schema_exists
 
-log = logging.getLogger(__package__)
+log = logging.getLogger("compliance_framework")
 
 
 def _json_default(o):
@@ -52,8 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     def scope(sp, project_required=False):
         sp.add_argument("--project", required=project_required)
-        sp.add_argument("--table")
+        sp.add_argument("--table-group", help="table groups, comma separated")
+        sp.add_argument("--table", help="tables, comma separated")
         sp.add_argument("--run-type", required=project_required)
+        sp.add_argument("--source", help="Src_IDs or source names, comma separated")
 
     add("list-modules", "list the modules that 'run --module' can call, with their parameters")
     sp = add("run", "run one module by name (see list-modules)")
@@ -66,19 +66,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--share", help="FILE_LOAD: NAS share, as <server>/<share> or <share>")
     sp.add_argument("--file", help="FILE_LOAD: one file, its path inside the share (with --share)")
     sp.add_argument("--folder", help="FILE_LOAD: one folder inside the share (with --share)")
+    sp.add_argument("--batch", help="SOURCE_LOAD: Btch_ID(s) to pull, comma separated")
     add("show-config", "print resolved settings (with their source) and the database target")
-    add("test-connection", "connect to the database and check the schema")
+    sp = add("test-connection", "connect to the database and check the schema; with --source, an internal source")
+    sp.add_argument("--source", help="Airflow Connection id of an internal source (Src_Conn_Cd)")
+    sp.add_argument("--db-type", default="SQLSERVER", help="TERADATA or SQLSERVER (with --source)")
     add("validate-config", "validate the configuration tables and target tables")
     add("process-decisions", "apply approved reuse overrides and remove expired ones")
-    scope(add("close-batches", "close the batches past their SLA hold that have data or are in exception"))
-    sp = add("close-batch", "close one batch past its SLA hold, with or without data (manual)")
+    scope(add("close-batches", "close the batches past their SLA hold, with or without data"))
+    sp = add("close-batch", "close a batch past its SLA hold, with or without data (manual): every open source of it, "
+                            "or the one in --src-id")
     sp.add_argument("--btch-id", required=True)
+    sp.add_argument("--src-id")
     sp.add_argument("--closed-by", required=True)
     add("notify", "send pending notifications")
     add("locks", "list the locks currently held (a crashed run leaves its locks until they expire)")
     sp = add("release-lock", "remove a lock left behind by a run that no longer exists")
     sp.add_argument("--key", required=True, help="Lock_Key as printed by 'locks'")
-    add("health", "print operational health report")
+    sp = add("health", "print operational health report")
+    sp.add_argument("--project", help="one project's loads, overrides and batches (default every project)")
     return p
 
 
@@ -104,17 +110,31 @@ def _no_app(args, settings: Settings) -> int:
     if args.cmd == "show-config":
         _print({"database": target, "settings": settings.describe()})
         return 0
+    if getattr(args, "source", None):
+        from compliance_framework.db import source_connection
+
+        try:
+            src = source_connection(args.source, args.db_type.strip().upper())
+            cur = src.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchall()
+            cur.close()
+            src.close()
+        except Exception as e:  # noqa: BLE001
+            _print({"source": args.source, "ok": False, "error": f"{type(e).__name__}: {str(e).splitlines()[0][:300]}"})
+            return 1
+        _print({"source": args.source, "ok": True, "error": None})
+        return 0
     with settings.connect() as conn:
         ok = schema_exists(conn, settings.metadata_schema)
-        _print({"database": target, "ok": ok, "error": None if ok else "framework tables not found (created separately from sql/schema.sql)"})
+        _print({"database": target, "ok": ok, "error": None if ok else "framework tables not found (created separately from airflow_resources/sql/schema.sql)"})
         return 0 if ok else 1
 
 
 def _dispatch(app: App, args) -> int:
     c = args.cmd
     if c == "validate-config":
-        issues = validate_all(app.conn, app.settings.filename_case_sensitive, app.settings,
-                              app.clock.today(app.settings.business_tz))
+        issues = validate_all(app.conn, app.settings, app.clock.today(app.settings.business_tz))
         _print([asdict(i) for i in issues])
         errors = [i for i in issues if i.severity == "ERROR"]
         if errors:
@@ -123,21 +143,22 @@ def _dispatch(app: App, args) -> int:
                     "CONFIG_VALIDATION_FAILED", description="; ".join(f"{i.code}: {i.message}" for i in errors)[:4000])
         return 1 if errors else 0
     if c == "run":
-        params = {k: getattr(args, k) for k in ("project", "table", "run_type", "period", "period_file",
-                                                "lookback_days", "lookback_weeks", "share", "file", "folder")}
+        params = {k: getattr(args, k) for k in ("project", "table_group", "table", "run_type", "source", "period", "period_file",
+                                                "lookback_days", "lookback_weeks", "share", "file", "folder", "batch")}
         out = run_module(app, args.module, params)
-        _print({"module": out.module, "result": out.result})
+        _print(report(out))
         return out.exit_code
     if c == "process-decisions":
         s = app.decisions.run()
         _print(s)
         return 1 if s.invalid else 0
     if c == "close-batches":
-        s = app.closer.run(args.project, args.table, args.run_type)
+        s = app.closer.run(resolve_scope(app.conn, args.project, args.table_group, args.table, args.run_type,
+                                         args.source))
         _print(s)
         return 1 if s.deferred else 0
     if c == "close-batch":
-        _print(app.closer.close(args.btch_id, args.closed_by))
+        _print(app.closer.close(args.btch_id, args.closed_by, args.src_id))
         return 0
     if c == "notify":
         notifier = app.notifier()
@@ -150,7 +171,7 @@ def _dispatch(app: App, args) -> int:
         _print({"released": release_lock(app.conn, args.key)})
         return 0
     if c == "health":
-        _print(app.health())
+        _print(app.health(args.project))
         return 0
     raise AssertionError(c)
 

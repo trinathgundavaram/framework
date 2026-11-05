@@ -5,26 +5,26 @@ It registers no load, moves no file and changes no batch; the result is the step
 from __future__ import annotations
 
 import csv
-from decimal import Decimal, InvalidOperation
 import logging
 import os
 import re
 import tempfile
+from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
-from . import config as cfgmod
-from . import db
-from .adapters import FileStore, basename, dirname, parse_uri
-from .audit import EventLogger
-from .common import Clock, ConfigError, btch_id_version, code
-from .control_report import write_error_log
-from .config import FileConfig, MatchError
-from .filecheck_options import CheckOptions, check_options, data_fields, trailer_problems
-from .load import (DELIMITED_FILE_TYPES, _file_lines, _lf_lines, _undecodable_line, delimiter_for, file_layout,
-                   header_columns, raw_line)
-from .settings import Settings
+from compliance_framework import config as cfgmod
+from compliance_framework import db
+from compliance_framework.adapters import FileStore, basename, dirname, parse_uri
+from compliance_framework.audit import EventLogger
+from compliance_framework.common import Clock, ConfigError, code
+from compliance_framework.config import (CheckOptions, FieldRule, FileConfig, MatchError, Scope, check_options, data_fields,
+                     trailer_problems)
+from compliance_framework.db import Settings
+from compliance_framework.load import (DELIMITED_FILE_TYPES, _file_lines, _lf_lines, _undecodable_line, delimiter_for, file_layout,
+                   header_columns, raw_line, write_error_log)
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +79,48 @@ def _value_problem(value: str, col, rules: tuple, empty_is_null: bool) -> Option
     return None
 
 
+def field_positions(opts: CheckOptions, names, columns, offset: int) -> list[tuple[int, FieldRule]]:
+    """Where each field rule's field is in a row: by HEADER_NAMES, else by the file's columns."""
+    order = [n.lower() for n in names] if names else [c.name for c in columns or ()]
+    out = []
+    for r in opts.field_rules:
+        if r.field not in order:
+            raise ConfigError(f"{r.label}: Check_Field_Nm {r.field!r} is not a field of the file "
+                              f"({', '.join(order) if order else 'no field names: set HEADER_NAMES'})")
+        out.append((order.index(r.field) + offset, r))
+    return out
+
+
+def _field_problem(value: str, r: FieldRule) -> Optional[str]:
+    """Why a value breaks a field rule, or None; empty values are left to COLUMN_VALUES REQUIRED."""
+    if value == "":
+        return None
+    c = r.check_cd
+    if c == "MIN_LENGTH" and len(value) < r.value:
+        return f"{r.field}: {len(value)} characters, at least {r.value} expected"
+    if c == "MAX_LENGTH" and len(value) > r.value:
+        return f"{r.field}: {len(value)} characters, at most {r.value} allowed"
+    if c in ("MIN_VALUE", "MAX_VALUE"):
+        try:
+            number = Decimal(value.strip())
+        except InvalidOperation:
+            return f"{r.field}: {value!r} is not a number"
+        if c == "MIN_VALUE" and number < r.value:
+            return f"{r.field}: {value} is below {r.text}"
+        if c == "MAX_VALUE" and number > r.value:
+            return f"{r.field}: {value} is above {r.text}"
+    if c == "VALUE_IN" and value.strip().casefold() not in r.value:
+        return f"{r.field}: {value!r} is not one of {r.text}"
+    if c == "PATTERN" and not r.value.fullmatch(value):
+        return f"{r.field}: {value!r} does not match {r.text}"
+    if c == "DATE_FORMAT":
+        try:
+            datetime.strptime(value, r.value)
+        except ValueError:
+            return f"{r.field}: {value!r} is not a date in the format {r.text}"
+    return None
+
+
 def error_rows(findings: list, details: list) -> list:
     """The error log rows of a file: one per problem line, plus the problems that have no line."""
     covered = {d[0] for d in details}
@@ -92,10 +134,12 @@ def file_columns(layout) -> list:
 
 
 def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional[int], settings: Settings,
-                  opts: CheckOptions, details: Optional[list] = None, columns: Optional[list] = None) -> list[Finding]:
+                  opts: CheckOptions, details: Optional[list] = None, columns: Optional[list] = None,
+                  stats: Optional[dict] = None) -> list[Finding]:
     """Every content problem of a downloaded file; nothing is loaded anywhere.
 
-    `details` collects one (check, line number, message, record) per problem line, for the error file.
+    `details` collects one (check, line number, message, record) per problem line, for the error file; `stats`
+    receives the counts: non-blank lines, data rows, rows validated (every data row), and the COLUMN_VALUES rules.
     """
     out: list[Finding] = []
     details = details if details is not None else []
@@ -140,10 +184,29 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
             return True
         return any(_value_problem(rec[i], columns[i - offset], ("NUMBER",), settings.empty_as_null) for i in numeric)
     counts = {"content": 0, "data": 0}
+    fields = field_positions(opts, names, columns, offset)
+    min_rec, max_rec = opts.limit("MIN_RECORD_LENGTH"), opts.limit("MAX_RECORD_LENGTH")
+    broken: dict = defaultdict(_Lines)
+
+    def extra(line_no: int, rec: list[str]) -> None:
+        """The field rules and record length limits of a data row."""
+        for i, r in fields:
+            problem = _field_problem(rec[i], r) if i < len(rec) else None
+            if problem:
+                broken[r.check_cd].add(line_no, r.field)
+                note(r.check_cd, line_no, problem, rec)
+        if min_rec or max_rec:
+            size = len(delim.join(rec))
+            if min_rec and size < min_rec:
+                broken["MIN_RECORD_LENGTH"].add(line_no, f"{size}")
+                note("MIN_RECORD_LENGTH", line_no, f"{size} characters, at least {min_rec} expected", rec)
+            if max_rec and size > max_rec:
+                broken["MAX_RECORD_LENGTH"].add(line_no, f"{size}")
+                note("MAX_RECORD_LENGTH", line_no, f"{size} characters, at most {max_rec} allowed", rec)
 
     def detail(line_no: int, rec: list[str]) -> None:
         counts["data"] += 1
-        if detail_code and rec[0] != detail_code:
+        if detail_code and rec[0].strip().upper() != detail_code:
             wrong_type.add(line_no, repr(rec[0]))
             note("RECORD_TYPE", line_no, f"record type {rec[0]!r}, expected {detail_code!r}", rec)
         if expected_cols is not None and len(rec) != expected_cols:
@@ -156,6 +219,8 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
                 wrong_values.add(line_no, problems[0].split(":")[0].replace("column ", "").split(" ")[0])
                 for problem in problems:
                     note("COLUMN_VALUES", line_no, problem, rec)
+        if (fields or min_rec or max_rec) and (expected_cols is None or len(rec) == expected_cols):
+            extra(line_no, rec)
 
     reader = csv.reader(_lf_lines(_file_lines(path, settings.file_encoding)), delimiter=delim,
                         quotechar=settings.quote_char or None, strict=True)
@@ -196,7 +261,7 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
     elif header:
         line_no, rec = header
         before = len(out)
-        if header_code and rec[0] != header_code:
+        if header_code and rec[0].strip().upper() != header_code:
             out.append(("RECORD_TYPE", f"line {line_no}: header record type {rec[0]!r}, expected {header_code!r}"))
         if expected_cols is not None and len(rec) != expected_cols:
             out.append(("HEADER", f"line {line_no}: header has {len(rec)} columns, expected {expected_cols}"))
@@ -221,16 +286,24 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
                                      f"{wrong_values.text()}"))
     if wrong_cols.count:
         out.append(("COLUMN_COUNT", f"{wrong_cols.count} row(s) without {expected_cols} columns: {wrong_cols.text()}"))
+    for check in sorted(broken):
+        out.append((check, f"{broken[check].count} row(s) failing {check}: {broken[check].text()}"))
+    for check, wrong in (("MIN_ROWS", lambda n: counts["data"] < n), ("MAX_ROWS", lambda n: counts["data"] > n)):
+        limit = opts.limit(check)
+        if limit is not None and wrong(limit):
+            out.append((check, f"{counts['data']} data row(s), {'at least' if check == 'MIN_ROWS' else 'at most'} "
+                               f"{limit} expected"))
     if cfg.has_trailer and trailer is None:
         out.append(("TRAILER", "trailer expected but not found"))
     elif trailer:
-        found = trailer_problems(trailer[1], trailer[0], name, opts, settings.filename_case_sensitive, counts["data"],
+        found = trailer_problems(trailer[1], trailer[0], name, opts, counts["data"],
                                  counts["content"])
         for check, text in found:
             note(check, trailer[0], text.split(": ", 1)[1], trailer[1])
         out.extend(found)
-    if counts["data"] == 0 and not cfg.allow_zero_records:
-        out.append(("ZERO_RECORDS", "file has no data rows"))
+    if stats is not None:
+        stats.update(lines=counts["content"], data_rows=counts["data"], rows_validated=counts["data"],
+                     value_rules=",".join(rules) or "none")
     return out
 
 
@@ -258,29 +331,42 @@ class FileChecker:
         self._checks: Optional[list] = None
         self._config_errors: dict = {}
 
-    def run(self, project_cd: Optional[str] = None) -> FileCheckSummary:
-        """Check the files waiting in one project's inbound folders, or in every configured folder."""
-        project_cd = code(project_cd)
+    def run(self, scope: Optional[Scope] = None) -> FileCheckSummary:
+        """Check the files waiting in the folders of a scope (a project, a table group or table, a run type), or in
+        every configured folder."""
+        scope = scope or Scope()
+        project_cd = scope.project_cd
         self._sources = self._checks = None
         self._config_errors = {}
         summary = FileCheckSummary(run_date=self.clock.today(self.settings.business_tz))
         own, shared = None, set()
-        if project_cd:
-            locations, shared, own = self.pipeline._project_locations(project_cd)
+        if project_cd or scope.narrowed:
+            locations, shared, own = self.pipeline._scope_locations(scope)
             if not locations:
-                summary.errors.append(f"project {project_cd} has no active file config")
+                summary.errors.append(f"{scope.label()}: no active file config")
         else:
             locations = self.pipeline._configured_locations()
         summary.locations = [f"{s}/{f}" for s, f in locations]
-        matcher = self.pipeline._load_config()
+        matcher = self.pipeline._load_config(project_cd)
+        others = self.pipeline._others(project_cd)
         for share, folder in locations:
             try:
                 files = self.store.list_files(share, folder)
             except Exception as e:  # noqa: BLE001
+                log.warning("FILE_CHECK | %s | could not list: %s", self.store.uri(share, folder), db.error_text(e))
                 summary.errors.append(f"{share}/{folder}: {db.error_text(e)}")
                 continue
+            log.info("FILE_CHECK | %s | %s file(s) found%s", self.store.uri(share, folder), len(files),
+                     ": " + ", ".join(basename(i.path) for i in files[:50]) + (" ..." if len(files) > 50 else "") if files else "")
             for info in files:
-                if (share, folder) in shared and not own.candidates(basename(info.path)):
+                why = self.pipeline.not_ours(basename(info.path), (share, folder), shared, own, scope)
+                if why:
+                    log.info("FILE_CHECK | %s | not checked: %s", basename(info.path), why)
+                    summary.skipped += 1
+                    continue
+                left = self.pipeline.elsewhere(basename(info.path), (info.share, dirname(info.path)), matcher, others)
+                if left:
+                    log.info("FILE_CHECK | %s | not checked: %s", basename(info.path), left)
                     summary.skipped += 1
                     continue
                 try:
@@ -308,7 +394,7 @@ class FileChecker:
         checked = True
         notes: list[str] = []
         try:
-            m = matcher.match(name)
+            m = matcher.match(name, lambda found: self.pipeline.choose(found, (info.share, dirname(info.path))))
         except MatchError as e:
             m, cfg = None, e.cfg
             findings.append(("FILE_NAME", str(e)))
@@ -332,23 +418,26 @@ class FileChecker:
                              "loading this file replaces it")
         if cfg is not None:
             findings.extend(self._source(cfg))
+        stats: dict = {}
         if cfg is not None and self.settings.check_content:
-            found = self._content(info, name, cfg, details)
+            found = self._content(info, name, cfg, details, stats)
             checked = found is not None
             findings.extend(found or [])
-        version = (btch_id_version(batch["btch_id"], cfg.project_cd, cfg.table_nm, cfg.src_id, run_ty)
-                   if batch else None)
+        version = batch["cmplnc_vrsn"] if batch else None
         result = {"file": self.store.uri(info.share, info.path),
                   "config": f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}" if cfg else None,
                   "run_type": run_ty, "version": version,
                   "rpt_start": str(m.rpt_start) if m else None, "rpt_end": str(m.rpt_end) if m else None,
                   "batch": batch["btch_id"] if batch else None, "req_id": batch["req_id"] if batch else None,
                   "result": "FAILED" if findings else "PASSED" if checked else "NOT_CHECKED",
-                  "findings": [f"{c}: {text}" for c, text in findings], "notes": notes}
+                  "findings": [f"{c}: {text}" for c, text in findings], "notes": notes, "records": stats or None}
         if findings:
             self._after_failure(info, name, result, findings, details)
         if checked or findings:
             self._record(result, cfg, batch, run_ty)
+        log.info("FILE_CHECK | %s | %s | %s | batch %s", name, result["result"],
+                 ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in stats.items()) or "content not read",
+                 result["batch"] or "-")
         return result
 
     def _after_failure(self, info, name: str, result: dict, findings: list, details: list) -> None:
@@ -371,7 +460,7 @@ class FileChecker:
             return [("SOURCE", f"source {cfg.src_id} of {cfg.project_cd}/{cfg.table_nm} is not in ComplianceSourceSystem")]
         return [] if active else [("SOURCE", f"source {cfg.src_id} of {cfg.project_cd}/{cfg.table_nm} is inactive")]
 
-    def _content(self, info, name: str, cfg: FileConfig, details: list) -> Optional[list[Finding]]:
+    def _content(self, info, name: str, cfg: FileConfig, details: list, stats: dict) -> Optional[list[Finding]]:
         """The problems in the file itself; None = its configuration is wrong, which is not a problem of the file."""
         try:
             if self._checks is None:
@@ -380,17 +469,20 @@ class FileChecker:
             delimiter_for(cfg)
             expected_cols = data_fields(opts, header_columns(cfg, opts))
             columns = None
-            if opts.value_rules:
+            if opts.value_rules or opts.field_rules:
                 layout = file_layout(self.conn, cfg, cfgmod.target_columns(self.conn), opts)
                 columns = file_columns(layout)
                 expected_cols = expected_cols or len(columns) + (1 if opts.record_types else 0)
+                field_positions(opts, header_columns(cfg, opts), columns, 1 if opts.record_types else 0)
         except (ConfigError, LookupError) as e:
+            log.warning("FILE_CHECK | %s | not checked: %s/%s/%s is not set up correctly: %s", name, cfg.project_cd,
+                        cfg.table_nm, cfg.src_id, e)
             self._config_errors.setdefault(f"{cfg.project_cd}/{cfg.table_nm}/{cfg.src_id}", str(e))
             return None
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, name)
             self.store.download(info.share, info.path, path)
-            return check_content(path, name, cfg, expected_cols, self.settings, opts, details, columns)
+            return check_content(path, name, cfg, expected_cols, self.settings, opts, details, columns, stats)
 
     def _record(self, result: dict, cfg: Optional[FileConfig], batch: Optional[dict], run_ty: Optional[str]) -> None:
         """One audit row per file and outcome; a repeat of the same outcome for the same file adds nothing."""

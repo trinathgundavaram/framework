@@ -1,4 +1,4 @@
-"""Compliance batch framework - FILE_CHECK. See compliance_framework/AIRFLOW_DEPLOYMENT.md."""
+"""Compliance batch framework - FILE_CHECK. See airflow_resources/docs/AIRFLOW_DEPLOYMENT.md."""
 import os
 import sys
 
@@ -6,7 +6,7 @@ _DAG_DIR = os.path.dirname(os.path.abspath(__file__))
 if _DAG_DIR not in sys.path:
     sys.path.insert(0, _DAG_DIR)
 
-from compliance_framework.dag_factory import build_step_dag  # noqa: E402
+from compliance_framework.dags import build_step_dag  # noqa: E402
 
 dag_id = "OSSTD_CORE_CMS_COMPLIANCE_FILE_CHECK"
 variable_key = "compliance_file_check_config_var"

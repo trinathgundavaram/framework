@@ -13,8 +13,9 @@ from .audit import EventLogger
 from .common import FrameworkError, parse_as_of
 from .config import validate_all
 from .db import schema_exists
-from .modules import describe_modules, run_module
+from .modules import describe_modules, report, run_module
 from .settings import Settings
+from .scope import resolve_scope
 
 log = logging.getLogger("framework")
 
@@ -51,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def scope(sp, project_required=False):
         sp.add_argument("--project", required=project_required)
+        sp.add_argument("--table-group")
         sp.add_argument("--table")
         sp.add_argument("--run-type", required=project_required)
 
@@ -120,18 +122,18 @@ def _dispatch(app: App, args) -> int:
                     "CONFIG_VALIDATION_FAILED", description="; ".join(f"{i.code}: {i.message}" for i in errors)[:4000])
         return 1 if errors else 0
     if c == "run":
-        params = {k: getattr(args, k) for k in ("project", "table", "run_type", "period", "period_file",
+        params = {k: getattr(args, k) for k in ("project", "table_group", "table", "run_type", "period", "period_file",
                                                 "lookback_days", "lookback_weeks", "bucket", "key", "prefix",
                                                 "version_id")}
         out = run_module(app, args.module, params)
-        _print({"module": out.module, "result": out.result})
+        _print(report(out))
         return out.exit_code
     if c == "process-decisions":
         s = app.decisions.run()
         _print(s)
         return 1 if s.invalid else 0
     if c == "close-batches":
-        s = app.closer.run(args.project, args.table, args.run_type)
+        s = app.closer.run(resolve_scope(app.conn, args.project, args.table_group, args.table, args.run_type))
         _print(s)
         return 1 if s.deferred else 0
     if c == "close-batch":

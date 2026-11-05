@@ -4,54 +4,59 @@ from __future__ import annotations
 import logging
 from typing import NamedTuple, Optional
 
-from . import db
-from .adapters import Channel, Message
-from .common import Clock, ConfigError, code
-from .db import Connection
-from .settings import Settings
+from compliance_framework import db
+from compliance_framework.adapters import Channel, Message
+from compliance_framework.common import Clock, ConfigError
+from compliance_framework.db import Connection, Settings
 
 log = logging.getLogger(__name__)
 
 BATCH_EVENTS = frozenset({
-    "BATCH_CREATED", "BATCH_CLOSED", "FILE_RECEIVED", "FILE_REPLACED_BEFORE_CLOSE", "FILE_PROMOTED",
-    "FILE_RULES_FAILED", "FILE_RULES_PASSED", "LATE_ARRIVAL_PROMOTED", "CORRECTION_PROMOTED", "CARRY_FORWARD_APPLIED",
-    "CARRY_FORWARD_REMOVED",
+    "BATCH_CREATED", "BATCH_CLOSED", "FILE_RECEIVED", "FILE_REPLACED_BEFORE_CLOSE", "FILE_LOADED",
+    "FILE_RULES_FAILED", "FILE_RULES_PASSED", "LATE_ARRIVAL_LOADED", "CORRECTION_LOADED", "CARRY_FORWARD_APPLIED",
+    "CARRY_FORWARD_REMOVED", "EXPORT_LOADED", "BATCH_RELEASED", "BATCH_REOPENED", "SOURCE_NO_DATA_YET",
 })
 
 
 class AuditEvent(NamedTuple):
-    category: str
     severity: str
     notify: bool
 
 
-_EXC_ERROR, _EXC_WARN = AuditEvent("EXCEPTION", "ERROR", True), AuditEvent("EXCEPTION", "WARNING", True)
+_EXC_ERROR, _EXC_WARN = AuditEvent("ERROR", True), AuditEvent("WARNING", True)
 AUDIT_EVENTS: dict[str, AuditEvent] = {
     "INTAKE_FAILED": _EXC_ERROR,
     **dict.fromkeys(("FILE_REJECTED_UNPARSEABLE", "FILE_REJECTED_AMBIGUOUS_TEMPLATE", "FILE_REJECTED_INVALID_TOKEN",
                      "FILE_REJECTED_NO_BATCH", "FILE_REJECTED_BATCH_CLOSED",
                      "FILE_PARSE_ERROR", "FILE_COLUMN_COUNT_MISMATCH", "FILE_TRAILER_COUNT_MISMATCH",
-                     "FILE_ZERO_RECORDS_REJECTED", "FILE_TYPE_NOT_SUPPORTED"), _EXC_ERROR),
+                     "FILE_TYPE_NOT_SUPPORTED"), _EXC_ERROR),
     "FILE_CONTENT_CHECK_FAILED": _EXC_ERROR,
     "FILE_SAME_CONTENT_OTHER_BATCH": _EXC_WARN,
     "FILE_CHECK_FAILED": _EXC_WARN,
-    "FILE_CHECK_PASSED": AuditEvent("AUDIT", "INFO", False),
-    "FILE_MOVE_FAILED": AuditEvent("EXCEPTION", "WARNING", False),
+    "FILE_CHECK_PASSED": AuditEvent("INFO", False),
+    "FILE_MOVE_FAILED": AuditEvent("WARNING", True),
+    "STAGING_LOCK_STALE": AuditEvent("WARNING", True),
     "RULES_VALIDATION_FAILED": _EXC_ERROR,
     "RULES_ENGINE_TECHNICAL_FAILURE": _EXC_ERROR,
     "CORE_LOAD_ROWCOUNT_MISMATCH": _EXC_ERROR,
     "FILE_TECHNICAL_FAILURE": _EXC_ERROR,
-    "OVERRIDE_APPROVED": AuditEvent("AUDIT", "WARNING", True),
+    "SOURCE_QUERY_FAILED": _EXC_ERROR,
+    "EXPORT_LOAD_FAILED": _EXC_ERROR,
+    "SOURCE_DATA_REJECTED": _EXC_ERROR,
+    "CORE_TYPE_MISMATCH": _EXC_ERROR,
+    "OVERRIDE_APPROVED": AuditEvent("WARNING", True),
     "OVERRIDE_INVALID_DETECTED": _EXC_ERROR,
-    "OVERRIDE_EXPIRED": AuditEvent("AUDIT", "WARNING", True),
-    "BATCH_CLOSE_BLOCKED": AuditEvent("AUDIT", "WARNING", False),
-    "BATCH_CLOSE_DEFERRED_LOCKED": AuditEvent("AUDIT", "INFO", False),
+    "OVERRIDE_EXPIRED": AuditEvent("WARNING", True),
+    "BATCH_REOPENED": AuditEvent("WARNING", True),
+    "BATCH_CLOSE_BLOCKED": AuditEvent("WARNING", False),
+    "BATCH_CLOSE_DEFERRED_LOCKED": AuditEvent("INFO", False),
     "SOURCE_MISSING_AT_CLOSE": _EXC_WARN,
     "CONFIG_VALIDATION_FAILED": _EXC_ERROR,
 }
 
 
 TEXT_MAX = 4000
+FILE_REF_MAX = 1100
 
 
 def _text(value: Optional[str]) -> Optional[str]:
@@ -73,7 +78,7 @@ class EventLogger:
             """INSERT INTO ComplianceRequestFileDetail (Req_ID, Btch_ID, Load_ID, Ovrd_ID, Intake_ID, Event_Ty, Actor,
                  Event_Txt, Event_Dtts) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (req_id, btch_id, load_id, ovrd_id, intake_id, event_ty, actor, _text(detail), self.clock.now()))
-        log.info("batch_event %s req_id=%s btch_id=%s load_id=%s %s", event_ty, req_id, btch_id, load_id, detail or "")
+        log.info("batch %s | %s | load %s | %s", btch_id, event_ty, load_id if load_id is not None else "-", detail or "")
 
     def audit(self, event_ty: str, *, actor: str = "SYSTEM", severity: Optional[str] = None,
               description: Optional[str] = None, project_cd: Optional[str] = None,
@@ -90,9 +95,13 @@ class EventLogger:
                  Req_ID, Load_ID, Ovrd_ID, Intake_ID, Btch_ID, File_Ref, Actor, Event_Txt, Event_Dtts, Notified_Ind)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (event_ty, sev, project_cd, table_nm, src_id, run_ty, req_id, load_id, ovrd_id, intake_id,
-             btch_id, file_ref, actor, _text(description), self.clock.now(), 0 if et.notify else 1))
+             btch_id, file_ref[:FILE_REF_MAX] if file_ref else file_ref, actor or "SYSTEM", _text(description),
+             self.clock.now(), 0 if et.notify else 1))
         level = logging.ERROR if sev == "ERROR" else logging.WARNING if sev == "WARNING" else logging.INFO
-        log.log(level, "audit %s req=%s load=%s %s", event_ty, req_id, load_id, description or "")
+        where = (f"{btch_id} source {src_id}" if btch_id and src_id else btch_id
+                 or "/".join(x for x in (project_cd, table_nm, src_id) if x) or "-")
+        log.log(level, "%s | %s | load %s | %s", event_ty, where, load_id if load_id is not None else "-",
+                description or "")
 
 
 _BODY_KEYS = ("event_id", "event_ty", "event_dtts", "project_cd", "table_nm", "src_id", "run_ty", "btch_id",
@@ -106,22 +115,24 @@ class NotificationDispatcher:
         self.conn, self.settings, self.channel = conn, settings, channel
         self.failed: list[int] = []
 
-    def run(self, limit: int = 500, project_cd: Optional[str] = None) -> int:
-        """Send up to `limit` events - of one project, or of every project (and none) when project_cd is None."""
+    def run(self, limit: int = 500, scope=None) -> int:
+        """Send up to `limit` events of a scope (a project, a table group or table, a run type), or of every project
+        and of none."""
         sent, self.failed = 0, []
-        where, params = "Notified_Ind = 0", []
-        if project_cd is not None:
-            where, params = where + " AND Project_Cd = %s", [code(project_cd)]
+        cond, params = scope.sql("") if scope is not None else ("", [])
+        where = "Notified_Ind = 0" + cond
         pending = self.conn.execute(f"SELECT TOP {int(limit)} Event_ID FROM CMS_ComplianceExceptionsAudit "
                                     f"WHERE {where} ORDER BY Event_Dtts, Event_ID", params).fetchall()
         for p in pending:
             key = db.row_key("EVT", p["event_id"])
             if not db.try_lock(self.conn, key):
+                log.info("NOTIFY | event %s | skipped: being sent by another run", p["event_id"])
                 continue
             try:
                 r = self.conn.execute("SELECT * FROM CMS_ComplianceExceptionsAudit WHERE Event_ID=%s "
                                       "AND Notified_Ind = 0", (p["event_id"],)).fetchone()
                 if r is None:
+                    log.info("NOTIFY | event %s | skipped: already sent by another run", p["event_id"])
                     continue
                 if self._send(r):
                     self.conn.execute("UPDATE CMS_ComplianceExceptionsAudit SET Notified_Ind = 1 WHERE Event_ID=%s",

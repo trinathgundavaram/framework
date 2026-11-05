@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -38,7 +38,7 @@ class RuleEngineNotConfigured(TechnicalFailure):
 
 
 class FileRejected(FrameworkError):
-    """A file failed a structural pre-check; carries the quarantine event code."""
+    """A file failed a structural pre-check; carries the reject event code."""
 
     def __init__(self, event_ty: str, message: str):
         super().__init__(message)
@@ -62,17 +62,22 @@ _ENV_TOKEN = re.compile(r"\$env", re.IGNORECASE)
 
 
 def resolve_env(text: Optional[str], environment: str, value: Optional[str] = None, identifier: bool = True):
-    """Replace $env / $ENV / $Env with the environment's value in the token's own casing (GRE convention)."""
+    """Replace $env / $ENV / $Env with the environment's value in the token's own casing (GRE convention). In a name,
+    an empty value leaves no doubled, leading or trailing underscore (HSPROCS_$ENV.x -> HSPROCS.x in PROD); in other
+    text only the token changes, an empty one with the underscore next to it (EXPORT_FEED_$ENV_T -> EXPORT_FEED_T)."""
     if not text or not _ENV_TOKEN.search(text):
         return text
     low = (value if value is not None else ENV_TOKEN_VALUES.get(environment.upper(), environment.lower())).lower()
+    if not identifier and not low:
+        return re.sub(r"_\$env|\$env_?", "", text, flags=re.IGNORECASE)
 
     def sub(m):
         token = m.group(0)[1:]
         return low.upper() if token.isupper() else low if token.islower() else low.capitalize()
 
     out = _ENV_TOKEN.sub(sub, text)
-    return re.sub(r"_{2,}", "_", out) if identifier else out
+    return re.sub(r"_+(?=\.|$)|(?<=\.)_+|^_+", "", re.sub(r"_{2,}", "_", out)) if identifier and not low else \
+        re.sub(r"_{2,}", "_", out) if identifier else out
 
 
 
@@ -128,11 +133,14 @@ def period_lookback(period: str) -> tuple:
     return (name, n, None) if name == "PREV_N_DAYS" else (name, None, n)
 
 
+BUSINESS_TZ = "America/Chicago"
+
+
 class Clock:
-    """Injected time source."""
+    """Injected time source: the current time in the business time zone (Central), as written to the tables."""
 
     def now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(ZoneInfo(BUSINESS_TZ))
 
     def today(self, tz: str) -> date:
         return self.now().astimezone(ZoneInfo(tz)).date()
@@ -150,7 +158,7 @@ class FixedClock(Clock):
     def set(self, at: datetime) -> None:
         if at.tzinfo is None:
             raise ValueError("timezone-aware datetime required")
-        self._at = at.astimezone(timezone.utc)
+        self._at = at.astimezone(ZoneInfo(BUSINESS_TZ))
 
 
 def parse_as_of(value: str | None, business_tz: str = "UTC") -> Clock:
@@ -166,22 +174,15 @@ def parse_as_of(value: str | None, business_tz: str = "UTC") -> Clock:
 BTCH_ID_MAX_LEN = 250
 
 
-def build_btch_id(req_dt: date, project_cd: str, table_nm: str, src_id: str, run_ty: str,
-                  cmplnc_vrsn: str, seq: int) -> str:
-    """{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Src}_{Run_Ty}_{Vrsn}_{Seq}."""
+def build_btch_id(req_dt: date, project_cd: str, table_nm: str, run_ty: str, seq: int = 1) -> str:
+    """{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Run_Ty}, shared by every source of the table and run type; a second,
+    third, ... report period on the same request date gets _2, _3, ..."""
     if seq < 1:
         raise ValueError("seq must be >= 1")
-    value = "_".join([f"{req_dt:%Y%m%d}", *map(code, (project_cd, table_nm, src_id, run_ty, cmplnc_vrsn)), str(seq)])
+    value = "_".join([f"{req_dt:%Y%m%d}", *map(code, (project_cd, table_nm, run_ty))]) + (f"_{seq}" if seq > 1 else "")
     if len(value) > BTCH_ID_MAX_LEN:
         raise ValueError(f"Btch_ID exceeds {BTCH_ID_MAX_LEN} characters: {value}")
     return value
-
-
-def btch_id_version(btch_id: str, project_cd: str, table_nm: str, src_id: str, run_ty: str) -> Optional[str]:
-    """The compliance version a batch was created with: the part of its Btch_ID before the sequence."""
-    head = "_".join(map(code, (project_cd, table_nm, src_id, run_ty))) + "_"
-    body = str(btch_id).partition("_")[2]
-    return body[len(head):].rpartition("_")[0] or None if body.upper().startswith(head) else None
 
 
 def earliest_close_date(req_dt: date, sla_days: int) -> date:
@@ -195,24 +196,23 @@ SCHEDULED = "SCHEDULED"
 ADHOC = "ADHOC"
 
 REQUEST_CREATED = "REQUEST_CREATED"
-PROMOTED = "PROMOTED"
-CARRIED_FORWARD = "CARRIED_FORWARD"
-EXCEPTION_PENDING = "EXCEPTION_PENDING"
-COMPLETED = "COMPLETED"
-COMPLETED_WITH_EXCEPTION = "COMPLETED_WITH_EXCEPTION"
+SOURCE_DATA_READY = "SOURCE_DATA_READY"
+SOURCE_DATA_READY_NO_DATA = "SOURCE_DATA_READY_NO_DATA"
+SOURCE_DATA_CARRY_FORWARD = "SOURCE_DATA_CARRY_FORWARD"
+REQUEST_COMPLETE = "REQUEST_COMPLETE"
 DATA_NOT_PROVIDED = "DATA_NOT_PROVIDED"
 
-OPEN_STATUSES = (REQUEST_CREATED, PROMOTED, CARRIED_FORWARD, EXCEPTION_PENDING)
+OPEN_STATUSES = (REQUEST_CREATED, SOURCE_DATA_READY, SOURCE_DATA_READY_NO_DATA, SOURCE_DATA_CARRY_FORWARD)
 
 TRANSITIONS: dict[str, set[str]] = {
-    REQUEST_CREATED: {PROMOTED, EXCEPTION_PENDING, CARRIED_FORWARD, DATA_NOT_PROVIDED},
-    PROMOTED: {EXCEPTION_PENDING, COMPLETED},
-    CARRIED_FORWARD: {PROMOTED, EXCEPTION_PENDING, REQUEST_CREATED, COMPLETED},
-    EXCEPTION_PENDING: {PROMOTED, CARRIED_FORWARD, REQUEST_CREATED, COMPLETED_WITH_EXCEPTION},
-    COMPLETED: {COMPLETED},
-    COMPLETED_WITH_EXCEPTION: {COMPLETED},
-    DATA_NOT_PROVIDED: {COMPLETED},
+    REQUEST_CREATED: {SOURCE_DATA_READY, SOURCE_DATA_READY_NO_DATA, SOURCE_DATA_CARRY_FORWARD, DATA_NOT_PROVIDED},
+    SOURCE_DATA_READY: {SOURCE_DATA_READY_NO_DATA, REQUEST_COMPLETE},
+    SOURCE_DATA_READY_NO_DATA: {SOURCE_DATA_READY, DATA_NOT_PROVIDED, SOURCE_DATA_CARRY_FORWARD},
+    SOURCE_DATA_CARRY_FORWARD: {SOURCE_DATA_READY, SOURCE_DATA_READY_NO_DATA, REQUEST_CREATED, REQUEST_COMPLETE},
+    REQUEST_COMPLETE: {REQUEST_COMPLETE, DATA_NOT_PROVIDED, SOURCE_DATA_READY, SOURCE_DATA_CARRY_FORWARD},
+    DATA_NOT_PROVIDED: {REQUEST_COMPLETE, DATA_NOT_PROVIDED, REQUEST_CREATED, SOURCE_DATA_READY_NO_DATA},
 }
+REOPEN_STATUS = {"NEW_FILE": SOURCE_DATA_READY, "CARRY_FORWARD": SOURCE_DATA_CARRY_FORWARD, "NO_DATA": SOURCE_DATA_READY_NO_DATA}
 
 
 def check_transition(from_stat: str, to_stat: str) -> None:

@@ -12,8 +12,9 @@ from . import config as cfgmod
 from . import db
 from .audit import EventLogger
 from .batches import get_batch, promoted_load
-from .common import CARRIED_FORWARD, OPEN_STATUSES, REQUEST_CREATED, Clock, check_transition, code
+from .common import SOURCE_DATA_CARRY_FORWARD, OPEN_STATUSES, REQUEST_CREATED, Clock, check_transition, code
 from .settings import Settings
+from .scope import Scope
 
 
 @dataclass
@@ -28,24 +29,25 @@ class DecisionProcessor:
         self.conn, self.clock, self.settings = conn, clock, settings
         self.logger = EventLogger(conn, clock)
 
-    def run(self, project_cd: Optional[str] = None) -> DecisionSummary:
-        """Expire, then apply, REUSE overrides - of one project, or of every project when project_cd is None."""
+    def run(self, scope: Optional[Scope] = None) -> DecisionSummary:
+        """Expire, then apply, REUSE overrides of a scope (a project, a table group or table, a run type), or of
+        every project."""
         s = DecisionSummary()
-        project_cd = code(project_cd)
+        scope = scope or Scope()
         today = self.clock.today(self.settings.business_tz)
-        self._expire(s, today, project_cd)
-        self._apply(s, today, project_cd)
+        self._expire(s, today, scope)
+        self._apply(s, today, scope)
         return s
 
-    def _apply(self, s: DecisionSummary, today: date, project_cd: Optional[str]) -> None:
+    def _apply(self, s: DecisionSummary, today: date, scope: Scope) -> None:
         """Approved, still-valid REUSE overrides whose batch is open and has no data yet."""
+        where, params = scope.sql("c")
         rows = self.conn.execute(
-            """SELECT o.Ovrd_ID FROM ComplianceBatchOverride o
+            f"""SELECT o.Ovrd_ID FROM ComplianceBatchOverride o
                  JOIN ComplianceRequestControl c ON c.Req_ID = o.Req_ID
                 WHERE UPPER(o.Override_Ty) = 'REUSE' AND UPPER(o.Apprvl_Stat) = 'APPROVED' AND o.Valid_Thru_Dt_Key >= %s
-                  AND c.Batch_Close_Ind = 0 AND c.Resolution_Ty IS DISTINCT FROM 'CARRY_FORWARD'
-                  AND (%s::text IS NULL OR c.Project_Cd = %s)
-                ORDER BY o.Ovrd_ID""", (today, project_cd, project_cd)).fetchall()
+                  AND c.Batch_Close_Ind = 0 AND c.Resolution_Ty IS DISTINCT FROM 'CARRY_FORWARD'{where}
+                ORDER BY o.Ovrd_ID""", [today, *params]).fetchall()
         run_types = cfgmod.run_types(self.conn) if rows else {}
         for r in rows:
             with self.conn.transaction():
@@ -66,11 +68,11 @@ class DecisionProcessor:
                                           description=f"REUSE: {problem}", **ctx)
                     s.invalid.append(o["ovrd_id"])
                     continue
-                check_transition(b["req_stat"], CARRIED_FORWARD)
+                check_transition(b["req_stat"], SOURCE_DATA_CARRY_FORWARD)
                 self.conn.execute(
                     """UPDATE ComplianceRequestControl SET Resolution_Ty='CARRY_FORWARD', Reuse_Btch_ID=%s,
                               Req_Stat=%s, Updated_Dtts=%s WHERE Req_ID=%s""",
-                    (src["btch_id"], CARRIED_FORWARD, self.clock.now(), b["req_id"]))
+                    (src["btch_id"], SOURCE_DATA_CARRY_FORWARD, self.clock.now(), b["req_id"]))
                 if code(o["reuse_btch_id"]) != src["btch_id"]:
                     self.conn.execute("UPDATE ComplianceBatchOverride SET Reuse_Btch_ID=%s, Updated_Dtts=%s "
                                       "WHERE Ovrd_ID=%s", (src["btch_id"], self.clock.now(), o["ovrd_id"]))
@@ -81,23 +83,23 @@ class DecisionProcessor:
                                         detail=f"reuses {src['btch_id']} through {o['valid_thru_dt_key']}")
                 s.applied.append(o["ovrd_id"])
 
-    def _expire(self, s: DecisionSummary, today: date, project_cd: Optional[str]) -> None:
+    def _expire(self, s: DecisionSummary, today: date, scope: Scope) -> None:
         """A batch still carrying data whose override has run out (or was rejected) goes back to REQUEST_CREATED."""
+        where, params = scope.sql("c")
         rows = self.conn.execute(
-            """SELECT c.Req_ID, o.Ovrd_ID FROM ComplianceRequestControl c
+            f"""SELECT c.Req_ID, o.Ovrd_ID FROM ComplianceRequestControl c
                  LEFT JOIN ComplianceBatchOverride o
                         ON o.Req_ID = c.Req_ID AND UPPER(o.Override_Ty) = 'REUSE' AND UPPER(o.Apprvl_Stat) = 'APPROVED'
                 WHERE c.Resolution_Ty = 'CARRY_FORWARD' AND c.Batch_Close_Ind = 0
-                  AND (o.Ovrd_ID IS NULL OR o.Valid_Thru_Dt_Key < %s)
-                  AND (%s::text IS NULL OR c.Project_Cd = %s)
-                ORDER BY c.Req_ID""", (today, project_cd, project_cd)).fetchall()
+                  AND (o.Ovrd_ID IS NULL OR o.Valid_Thru_Dt_Key < %s){where}
+                ORDER BY c.Req_ID""", [today, *params]).fetchall()
         for r in rows:
             with self.conn.transaction():
                 b = get_batch(self.conn, r["req_id"], for_update=True)
                 if (b["resolution_ty"] != "CARRY_FORWARD" or b["batch_close_ind"] == 1
                         or b["req_stat"] not in OPEN_STATUSES):
                     continue
-                to_stat = REQUEST_CREATED if b["req_stat"] == CARRIED_FORWARD else b["req_stat"]
+                to_stat = REQUEST_CREATED if b["req_stat"] == SOURCE_DATA_CARRY_FORWARD else b["req_stat"]
                 check_transition(b["req_stat"], to_stat)
                 self.conn.execute(
                     """UPDATE ComplianceRequestControl SET Resolution_Ty=NULL, Reuse_Btch_ID=NULL, Req_Stat=%s,
