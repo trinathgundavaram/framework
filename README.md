@@ -1,4 +1,4 @@
-# CMS Compliance Framework
+# CMS Government Regulatory Framework
 
 Everything lives in [`module/aws/compliance_frameworks/compliance_batch_framework`](module/aws/compliance_frameworks/compliance_batch_framework/README.md),
 ready to copy into the infrastructure repository:

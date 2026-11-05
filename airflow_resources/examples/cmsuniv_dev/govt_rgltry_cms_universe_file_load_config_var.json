@@ -1,0 +1,13 @@
+{
+  "td_conn_var": "DEV",
+  "meta_db": "HSABC_DEV",
+  "snow_assignment_group": "D&AE - EDE Govt Compliance",
+  "tags": ["Universe"],
+  "load_env": "DEV",
+  "email_recipient": "TRINATH_gundavaram@example.com",
+  "project": "CMSUNIV",
+  "trigger_dags": [
+    "GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD",
+    "GOVT_RGLTRY_CMS_UNIVERSE_OVERRIDE_DECISIONS"
+  ]
+}

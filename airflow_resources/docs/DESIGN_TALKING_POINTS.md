@@ -1,7 +1,7 @@
-# Compliance Batch Framework – Design Talking Points
+# Government Regulatory Batch Framework – Design Talking Points
 
 Speaker notes for walking a meeting through the design with the draw.io diagrams
-([`diagrams/compliance_framework.drawio`](diagrams/compliance_framework.drawio), one page per section below; the
+([`diagrams/govt_rgltry_framework.drawio`](diagrams/govt_rgltry_framework.drawio), one page per section below; the
 pictures are in [`diagrams/png/`](diagrams/png/)). Each section says what the page shows, the points to make, why it
 was built that way, and the questions to expect. The operational detail (exact columns, codes, procedures) stays in
 the [runbook](OPERATIONAL_RUNBOOK.md).
@@ -13,7 +13,7 @@ the common DAG behaviour (10), the step pages (20), batch lifecycle and metadata
 
 ## 0. Opening: the problem and the design principles
 
-**The problem.** Compliance reporting (e.g. the CMS Universes) needs data from many sources – external vendors that
+**The problem.** Government Regulatory reporting (e.g. the CMS Universes) needs data from many sources – external vendors that
 send files and internal systems that are read by query – for many datasets, on daily, weekly, monthly and ad-hoc
 cycles. For every cycle we must be able to say: what was expected, what arrived, when, what was loaded and exported,
 what was missing, and who approved any exception.
@@ -53,11 +53,12 @@ Principles to state up front (each comes back on a later page):
 - **Airflow 3.3.**
   - The **scheduler** starts DAGs on Central-time schedules; the **triggerer** handles deferred waits (EXPORT_LOAD
     waiting for FILE_RULES without holding a worker slot).
-  - **Ten DAGs per project, one per step** (CMSUNIV: `OSSTD_CORE_CMS_COMPLIANCE_*`; UMCM: `COMPLIANCE_UMCM_*`).
+  - **Nine DAGs per project, one per step** (CMSUNIV: `GOVT_RGLTRY_CMS_UNIVERSE_*`; UMCM: `GOVT_RGLTRY_UMCM_*`, plus
+    an ad-hoc EXPORT_LOAD DAG).
     The DAG file is only a shell: the step, schedule, scope, triggers and settings come from **one Airflow Variable
     per DAG** (JSON).
   - **Connections** hold Teradata, NAS, SQL Server sources and SMTP. Nothing else holds a credential.
-  - The **workers** run the `compliance_framework` Python package in process; the **GRE** (`rules_engine`) runs the
+  - The **workers** run the `govt_rgltry_framework` Python package in process; the **GRE** (`rules_engine`) runs the
     data quality rules, in a **pool of one slot** so two rules runs never write the GRE tables at once.
 - **Teradata.**
   - **Metadata database** (`HSABC_$ENV`): configuration, batches, loads, timeline, audit, locks.
@@ -91,7 +92,7 @@ Principles to state up front (each comes back on a later page):
 
 ## Page 2 – Daily flow (DAGs and triggers)
 
-**What it shows.** The ten DAGs, their default times, and which DAG starts which.
+**What it shows.** The nine step DAGs, their default times, and which DAG starts which.
 
 **The day in order:**
 
@@ -124,7 +125,7 @@ started by hand with a narrower scope.
 
 ## Page 3 – What every DAG run does
 
-**What it shows.** The common skeleton of all ten DAGs and the meaning of the result.
+**What it shows.** The common skeleton of all the DAGs and the meaning of the result.
 
 - A run reads its Variable and the trigger's settings (scope, runs, settings), then runs the step – one task per
   `runs` entry (for example one task per table group).
@@ -153,14 +154,14 @@ overlap safely because batch and table locks keep them apart.
 
 - **Sources of batches:** schedule codes on the run type (daily, weekly on a weekday, monthly on a day, with offsets
   and a catch-up window), a SQL statement that decides the dates, the batch calendar for irregular dates, an ad-hoc
-  run type with a schedule, and **ad-hoc requests** in `ComplianceRequestInTake`.
-- **Which sources:** every crosswalk row (`ComplianceDataSetSourceXwalk`) active and effective on the day that lists
+  run type with a schedule, and **ad-hoc requests** in `GOVT_RGLTRY_RequestInTake`.
+- **Which sources:** every crosswalk row (`GOVT_RGLTRY_DataSetSourceXwalk`) active and effective on the day that lists
   the run type.
 - **Exists?** One batch per table + run type + report period + day. Running it twice creates nothing new.
-- **Result:** one `ComplianceRequestControl` row **per source**, status `REQUEST_CREATED`, timeline
+- **Result:** one `GOVT_RGLTRY_RequestControl` row **per source**, status `REQUEST_CREATED`, timeline
   `BATCH_CREATED`.
   - Batch ID `YYYYMMDD_PROJECT_TABLE_RUNTYPE` (e.g. `20261020_CMSUNIV_ODAG3_DLY`), readable in every table and log.
-  - The compliance version comes from the crosswalk row effective that day, so a yearly protocol change is a dated
+  - The report version comes from the crosswalk row effective that day, so a yearly protocol change is a dated
     metadata change, not a code change.
   - Close date = `Req_Dt_Key + SLA_Days − 1`.
 - A configuration error in one row is reported (exit 1); the other batches are still created.
@@ -177,7 +178,7 @@ against, and no way to say a source was missing.
 - Leaves files modified in the last `NAS_MIN_AGE_SECONDS` (120 s) alone – they may still be arriving.
 - A file that belongs to another project or run type is skipped, with the reason in the log.
 - The name must fit exactly one file name template and have an open batch for its dates.
-- Content checks from `ComplianceFileCheckConfig`: header, trailer (with row counts), column count, record types,
+- Content checks from `GOVT_RGLTRY_FileCheckConfig`: header, trailer (with row counts), column count, record types,
   allowed values.
 - **Passed:** `FILE_CHECK_PASSED`, and FILE_LOAD is started for the good files right away.
 - **Failed:** `FILE_CHECK_FAILED` (emailed), an error log in `ErrorLog/`, and with `CHECK_MOVE_FAILED` the file moves
@@ -196,7 +197,7 @@ FILE_LOAD can run the same checks itself (`CHECK_ON_LOAD`) when no separate pre-
 1. **List** the inbound folders of the scope.
 2. **Skip, not reject**, when the file is still arriving, is another project's or run type's, or was already moved
    or loaded by another run. The reason is in the log and in the report's `skipped_files`.
-3. **Register** the load: a `ComplianceFileLoad` row (`RECEIVED`); the name gives the file config and the batch.
+3. **Register** the load: a `GOVT_RGLTRY_FileLoad` row (`RECEIVED`); the name gives the file config and the batch.
 4. **Batch open?** If not: rejected (`FILE_REJECTED_NO_BATCH` / `_BATCH_CLOSED`), unless an approved
    `LATE_ARRIVAL` / `CORRECTION` override lets it in.
 5. **Content checks** (when `CHECK_ON_LOAD`).
@@ -233,7 +234,7 @@ the file stays and is tried again.
 
 **What it shows.** The same staging → core path, but the data is pulled with a query instead of read from a file.
 
-- Works on open batches whose source has a `ComplianceInternalSourceConfig` row: the query, the Connection (SQL
+- Works on open batches whose source has a `GOVT_RGLTRY_InternalSourceConfig` row: the query, the Connection (SQL
   Server, or Teradata itself), and the target tables.
 - **Held run types** are skipped and listed in the report.
 - The query runs with the batch's values bound as parameters; the log shows it with the values written in, so it can
@@ -251,7 +252,7 @@ close do not care how the data arrived.
 
 ## Page 8 – OVERRIDE_DECISIONS (approved exceptions)
 
-**What it shows.** How human decisions are applied – always through an approved row in `ComplianceBatchOverride`.
+**What it shows.** How human decisions are applied – always through an approved row in `GOVT_RGLTRY_BatchOverride`.
 
 - **REUSE (carry forward):** a source will not send this period; the batch takes the data of the earlier closed batch
   (`SOURCE_DATA_CARRY_FORWARD`). Only before the close, and only for run types that allow it (`Carry_Fwd_Ind = 1`).
@@ -297,7 +298,7 @@ Nobody updates a status by hand.
 
 - Takes the loads whose rules have not run yet (or ended in error), batch by batch; a table with an export only
   after its export.
-- Rule groups come from `ComplianceRuleBinding`, otherwise from the table and run type.
+- Rule groups come from `GOVT_RGLTRY_RuleBinding`, otherwise from the table and run type.
 - `run_key = Btch_ID`, and the rules see only the batch's rows. Results and exceptions join back to the batch, and a
   rerun refreshes them.
 - **Results:** `PASSED`; `FAILED` (emailed – a result, not an error, so the task succeeds); no active rules →
@@ -322,7 +323,7 @@ explain.
   - **nothing arrived** → `DATA_NOT_PROVIDED` (`MISSING`) plus `SOURCE_MISSING_AT_CLOSE`, emailed.
 - Then starts the next day's BATCH_CREATION and NOTIFY.
 
-**Why:** the close is what turns "not yet" into "missing" – the compliance answer to "did every source deliver for
+**Why:** the close is what turns "not yet" into "missing" – the Government Regulatory answer to "did every source deliver for
 this period?".
 
 ---
@@ -350,8 +351,8 @@ needs attention".
   These are final.
 - After the close: LATE_ARRIVAL / CORRECTION load data and the batch stays closed; REOPEN opens it until new data.
 
-**Point to make:** status and resolution together answer the compliance question per source and period, and the
-timeline (`ComplianceRequestFileDetail`) shows every step that led there, with times.
+**Point to make:** status and resolution together answer the Government Regulatory question per source and period, and the
+timeline (`GOVT_RGLTRY_RequestFileDetail`) shows every step that led there, with times.
 
 ---
 
@@ -364,41 +365,41 @@ writes it (read only).
 
 | Table | Role | Why it exists |
 |---|---|---|
-| `ComplianceProject` | The project (`Project_Cd`) | Everything is scoped by project; several projects share the framework |
-| `ComplianceTable` | Table groups (optional) | Run or schedule several tables together |
-| `ComplianceSourceSystem` | Sources (`Src_ID`, name, type) | One definition per source, reused across tables |
-| `ComplianceDataSetSourceXwalk` | Who sends which table, for which run types, from when, in which version | The heart of the setup: effective dates make version changes and stopping a source dated changes |
-| `ComplianceRunType` | Schedule codes, SLA days, category (scheduled / ad hoc) | When batches are created and when they close |
-| `ComplianceRunTypePeriod` | Report dates per run type (and table) | The same run type can cover different periods per project |
-| `ComplianceBatchCalendar` | Extra dates (optional) | Irregular cycles without code |
-| `ComplianceSourceFileConfig` | File name template, folder, delimiter, header / trailer, staging and core tables | Files are matched and loaded from metadata |
-| `ComplianceInternalSourceConfig` | Query, Connection, staging and core tables | Internal sources without files |
-| `ComplianceFileCheckConfig` | File checks | Reject bad files with a precise reason |
-| `ComplianceTargetColumnConfig` | Derived columns (batch ID, version, load time, row ID …) | Lineage on every row, without changing the source file |
-| `ComplianceExportConfig` | Export table, procedure or SELECT | Each table decides how it feeds downstream |
-| `ComplianceRuleBinding` | GRE rule groups (optional) | Rules other than the default per table / run type |
+| `GOVT_RGLTRY_Project` | The project (`Project_Cd`) | Everything is scoped by project; several projects share the framework |
+| `GOVT_RGLTRY_Table` | Table groups (optional) | Run or schedule several tables together |
+| `GOVT_RGLTRY_SourceSystem` | Sources (`Src_ID`, name, type) | One definition per source, reused across tables |
+| `GOVT_RGLTRY_DataSetSourceXwalk` | Who sends which table, for which run types, from when, in which version | The heart of the setup: effective dates make version changes and stopping a source dated changes |
+| `GOVT_RGLTRY_RunType` | Schedule codes, SLA days, category (scheduled / ad hoc) | When batches are created and when they close |
+| `GOVT_RGLTRY_RunTypePeriod` | Report dates per run type (and table) | The same run type can cover different periods per project |
+| `GOVT_RGLTRY_BatchCalendar` | Extra dates (optional) | Irregular cycles without code |
+| `GOVT_RGLTRY_SourceFileConfig` | File name template, folder, delimiter, header / trailer, staging and core tables | Files are matched and loaded from metadata |
+| `GOVT_RGLTRY_InternalSourceConfig` | Query, Connection, staging and core tables | Internal sources without files |
+| `GOVT_RGLTRY_FileCheckConfig` | File checks | Reject bad files with a precise reason |
+| `GOVT_RGLTRY_TargetColumnConfig` | Derived columns (batch ID, version, load time, row ID …) | Lineage on every row, without changing the source file |
+| `GOVT_RGLTRY_ExportConfig` | Export table, procedure or SELECT | Each table decides how it feeds downstream |
+| `GOVT_RGLTRY_RuleBinding` | GRE rule groups (optional) | Rules other than the default per table / run type |
 
 **Requests and decisions – the "what people asked for":**
 
 | Table | Role |
 |---|---|
-| `ComplianceRequestInTake` | Ad-hoc batch requests |
-| `ComplianceBatchOverride` | REUSE, LATE_ARRIVAL, CORRECTION, REOPEN – with an approver and validity dates |
+| `GOVT_RGLTRY_RequestInTake` | Ad-hoc batch requests |
+| `GOVT_RGLTRY_BatchOverride` | REUSE, LATE_ARRIVAL, CORRECTION, REOPEN – with an approver and validity dates |
 
 **Written by the framework – the "what happened":**
 
 | Table | Role | Key |
 |---|---|---|
-| `ComplianceRequestControl` | The batches: one row per batch + source, status and resolution | `Req_ID`, `Btch_ID` |
-| `ComplianceFileLoad` | One row per load or pull: file, counts, status, reject reason | `Load_ID` → `Req_ID` |
-| `ComplianceRequestFileDetail` | The timeline of each batch row | `Req_ID` |
-| `CMS_ComplianceExceptionsAudit` | Problems and approvals; what NOTIFY emails | event, batch |
-| `ComplianceLock` | Work in progress (batch, staging table, event); expires after a crashed run | lock key |
+| `GOVT_RGLTRY_RequestControl` | The batches: one row per batch + source, status and resolution | `Req_ID`, `Btch_ID` |
+| `GOVT_RGLTRY_FileLoad` | One row per load or pull: file, counts, status, reject reason | `Load_ID` → `Req_ID` |
+| `GOVT_RGLTRY_RequestFileDetail` | The timeline of each batch row | `Req_ID` |
+| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Problems and approvals; what NOTIFY emails | event, batch |
+| `GOVT_RGLTRY_Lock` | Work in progress (batch, staging table, event); expires after a crashed run | lock key |
 
 **How they connect, in one sentence each:**
 
-- Project → crosswalk (table + source + run types + version) → **BATCH_CREATION** writes `ComplianceRequestControl`.
-- Each load or pull writes a `ComplianceFileLoad` row for that batch row, and every event a timeline row.
+- Project → crosswalk (table + source + run types + version) → **BATCH_CREATION** writes `GOVT_RGLTRY_RequestControl`.
+- Each load or pull writes a `GOVT_RGLTRY_FileLoad` row for that batch row, and every event a timeline row.
 - Intake requests create batches; overrides change what happens to existing ones.
 - Every problem or approval becomes an audit row, which NOTIFY emails.
 

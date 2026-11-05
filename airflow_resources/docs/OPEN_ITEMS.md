@@ -1,8 +1,8 @@
-# Compliance Batch Framework (Airflow / Teradata): open items
+# Government Regulatory Batch Framework (Airflow / Teradata): open items
 
-State at version 0.3.71. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
+State at version 0.3.82. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
 everything they list that is not below is done. Tested: 25 scenarios on Python 3.13 and 3.9 against a PostgreSQL
-stand-in for Teradata; the 9 DAG files parse and a step DAG runs (stubbed step) on Airflow 3.3.0. **Nothing has run on Teradata, the NAS or a real
+stand-in for Teradata; the 19 DAG files (CMS Universe 9, UMCM 10) build with their Variables, and a step DAG runs (stubbed step) on Airflow 3.3.0. **Nothing has run on Teradata, the NAS or a real
 Airflow deployment yet.**
 
 ## 1. Before the first production run
@@ -41,7 +41,7 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
 | Item | What | Why it can grow |
 |---|---|---|
 | C1 | `ROW_SEQUENCE` reads `MAX()` of the core table on every load | Mapped on every CMSUNIV file table; one scan per file |
-| C3 | EXPORT_LOAD reads the whole batch timeline (`ComplianceRequestFileDetail`) every run | The timeline is never purged |
+| C3 | EXPORT_LOAD reads the whole batch timeline (`GOVT_RGLTRY_RequestFileDetail`) every run | The timeline is never purged |
 | C5 | Staging insert batch size (2,000 rows / 500 KB), single transaction per file | Large files; `LOAD_ENGINE=FASTLOAD` / `AUTO` (falls back to batched inserts) is untested on Teradata |
 | – | `execution_timeout_minutes` per step | FILE_LOAD of several large files |
 
@@ -57,7 +57,7 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
 | Data quality gate | Rules run per batch after its export (FILE_RULES); a failed rule is reported and emailed, the export stands | Whether a failed rule should hold the submission |
 | Retention | Control, audit, timeline, staging, core, export and NAS archive are never purged | A retention period per table and folder |
 | Business days | SLA and due dates are calendar days; no holidays | A business calendar if needed |
-| Status view | Business users read status through SQL (runbook section 12) | A dashboard over `ComplianceRequestControl` |
+| Status view | Business users read status through SQL (runbook section 12) | A dashboard over `GOVT_RGLTRY_RequestControl` |
 | Global run types and sources | Shared by all projects (each project has its own DAGs and Variables) | Per-project run types if projects need different meanings |
 | Metadata versioning | A change applies at once, also to batches in flight | Effective dates (the crosswalk has them) or change control |
 
@@ -67,7 +67,7 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
   problems (a rejected file, a batch not loaded) fails at once with the incident and email.
 - **Triggers** may change the step's inputs and normal settings only; the database, connections, file store, rules
   engine and `period_file` always come from the Variable.
-- **Intake requests** need no crosswalk row: one row per source, with its `Src_ID` and `Cmplnc_Vrsn` (both
+- **Intake requests** need no crosswalk row: one row per source, with its `Src_ID` and `Rpt_Version` (both
   required); the source needs a file or internal source config for the table. They make one batch per request day; a multi-day window gives a batch each day, and a day without a
   file closes `DATA_NOT_PROVIDED` with an email. One batch per request = one request day.
 - **IN1** batches close without data every day (one email a day). **CMS** (ad hoc) is pulled and exported only with

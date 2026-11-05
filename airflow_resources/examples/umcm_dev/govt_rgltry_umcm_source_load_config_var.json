@@ -1,0 +1,12 @@
+{
+  "td_conn_var": "DEV",
+  "meta_db": "HSABC_DEV",
+  "snow_assignment_group": "D&AE - EDE Govt Compliance",
+  "tags": ["UMCM"],
+  "load_env": "DEV",
+  "email_recipient": "TRINATH_gundavaram@example.com",
+  "project": "UMCM",
+  "trigger_dags": [
+    "GOVT_RGLTRY_UMCM_EXPORT_LOAD"
+  ]
+}

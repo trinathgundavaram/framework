@@ -1,21 +1,21 @@
-# Compliance Batch Framework: Airflow + Teradata
+# Government Regulatory Batch Framework: Airflow + Teradata
 
-A self-contained copy of the compliance batch framework that runs from Airflow DAGs with its metadata,
+A self-contained copy of the Government Regulatory batch framework that runs from Airflow DAGs with its metadata,
 staging and core tables in **Teradata**. Nothing outside `airflow/` is used or changed. It follows the
 layout and connection style of the GRE rules engine's Airflow package (`DQ_COMPLETE_REPO/airflow`) and
 the team's DAG conventions (one DAG file, one DAG id, one `<name>_config_var` Variable).
 
 ```
 airflow/
-  osstd_core_cms_compliance_batch_creation.py      one DAG file per step
-  osstd_core_cms_compliance_file_check.py
-  osstd_core_cms_compliance_file_load.py
-  osstd_core_cms_compliance_source_load.py
-  osstd_core_cms_compliance_export_load.py
-  osstd_core_cms_compliance_override_decisions.py
-  osstd_core_cms_compliance_batch_close.py
-  osstd_core_cms_compliance_notify.py
-  compliance_framework/
+  govt_rgltry_cms_universe_batch_creation.py      one DAG file per step
+  govt_rgltry_cms_universe_file_check.py
+  govt_rgltry_cms_universe_file_load.py
+  govt_rgltry_cms_universe_source_load.py
+  govt_rgltry_cms_universe_export_load.py
+  govt_rgltry_cms_universe_override_decisions.py
+  govt_rgltry_cms_universe_batch_close.py
+  govt_rgltry_cms_universe_notify.py
+  govt_rgltry_framework/
     dags.py        the DAGs (schedule, tasks, triggers, emails, ServiceNow callback), Variable + Connections ->
                    the framework, run_step() in-process
     app.py         the application and its steps (modules, step reports)
@@ -50,16 +50,16 @@ airflow_resources/                (not deployed with the DAGs)
 
    | Step | DAG id | Variable |
    |---|---|---|
-   | `BATCH_CREATION` | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CREATION` | `compliance_batch_creation_config_var` |
-   | `FILE_CHECK` (optional) | `OSSTD_CORE_CMS_COMPLIANCE_FILE_CHECK` | `compliance_file_check_config_var` |
-   | `FILE_LOAD` | `OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD` | `compliance_file_load_config_var` |
-   | `SOURCE_LOAD` (internal sources) | `OSSTD_CORE_CMS_COMPLIANCE_SOURCE_LOAD` | `compliance_source_load_config_var` |
-   | `EXPORT_LOAD` (optional) | `OSSTD_CORE_CMS_COMPLIANCE_EXPORT_LOAD` | `compliance_export_load_config_var` |
-   | `OVERRIDE_DECISIONS` | `OSSTD_CORE_CMS_COMPLIANCE_OVERRIDE_DECISIONS` | `compliance_override_decisions_config_var` |
-   | `BATCH_CLOSE` | `OSSTD_CORE_CMS_COMPLIANCE_BATCH_CLOSE` | `compliance_batch_close_config_var` |
-   | `NOTIFY` | `OSSTD_CORE_CMS_COMPLIANCE_NOTIFY` | `compliance_notify_config_var` |
+   | `BATCH_CREATION` | `GOVT_RGLTRY_CMS_UNIVERSE_BATCH_CREATION` | `govt_rgltry_cms_universe_batch_creation_config_var` |
+   | `FILE_CHECK` (optional) | `GOVT_RGLTRY_CMS_UNIVERSE_FILE_CHECK` | `govt_rgltry_cms_universe_file_check_config_var` |
+   | `FILE_LOAD` | `GOVT_RGLTRY_CMS_UNIVERSE_FILE_LOAD` | `govt_rgltry_cms_universe_file_load_config_var` |
+   | `SOURCE_LOAD` (internal sources) | `GOVT_RGLTRY_CMS_UNIVERSE_SOURCE_LOAD` | `govt_rgltry_cms_universe_source_load_config_var` |
+   | `EXPORT_LOAD` (optional) | `GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD` | `govt_rgltry_cms_universe_export_load_config_var` |
+   | `OVERRIDE_DECISIONS` | `GOVT_RGLTRY_CMS_UNIVERSE_OVERRIDE_DECISIONS` | `govt_rgltry_cms_universe_override_decisions_config_var` |
+   | `BATCH_CLOSE` | `GOVT_RGLTRY_CMS_UNIVERSE_BATCH_CLOSE` | `govt_rgltry_cms_universe_batch_close_config_var` |
+   | `NOTIFY` | `GOVT_RGLTRY_CMS_UNIVERSE_NOTIFY` | `govt_rgltry_cms_universe_notify_config_var` |
 
-   | `FILE_RULES` | `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES` | `compliance_file_rules_config_var` |
+   | `FILE_RULES` | `GOVT_RGLTRY_CMS_UNIVERSE_FILE_RULES` | `govt_rgltry_cms_universe_file_rules_config_var` |
 
    FILE_RULES calls the GRE code in `<dags>/rules_engine` (the `airflow/rules_engine` folder of the GRE repository)
    and runs in the Airflow pool `gre_rules`: create it once with 1 slot (Admin → Pools). EXPORT_LOAD starts it and
@@ -84,7 +84,7 @@ apply to the command line).
 
 ## Deploying
 
-1. Copy the `osstd_core_cms_compliance_*.py` files and the `compliance_framework/` folder into the DAGs folder,
+1. Copy the `govt_rgltry_cms_universe_*.py` files and the `govt_rgltry_framework/` folder into the DAGs folder,
    side by side.
 2. Install `airflow_resources/requirements.txt` in the workers' environment. **Airflow 3** (Task SDK
    `airflow.sdk`, the `standard` and `smtp` providers; no Airflow 2 or deprecated imports), on a Python version your
@@ -93,20 +93,21 @@ apply to the command line).
    `airflow_resources/examples/cmsuniv_dev`, file name = Variable name).
 4. The framework tables already exist: they are created separately from `airflow_resources/sql/schema.sql` (replace
    `{{META_DB}}` with the metadata database). The framework never creates or alters tables.
-   Tables created before 0.3.60: `ALTER TABLE <META_DB>.ComplianceFileLoad RENAME Quarantine_Rsn_Cd TO Reject_Rsn_Cd;` and
-   `UPDATE <META_DB>.ComplianceFileLoad SET Load_Stat = 'REJECTED' WHERE Load_Stat = 'QUARANTINED';`
-   Tables created before 0.3.62: `UPDATE <META_DB>.ComplianceFileLoad SET Reject_Rsn_Cd = CASE WHEN Load_Stat =
+   Tables created before 0.3.60: `ALTER TABLE <META_DB>.GOVT_RGLTRY_FileLoad RENAME Quarantine_Rsn_Cd TO Reject_Rsn_Cd;` and
+   `UPDATE <META_DB>.GOVT_RGLTRY_FileLoad SET Load_Stat = 'REJECTED' WHERE Load_Stat = 'QUARANTINED';`
+   Tables created before 0.3.62: `UPDATE <META_DB>.GOVT_RGLTRY_FileLoad SET Reject_Rsn_Cd = CASE WHEN Load_Stat =
    'DEFERRED' THEN 'STAGING_TABLE_BUSY' ELSE Reject_Rsn_Cd END, Load_Stat = CASE Load_Stat WHEN 'PROMOTED' THEN
    'FILE_LOADED' WHEN 'SUPERSEDED' THEN 'RELOADED' WHEN 'FAILED_TECHNICAL' THEN 'PROCESS_FAILURE' WHEN 'DEFERRED' THEN
    'LOAD_INCOMPLETE' END WHERE Load_Stat IN ('PROMOTED', 'SUPERSEDED', 'FAILED_TECHNICAL', 'DEFERRED');`
-   and `UPDATE <META_DB>.ComplianceRequestFileDetail SET Event_Ty = CASE Event_Ty WHEN 'FILE_PROMOTED' THEN 'FILE_LOADED'
+   and `UPDATE <META_DB>.GOVT_RGLTRY_RequestFileDetail SET Event_Ty = CASE Event_Ty WHEN 'FILE_PROMOTED' THEN 'FILE_LOADED'
    WHEN 'LATE_ARRIVAL_PROMOTED' THEN 'LATE_ARRIVAL_LOADED' WHEN 'CORRECTION_PROMOTED' THEN 'CORRECTION_LOADED' END
    WHERE Event_Ty IN ('FILE_PROMOTED', 'LATE_ARRIVAL_PROMOTED', 'CORRECTION_PROMOTED');`
 5. Load the configuration tables, then run `validate-config` from the command line (below).
 
 Another project (or another cadence) gets its own DAGs: copy each step's DAG file, give the copy its own `dag_id`
-(e.g. `OSSTD_CORE_PRJB_COMPLIANCE_FILE_LOAD`) and `variable_key` (e.g. `prjb_compliance_file_load_config_var`), and
-create those Variables (each with `project`, and `trigger_dags` naming the copies' own DAGs).
+(e.g. `GOVT_RGLTRY_PRJB_FILE_LOAD`) and `variable_key` (e.g. `govt_rgltry_prjb_file_load_config_var`), and
+create those Variables (each with `project`, the project's tag in `tags`, e.g. `["PRJB"]`, and `trigger_dags` naming the
+copies' own DAGs). The file is named like the DAG id, e.g. `govt_rgltry_prjb_file_load.py`.
 
 ### Airflow Connections
 
@@ -133,20 +134,22 @@ it and then moved into its `Archive` or `Error` subfolder.
 The account needs, on the metadata database: SELECT / INSERT / UPDATE / DELETE (no CREATE); on each project's staging and core databases: SELECT / INSERT / UPDATE / DELETE; and SELECT on
 `DBC.TablesV` and `DBC.ColumnsV`.
 
-### Airflow Variables (`compliance_<step>_config_var`)
+### Airflow Variables (`govt_rgltry_cms_universe_<step>_config_var`)
 
 One per DAG. Paste the matching file from [`examples/cmsuniv_dev`](../examples/cmsuniv_dev) as the Variable's
 value (Admin → Variables); for another environment change `td_conn_var`, `meta_db`, `load_env` and the emails. Example,
-`compliance_file_load_config_var`:
+`govt_rgltry_cms_universe_file_load_config_var`:
 
 ```json
 {
   "td_conn_var": "DEV",
   "meta_db": "HSABC_DEV",
+  "snow_assignment_group": "D&AE - EDE Govt Compliance",
+  "tags": ["Universe"],
   "load_env": "DEV",
   "email_recipient": "compliance-dev@example.com",
   "project": "CMSUNIV",
-  "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_EXPORT_LOAD", "OSSTD_CORE_CMS_COMPLIANCE_OVERRIDE_DECISIONS"]
+  "trigger_dags": ["GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD", "GOVT_RGLTRY_CMS_UNIVERSE_OVERRIDE_DECISIONS"]
 }
 ```
 
@@ -156,15 +159,15 @@ default is right (the examples carry only what differs: connections, `load_env`,
 | Key | Meaning |
 |---|---|
 | `meta_db` (required) | Teradata database holding the framework tables |
-| `td_conn_var` | Airflow Connection of Teradata. Falls back to `connection_id`, then `gre.connection_id`, then `compliance_teradata` |
+| `td_conn_var` | Airflow Connection of Teradata (default `compliance_teradata`) |
 | `wdc_comp_oper_nas_var` | Airflow Connection of the NAS file server, used where files are checked or loaded (`FILE_CHECK`, `FILE_LOAD`); default `comp_oper_creds` |
-| `load_env` | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); falls back to `environment`, then `gre.environment`, else `DEV` |
+| `load_env` | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); default `DEV` |
 | `schedule_interval` | Cron expression of the DAG; leave out for a DAG that is only triggered |
 | `schedule_timezone` | Optional; schedules run in Central time (`America/Chicago`, with daylight saving) |
 | `trigger_dags` | DAG ids to start when the step succeeds (a list, or one comma-separated string); the scope (`project`, `table_group`, `table`, `run_type`, `source`) and `as_of` of this run are passed on, so a chain started for one table group stays on it |
 | `email_recipient` | Who gets the DAG's success / failure emails (`success_email`, `fail_email` tasks). Without it the DAG has no email tasks |
-| `snow_assignment_group` | ServiceNow assignment group of the incident opened when a task fails (default `D&AE - EDE Govt Compliance`) |
-| `owner`, `tags` | DAG owner (default `oss`) and tags (a list, or one comma-separated string) |
+| `snow_assignment_group` | ServiceNow assignment group of the incident opened when a task fails, e.g. `D&AE - EDE Govt Compliance`. No default in the code: without it a failed task logs a warning and opens no incident |
+| `owner`, `tags` | DAG owner (default `oss`) and tags (a list, or one comma-separated string): the project's tag, e.g. `Universe` (CMS Universe), `UMCM`. No default tags; the step's name is always added |
 | `settings` | Framework settings by name, only where they differ from the default. Common: `LOCK_TIMEOUT_SECONDS` (300), `LOCK_TTL_MINUTES` (240); plus the step's own, below (defaults in brackets) |
 | `fail_on_problems` | `true` / `false` (also as text, from a trigger form): whether "completed with problems" (exit code 1) fails the task. Default: true, except `OVERRIDE_DECISIONS`. `FILE_LOAD` processes every file first and then fails the task when any file was not loaded (rejected, or a technical failure); the DAGs it triggers are then not started |
 | `runs` | Optional list of scopes: one task per entry, each with its own `project` / `run_type` / `period` / ... (and `settings`, `gre`). Without it the DAG has one task, scoped by the Variable's own keys |
@@ -177,8 +180,8 @@ Keys by step:
 
 | Step | Scope keys | Settings worth setting |
 |---|---|---|
-| `BATCH_CREATION` | `project` (required). When batches are due and their report dates come from the metadata (schedule codes, `Rpt_Period_Cd`, `ComplianceBatchCalendar`; below). Optional: `table_group`, `run_type`, `table`, `period`, `lookback_days`, `lookback_weeks` | — |
-| `FILE_CHECK` | the scope (`project`, `table_group` or `table`, `run_type`; see "Scope of a run"), the NAS connection as for `FILE_LOAD` | `CHECK_CONTENT` and the file settings of `FILE_LOAD`; which checks a file gets is in `ComplianceFileCheckConfig` |
+| `BATCH_CREATION` | `project` (required). When batches are due and their report dates come from the metadata (schedule codes, `Rpt_Period_Cd`, `GOVT_RGLTRY_BatchCalendar`; below). Optional: `table_group`, `run_type`, `table`, `period`, `lookback_days`, `lookback_weeks` | — |
+| `FILE_CHECK` | the scope (`project`, `table_group` or `table`, `run_type`; see "Scope of a run"), the NAS connection as for `FILE_LOAD` | `CHECK_CONTENT` and the file settings of `FILE_LOAD`; which checks a file gets is in `GOVT_RGLTRY_FileCheckConfig` |
 | `FILE_LOAD` | the scope (`project`, `table_group` or `table`, `run_type`) | `FILE_STORE` (`nas`), `ARCHIVE_FOLDER` (`Archive`), `ERROR_FOLDER` (`Error`), `CONTROL_REPORT_FOLDER` (`ControlReport`), `ERROR_LOG_FOLDER` (`ErrorLog`), `NAS_MIN_AGE_SECONDS` (120), `ARCHIVE_BY_YEAR` (`false`); for large files `INSERT_BATCH_ROWS` (2000), `INSERT_BATCH_BYTES` (500000), `LOAD_ENGINE` (`BATCH`, `FASTLOAD` or `AUTO`), `FASTLOAD_MIN_BYTES` (100000000), `CHECK_ON_LOAD` (`false`) — see "Large files" |
 | `FILE_RULES` | the scope; `gre` (the GRE's own Airflow Variable; every key optional: `meta_db` (default the Variable's `meta_db`), `environment` (`load_env`), `project_name` (`project`), `log_level` (the Variable's, `INFO`), `max_parallel_rules` (1), `connection_type` / `meta_connection` (`teradata`), `run_params` / `text_params` / `extra_filters` (none); plus `package_dir`, the folder holding the GRE's `run_rules.py`, default `<dags>/rules_engine`) | `RULE_ENGINE` (`gre` / `none`), `GRE_ENTRYPOINT`, `FILE_RULES_MODE` (`GATE`) |
 | `OVERRIDE_DECISIONS` | the scope | — |
@@ -198,7 +201,7 @@ works with the entry scheduled at its time, e.g. EXPORT_LOAD for MNT at 06:00 an
 
 ```json
 {"meta_db": "HSABC_DEV", "td_conn_var": "DEV", "load_env": "DEV", "project": "CMS_UNIVERSE", "schedule_interval": null,
- "trigger_dags": ["OSSTD_CORE_CMS_COMPLIANCE_NOTIFY"],
+ "trigger_dags": ["GOVT_RGLTRY_CMS_UNIVERSE_NOTIFY"],
  "runs": [{"name": "DLY", "run_type": "DLY", "schedule_interval": "0 20 * * *", "settings": {"RELEASE_TIME": "20:00"}},
           {"name": "MNT", "run_type": "MNT", "schedule_interval": "0 6 * * *"}]}
 ```
@@ -238,12 +241,14 @@ environment of that shell (never from a file in the repository):
 ```bash
 export TERADATA_HOST=<host> TERADATA_USER=<login> TERADATA_PASSWORD=<password> TERADATA_LOGMECH=LDAP
 export FRAMEWORK_METADATA_SCHEMA=HSABC_DEV FRAMEWORK_ENVIRONMENT=DEV
-python -m compliance_framework.cli validate-config
-python -m compliance_framework.cli close-batch --btch-id <Btch_ID> --closed-by jdoe [--src-id <Src_ID>]
-python -m compliance_framework.cli locks
-python -m compliance_framework.cli release-lock --key <Lock_Key>
-python -m compliance_framework.cli run --module BATCH_CREATION --project CMSUNIV --as-of 2026-10-18
+python -m govt_rgltry_framework.cli validate-config
+python -m govt_rgltry_framework.cli close-batch --btch-id <Btch_ID> --closed-by jdoe [--src-id <Src_ID>]
+python -m govt_rgltry_framework.cli locks
+python -m govt_rgltry_framework.cli release-lock --key <Lock_Key>
+python -m govt_rgltry_framework.cli run --module BATCH_CREATION --project CMSUNIV --as-of 2026-10-18
 ```
+
+Without `FRAMEWORK_METADATA_SCHEMA` the metadata database is `HSABC_$ENV`, resolved with `FRAMEWORK_ENVIRONMENT`: `HSABC_DEV`, `HSABC_TEST`, ..., `HSABC` in PROD.
 
 `--set NAME=value` sets a framework setting for the command (e.g. `--set NOTIFY_BACKEND=airflow`); files on the NAS
 also need `NAS_HOST`, `NAS_USER`, `NAS_PASSWORD`. `test-connection --source <Src_Conn_Cd>` reads that Airflow
@@ -253,19 +258,19 @@ Connection, so it runs where the Connection is available (e.g. as `AIRFLOW_CONN_
 
 Sources that are tables (on the framework's own Teradata system, on another Teradata system or on a SQL Server)
 are pulled by batch with their own `SELECT`, instead of being delivered as files. Everything after the pull is the
-same as for a file: the same staging and core tables, column mapping (`ComplianceTargetColumnConfig`,
+same as for a file: the same staging and core tables, column mapping (`GOVT_RGLTRY_TargetColumnConfig`,
 `TARGET_COLUMNS`), batch status, rules, close, audit, emails and step report.
 
-**One row per source in `ComplianceInternalSourceConfig`** (DDL in `airflow_resources/sql/schema.sql`; optional, only for internal
+**One row per source in `GOVT_RGLTRY_InternalSourceConfig`** (DDL in `airflow_resources/sql/schema.sql`; optional, only for internal
 sources). An installation that has the table under its earlier name renames it once:
-`RENAME TABLE <META_DB>.ComplianceSourceQueryConfig TO <META_DB>.ComplianceInternalSourceConfig;`
+`RENAME TABLE <META_DB>.GOVT_RGLTRY_SourceQueryConfig TO <META_DB>.GOVT_RGLTRY_InternalSourceConfig;`
 
 | Column | Meaning |
 |---|---|
 | `Project_Cd`, `Table_Nm`, `Src_ID` | The source, as in the crosswalk (the source needs no file config) |
 | `Src_Db_Ty` | `TERADATA` or `SQLSERVER` |
 | `Src_Conn_Cd` | The Airflow Connection of the source's server. Empty for a source on the framework's own Teradata system: its rows are then copied with one `INSERT ... SELECT` and never pass through Airflow (the framework's account needs SELECT on the source tables). `$env` is replaced as in database names |
-| `Src_Sql_Txt` | One `SELECT` in the source's own dialect. It can use `{btch_id}`, `{rpt_start}`, `{rpt_end}`, `{run_ty}`, `{version}`, `{src_id}`, `{req_id}`, `{project_cd}`, `{table_nm}`, `{load_id}`, `{load_date}`, bound as parameters. Its column names fill the staging columns of the same name; a column it returns wins over that column's `ComplianceTargetColumnConfig` row for the pull (e.g. an ID from the source instead of `ROW_SEQUENCE`), except the batch, `SOURCE_ID` and `LOAD_ID` columns, which are always the framework's; a name that is not a column of the staging table (a misspelling), one of those three, or a name returned twice, rejects the pull (`SOURCE_DATA_REJECTED`) with the names, unless `TARGET_COLUMNS` lists the columns in order |
+| `Src_Sql_Txt` | One `SELECT` in the source's own dialect. It can use `{btch_id}`, `{rpt_start}`, `{rpt_end}`, `{run_ty}`, `{version}`, `{src_id}`, `{req_id}`, `{project_cd}`, `{table_nm}`, `{load_id}`, `{load_date}`, bound as parameters. Its column names fill the staging columns of the same name; a column it returns wins over that column's `GOVT_RGLTRY_TargetColumnConfig` row for the pull (e.g. an ID from the source instead of `ROW_SEQUENCE`), except the batch, `SOURCE_ID` and `LOAD_ID` columns, which are always the framework's; a name that is not a column of the staging table (a misspelling), one of those three, or a name returned twice, rejects the pull (`SOURCE_DATA_REJECTED`) with the names, unless `TARGET_COLUMNS` lists the columns in order |
 | `Stg_Schema_Nm`, `Stg_Table_Nm`, `Core_Schema_Nm`, `Core_Table_Nm` | As in the file config |
 
 **Connections.** One Airflow Connection per server (or per login); many sources can share one. SQL Server:
@@ -274,7 +279,7 @@ host (or `server\instance`), port, schema = default database, login and password
 (`"authentication"` for Azure AD logins, `"login_timeout"` in seconds). Teradata: host, login, password, Extra
 `{"logmech": "LDAP"}`. Credentials stay in Airflow; the log shows only the Connection id, host and database. SQL
 Server needs `pyodbc` and the Microsoft ODBC driver on the workers. Check a connection from the command line:
-`python -m compliance_framework.cli test-connection --source <Src_Conn_Cd> --db-type SQLSERVER`.
+`python -m govt_rgltry_framework.cli test-connection --source <Src_Conn_Cd> --db-type SQLSERVER`.
 
 **Which batches are pulled.** With the scope (`project`, `table_group` or `table`, `run_type`): every open batch
 of a query source that has no data yet (`REQUEST_CREATED`, request date reached), or whose earlier pull returned no
@@ -287,7 +292,7 @@ is ready early is taken at once. A query that returns no rows **before the batch
 means "no data yet": the batch stays `REQUEST_CREATED` (`SOURCE_NO_DATA_YET` in its timeline, `WAITING` in the step
 report, the task does not fail) and the next SOURCE_LOAD runs try again; on or after the due date no rows means the
 source had no data (`SOURCE_DATA_READY_NO_DATA`). Data pulled early is not pulled again by itself: a later change in
-the source needs `batch` (it replaces the batch's rows). Each pull is a row of `ComplianceFileLoad` (`File_Share` = `QUERY:<Src_Conn_Cd>`
+the source needs `batch` (it replaces the batch's rows). Each pull is a row of `GOVT_RGLTRY_FileLoad` (`File_Share` = `QUERY:<Src_Conn_Cd>`
 or `QUERY:LOCAL`, `File_Path` = project/table/source/batch), so FILE_RULES, the step report and the history work
 as for files; no control report file is written for pulls. A query that fails or a value that does not fit
 rejects that pull (`SOURCE_QUERY_FAILED` / `SOURCE_DATA_REJECTED`, emailed); the other batches are still pulled
@@ -296,10 +301,10 @@ and the task fails at the end. Sources on another server are read in batches of 
 ## Export tables (`EXPORT_LOAD`)
 
 Optional step between the load (FILE_LOAD / SOURCE_LOAD) and FILE_RULES: it copies each batch's core rows into
-the table's export table, so the rules (and downstream feeds) read the export. Without `ComplianceExportConfig`
+the table's export table, so the rules (and downstream feeds) read the export. Without `GOVT_RGLTRY_ExportConfig`
 rows (or without the table) the step finds nothing to do.
 
-**One row per core table in `ComplianceExportConfig`** (DDL in `airflow_resources/sql/schema.sql`): `Project_Cd`, `Table_Nm`,
+**One row per core table in `GOVT_RGLTRY_ExportConfig`** (DDL in `airflow_resources/sql/schema.sql`): `Project_Cd`, `Table_Nm`,
 `Exp_Schema_Nm` (`$env` replaced as in database names), `Exp_Table_Nm`, `Active_Ind`. The export table has the
 core table's columns (it may have fewer, and its own identity column); `Btch_ID` is required. Columns of the export
 that are not in core are left NULL (`validate-config` warns). The core row ID column is copied as it is, so an
@@ -320,13 +325,13 @@ those batches, again.
 **What the export holds.** Per source, run type and report dates, the latest batch with data: exporting it removes
 the rows of the other batches of that period and inserts its own. A carried-forward batch gets a copy of the
 reused batch's core rows under its own `Btch_ID`, with its own run type, version, request and report dates (the
-columns mapped to them in `ComplianceTargetColumnConfig`); every other column, row ID, file name and load times
+columns mapped to them in `GOVT_RGLTRY_TargetColumnConfig`); every other column, row ID, file name and load times
 included, is copied as it is. The reused batch keeps its own rows, so both batches have their data. A batch with
 no data (empty file) removes the period's rows. An older batch of a period that has a later batch with data is
 skipped (`EXPORT_LOADED` in the timeline says why).
 
 **When: by run type category.** Files always load to core as they arrive. Pulling internal sources (SOURCE_LOAD),
-the export and therefore the rules follow the batch's run type (`ComplianceRunType.Run_Category_Cd`). Internal
+the export and therefore the rules follow the batch's run type (`GOVT_RGLTRY_RunType.Run_Category_Cd`). Internal
 sources of a scheduled run type are pulled from the request date on (an empty result waits until the due date, see
 SOURCE_LOAD); the export:
 
@@ -369,7 +374,7 @@ Give EXPORT_LOAD its own daily `schedule_interval` at or after `RELEASE_TIME` (t
 batches are exported on their due date even when no file arrives that day, and schedule BATCH_CLOSE after it (the
 examples: 22:00), so a batch is exported before it closes.
 
-**Export through a procedure.** When `ComplianceExportConfig.Exp_Proc_Nm` names a procedure (`database.procedure`,
+**Export through a procedure.** When `GOVT_RGLTRY_ExportConfig.Exp_Proc_Nm` names a procedure (`database.procedure`,
 `$env` replaced), EXPORT_LOAD calls it instead of its own delete and `INSERT ... SELECT`: the framework still decides
 which batches to export (changes, hold, release, latest batch of the period), takes the locks, runs the call in one
 transaction, counts the batch's rows in the export table afterwards and records `EXPORT_LOADED`; the procedure deletes
@@ -378,16 +383,16 @@ and inserts the export rows itself. `Exp_Proc_Parm_Txt` lists its parameters in 
 `{data_btch_id}` (the batch whose core rows are its data: itself, the batch it reuses, or NULL when it has no data),
 `{reused_btch_ids}` (the batches it reuses, comma separated, whose rows must stay), `{project_cd}`,
 `{table_nm}`, `{src_id}`, `{run_ty}`, `{version}`, `{req_id}`, `{req_dt}`, `{rpt_start}`, `{rpt_end}`. Existing
-tables: `ALTER TABLE <META_DB>.ComplianceExportConfig ADD Exp_Proc_Nm VARCHAR(256), ADD Exp_Proc_Parm_Txt VARCHAR(1000);`.
+tables: `ALTER TABLE <META_DB>.GOVT_RGLTRY_ExportConfig ADD Exp_Proc_Nm VARCHAR(256), ADD Exp_Proc_Parm_Txt VARCHAR(1000);`.
 
 **Custom SELECT and pre / post statements** (`Exp_Sql_Txt`, `Exp_Pre_Sql_Txt`, `Exp_Post_Sql_Txt`; runbook 5.11): without a
 procedure, `Exp_Sql_Txt` gives the export rows of a batch + source (the framework stamps the batch and source columns);
 pre / post run once per batch, in one transaction with all its sources' exports (a failure rolls the batch back).
-Tables created before 0.3.67: `ALTER TABLE <META_DB>.ComplianceExportConfig ADD Exp_Sql_Txt VARCHAR(8000), ADD
+Tables created before 0.3.67: `ALTER TABLE <META_DB>.GOVT_RGLTRY_ExportConfig ADD Exp_Sql_Txt VARCHAR(8000), ADD
 Exp_Pre_Sql_Txt VARCHAR(8000), ADD Exp_Post_Sql_Txt VARCHAR(8000);`.
 
 Each batch is exported in one transaction (delete, then `INSERT ... SELECT` on Teradata; no row passes through
-Airflow) and recorded as `EXPORT_LOADED` in `ComplianceRequestFileDetail`. A batch that fails is rolled back and
+Airflow) and recorded as `EXPORT_LOADED` in `GOVT_RGLTRY_RequestFileDetail`. A batch that fails is rolled back and
 reported (`EXPORT_LOAD_FAILED`, emailed); the others are still exported and the task fails at the end, so
 FILE_RULES is not triggered on a partial export.
 
@@ -407,12 +412,12 @@ optionally `run_type`. The levels:
 |---|---|
 | nothing | every project (`BATCH_CREATION` needs `project`) |
 | `project` | the whole project |
-| `project` + `table_group` | the project's tables in that group (`ComplianceTable`) |
+| `project` + `table_group` | the project's tables in that group (`GOVT_RGLTRY_Table`) |
 | `project` + `table` | that table |
 | any of the above + `run_type` | only that run type |
 
 - `table_group` and `table` need `project`; give one of them, not both.
-- Table groups are optional: `ComplianceTable` (`Project_Cd`, `Table_Nm`, `Table_Grp_Cd`, `Table_Desc`,
+- Table groups are optional: `GOVT_RGLTRY_Table` (`Project_Cd`, `Table_Nm`, `Table_Grp_Cd`, `Table_Desc`,
   `Active_Ind`) is read only when a run names a `table_group`. A project without rows there works exactly as
   before, per project or per table. A group with no active table does nothing (the step reports it).
 - What each step does with the scope: `BATCH_CREATION` creates the scope's batches (scheduled and ad hoc requests);
@@ -450,34 +455,34 @@ The SMB library's connection messages are no longer written (warnings and errors
 ## Batch ID (`Btch_ID`)
 
 `Btch_ID` = `{Req_Dt_Key:YYYYMMDD}_{Project}_{Table}_{Run_Ty}`, e.g. `20261019_CMSUNIV_ODAG3_DLY`: one batch per table,
-run type and request date, shared by every source. Each source has its own row in `ComplianceRequestControl`
+run type and request date, shared by every source. Each source has its own row in `GOVT_RGLTRY_RequestControl`
 (`Btch_ID` + `Src_ID` is unique; `Req_ID` identifies the row) with its own status, data, SLA, close, overrides and
 timeline. A second report period of the same table and run type on the same request date (an ad-hoc request, an
-intake row for another month) gets `_2`, then `_3`: `20261019_CMSUNIV_ODAG3_CMS_2`. The compliance version is in
-`Cmplnc_Vrsn` of the batch row.
+intake row for another month) gets `_2`, then `_3`: `20261019_CMSUNIV_ODAG3_CMS_2`. The report version is in
+`Rpt_Version` of the batch row.
 
 What that means in use:
 
 - Core, staging and export rows of a batch are told apart by the column mapped to `SOURCE_ID` (required).
 - `batch` in SOURCE_LOAD / EXPORT_LOAD and `close-batch` act on every source of the batch (`--src-id` for one).
 - Queries and rules that select by `{btch_id}` get every source: add `{src_id}` where they work per source.
-- Overrides are entered for one source: `... FROM ComplianceRequestControl WHERE Btch_ID = '...' AND Src_ID = '...'`.
+- Overrides are entered for one source: `... FROM GOVT_RGLTRY_RequestControl WHERE Btch_ID = '...' AND Src_ID = '...'`.
 
 Upgrading an installation from 0.3.37 (DEV: the earlier batches are removed and created again):
 
 ```sql
-ALTER TABLE <META_DB>.ComplianceRequestControl ADD Cmplnc_Vrsn VARCHAR(10);
+ALTER TABLE <META_DB>.GOVT_RGLTRY_RequestControl ADD Rpt_Version VARCHAR(10);
 -- (since 0.3.71 the tables have no secondary indexes: drop any that an older install created)
 -- clear the old batches (then run BATCH_CREATION again, and FILE_LOAD / SOURCE_LOAD for their data)
-DELETE FROM <META_DB>.ComplianceBatchOverride;
-DELETE FROM <META_DB>.ComplianceRequestFileDetail;
-DELETE FROM <META_DB>.ComplianceFileLoad;
-DELETE FROM <META_DB>.ComplianceRequestControl;
-UPDATE <META_DB>.ComplianceRequestInTake SET Last_Run_Dt_Key = NULL;
+DELETE FROM <META_DB>.GOVT_RGLTRY_BatchOverride;
+DELETE FROM <META_DB>.GOVT_RGLTRY_RequestFileDetail;
+DELETE FROM <META_DB>.GOVT_RGLTRY_FileLoad;
+DELETE FROM <META_DB>.GOVT_RGLTRY_RequestControl;
+UPDATE <META_DB>.GOVT_RGLTRY_RequestInTake SET Last_Run_Dt_Key = NULL;
 -- and the rows of those batches in the staging, core and export tables
 ```
 
-## Batch status (`ComplianceRequestControl.Req_Stat`)
+## Batch status (`GOVT_RGLTRY_RequestControl.Req_Stat`)
 
 | `Req_Stat` | Open / closed | When |
 |---|---|---|
@@ -497,12 +502,12 @@ batch). `DATA_NOT_PROVIDED` is a final status like `REQUEST_COMPLETE`. Not close
 (`REUSE`) needs its override applied by OVERRIDE_DECISIONS before BATCH_CLOSE runs on the close date; after the
 close, data still comes in with a `LATE_ARRIVAL` override or a `REOPEN`. A file that is rejected does not
 change the batch status. `Allow_Zero_Rcd_Ind` is no longer used: a file with no data rows is always accepted as
-the source's delivery. The loads themselves keep their own status (`ComplianceFileLoad.Load_Stat`: `FILE_LOADED`,
+the source's delivery. The loads themselves keep their own status (`GOVT_RGLTRY_FileLoad.Load_Stat`: `FILE_LOADED`,
 `RELOADED`, `REJECTED`, ...).
 
 **Reopening a closed batch (`REOPEN` override).** A late or corrected file can always be loaded into a closed
 batch with an approved `LATE_ARRIVAL` / `CORRECTION` override (the batch stays closed). To open the batch again
-instead, add a `REOPEN` row to `ComplianceBatchOverride` (`Override_Ty = 'REOPEN'`, `Apprvl_Stat = 'APPROVED'`,
+instead, add a `REOPEN` row to `GOVT_RGLTRY_BatchOverride` (`Override_Ty = 'REOPEN'`, `Apprvl_Stat = 'APPROVED'`,
 `Valid_Thru_Dt_Key` = the last day it may be applied, `Rsn_Txt`, `Reviewed_By`). The next OVERRIDE_DECISIONS run
 reopens any closed batch, with or without data:
 
@@ -522,7 +527,7 @@ reopen (a load, a pull or a carry-forward), then closes it on its next run; with
 Batches created before version 0.3.33 carry the earlier names; to rename them:
 
 ```sql
-UPDATE <meta_db>.ComplianceRequestControl
+UPDATE <meta_db>.GOVT_RGLTRY_RequestControl
 SET Req_Stat = CASE Req_Stat WHEN 'PROMOTED' THEN 'SOURCE_DATA_READY'
                              WHEN 'CARRIED_FORWARD' THEN 'SOURCE_DATA_CARRY_FORWARD'
                              WHEN 'COMPLETED' THEN 'REQUEST_COMPLETE' END
@@ -533,7 +538,7 @@ WHERE Req_Stat IN ('PROMOTED', 'CARRIED_FORWARD', 'COMPLETED');
 
 Files are read from the NAS over SMB (`FILE_STORE` = `nas`, the default; library `smbprotocol`).
 
-**Inbound folder** — `ComplianceSourceFileConfig.Src_File_Path` holds the folder:
+**Inbound folder** — `GOVT_RGLTRY_SourceFileConfig.Src_File_Path` holds the folder:
 
 | Written as | Server | Share | Folder |
 |---|---|---|---|
@@ -552,7 +557,7 @@ A path with its own server uses that server with the NAS Connection's login. `$e
 | Technical failure | stays in place and is retried by the next sweep |
 
 - **Every pickup is a new load.** Each time FILE_LOAD finds a file in the inbound folder it gets a new row in
-  `ComplianceFileLoad` (a new `Load_ID`) and is processed from the start, whatever happened to a file of the same
+  `GOVT_RGLTRY_FileLoad` (a new `Load_ID`) and is processed from the start, whatever happened to a file of the same
   name before: the same name and path may come back with updated data, after a rejection or after a load. For an
   open batch it replaces the batch's data; a closed batch still needs the usual override. Earlier rows stay as
   history. A load of the same file left unfinished by a run that stopped is closed as `PROCESS_FAILURE`.
@@ -566,7 +571,7 @@ A path with its own server uses that server with the NAS Connection's login. `$e
   on the NAS with the worker's clock.
 - A file is identified by its path, size and modified time: delivering the same name again is a new
   load; a sweep that sees an untouched file again (one whose move failed) does not reload it.
-- `ComplianceFileLoad.File_Share` holds `<server>/<share>`, `File_Path` the path inside the share and
+- `GOVT_RGLTRY_FileLoad.File_Share` holds `<server>/<share>`, `File_Path` the path inside the share and
   `File_Version` the size and modified time that identify one delivery of the file; audit
   rows show the file as `//server/share/path`.
 - There is no S3 in this version: no bucket, key or object-version columns and no AWS file store.
@@ -581,7 +586,7 @@ reject, stop) are in the runbook (`OPERATIONAL_RUNBOOK.md`, section 6.2).
 
 ## File names (`Src_File_Nm_Tmplt`)
 
-How a project's files are named is not in the code: each `ComplianceSourceFileConfig` row describes its
+How a project's files are named is not in the code: each `GOVT_RGLTRY_SourceFileConfig` row describes its
 file name in `Src_File_Nm_Tmplt`, as fixed text plus tokens. `FILE_LOAD` and `FILE_CHECK` use the same rule.
 
 | Token | Meaning |
@@ -645,16 +650,16 @@ wants to hold the load until the files are clean.
 | Record types | `RECORD_TYPE` | With a `RECORD_TYPE` row (for example `H,D,T`): the first field of the header, of every data row and of the trailer |
 | Columns | `COLUMN_COUNT` | Every data row has the expected number of fields: the `COLUMN_COUNT` row, or else the number of names in the `HEADER_NAMES` row; with neither row the count is not checked. The first lines are named |
 | Trailer | `TRAILER` | Present when `Src_File_Has_Trlr_Ind = 1`; with a `TRAILER` row: field count, file name, row count, timestamp |
-| Source | `SOURCE` | The file's source is in `ComplianceSourceSystem` and active |
+| Source | `SOURCE` | The file's source is in `GOVT_RGLTRY_SourceSystem` and active |
 
-A file belongs to the batch of its project, table, source, run type and report dates. Nothing else is looked at: not `ComplianceDataSetSourceXwalk`, not its effective dates and not the day the batch was requested, so a file for an ad hoc batch or for a batch requested on another day matches the same way.
+A file belongs to the batch of its project, table, source, run type and report dates. Nothing else is looked at: not `GOVT_RGLTRY_DataSetSourceXwalk`, not its effective dates and not the day the batch was requested, so a file for an ad hoc batch or for a batch requested on another day matches the same way.
 
-Only problems of the file are findings. A setup problem (staging table missing, wrong delimiter, a wrong `ComplianceFileCheckConfig` or `ComplianceTargetColumnConfig` row) is reported as an error of the step: the files of that source are not checked, get no error file and are not moved. `validate-config` lists the same problems.
+Only problems of the file are findings. A setup problem (staging table missing, wrong delimiter, a wrong `GOVT_RGLTRY_FileCheckConfig` or `GOVT_RGLTRY_TargetColumnConfig` row) is reported as an error of the step: the files of that source are not checked, get no error file and are not moved. `validate-config` lists the same problems.
 
-`FILE_CHECK` does not read the staging or core table: what a file must look like comes from `ComplianceFileCheckConfig` only. The one exception is `COLUMN_VALUES`, which compares values with the staging columns and therefore reads the table when (and only when) that row is present.
+`FILE_CHECK` does not read the staging or core table: what a file must look like comes from `GOVT_RGLTRY_FileCheckConfig` only. The one exception is `COLUMN_VALUES`, which compares values with the staging columns and therefore reads the table when (and only when) that row is present.
 
-**Which content checks a file gets** is in its own table, `ComplianceFileCheckConfig`, one row per check.
-`ComplianceSourceFileConfig` only describes the file and where it loads.
+**Which content checks a file gets** is in its own table, `GOVT_RGLTRY_FileCheckConfig`, one row per check.
+`GOVT_RGLTRY_SourceFileConfig` only describes the file and where it loads.
 
 | Column | Meaning |
 |---|---|
@@ -671,7 +676,7 @@ Only problems of the file are findings. A setup problem (staging table missing, 
 | `RECORD_TYPE` | `H,D,T` | Three codes: header, detail, trailer. The first field of each line must be the code of its position. Without this check the first line is the header and the last line the trailer by position (`Src_File_Has_Hdr_Ind`, `Src_File_Has_Trlr_Ind`) |
 | `HEADER_NAMES` | `Member Id\|Paid Amount\|Member Name` | The expected header line (with the file's delimiter, or comma separated). Names are compared in order, ignoring upper / lower case and surrounding spaces. Without this check only the number of header columns is compared with the staging table |
 | `COLUMN_COUNT` | `23` | The number of fields in the header and in every data row, counted as delimiters + 1, so a record type field (`H` / `D`) counts. The trailer is not counted here (see `TRAILER`). |
-| `TARGET_COLUMNS` | `MemberFirstName\|MemberID\|SourceUnique_ID` | Not a check: the staging column of each field of the file, in file order (the old `TargetColumnList`, without the derived columns). Use it when a source's file skips table columns or is in a different order. Field n goes to the n-th listed column; columns not listed and not in `ComplianceTargetColumnConfig` are loaded as NULL. A listed column must be a staging column the file can fill (not a column of `ComplianceTargetColumnConfig`, not `Btch_ID`). With `*` and per-source rows each source can have its own layout; `Include_Ind = 0` makes a source use the table order |
+| `TARGET_COLUMNS` | `MemberFirstName\|MemberID\|SourceUnique_ID` | Not a check: the staging column of each field of the file, in file order (the old `TargetColumnList`, without the derived columns). Use it when a source's file skips table columns or is in a different order. Field n goes to the n-th listed column; columns not listed and not in `GOVT_RGLTRY_TargetColumnConfig` are loaded as NULL. A listed column must be a staging column the file can fill (not a column of `GOVT_RGLTRY_TargetColumnConfig`, not `Btch_ID`). With `*` and per-source rows each source can have its own layout; `Include_Ind = 0` makes a source use the table order |
 | `TRAILER` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | What each trailer field holds, in order: `RECORD_TYPE`, `FILE_NAME` (must equal the file's name), `DATA_ROW_COUNT` (data rows) or `TOTAL_ROW_COUNT` (every line, header and trailer included), `TIMESTAMP` (`YYYYMMDD`, `YYYYMMDDHHMM` or `YYYYMMDDHHMMSS`), `SKIP` |
 | `CHARACTER_SET` | `latin-1` | Every line must only contain characters of that character set (`latin-1`, `ascii`, `cp1252`, ...) and no control characters (tab is allowed). Use it when the target columns cannot hold every character: each offending line is reported with the character and the record |
 | `COLUMN_VALUES` | `ALL`, or any of `LENGTH,NUMBER,REQUIRED` | Every value of every data row against its target staging column: `LENGTH` = not longer than a character column, `NUMBER` = a number for a numeric column, `REQUIRED` = not empty for a `NOT NULL` column. Every offending value is reported with its line, column and record, so all bad records are listed before the load |
@@ -700,13 +705,13 @@ The field checks need `Check_Field_Nm`; empty values are not field-checked (that
 Existing installations (from 0.3.39; the primary index gets `Check_Field_Nm`, so the table is rebuilt):
 
 ```sql
-RENAME TABLE <META_DB>.ComplianceFileCheckConfig TO <META_DB>.ComplianceFileCheckConfig_Old;
--- create ComplianceFileCheckConfig from sql/schema.sql, then
-INSERT INTO <META_DB>.ComplianceFileCheckConfig (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt,
+RENAME TABLE <META_DB>.GOVT_RGLTRY_FileCheckConfig TO <META_DB>.GOVT_RGLTRY_FileCheckConfig_Old;
+-- create GOVT_RGLTRY_FileCheckConfig from sql/schema.sql, then
+INSERT INTO <META_DB>.GOVT_RGLTRY_FileCheckConfig (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt,
        Include_Ind, Active_Ind, Load_Dtts, LoadUser_ID, LastUpdt_Dtts, LastUpdt_ID)
 SELECT Project_Cd, Table_Nm, Src_ID, Check_Cd, '*', Check_Val_Txt, Include_Ind, Active_Ind, Created_Dtts, Created_By,
-       Updated_Dtts, Updated_By FROM <META_DB>.ComplianceFileCheckConfig_Old;
-DROP TABLE <META_DB>.ComplianceFileCheckConfig_Old;
+       Updated_Dtts, Updated_By FROM <META_DB>.GOVT_RGLTRY_FileCheckConfig_Old;
+DROP TABLE <META_DB>.GOVT_RGLTRY_FileCheckConfig_Old;
 ```
 - A file with no row for a check does not get that check. The name, batch, source, encoding, blank-line,
   column-count and zero-row checks always run and need no row.
@@ -741,7 +746,7 @@ NAS) and sent to the staging table in batches.
 
 | Column | Value |
 |---|---|
-| `Source_System` | `ComplianceSourceSystem.Src_Nm` of the file's source (MHK, Advocate, WellMed ...) |
+| `Source_System` | `GOVT_RGLTRY_SourceSystem.Src_Nm` of the file's source (MHK, Advocate, WellMed ...) |
 | `File_Name` | The file |
 | `Status` | `ACCEPTED` (loaded), `REJECTED` (not loaded, moved to `Error/`), `FAILED` (a technical failure; the file stays and is tried again) |
 | `Total_Rows_In_File` | Data rows read from the file; empty when the file was rejected before it was read |
@@ -776,14 +781,14 @@ what the name resolved to: `config` (project / table / source), `run_type`, `ver
 `rpt_end`, `batch` and `req_id`. `notes` holds remarks that are not failures, such as a batch that already
 has data and would be replaced by the file. The step ends with exit code 1 when a file failed or a folder
 could not be read. Each file also gets one row in the framework's audit table,
-`CMS_ComplianceExceptionsAudit`: `FILE_CHECK_FAILED` (emailed by `NOTIFY` to `DEFAULT_NOTIFY_EMAILS`) or
+`CMS_GOVT_RGLTRY_ExceptionsAudit`: `FILE_CHECK_FAILED` (emailed by `NOTIFY` to `DEFAULT_NOTIFY_EMAILS`) or
 `FILE_CHECK_PASSED`. A run that finds the same result for the same
 file again adds no new row.
 
-- **Airflow:** its own DAG, `OSSTD_CORE_CMS_COMPLIANCE_FILE_CHECK`, with its own Variable
-  `compliance_file_check_config_var` (the same keys as the file load Variable). It is unscheduled in the
+- **Airflow:** its own DAG, `GOVT_RGLTRY_CMS_UNIVERSE_FILE_CHECK`, with its own Variable
+  `govt_rgltry_cms_universe_file_check_config_var` (the same keys as the file load Variable). It is unscheduled in the
   examples. A project that wants the check gives it the schedule and lists
-  `OSSTD_CORE_CMS_COMPLIANCE_FILE_LOAD` in its `trigger_dags`, so the load starts only when the check
+  `GOVT_RGLTRY_CMS_UNIVERSE_FILE_LOAD` in its `trigger_dags`, so the load starts only when the check
   succeeded; `"fail_on_problems": false` in the Variable starts the load anyway and keeps the check as a
   report. A project that does not want it leaves the DAG unscheduled and schedules the file load DAG.
   One run by hand: trigger the DAG with `{"project": "..."}`.
@@ -793,14 +798,14 @@ file again adds no new row.
 The rules engine is not part of the load. `FILE_LOAD` validates the file, stages it and loads it to
 core; it never calls the rules engine and never waits for it.
 
-`FILE_RULES` is a separate step (DAG `OSSTD_CORE_CMS_COMPLIANCE_FILE_RULES`), started by EXPORT_LOAD, which waits
+`FILE_RULES` is a separate step (DAG `GOVT_RGLTRY_CMS_UNIVERSE_FILE_RULES`), started by EXPORT_LOAD, which waits
 for it. It takes every **batch** whose loaded data has not had its rules yet (`Load_Stat = FILE_LOADED`,
 `Rules_Stat = NOT_RUN` or `ERROR`; a table with an export table only after the batch's export), one batch at a time,
 and runs that table's GRE rules on that batch's rows only, calling the GRE's `run_rules()` in the task:
 
 | GRE argument | Value |
 |---|---|
-| `rule_group`, `rule_variant` | The batch's table and run type (`CDAG2`, `MNT`), or the `ComplianceRuleBinding` rows of the table |
+| `rule_group`, `rule_variant` | The batch's table and run type (`CDAG2`, `MNT`), or the `GOVT_RGLTRY_RuleBinding` rows of the table |
 | `run_key` | The batch ID |
 | `extra_filters` | `{<gre.batch_column, default Btch_ID>: <batch ID>}` plus the Variable's `gre.extra_filters`: the GRE filters each rule's result and its record count to the batch |
 | `text_params` | The batch's values (`btch_id`, `run_ty`, `table_nm`, `project_cd`, report dates; `{name}` in a rule) and `run_type` / `batch_schedule` (written to `gre_exceptions`) plus `gre.text_params` |
@@ -818,7 +823,7 @@ and runs that table's GRE rules on that batch's rows only, calling the GRE's `ru
   closes as usual.
 - One batch at a time in one task, in the pool `gre_rules` (1 slot): the GRE tables are never written by two rules
   runs at once; EXPORT_LOAD waits, so the export tables are not written while their rules read them.
-- The GRE writes each rule's final SQL to the task log. `python -m compliance_framework.cli run --module FILE_RULES
+- The GRE writes each rule's final SQL to the task log. `python -m govt_rgltry_framework.cli run --module FILE_RULES
   --project <project>` runs the step by hand.
 - An EXPORT_LOAD with a failed batch fails and does not start FILE_RULES; the batches it did export get their rules
   on the next EXPORT_LOAD (they stay `NOT_RUN`).
@@ -844,12 +849,12 @@ cannot express. Nothing about it is in the DAG, the Airflow Variable or the code
 
 | Question | Table | Columns (codes) | Fallback |
 |---|---|---|---|
-| **When** are batches created? | `ComplianceRunType` (run type) | `Sched_Cd`, `Sched_Day_Cd`, `Sched_Week_Cd`, `Sched_Months_Txt`, `Sched_Window_Days` | `Batch_Schedule_Sql_Txt` |
-| **Which sources** get batches of a run type? | `ComplianceDataSetSourceXwalk` (project, table, source; `Run_Ty` lists the run types) | — | — |
-| **Which report dates** does a batch get? | `ComplianceRunTypePeriod` (project, table or `*`, run type), or `Rpt_Period_Cd` on the crosswalk row | `Rpt_Period_Cd` | `Rpt_Dt_Sql_Txt` |
-| **Irregular dates** (an extra or moved submission) | `ComplianceBatchCalendar` (optional) | one row per date and report period | — |
+| **When** are batches created? | `GOVT_RGLTRY_RunType` (run type) | `Sched_Cd`, `Sched_Day_Cd`, `Sched_Week_Cd`, `Sched_Months_Txt`, `Sched_Window_Days` | `Batch_Schedule_Sql_Txt` |
+| **Which sources** get batches of a run type? | `GOVT_RGLTRY_DataSetSourceXwalk` (project, table, source; `Run_Ty` lists the run types) | — | — |
+| **Which report dates** does a batch get? | `GOVT_RGLTRY_RunTypePeriod` (project, table or `*`, run type), or `Rpt_Period_Cd` on the crosswalk row | `Rpt_Period_Cd` | `Rpt_Dt_Sql_Txt` |
+| **Irregular dates** (an extra or moved submission) | `GOVT_RGLTRY_BatchCalendar` (optional) | one row per date and report period | — |
 
-### When: schedule codes on `ComplianceRunType`
+### When: schedule codes on `GOVT_RGLTRY_RunType`
 
 | Batches are due | `Sched_Cd` | `Sched_Day_Cd` | `Sched_Week_Cd` | `Sched_Months_Txt` |
 |---|---|---|---|---|
@@ -874,35 +879,35 @@ report dates are the previous one's (DLY with `ANNUAL_WINDOW(01-01,01-31)` = a b
 
 `Run_Ty` lists the run types of the source, e.g. `DLY,WKLY,MNT` (only the listed run types: a run type added
 later applies to no source until it is listed). The version and effective dates are on the row. A row for **one**
-run type replaces the list's entry for that run type while that row is effective: its own `Cmplnc_Vrsn`, effective
+run type replaces the list's entry for that run type while that row is effective: its own `Rpt_Version`, effective
 dates or `Rpt_Period_Cd`; with `Include_Ind = 0` it switches that run type off for the source. A row with a single
 run type and no list is a normal row, so existing crosswalks keep working unchanged.
 
 ```sql
-INSERT INTO <META_DB>.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Cmplnc_Vrsn)
+INSERT INTO <META_DB>.GOVT_RGLTRY_DataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Rpt_Version)
 VALUES ('CMSUNIV', 'ODAG3', '51', 'DLY,WKLY,MNT', DATE '2026-01-01', '2200');
 -- source 140 has no weekly batches
-INSERT INTO <META_DB>.ComplianceDataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Cmplnc_Vrsn, Include_Ind)
+INSERT INTO <META_DB>.GOVT_RGLTRY_DataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Rpt_Version, Include_Ind)
 VALUES ('CMSUNIV', 'ODAG3', '140', 'WKLY', DATE '2026-01-01', '2200', 0);
 ```
 
-### Which dates: `ComplianceRunTypePeriod` (or `Rpt_Period_Cd` on the crosswalk)
+### Which dates: `GOVT_RGLTRY_RunTypePeriod` (or `Rpt_Period_Cd` on the crosswalk)
 
 The report dates of a run type for a project: `Project_Cd`, `Table_Nm` (`*` = every table), `Run_Ty`, and either
 `Rpt_Period_Cd` (a code, below) or `Rpt_Dt_Sql_Txt` (a SELECT returning `rpt_start` and `rpt_end`, for dates no code
 expresses; same placeholders as the crosswalk's, `{period_dt}` = the scheduled date). The period used for a batch is
-the first found of: the crosswalk row's `Rpt_Period_Cd`, its `Rpt_Dt_Sql_Txt`, the table's `ComplianceRunTypePeriod`
-row, the project's `*` row. Existing installations: `ALTER TABLE <META_DB>.ComplianceRunTypePeriod ADD Rpt_Dt_Sql_Txt
-VARCHAR(8000);` and `ALTER TABLE <META_DB>.ComplianceRunTypePeriod ADD Rpt_Period_Cd NULL;` (the code may then be
+the first found of: the crosswalk row's `Rpt_Period_Cd`, its `Rpt_Dt_Sql_Txt`, the table's `GOVT_RGLTRY_RunTypePeriod`
+row, the project's `*` row. Existing installations: `ALTER TABLE <META_DB>.GOVT_RGLTRY_RunTypePeriod ADD Rpt_Dt_Sql_Txt
+VARCHAR(8000);` and `ALTER TABLE <META_DB>.GOVT_RGLTRY_RunTypePeriod ADD Rpt_Period_Cd NULL;` (the code may then be
 empty). A SCHEDULED run type with a
 schedule code and no period anywhere is a validate-config error. An ADHOC run type with a schedule gets scheduled
 batches for every crosswalk row that finds a period (set none for it when only some sources are scheduled, and put
 `Rpt_Period_Cd` on those rows).
 
 ```sql
-INSERT INTO <META_DB>.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'DLY', 'PREV_DAY');
-INSERT INTO <META_DB>.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'WKLY', 'PREV_CALENDAR_WEEK');
-INSERT INTO <META_DB>.ComplianceRunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'WKLY2', 'RANGE(WEEK,5,1)');
+INSERT INTO <META_DB>.GOVT_RGLTRY_RunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'DLY', 'PREV_DAY');
+INSERT INTO <META_DB>.GOVT_RGLTRY_RunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'WKLY', 'PREV_CALENDAR_WEEK');
+INSERT INTO <META_DB>.GOVT_RGLTRY_RunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd) VALUES ('CMSUNIV', '*', 'WKLY2', 'RANGE(WEEK,5,1)');
 ```
 
 Codes, counted from the scheduled date: `PREV_DAY`, `SAME_DAY`, `PREV_CALENDAR_WEEK` (Monday to Sunday),
@@ -918,22 +923,22 @@ first / last days of the unit `back` units before (units `WEEK`, `MONTH`, `QUART
 gets 09-01 to 09-30.
 
 Existing installations: `Run_Ty` is in the crosswalk's primary index, so it cannot be widened in place; the table
-is copied once. First run the `ComplianceDataSetSourceXwalk` CREATE TABLE of `airflow_resources/sql/schema.sql` with the name
-`ComplianceDataSetSourceXwalk_N`, then:
+is copied once. First run the `GOVT_RGLTRY_DataSetSourceXwalk` CREATE TABLE of `airflow_resources/sql/schema.sql` with the name
+`GOVT_RGLTRY_DataSetSourceXwalk_N`, then:
 
 ```sql
-INSERT INTO <META_DB>.ComplianceDataSetSourceXwalk_N
-  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt,
+INSERT INTO <META_DB>.GOVT_RGLTRY_DataSetSourceXwalk_N
+  (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Rpt_Version, Rpt_Dt_Sql_Txt,
    Rpt_Period_Cd, Include_Ind, Active_Ind, Load_Dtts, LoadUser_ID, LastUpdt_Dtts, LastUpdt_ID)
-SELECT Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Cmplnc_Vrsn, Rpt_Dt_Sql_Txt,
+SELECT Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Rpt_Version, Rpt_Dt_Sql_Txt,
        Rpt_Period_Cd, 1, Active_Ind, Created_Dtts, Created_By, Updated_Dtts, Updated_By
-FROM <META_DB>.ComplianceDataSetSourceXwalk;
-RENAME TABLE <META_DB>.ComplianceDataSetSourceXwalk TO <META_DB>.ComplianceDataSetSourceXwalk_Old;
-RENAME TABLE <META_DB>.ComplianceDataSetSourceXwalk_N TO <META_DB>.ComplianceDataSetSourceXwalk;
--- and ComplianceRunTypePeriod from sql/schema.sql
+FROM <META_DB>.GOVT_RGLTRY_DataSetSourceXwalk;
+RENAME TABLE <META_DB>.GOVT_RGLTRY_DataSetSourceXwalk TO <META_DB>.GOVT_RGLTRY_DataSetSourceXwalk_Old;
+RENAME TABLE <META_DB>.GOVT_RGLTRY_DataSetSourceXwalk_N TO <META_DB>.GOVT_RGLTRY_DataSetSourceXwalk;
+-- and GOVT_RGLTRY_RunTypePeriod from sql/schema.sql
 ```
 
-### Irregular dates: `ComplianceBatchCalendar` (optional)
+### Irregular dates: `GOVT_RGLTRY_BatchCalendar` (optional)
 
 One row per run type, request date and report period (`Project_Cd`, `Table_Nm` (`*` = every table), `Run_Ty`,
 `Req_Dt_Key`, `Rpt_Start_Dt_Key`, `Rpt_End_Dt_Key`): on `Req_Dt_Key` BATCH_CREATION creates a batch for those
@@ -947,17 +952,17 @@ Used only when the run type has no `Sched_Cd` (`Batch_Schedule_Sql_Txt`) or the 
 scheduled date). Existing installations add the columns:
 
 ```sql
-ALTER TABLE <META_DB>.ComplianceRunType ADD Sched_Cd VARCHAR(10), ADD Sched_Day_Cd VARCHAR(5), ADD Sched_Week_Cd VARCHAR(5),
+ALTER TABLE <META_DB>.GOVT_RGLTRY_RunType ADD Sched_Cd VARCHAR(10), ADD Sched_Day_Cd VARCHAR(5), ADD Sched_Week_Cd VARCHAR(5),
   ADD Sched_Months_Txt VARCHAR(40), ADD Sched_Window_Days SMALLINT DEFAULT 1 NOT NULL;
-ALTER TABLE <META_DB>.ComplianceRunType ADD Sched_Offset_Days SMALLINT DEFAULT 0 NOT NULL;
-ALTER TABLE <META_DB>.ComplianceDataSetSourceXwalk ADD Rpt_Period_Cd VARCHAR(60);
--- and ComplianceBatchCalendar from sql/schema.sql when it is used
+ALTER TABLE <META_DB>.GOVT_RGLTRY_RunType ADD Sched_Offset_Days SMALLINT DEFAULT 0 NOT NULL;
+ALTER TABLE <META_DB>.GOVT_RGLTRY_DataSetSourceXwalk ADD Rpt_Period_Cd VARCHAR(60);
+-- and GOVT_RGLTRY_BatchCalendar from sql/schema.sql when it is used
 ```
 
 Which tables and sources get batches of a run type is the crosswalk itself: a source gets batches of the run
 types its row lists (or of its row's single run type).
 
-### SQL fallback for when: `ComplianceRunType.Batch_Schedule_Sql_Txt`
+### SQL fallback for when: `GOVT_RGLTRY_RunType.Batch_Schedule_Sql_Txt`
 
 A single `SELECT` that returns **one row on a day batches are due and no row on any other day**.
 
@@ -978,7 +983,7 @@ Examples (Teradata):
 | Any day of the 4th quarter | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE EXTRACT(MONTH FROM d) >= 10` |
 | Any day of the second month of the second quarter (May) | `SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE EXTRACT(MONTH FROM d) = 5` |
 
-### SQL fallback for which dates: `ComplianceDataSetSourceXwalk.Rpt_Dt_Sql_Txt`
+### SQL fallback for which dates: `GOVT_RGLTRY_DataSetSourceXwalk.Rpt_Dt_Sql_Txt`
 
 A single `SELECT` that returns **one row with `rpt_start` and `rpt_end`** for that table, source and run
 type. It only runs on a day the run type is due.
@@ -1053,10 +1058,10 @@ finds them on 2026-10-19 to 2026-10-22, and creates nothing on 2026-10-23 and 20
 year on the third date, by default the day after the window ends). Example, one batch by hand:
 `BATCH_CREATION` with `run_type`, `table` and `period = PREV_CALENDAR_MONTH`.
 
-## Stage and core table layout (`ComplianceTargetColumnConfig`)
+## Stage and core table layout (`GOVT_RGLTRY_TargetColumnConfig`)
 
 The staging and core tables of a file can have any layout. Which of their columns the framework fills,
-and with what, is in `ComplianceTargetColumnConfig`; **every other column of the staging table is a column
+and with what, is in `GOVT_RGLTRY_TargetColumnConfig`; **every other column of the staging table is a column
 of the file, in table order.**
 
 The sources of one table can have staging (and core) tables with different column names, e.g. `Src_Data_Key` in
@@ -1076,7 +1081,7 @@ core tables (`TARGET_COLUMN`).
 | `Value_Cd` | Value |
 |---|---|
 | `BATCH_ID` | The batch ID in a table whose batch column has another name than `Btch_ID` (e.g. `Batch_ID`, `BatchID`); that column is then the table's batch column (staging, core or export) |
-| `RUN_TYPE`, `VERSION`, `SOURCE_ID` | The batch's run type, the compliance version the batch was created with (`ComplianceRequestControl.Cmplnc_Vrsn`), the batch's `Src_ID` |
+| `RUN_TYPE`, `VERSION`, `SOURCE_ID` | The batch's run type, the report version the batch was created with (`GOVT_RGLTRY_RequestControl.Rpt_Version`), the batch's `Src_ID` |
 | `FILE_NAME` | The name of the file |
 | `LOAD_TIMESTAMP` | When the file was loaded: a timestamp, or text `YYYY-MM-DD HH:MM:SS` (business time zone) in a character column |
 | `ROW_SEQUENCE` | A running row number, continuing from the highest value in the staging and core tables |
@@ -1095,10 +1100,10 @@ Rules:
 - A row for one table wins over the project's `*` row for the same column.
 - **Which staging column fills which core column:** a core column takes the staging column of the same name; a derived column (this table) the staging column with the same value code. The data columns whose names differ are paired **in table order**: the first such staging column fills the first such core column, and so on (e.g. staging `MemberFirstName, MemberID` → core `EnrolleeFirstName, EnrolleeID`), so keep those columns in the same order in both tables. Core columns left over stay empty (or get the load time with `LOAD_TIMESTAMP`); staging columns left over are not copied. The pairs with different names are written to the task log (`staging -> core by column position: ...`), and `validate-config` writes them too.
 - The same column can have different types in staging and core. `LOAD_DATE`, `LOAD_TIMESTAMP`, `RPT_START` and `RPT_END` are written to each table in that table's type (a date in a timestamp column is its midnight). Any other text staging column whose core column is a number, date, time or timestamp is converted to the core column's type as `DBC.ColumnsV` gives it, dates and times with the column's own `FORMAT` (e.g. `DATE FORMAT 'MM/DD/YYYY'`); an empty value becomes NULL. If a value does not convert (or a NOT NULL core column would get no value or an empty one), the file or pull is rejected (`CORE_TYPE_MISMATCH`, the column named, no data shown), its staged rows are removed and core is not touched. Columns of the same kind in both tables are copied as they are.
-- **How the file's fields reach the table.** The columns in `ComplianceTargetColumnConfig` (and `Btch_ID`) are
+- **How the file's fields reach the table.** The columns in `GOVT_RGLTRY_TargetColumnConfig` (and `Btch_ID`) are
   filled by the framework wherever they are in the table. The file's fields fill the other columns, decided by the
   first of these that applies to the file's source:
-  1. a `TARGET_COLUMNS` row in `ComplianceFileCheckConfig`: field n goes to the n-th listed column;
+  1. a `TARGET_COLUMNS` row in `GOVT_RGLTRY_FileCheckConfig`: field n goes to the n-th listed column;
   2. a `HEADER_NAMES` row whose names are all column names: by name;
   3. a `COLUMN_COUNT` row: the first columns in table order;
   4. otherwise every column in table order, from the first one on.
@@ -1116,7 +1121,7 @@ Rules:
   of its name. Otherwise the fields fill the staging columns left to right. Without `HEADER_NAMES`, a
   `COLUMN_COUNT` row gives the number of fields (record type included): they fill the first staging columns in
   table order. Every staging or core column that is neither filled from the file nor in
-  `ComplianceTargetColumnConfig` is loaded as NULL, so it must allow NULL. With neither row every such column is
+  `GOVT_RGLTRY_TargetColumnConfig` is loaded as NULL, so it must allow NULL. With neither row every such column is
   expected in the file. The load skips the header line; it never counts or compares it (that is `FILE_CHECK`).
 - **Core holds one load per batch and source.** When a file is loaded for a batch that already has rows of that
   source in the core table, those rows are deleted by `Btch_ID` and the source column (the one mapped to
@@ -1138,7 +1143,7 @@ Rules:
   taken literally: `CURRENT_DATE` as a constant is the text, not today's date.
 - A derived column of the core table must also be in the staging table (it is copied), except
   `CURRENT_FLAG`, `END_TIMESTAMP` and `LOAD_TIMESTAMP`.
-- A file with record types (a `RECORD_TYPE` row in `ComplianceFileCheckConfig`) has that first field
+- A file with record types (a `RECORD_TYPE` row in `GOVT_RGLTRY_FileCheckConfig`) has that first field
   dropped at load: it is not a column of the tables.
 - **A project with no rows for a table** uses the framework's own column names: staging `btch_id`,
   `load_id`, `src_file_nm`, `stg_load_dtts`; core `btch_id`, `load_id`, `current_ind`, `load_dtts`, `end_dtts`.
@@ -1161,11 +1166,11 @@ Load_Dtts` and start with a row ID:
 
 ## The core table and the delimiter
 
-`ComplianceSourceFileConfig.Delmtr_Cd` holds the delimiter character itself: `|`, `,`, `*`, `;` ... and `\t` for a
+`GOVT_RGLTRY_SourceFileConfig.Delmtr_Cd` holds the delimiter character itself: `|`, `,`, `*`, `;` ... and `\t` for a
 tab. It is one character; empty means a comma. Words such as `PIPE` or `COMMA` are not accepted, and
 `validate-config` reports them (`DELIMITER`).
 
-`ComplianceSourceFileConfig.Core_Table_Nm` (required) names the core table in `Core_Schema_Nm`, the way
+`GOVT_RGLTRY_SourceFileConfig.Core_Table_Nm` (required) names the core table in `Core_Schema_Nm`, the way
 `Stg_Table_Nm` names the staging table. It can differ from `Table_Nm`.
 
 ## Upper and lower case
@@ -1174,32 +1179,32 @@ Codes and values that people type are compared without regard to case, everywher
 
 - project, table, source, run type and run category codes in every configuration table, in the
   intake requests, in job parameters (`--project`, `--run-type`, `--table`, a Variable's `project`, ...);
-- override type and approval status in `ComplianceBatchOverride`, and a `Reuse_Btch_ID` or `--btch-id`;
+- override type and approval status in `GOVT_RGLTRY_BatchOverride`, and a `Reuse_Btch_ID` or `--btch-id`;
 - file names against their templates (always; the earlier `FILENAME_CASE_SENSITIVE` setting is gone), the
   run-type token in a file name, the template placeholders (`{RunTy}` = `{RUNTY}`) and the file name in a trailer;
 - file content checks: record types (`h` = `H`), `VALUE_IN` values, `PATTERN` (matched ignoring case), the
   `DATE_FORMAT` tokens (`yyyymmdd` = `YYYYMMDD`), header names and `TARGET_COLUMNS` names, check and trailer codes;
-- column names in `ComplianceTargetColumnConfig`, `Check_Field_Nm`, staging / core / export table and database
+- column names in `GOVT_RGLTRY_TargetColumnConfig`, `Check_Field_Nm`, staging / core / export table and database
   names, SQL placeholders (`{BTCH_ID}` = `{btch_id}`), period and schedule codes (`range(week,1,1)`);
 - step and module names, admin commands, period names and the choice settings (`FILE_RULES_MODE`,
   `NOTIFY_BACKEND`, `RULE_ENGINE`, ...).
 
 The framework keeps codes upper case in what it writes (batch rows, `Btch_ID`, audit rows), so
 `odr`, `Odr` and `ODR` are one project. `validate-config` reports `CODE_CASE_DUPLICATE` when two rows of
-`ComplianceProject`, `ComplianceSourceSystem` or `ComplianceRunType` differ only in case.
+`GOVT_RGLTRY_Project`, `GOVT_RGLTRY_SourceSystem` or `GOVT_RGLTRY_RunType` differ only in case.
 
 The run categories are `SCHEDULED` (batches created on a schedule for a period; was `ROUTINE`) and
-`ADHOC` (batches requested through `ComplianceRequestInTake`). The two ways of creating batches can be mixed:
+`ADHOC` (batches requested through `GOVT_RGLTRY_RequestInTake`). The two ways of creating batches can be mixed:
 
 - An `ADHOC` run type with a `Batch_Schedule_Sql_Txt` gets scheduled batches for its crosswalk rows that have a
-  `Rpt_Dt_Sql_Txt`; its rows without one get batches from `ComplianceRequestInTake` only. So one ad-hoc run type can
+  `Rpt_Dt_Sql_Txt`; its rows without one get batches from `GOVT_RGLTRY_RequestInTake` only. So one ad-hoc run type can
   run daily for some sources and on request (other dates) for others.
-- `ComplianceRequestInTake` takes any active run type, `SCHEDULED` ones too (e.g. an extra `MNT` batch for an earlier
-  month). A request needs no crosswalk row: it names its source (`Src_ID`, required) and its compliance version
-  (`Cmplnc_Vrsn`, required), and the source must have an active file config or internal source config for the
+- `GOVT_RGLTRY_RequestInTake` takes any active run type, `SCHEDULED` ones too (e.g. an extra `MNT` batch for an earlier
+  month). A request needs no crosswalk row: it names its source (`Src_ID`, required) and its report version
+  (`Rpt_Version`, required), and the source must have an active file config or internal source config for the
   table; otherwise the request fails (`INTAKE_FAILED`, emailed) and validate-config reports it (`INTAKE_REQUEST`).
   The crosswalk is only for scheduled batches (including an ad-hoc run type's schedule, e.g. IN1). Existing
-  installations add the column: `ALTER TABLE <META_DB>.ComplianceRequestInTake ADD Cmplnc_Vrsn VARCHAR(10);`
+  installations add the column: `ALTER TABLE <META_DB>.GOVT_RGLTRY_RequestInTake ADD Rpt_Version VARCHAR(10);`
 - A request whose source, run type and report dates already have an open batch made by the schedule or another
   request uses that batch (no second batch); a closed batch gets a new one (a re-request). A request's own window
   (`Req_Start_Dt_Key` to `Req_End_Dt_Key`) still makes its batch on each day. The schedule skips report dates
@@ -1211,7 +1216,7 @@ The run categories are `SCHEDULED` (batches created on a schedule for a period; 
 
 ## Environment in database names (`$env`)
 
-The staging and core database names and the inbound path of `ComplianceSourceFileConfig` can carry
+The staging and core database names and the inbound path of `GOVT_RGLTRY_SourceFileConfig` can carry
 a `$env` token, so one set of configuration rows works in every environment (the GRE convention):
 
 | Authored | DEV | TEST | QA | PROD / UAT |
@@ -1232,13 +1237,13 @@ a `$env` token, so one set of configuration rows works in every environment (the
 ## Teradata specifics
 
 **Tables.** `airflow_resources/sql/schema.sql` defines 15 MULTISET tables for `meta_db`, created separately: the 14 framework tables plus
-`ComplianceLock`. Identity columns are `GENERATED ALWAYS AS IDENTITY`; there are no foreign keys or
+`GOVT_RGLTRY_Lock`. Identity columns are `GENERATED ALWAYS AS IDENTITY`; there are no foreign keys or
 CHECK constraints (the validator checks references).
 
 **Staging and core tables** are created by each project, in the databases named in
-`ComplianceSourceFileConfig` (`Stg_Schema_Nm` / `Core_Schema_Nm` are Teradata database names):
+`GOVT_RGLTRY_SourceFileConfig` (`Stg_Schema_Nm` / `Core_Schema_Nm` are Teradata database names):
 
-Their layout is free when it is described in `ComplianceTargetColumnConfig` (above). Without rows there, they
+Their layout is free when it is described in `GOVT_RGLTRY_TargetColumnConfig` (above). Without rows there, they
 follow the framework's own column names:
 
 - Staging: the business columns in file order, then `btch_id VARCHAR(250)`, `load_id BIGINT`,
@@ -1256,7 +1261,7 @@ follow the framework's own column names:
 
 | PostgreSQL | Teradata |
 |---|---|
-| Session advisory locks | Rows in `ComplianceLock` (insert = acquire, delete = release) |
+| Session advisory locks | Rows in `GOVT_RGLTRY_Lock` (insert = acquire, delete = release) |
 | A crashed run's locks vanish with its session | They stay until they expire (`LOCK_TTL_MINUTES`, default 240). `locks` lists them, `release-lock --key` removes one, `health` shows them. Keep the TTL above the longest step. |
 | `FOR UPDATE SKIP LOCKED` row claims | Each notification / intake request is claimed with its own lock row |
 | Partial unique indexes (one open override per batch and type; one active file config per source) | Reported by `validate-config` (`OVERRIDE_DUPLICATE`, `FILE_CONFIG_DUPLICATE`); the approval templates refuse a duplicate |
@@ -1270,8 +1275,8 @@ String comparisons follow the session's transaction mode (Teradata mode is not c
 
 ## File rules through the GRE
 
-With `RULE_ENGINE=gre` and `GRE_ENTRYPOINT=compliance_framework.export:run_gre`, each
-`ComplianceRuleBinding` of a file runs that GRE `rule_group` (and `rule_variant`; `*` = all) through the
+With `RULE_ENGINE=gre` and `GRE_ENTRYPOINT=govt_rgltry_framework.export:run_gre`, each
+`GOVT_RGLTRY_RuleBinding` of a file runs that GRE `rule_group` (and `rule_variant`; `*` = all) through the
 GRE's `run_rules()`, with `run_key = CBF_LOAD_<Load_ID>` and the file's context as `run_params`
 (`{btch_id}`, `{load_id}`, `{stg_schema_nm}`, `{stg_table_nm}`, `{core_schema_nm}`, `{core_table_nm}`, `{exp_schema_nm}`, `{exp_table_nm}`, `{project_cd}`, `{table_nm}`, `{src_id}`,
 `{run_ty}`, `{rpt_start_dt_key}`, `{rpt_end_dt_key}`, `{req_dt_key}`). The verdict of each rule is read
@@ -1279,7 +1284,7 @@ from `<gre meta_db>.gre_results`: `PASS` / `WARN` pass, `FAIL` marks the file's 
 warnings under ANNOTATE), anything else is a technical failure that is retried. This happens in the
 `FILE_RULES` step, after the core load (above). Use `RULE_ENGINE=none` to run no rules.
 
-The `gre` section of `compliance_file_rules_config_var` is passed on to `run_rules()`: `project_name`, `text_params` and
+The `gre` section of `govt_rgltry_cms_universe_file_rules_config_var` is passed on to `run_rules()`: `project_name`, `text_params` and
 `extra_filters` as written, and `run_params` merged with the file's context (the file's values win).
 `text_params` and `extra_filters` are the same for every file of the Variable: where they name a run type
 (e.g. `{"RUNTYPE": "MNT"}`, `{"run_ty": "MNT"}`), use a `runs` entry per project with its own `gre`

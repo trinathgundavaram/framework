@@ -1,7 +1,7 @@
--- CMS Compliance Framework schema for Teradata. Replace {{META_DB}} with the metadata database and run once.
--- No secondary indexes: each table has only its primary index. Existing installations: upgrade_0.3.71.sql.
+-- CMS Government Regulatory Framework schema for Teradata. Replace {{META_DB}} with the metadata database and run once.
+-- No secondary indexes: each table has only its primary index. Existing installations: upgrade_0.3.71.sql, then upgrade_0.3.82.sql.
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceProject (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_Project (
   Project_Cd    VARCHAR(30)  NOT NULL,
   Project_Desc  VARCHAR(200) NOT NULL,
   Active_Ind    SMALLINT     DEFAULT 1 NOT NULL,
@@ -13,7 +13,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceProject (
 UNIQUE PRIMARY INDEX (Project_Cd);
 
 -- Optional: the table group of a project's tables, used only when a run names a table group.
-CREATE MULTISET TABLE {{META_DB}}.ComplianceTable (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_Table (
   Project_Cd    VARCHAR(30)  NOT NULL,
   Table_Nm      VARCHAR(63)  NOT NULL,
   Table_Grp_Cd  VARCHAR(30)  NOT NULL,
@@ -27,7 +27,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceTable (
 UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm);
 
 -- Optional: the export table of a core table (EXPORT_LOAD), one row per project / table.
-CREATE MULTISET TABLE {{META_DB}}.ComplianceExportConfig (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_ExportConfig (
   Project_Cd      VARCHAR(30)    NOT NULL,
   Table_Nm        VARCHAR(63)    NOT NULL,
   Exp_Schema_Nm   VARCHAR(128)   NOT NULL,
@@ -46,7 +46,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceExportConfig (
 UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm);
 
 -- Optional: internal sources pulled with a query (SOURCE_LOAD), one row per project / table / source.
-CREATE MULTISET TABLE {{META_DB}}.ComplianceInternalSourceConfig (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_InternalSourceConfig (
   Project_Cd      VARCHAR(30)    NOT NULL,
   Table_Nm        VARCHAR(63)    NOT NULL,
   Src_ID          VARCHAR(30)    NOT NULL,
@@ -65,7 +65,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceInternalSourceConfig (
 )
 UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Src_ID);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceSystem (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SourceSystem (
   Src_ID        VARCHAR(30)  NOT NULL,
   Src_Nm        VARCHAR(100) NOT NULL,
   Src_Ty        VARCHAR(20)  NOT NULL,
@@ -77,7 +77,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceSystem (
 )
 UNIQUE PRIMARY INDEX (Src_ID);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceRunType (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_RunType (
   Run_Ty          VARCHAR(20)  NOT NULL,
   Run_Ty_Desc     VARCHAR(200) NOT NULL,
   Run_Category_Cd VARCHAR(10)  NOT NULL,
@@ -99,7 +99,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceRunType (
 UNIQUE PRIMARY INDEX (Run_Ty);
 
 -- Optional: batches created on given dates with given report dates (irregular schedules), per run type and table.
-CREATE MULTISET TABLE {{META_DB}}.ComplianceBatchCalendar (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_BatchCalendar (
   Project_Cd       VARCHAR(30)  NOT NULL,
   Table_Nm         VARCHAR(63)  DEFAULT '*' NOT NULL,
   Run_Ty           VARCHAR(20)  NOT NULL,
@@ -114,7 +114,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceBatchCalendar (
 )
 UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Run_Ty, Req_Dt_Key, Rpt_Start_Dt_Key, Rpt_End_Dt_Key);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceRunTypePeriod (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_RunTypePeriod (
   Project_Cd       VARCHAR(30)  NOT NULL,
   Table_Nm         VARCHAR(63)  DEFAULT '*' NOT NULL,
   Run_Ty           VARCHAR(20)  NOT NULL,
@@ -128,14 +128,14 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceRunTypePeriod (
 )
 UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Run_Ty);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceDataSetSourceXwalk (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_DataSetSourceXwalk (
   Project_Cd             VARCHAR(30)  NOT NULL,
   Table_Nm               VARCHAR(63)  NOT NULL,
   Src_ID                 VARCHAR(30)  NOT NULL,
   Run_Ty                 VARCHAR(200)  NOT NULL,
   Effective_Start_Dt_Key DATE         NOT NULL,
   Effective_End_Dt_Key   DATE,
-  Cmplnc_Vrsn            VARCHAR(10)  NOT NULL,
+  Rpt_Version            VARCHAR(10)  NOT NULL,
   Rpt_Period_Cd          VARCHAR(60),
   Rpt_Dt_Sql_Txt         VARCHAR(8000),
   Include_Ind            SMALLINT     DEFAULT 1 NOT NULL,
@@ -147,7 +147,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceDataSetSourceXwalk (
 )
 UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceFileConfig (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SourceFileConfig (
   Cfg_ID                 BIGINT GENERATED ALWAYS AS IDENTITY,
   Project_Cd             VARCHAR(30)  NOT NULL,
   Table_Nm               VARCHAR(63)  NOT NULL,
@@ -171,7 +171,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceSourceFileConfig (
 )
 UNIQUE PRIMARY INDEX (Cfg_ID);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceFileCheckConfig (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_FileCheckConfig (
   Project_Cd       VARCHAR(30)  NOT NULL,
   Table_Nm         VARCHAR(63)  DEFAULT '*' NOT NULL,
   Src_ID           VARCHAR(30)  DEFAULT '*' NOT NULL,
@@ -187,7 +187,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceFileCheckConfig (
 )
 UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Src_ID, Check_Cd);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceTargetColumnConfig (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_TargetColumnConfig (
   Project_Cd       VARCHAR(30)  NOT NULL,
   Table_Nm         VARCHAR(63)  DEFAULT '*' NOT NULL,
   Column_Nm        VARCHAR(128) NOT NULL,
@@ -201,7 +201,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceTargetColumnConfig (
 )
 UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Column_Nm);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceRuleBinding (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_RuleBinding (
   Project_Cd       VARCHAR(30)  NOT NULL,
   Table_Nm         VARCHAR(63)  NOT NULL,
   Src_ID           VARCHAR(30)  NOT NULL,
@@ -216,13 +216,13 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceRuleBinding (
 )
 UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Src_ID, Run_Ty, Gre_Rule_Group, Gre_Rule_Variant);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceRequestInTake (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_RequestInTake (
   Intake_ID        BIGINT GENERATED ALWAYS AS IDENTITY,
   Project_Cd       VARCHAR(30)  NOT NULL,
   Table_Nm         VARCHAR(63)  NOT NULL,
   Src_ID           VARCHAR(30)  NOT NULL,
   Run_Ty           VARCHAR(20)  NOT NULL,
-  Cmplnc_Vrsn      VARCHAR(10)  NOT NULL,
+  Rpt_Version      VARCHAR(10)  NOT NULL,
   Rpt_Start_Dt_Key DATE         NOT NULL,
   Rpt_End_Dt_Key   DATE         NOT NULL,
   Req_Start_Dt_Key DATE         NOT NULL,
@@ -235,13 +235,13 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceRequestInTake (
 )
 UNIQUE PRIMARY INDEX (Intake_ID);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceRequestControl (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_RequestControl (
   Req_ID           BIGINT GENERATED ALWAYS AS IDENTITY,
   Project_Cd       VARCHAR(30)  NOT NULL,
   Table_Nm         VARCHAR(63)  NOT NULL,
   Src_ID           VARCHAR(30)  NOT NULL,
   Run_Ty           VARCHAR(20)  NOT NULL,
-  Cmplnc_Vrsn      VARCHAR(10),
+  Rpt_Version      VARCHAR(10),
   Rpt_Start_Dt_Key DATE         NOT NULL,
   Rpt_End_Dt_Key   DATE         NOT NULL,
   Req_Dt_Key       DATE         NOT NULL,
@@ -257,7 +257,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceRequestControl (
 )
 UNIQUE PRIMARY INDEX (Req_ID);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceFileLoad (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_FileLoad (
   Load_ID           BIGINT GENERATED ALWAYS AS IDENTITY,
   Cfg_ID            BIGINT,
   Req_ID            BIGINT,
@@ -280,7 +280,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceFileLoad (
 )
 UNIQUE PRIMARY INDEX (Load_ID);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceBatchOverride (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_BatchOverride (
   Ovrd_ID           BIGINT GENERATED ALWAYS AS IDENTITY,
   Override_Ty       VARCHAR(20)  NOT NULL,
   Req_ID            BIGINT       NOT NULL,
@@ -298,7 +298,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceBatchOverride (
 )
 UNIQUE PRIMARY INDEX (Ovrd_ID);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceRequestFileDetail (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_RequestFileDetail (
   Detail_ID   BIGINT GENERATED ALWAYS AS IDENTITY,
   Req_ID      BIGINT       NOT NULL,
   Btch_ID     VARCHAR(250) NOT NULL,
@@ -312,7 +312,7 @@ CREATE MULTISET TABLE {{META_DB}}.ComplianceRequestFileDetail (
 )
 PRIMARY INDEX (Req_ID);
 
-CREATE MULTISET TABLE {{META_DB}}.CMS_ComplianceExceptionsAudit (
+CREATE MULTISET TABLE {{META_DB}}.CMS_GOVT_RGLTRY_ExceptionsAudit (
   Event_ID     BIGINT GENERATED ALWAYS AS IDENTITY,
   Event_Ty     VARCHAR(60)   NOT NULL,
   Sevrty       VARCHAR(10)   NOT NULL,
@@ -333,7 +333,7 @@ CREATE MULTISET TABLE {{META_DB}}.CMS_ComplianceExceptionsAudit (
 )
 UNIQUE PRIMARY INDEX (Event_ID);
 
-CREATE MULTISET TABLE {{META_DB}}.ComplianceLock (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_Lock (
   Lock_Key      VARCHAR(300) NOT NULL,
   Owner_ID      VARCHAR(64)  NOT NULL,
   Acquired_Dtts TIMESTAMP(6) WITH TIME ZONE NOT NULL,

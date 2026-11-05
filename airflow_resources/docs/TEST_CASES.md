@@ -1,6 +1,6 @@
-# Compliance Batch Framework – Test Cases (Airflow / Teradata)
+# Government Regulatory Batch Framework – Test Cases (Airflow / Teradata)
 
-**Version:** framework 0.3.69. **Environment:** CMSUNIV DEV (`HSABC_DEV`, `CMSUNIV_FILELAND_DEV_T`,
+**Version:** framework 0.3.82. **Environment:** CMSUNIV DEV (`HSABC_DEV`, `CMSUNIV_FILELAND_DEV_T`,
 `CMSUNIV_STAGE_DEV_T`, `CMSUNIV_CORE_DEV_T`, `EXPORT_FEED_DEV_T`, NAS `chs_dms/Dev/OSS_Inbound/External/CMSUNIV`).
 Run types `DLY`, `WKLY`, `MNT`, `IN1`, `CMS`. Replace dates, batch IDs and sources with the ones of your run.
 
@@ -46,7 +46,7 @@ Run types `DLY`, `WKLY`, `MNT`, `IN1`, `CMS`. Replace dates, batch IDs and sourc
 |---|---|---|
 | P1 | Framework 0.3.67 and `rules_engine` deployed in the DAGs folder; 9 DAGs visible, no import errors | Airflow UI → DAGs; Browse → DAG import errors empty |
 | P2 | Metadata tables from `sql/schema.sql` exist in `HSABC_DEV` (20 tables) | Q12 |
-| P3 | CMSUNIV configuration loaded (`examples/cmsuniv_setup.sql`), run types `DLY` / `WKLY` | `SELECT Run_Ty, Sched_Cd, SLA_Days FROM HSABC_DEV.ComplianceRunType;` |
+| P3 | CMSUNIV configuration loaded (`examples/cmsuniv_setup.sql`), run types `DLY` / `WKLY` | `SELECT Run_Ty, Sched_Cd, SLA_Days FROM HSABC_DEV.GOVT_RGLTRY_RunType;` |
 | P4 | Staging and core tables created; feed tables `EXPORT_FEED_DEV_T.SDO_CMSUNIV_*` exist with `Btch_ID` and `Src_Data_Key` | `SHOW TABLE` on a few |
 | P5 | Airflow Connections: `DEV` (Teradata), `comp_oper_creds` (NAS), `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `smtp_default` | Admin → Connections |
 | P6 | 9 Airflow Variables from `examples/cmsuniv_dev/` | Admin → Variables |
@@ -77,24 +77,24 @@ File name: `CMSAUTH_<source>_<file type>_22_<run type>_<report start>_<report en
 
 ```sql
 -- Q1 batches of a day (all sources)
-SELECT Btch_ID, Src_ID, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key, Req_Stat, Resolution_Ty, Batch_Close_Ind, Cmplnc_Vrsn
-FROM HSABC_DEV.ComplianceRequestControl WHERE Project_Cd = 'CMSUNIV' AND Req_Dt_Key = DATE '2026-10-26' ORDER BY Btch_ID, Src_ID;
+SELECT Btch_ID, Src_ID, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key, Req_Stat, Resolution_Ty, Batch_Close_Ind, Rpt_Version
+FROM HSABC_DEV.GOVT_RGLTRY_RequestControl WHERE Project_Cd = 'CMSUNIV' AND Req_Dt_Key = DATE '2026-10-26' ORDER BY Btch_ID, Src_ID;
 
 -- Q2 one batch
-SELECT * FROM HSABC_DEV.ComplianceRequestControl WHERE Btch_ID = '<batch>' ORDER BY Src_ID;
+SELECT * FROM HSABC_DEV.GOVT_RGLTRY_RequestControl WHERE Btch_ID = '<batch>' ORDER BY Src_ID;
 
 -- Q3 timeline of a batch
 SELECT c.Src_ID, d.Event_Dtts, d.Event_Ty, d.Load_ID, d.Event_Txt
-FROM HSABC_DEV.ComplianceRequestFileDetail d JOIN HSABC_DEV.ComplianceRequestControl c ON c.Req_ID = d.Req_ID
+FROM HSABC_DEV.GOVT_RGLTRY_RequestFileDetail d JOIN HSABC_DEV.GOVT_RGLTRY_RequestControl c ON c.Req_ID = d.Req_ID
 WHERE c.Btch_ID = '<batch>' ORDER BY c.Src_ID, d.Detail_ID;
 
 -- Q4 loads (files and pulls) of a batch, newest first
 SELECT Load_ID, File_Share, File_Path, Load_Stat, Reject_Rsn_Cd, Rules_Stat, Stg_Rcd_Cnt, Error_Txt, LastUpdt_Dtts
-FROM HSABC_DEV.ComplianceFileLoad WHERE Btch_ID = '<batch>' ORDER BY Load_ID DESC;
+FROM HSABC_DEV.GOVT_RGLTRY_FileLoad WHERE Btch_ID = '<batch>' ORDER BY Load_ID DESC;
 
 -- Q5 alerts (audit) of a batch
 SELECT Event_ID, Event_Ty, Sevrty, Src_ID, Load_ID, Event_Txt, Notified_Ind, Event_Dtts
-FROM HSABC_DEV.CMS_ComplianceExceptionsAudit WHERE Btch_ID = '<batch>' ORDER BY Event_ID;
+FROM HSABC_DEV.CMS_GOVT_RGLTRY_ExceptionsAudit WHERE Btch_ID = '<batch>' ORDER BY Event_ID;
 
 -- Q6 staging rows by batch / source / run type / load
 SELECT Btch_ID, Src_Data_Key, Run_Ty, AuditDataID, COUNT(*) FROM <staging db>.<table> GROUP BY 1, 2, 3, 4 ORDER BY 1, 2;
@@ -110,13 +110,13 @@ SELECT r.rule_id, r.status, r.run_key FROM HSABC_DEV.gre_results r WHERE r.run_k
 SELECT rule_id, run_type, batch_schedule, COUNT(*) FROM HSABC_DEV.gre_exceptions WHERE run_key = '<batch>' AND etl_is_curr_ind = 'Y' GROUP BY 1, 2, 3;
 
 -- Q10 locks
-SELECT Lock_Key, Owner_ID, Acquired_Dtts, Expires_Dtts FROM HSABC_DEV.ComplianceLock ORDER BY Acquired_Dtts;
+SELECT Lock_Key, Owner_ID, Acquired_Dtts, Expires_Dtts FROM HSABC_DEV.GOVT_RGLTRY_Lock ORDER BY Acquired_Dtts;
 
 -- Q11 unsent alerts
-SELECT Event_ID, Event_Ty, Btch_ID, Event_Dtts FROM HSABC_DEV.CMS_ComplianceExceptionsAudit WHERE Notified_Ind = 0 ORDER BY Event_ID;
+SELECT Event_ID, Event_Ty, Btch_ID, Event_Dtts FROM HSABC_DEV.CMS_GOVT_RGLTRY_ExceptionsAudit WHERE Notified_Ind = 0 ORDER BY Event_ID;
 
 -- Q12 framework tables present
-SELECT TableName FROM DBC.TablesV WHERE DatabaseName = 'HSABC_DEV' AND (TableName LIKE 'Compliance%' OR TableName = 'CMS_ComplianceExceptionsAudit') ORDER BY 1;
+SELECT TableName FROM DBC.TablesV WHERE DatabaseName = 'HSABC_DEV' AND (TableName LIKE 'GOVT_RGLTRY%' OR TableName = 'CMS_GOVT_RGLTRY_ExceptionsAudit') ORDER BY 1;
 ```
 
 ---
@@ -125,10 +125,10 @@ SELECT TableName FROM DBC.TablesV WHERE DatabaseName = 'HSABC_DEV' AND (TableNam
 
 | ID | Test | Steps | Expected |
 |---|---|---|---|
-| CFG-01 | Configuration valid | `python -m compliance_framework.cli validate-config` on a worker | No ERROR except the known ones (Facets 210 until configured); WARNINGs read and accepted |
+| CFG-01 | Configuration valid | `python -m govt_rgltry_framework.cli validate-config` on a worker | No ERROR except the known ones (Facets 210 until configured); WARNINGs read and accepted |
 | CFG-02 | Unknown run type in crosswalk | Set a crosswalk `Run_Ty` to `'DLY,XYZ'`; validate | `XWALK_RUN_TYPE` error naming `XYZ`; revert |
 | CFG-03 | Missing source config | Crosswalk row for a source with no file / internal config | `XWALK_NO_FILE_CONFIG` |
-| CFG-04 | Period row with code and SQL | Set both `Rpt_Period_Cd` and `Rpt_Dt_Sql_Txt` on one `ComplianceRunTypePeriod` row | `RUN_TYPE_PERIOD`: "not both (the code is used)" |
+| CFG-04 | Period row with code and SQL | Set both `Rpt_Period_Cd` and `Rpt_Dt_Sql_Txt` on one `GOVT_RGLTRY_RunTypePeriod` row | `RUN_TYPE_PERIOD`: "not both (the code is used)" |
 | CFG-05 | Bad period code | `Rpt_Period_Cd = 'PREV_DAYS'` | `RPT_PERIOD` error |
 | CFG-06 | Crosswalk row with code and SQL | Both on one crosswalk row | `RPT_PERIOD` "not both" |
 | CFG-07 | Export statement checks | `Exp_Pre_Sql_Txt` with `{batch}`; `Exp_Post_Sql_Txt` with two statements; `Exp_Sql_Txt` an UPDATE | `EXPORT_CONFIG` errors: unknown placeholder, "one statement", "must be a SELECT" |
@@ -141,7 +141,7 @@ SELECT TableName FROM DBC.TablesV WHERE DatabaseName = 'HSABC_DEV' AND (TableNam
 | FL-SP4 | Run of every project | DLY file, both projects have the batch, same folder | `FILE_REJECTED_AMBIGUOUS_TEMPLATE` naming both projects |
 | FL-SP5 | Folder decides | As FL-SP4, but one project's config has its own folder and the file is there | Loaded for that project |
 | CFG-10 | Test connections | `test-connection` | Teradata and NAS OK; failures show the reason, no password |
-| CFG-11 | Missing framework table | Rename `ComplianceFileLoad` (DEV only), run FILE_LOAD, rename back | Load `PROCESS_FAILURE` / step "COULD NOT RUN" with error 3807; retried; nothing half done |
+| CFG-11 | Missing framework table | Rename `GOVT_RGLTRY_FileLoad` (DEV only), run FILE_LOAD, rename back | Load `PROCESS_FAILURE` / step "COULD NOT RUN" with error 3807; retried; nothing half done |
 | CFG-12 | Variables minimal | Open each Variable | Only `td_conn_var`, `meta_db`, `load_env`, `email_recipient`, `project` (+ `trigger_dags`, FILE_CHECK `settings`, FILE_RULES `pool`, EXPORT_LOAD `wait_for_triggered`) |
 
 ---
@@ -170,18 +170,18 @@ Trigger BATCH_CREATION (`{"project": "CMSUNIV"}` unless stated). Check with Q1 /
 | BC-16 | Inactive run type | `Active_Ind = 0` on a run type | No batches of it; validate WARNING |
 | BC-17 | Report dates by SQL | Period row with `Rpt_Dt_Sql_Txt` (e.g. 14 days before `{period_dt}`) | Batch dates from the SQL; SQL with values in the log |
 | BC-18 | SQL returns no row | Make that SQL return nothing | No batch that day for that table; no error |
-| BC-19 | Calendar batch | Insert a `ComplianceBatchCalendar` row for today | Batch with the calendar dates |
-| BC-20 | Version per source | Crosswalk row of one source with version `2300` | That source's row has `Cmplnc_Vrsn = 2300` |
+| BC-19 | Calendar batch | Insert a `GOVT_RGLTRY_BatchCalendar` row for today | Batch with the calendar dates |
+| BC-20 | Version per source | Crosswalk row of one source with version `2300` | That source's row has `Rpt_Version = 2300` |
 | BC-21 | Problems reported | Break a period code; run | Other batches still created; task fails (exit 1) with the error in the report; failure email |
 
 ---
 
 ## 3. Ad-hoc requests (IN)
 
-Insert into `ComplianceRequestInTake`, then run BATCH_CREATION.
+Insert into `GOVT_RGLTRY_RequestInTake`, then run BATCH_CREATION.
 
 ```sql
-INSERT INTO HSABC_DEV.ComplianceRequestInTake (Project_Cd, Table_Nm, Src_ID, Run_Ty, Cmplnc_Vrsn, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key)
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RequestInTake (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Version, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key)
 VALUES ('CMSUNIV', 'ODAG3', '51', 'CMS', '2200', DATE '2026-09-01', DATE '2026-09-30', CURRENT_DATE, CURRENT_DATE);
 ```
 
@@ -278,7 +278,7 @@ Trigger SOURCE_LOAD (`{"table_group": "SNPCC"}` to limit). Check the SQL log lin
 ## 7. Overrides (OV)
 
 ```sql
-INSERT INTO HSABC_DEV.ComplianceBatchOverride (Override_Ty, Req_ID, Btch_ID, Reuse_Btch_ID, Apprvl_Stat, Valid_Thru_Dt_Key, Rsn_Txt, Reviewed_By)
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_BatchOverride (Override_Ty, Req_ID, Btch_ID, Reuse_Btch_ID, Apprvl_Stat, Valid_Thru_Dt_Key, Rsn_Txt, Reviewed_By)
 VALUES ('<type>', <Req_ID>, '<batch>', '<earlier batch or NULL>', 'APPROVED', CURRENT_DATE + 7, 'test', '<you>');
 ```
 
@@ -347,7 +347,7 @@ Runs after EXPORT_LOAD (or trigger FILE_RULES with `{"project":"CMSUNIV"}`). Che
 | RU-10 | Rule error | Break one rule's SQL | `ERROR`; `RULES_ENGINE_TECHNICAL_FAILURE` emailed once; other batches still run; task fails at the end; retried next run |
 | RU-11 | Rerun after reload | Reload + re-export a batch | Rules run again with the same `run_key`; results refreshed (no duplicates) |
 | RU-12 | Variant empty | Rules with empty `RULE_VARIANT` | Run for every run type |
-| RU-13 | Binding override | `ComplianceRuleBinding` row naming another group | That group runs instead |
+| RU-13 | Binding override | `GOVT_RGLTRY_RuleBinding` row naming another group | That group runs instead |
 | RU-14 | One at a time | Two FILE_RULES runs at once | Second waits for the `gre_rules` pool slot |
 | RU-15 | Per table group | FILE_RULES Variable `runs` per table group | One task per group in the same DAG run |
 
@@ -450,12 +450,13 @@ For an installation created before the version shown (runbook section 16).
 
 | ID | From before | Check after running the statements |
 |---|---|---|
-| UP-01 | 0.3.57 | `ComplianceRunTypePeriod` has `Rpt_Dt_Sql_Txt`; `Rpt_Period_Cd` nullable |
-| UP-02 | 0.3.60 | `ComplianceFileLoad.Reject_Rsn_Cd` exists; no `QUARANTINED` rows |
+| UP-01 | 0.3.57 | `GOVT_RGLTRY_RunTypePeriod` has `Rpt_Dt_Sql_Txt`; `Rpt_Period_Cd` nullable |
+| UP-02 | 0.3.60 | `GOVT_RGLTRY_FileLoad.Reject_Rsn_Cd` exists; no `QUARANTINED` rows |
 | UP-03 | 0.3.62 | No `PROMOTED` / `SUPERSEDED` / `FAILED_TECHNICAL` / `DEFERRED` load statuses |
 | UP-04 | 0.3.63 | No `FILE_PROMOTED` / `…_PROMOTED` timeline events |
-| UP-05 | 0.3.67 | `ComplianceExportConfig` has `Exp_Sql_Txt`, `Exp_Pre_Sql_Txt`, `Exp_Post_Sql_Txt` |
+| UP-05 | 0.3.67 | `GOVT_RGLTRY_ExportConfig` has `Exp_Sql_Txt`, `Exp_Pre_Sql_Txt`, `Exp_Post_Sql_Txt` |
 | UP-06 | Run type rename | Old `DAILY` / `WEEKLY` inactive; `DLY` / `WKLY` in periods and crosswalk; old batches closed under their old IDs |
+| UP-07 | 0.3.82 | `upgrade_0.3.82.sql` run with the DAGs paused: the row counts of step 0 and step 3 are the same; the 20 tables are `GOVT_RGLTRY_<Name>` / `CMS_GOVT_RGLTRY_ExceptionsAudit` (no `Compliance*` table left); `Rpt_Version` in `GOVT_RGLTRY_DataSetSourceXwalk`, `GOVT_RGLTRY_RequestInTake`, `GOVT_RGLTRY_RequestControl`; `schema_check.sql` returns no rows; the `GOVT_RGLTRY_CMS_UNIVERSE_*` / `GOVT_RGLTRY_UMCM_*` DAGs, tagged `Universe` / `UMCM`, run with the new Variables |
 
 ---
 
