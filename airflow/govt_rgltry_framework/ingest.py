@@ -225,14 +225,9 @@ class IngestPipeline:
         return locations, shared, TemplateMatcher(mine)
 
     @staticmethod
-    def belongs(name: str, location: tuple, shared: set, own: Optional[TemplateMatcher], scope: Scope) -> bool:
-        """Whether a listed file is the scope's: in a folder shared with other file configs it must fit one of the
-        scope's templates; with a run type, its name must carry that run type. Other files are left in place."""
-        return not IngestPipeline.not_ours(name, location, shared, own, scope)
-
-    @staticmethod
     def not_ours(name: str, location: tuple, shared: set, own: Optional[TemplateMatcher], scope: Scope) -> str:
-        """Why a listed file is not the scope's (see belongs); "" when it is."""
+        """Why a listed file is not the scope's, "" when it is: in a folder shared with other file configs it must fit
+        one of the scope's templates; with a run type, its name must carry that run type. Other files stay in place."""
         if own is None:
             return ""
         if location in shared and not own.candidates(name):

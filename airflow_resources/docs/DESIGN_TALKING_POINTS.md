@@ -53,8 +53,8 @@ Principles to state up front (each comes back on a later page):
 - **Airflow 3.3.**
   - The **scheduler** starts DAGs on Central-time schedules; the **triggerer** handles deferred waits (EXPORT_LOAD
     waiting for FILE_RULES without holding a worker slot).
-  - **Nine DAGs per project, one per step** (CMSUNIV: `GOVT_RGLTRY_CMS_UNIVERSE_*`; UMCM: `GOVT_RGLTRY_UMCM_*`, plus
-    an ad-hoc EXPORT_LOAD DAG).
+  - **Nine DAGs per project, one per step** (CMSUNIV: `GOVT_RGLTRY_CMS_UNIVERSE_*`; UMCM: `GOVT_RGLTRY_UMCM_*`), plus
+    an ad-hoc EXPORT_LOAD DAG (`..._EXPORT_LOAD_ADHOC`, run type `CMS`).
     The DAG file is only a shell: the step, schedule, scope, triggers and settings come from **one Airflow Variable
     per DAG** (JSON).
   - **Connections** hold Teradata, NAS, SQL Server sources and SMTP. Nothing else holds a credential.
@@ -406,6 +406,24 @@ writes it (read only).
 **Why this split:** configuration, decisions and results are separate, so the business can change setup and approve
 exceptions with plain SQL inserts, while the result tables stay trustworthy because only the framework writes them.
 `validate-config` checks the configuration before it is used.
+
+---
+
+## Page 15 – FILE_MOVE (copy and move files between folders)
+
+**What it shows.** A standalone DAG that takes files by name pattern from one folder and hands each file to a list
+of target folders in order, e.g. backup copy, audit copy, then a move into the folder FILE_LOAD reads.
+
+- Every target says `copy` or `move`; only the last can be a move, so the file leaves the source only after every
+  other folder has it.
+- A copy goes into a temporary subfolder, its size is checked, and only then does it get its name: a DAG watching
+  the target never picks up a half-written file.
+- A file already there with the same content counts as done, so a run that stopped is simply run again; a different
+  file of that name follows `on_exists` (fail, rename, overwrite).
+- No database: it only needs the NAS connection and `load_env`; it starts FILE_LOAD only when it moved something.
+
+**Why a separate DAG:** landing folders, backups and audit copies differ per project and change often; keeping them in
+a Variable lets operations change the routing without touching the load, its metadata or its batches.
 
 ---
 

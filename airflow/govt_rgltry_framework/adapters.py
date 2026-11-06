@@ -134,6 +134,14 @@ class FileStore(ABC):
         self.delete(share, path)
         return dst_path
 
+    def rename(self, share: str, path: str, dst_path: str) -> None:
+        """Rename a file on its share (replacing a file of that name)."""
+        self.copy(share, path, share, dst_path)
+        self.delete(share, path)
+
+    def remove_folder(self, share: str, folder: str) -> None:
+        """Remove a folder when it is empty; a folder with files stays."""
+
 
 class LocalFileStore(FileStore):
     """<root>/<share>/<path>."""
@@ -182,6 +190,17 @@ class LocalFileStore(FileStore):
         p = self._path(share, path)
         if p.exists():
             os.remove(p)
+
+    def rename(self, share, path, dst_path):
+        dst = self._path(share, dst_path)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(self._path(share, path), dst)
+
+    def remove_folder(self, share, folder):
+        try:
+            self._path(share, folder).rmdir()
+        except OSError:
+            pass
 
 
 _SMB_NOT_FOUND = {0xC000000F, 0xC0000034, 0xC000003A}
@@ -279,6 +298,21 @@ class NasFileStore(FileStore):
 
     def delete(self, share, path):
         self.smb.remove(self._path(share, path), **self.nas)
+
+    def rename(self, share, path, dst_path):
+        self.smb.makedirs(self._path(share, dirname(dst_path)), exist_ok=True, **self.nas)
+        try:
+            self.smb.replace(self._path(share, path), self._path(share, dst_path), **self.nas)
+        except OSError as e:
+            log.info("rename of %s not possible (%s); copying instead", path, e)
+            self.copy(share, path, share, dst_path)
+            self.delete(share, path)
+
+    def remove_folder(self, share, folder):
+        try:
+            self.smb.rmdir(self._path(share, folder), **self.nas)
+        except OSError:
+            pass
 
     def put(self, share, path, data):
         self.smb.makedirs(self._path(share, dirname(path)), exist_ok=True, **self.nas)

@@ -412,6 +412,12 @@ def row_key(kind: str, row_id) -> str:
     return f"{kind}:{row_id}"
 
 
+def is_location(value: Optional[str]) -> bool:
+    """A full folder path (nas://share/folder, //server/share/folder, smb://, local://), not a plain folder name."""
+    text = (value or "").strip()
+    return "://" in text or text.startswith(("//", "\\\\"))
+
+
 def try_lock(conn: Connection, key: str) -> bool:
     """Take the lock row for `key`; False when another process holds it. Expired locks are replaced."""
     if conn.in_transaction:
@@ -575,7 +581,7 @@ _SCHEMA_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 @dataclass
 class Settings:
     metadata_schema: str = "HSABC_$ENV"
-    environment: str = "DEV"
+    environment: Optional[str] = None
     env_value: Optional[str] = None
     business_tz: str = "America/Chicago"
 
@@ -650,6 +656,8 @@ class Settings:
 
     def validate(self) -> None:
         self.environment = (self.environment or "").strip().upper()
+        if not self.environment:
+            raise ConfigError("ENVIRONMENT is required: the Airflow Variable's load_env, or FRAMEWORK_ENVIRONMENT on the command line")
         if not re.match(r"^[A-Z0-9_]{1,20}$", self.environment):
             raise ConfigError(f"ENVIRONMENT {self.environment!r} must be letters, digits or _ (e.g. DEV, TEST, PROD)")
         if self.env_value is not None and not re.match(r"^[A-Za-z0-9_]{0,20}$", self.env_value):
@@ -670,7 +678,19 @@ class Settings:
                               ("notify_backend", ("log", "airflow")), ("file_store", ("nas", "local"))):
             if getattr(self, name) not in allowed:
                 raise ConfigError(f"{name.upper()} must be one of {allowed}, got {getattr(self, name)!r}")
+        for name in ("control_report_folder", "error_log_folder"):
+            value = (getattr(self, name) or "").strip()
+            if is_location(value):
+                from govt_rgltry_framework.adapters import parse_uri
+                value = self.resolve_env(value, False)
+                try:
+                    parse_uri(value)
+                except ValueError as e:
+                    raise ConfigError(f"{name.upper()}: {e}") from None
+                setattr(self, name, value)
         for name in ("archive_folder", "error_folder", "control_report_folder", "error_log_folder"):
+            if name in ("control_report_folder", "error_log_folder") and is_location(getattr(self, name)):
+                continue
             if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_ .-]{0,99}$", getattr(self, name) or ""):
                 raise ConfigError(f"{name.upper()} {getattr(self, name)!r} must be a plain folder name")
         if self.nas_min_age_seconds < 0:

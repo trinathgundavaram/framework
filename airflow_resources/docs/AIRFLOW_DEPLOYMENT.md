@@ -12,9 +12,12 @@ airflow/
   govt_rgltry_cms_universe_file_load.py
   govt_rgltry_cms_universe_source_load.py
   govt_rgltry_cms_universe_export_load.py
+  govt_rgltry_cms_universe_export_load_adhoc.py   ad-hoc (CMS) requests
   govt_rgltry_cms_universe_override_decisions.py
   govt_rgltry_cms_universe_batch_close.py
   govt_rgltry_cms_universe_notify.py
+  govt_rgltry_cms_universe_file_rules.py
+  govt_rgltry_cms_universe_file_move.py         standalone: copy / move files between folders
   govt_rgltry_framework/
     dags.py        the DAGs (schedule, tasks, triggers, emails, ServiceNow callback), Variable + Connections ->
                    the framework, run_step() in-process
@@ -22,6 +25,7 @@ airflow/
     batches.py     batch creation (schedule codes, calendar, intake), release / hold, overrides, close
     ingest.py      FILE_LOAD and SOURCE_LOAD
     filecheck.py   FILE_CHECK
+    filemove.py    FILE_MOVE (copy / move files by name pattern; no database)
     load.py        staging / core layout, staging load, core swap, control report and error log
     export.py      EXPORT_LOAD, FILE_RULES (data quality rules per exported batch) and the GRE bridge
     config.py      metadata rows and validate-config, scope of a run, file check options
@@ -55,11 +59,12 @@ airflow_resources/                (not deployed with the DAGs)
    | `FILE_LOAD` | `GOVT_RGLTRY_CMS_UNIVERSE_FILE_LOAD` | `govt_rgltry_cms_universe_file_load_config_var` |
    | `SOURCE_LOAD` (internal sources) | `GOVT_RGLTRY_CMS_UNIVERSE_SOURCE_LOAD` | `govt_rgltry_cms_universe_source_load_config_var` |
    | `EXPORT_LOAD` (optional) | `GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD` | `govt_rgltry_cms_universe_export_load_config_var` |
+   | `EXPORT_LOAD` ad-hoc (`run_type` `CMS`, started by hand with `release`) | `GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD_ADHOC` | `govt_rgltry_cms_universe_export_load_adhoc_config_var` |
    | `OVERRIDE_DECISIONS` | `GOVT_RGLTRY_CMS_UNIVERSE_OVERRIDE_DECISIONS` | `govt_rgltry_cms_universe_override_decisions_config_var` |
    | `BATCH_CLOSE` | `GOVT_RGLTRY_CMS_UNIVERSE_BATCH_CLOSE` | `govt_rgltry_cms_universe_batch_close_config_var` |
    | `NOTIFY` | `GOVT_RGLTRY_CMS_UNIVERSE_NOTIFY` | `govt_rgltry_cms_universe_notify_config_var` |
-
    | `FILE_RULES` | `GOVT_RGLTRY_CMS_UNIVERSE_FILE_RULES` | `govt_rgltry_cms_universe_file_rules_config_var` |
+   | `FILE_MOVE` (standalone, below) | `GOVT_RGLTRY_CMS_UNIVERSE_FILE_MOVE` | `govt_rgltry_cms_universe_file_move_config_var` |
 
    FILE_RULES calls the GRE code in `<dags>/rules_engine` (the `airflow/rules_engine` folder of the GRE repository)
    and runs in the Airflow pool `gre_rules`: create it once with 1 slot (Admin → Pools). EXPORT_LOAD starts it and
@@ -67,7 +72,7 @@ airflow_resources/                (not deployed with the DAGs)
    (below).
 
 2. **Two Airflow Connections**, both named in the Variables: Teradata (`td_conn_var`) and the NAS file
-   server (`wdc_comp_oper_nas_var`, only needed by the DAGs that load files). The bridge exports them as
+   server (`wdc_comp_oper_nas_var`, only needed by the DAGs that load or move files). The bridge exports them as
    `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD` / `TERADATA_LOGMECH` and `NAS_HOST` /
    `NAS_USER` / `NAS_PASSWORD` / `NAS_PORT`.
 3. **DAGs start each other** through `trigger_dags` in the Variable (`TriggerDagRunOperator`, not
@@ -111,7 +116,7 @@ copies' own DAGs). The file is named like the DAG id, e.g. `govt_rgltry_prjb_fil
 
 ### Airflow Connections
 
-**Teradata** — the Connection named by the Variable's `td_conn_var` (default `compliance_teradata`):
+**Teradata** — the Connection named by the Variable's `td_conn_var` (required):
 
 | Field | Value |
 |---|---|
@@ -153,15 +158,17 @@ value (Admin → Variables); for another environment change `td_conn_var`, `meta
 }
 ```
 
-Keys every Variable can have. Only `meta_db` is required; every other key has a default and is left out when the
+Keys every Variable can have. `meta_db`, `td_conn_var` and `load_env` are required, and `wdc_comp_oper_nas_var` in the FILE_CHECK, FILE_LOAD
+and FILE_MOVE Variables: without one the task fails with
+`'<key>' is required in Airflow Variable '<variable>'`. Every other key has a default and is left out when the
 default is right (the examples carry only what differs: connections, `load_env`, `project`, schedule, triggers, emails):
 
 | Key | Meaning |
 |---|---|
 | `meta_db` (required) | Teradata database holding the framework tables |
-| `td_conn_var` | Airflow Connection of Teradata (default `compliance_teradata`) |
-| `wdc_comp_oper_nas_var` | Airflow Connection of the NAS file server, used where files are checked or loaded (`FILE_CHECK`, `FILE_LOAD`); default `comp_oper_creds` |
-| `load_env` | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); default `DEV` |
+| `td_conn_var` (required) | Airflow Connection of Teradata; no default |
+| `wdc_comp_oper_nas_var` (required for `FILE_CHECK`, `FILE_LOAD`, `FILE_MOVE`) | Airflow Connection of the NAS file server, used where files are checked, loaded or moved; no default (not needed with `FILE_STORE` `local`) |
+| `load_env` (required) | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); no default |
 | `schedule_interval` | Cron expression of the DAG; leave out for a DAG that is only triggered |
 | `schedule_timezone` | Optional; schedules run in Central time (`America/Chicago`, with daylight saving) |
 | `trigger_dags` | DAG ids to start when the step succeeds (a list, or one comma-separated string); the scope (`project`, `table_group`, `table`, `run_type`, `source`) and `as_of` of this run are passed on, so a chain started for one table group stays on it |
@@ -228,6 +235,9 @@ entries without `schedule_interval` work as before: one task each, all in every 
   is reported once (`STAGING_LOCK_STALE`, emailed) with the `release-lock` command that frees it. A file whose move
   to `Archive` / `Error` failed is not loaded again: the next runs only try the move (`FILE_MOVE_FAILED`, emailed
   once).
+- **FILE_MOVE DAG** — task `file_move`; with `trigger_dags` also `check_files_handled` (skips the triggers when no
+  file was moved or copied), the `trigger_<dag id>` tasks and `file_move_result` (fails the run when `file_move`
+  failed), then the emails.
 - A missing or invalid Variable never breaks parsing: the DAG is still there, unscheduled, and its task
   fails with the reason when run.
 
@@ -248,7 +258,7 @@ python -m govt_rgltry_framework.cli release-lock --key <Lock_Key>
 python -m govt_rgltry_framework.cli run --module BATCH_CREATION --project CMSUNIV --as-of 2026-10-18
 ```
 
-Without `FRAMEWORK_METADATA_SCHEMA` the metadata database is `HSABC_$ENV`, resolved with `FRAMEWORK_ENVIRONMENT`: `HSABC_DEV`, `HSABC_TEST`, ..., `HSABC` in PROD.
+`FRAMEWORK_ENVIRONMENT` is required (no default): without it every command stops with "ENVIRONMENT is required". Without `FRAMEWORK_METADATA_SCHEMA` the metadata database is `HSABC_$ENV`, resolved with `FRAMEWORK_ENVIRONMENT`: `HSABC_DEV`, `HSABC_TEST`, ..., `HSABC` in PROD.
 
 `--set NAME=value` sets a framework setting for the command (e.g. `--set NOTIFY_BACKEND=airflow`); files on the NAS
 also need `NAS_HOST`, `NAS_USER`, `NAS_PASSWORD`. `test-connection --source <Src_Conn_Cd>` reads that Airflow
@@ -632,6 +642,27 @@ as `FILE_REJECTED_AMBIGUOUS_TEMPLATE`, with the projects and the reason in the m
 template, a folder and a run type (and both having the batch) are told apart by neither: the first project run to
 find the file loads it; give such a source its own folder, or the run type to one project only.
 
+## Copying and moving files between folders (`FILE_MOVE`)
+
+`GOVT_RGLTRY_CMS_UNIVERSE_FILE_MOVE` / `GOVT_RGLTRY_UMCM_FILE_MOVE` stand on their own: no batches, no metadata
+tables, no Teradata, only the NAS Connection. Each job of the Variable names a source folder, file name patterns
+(`CMSAUTH_*.txt`, `*.*`, `*.txt`, ...; not case sensitive, no subfolders) and a list of target folders, each with
+`action` `copy` or `move` and `on_exists` `fail` (default), `rename` or `overwrite`. Targets are handled in order
+and only the last one can be a move, e.g. source → tgt1 copy → tgt2 copy → tgt3 move.
+
+- A copy is written into `<target>/_file_move_tmp/`, checked for size and then renamed, so a folder another DAG
+  watches never shows a half-written file. A move on the same share is a rename.
+- A file already in a target with the same content counts as done, so a stopped run is just run again.
+- A failure leaves the file in the source (exit 1: the task fails without retry). A Variable error or a source
+  folder that cannot be listed is exit 2 (retried).
+- `trigger_dags` start only when at least one file was moved or copied (e.g. FILE_LOAD after a move into its
+  inbound folder). The trigger key `job` runs only the named jobs.
+- `wdc_comp_oper_nas_var` and `load_env` are required in its Variable.
+
+Keys, log lines and troubleshooting: runbook 9.7, 11.24 and 13. Example Variables:
+`examples/cmsuniv_dev/govt_rgltry_cms_universe_file_move_config_var.json` and
+`examples/umcm_dev/govt_rgltry_umcm_file_move_config_var.json`.
+
 ## Optional file check before the load (`FILE_CHECK`)
 
 `FILE_CHECK` looks at the files that are waiting in the inbound NAS folders and reports **every** problem of
@@ -761,8 +792,13 @@ The detail of a rejection (the check, the line number, the message and the recor
 `<inbound folder>/ErrorLog/<file name without extension>_errors.txt` (`X.txt` -> `X_errors.txt`), written by `FILE_LOAD` and by `FILE_CHECK`. The rejected file itself
 still moves to `Error/`.
 
-The two folder names are the settings `CONTROL_REPORT_FOLDER` (default `ControlReport`) and `ERROR_LOG_FOLDER`
-(default `ErrorLog`); `WRITE_CONTROL_REPORT = false` and `WRITE_ERROR_FILE = false` switch them off.
+The two folders are the settings `CONTROL_REPORT_FOLDER` (default `ControlReport`) and `ERROR_LOG_FOLDER`
+(default `ErrorLog`); `WRITE_CONTROL_REPORT = false` and `WRITE_ERROR_FILE = false` switch them off. A folder name
+is a subfolder of the inbound folder (above). A full path sends them to that folder instead, for every file of the
+DAG, e.g. `"settings": {"CONTROL_REPORT_FOLDER": "nas://chs_dms/$Env/OSS_Reports/CMSUNIV/ControlReport",
+"ERROR_LOG_FOLDER": "nas://chs_dms/$Env/OSS_Reports/CMSUNIV/ErrorLog"}` (`$env` allowed, the folder is created when
+missing). There the control reports are named `ControlReport_<PROJECT>_<yyyymmdd_hhmmss>.txt`, one per inbound folder
+and project. Set them in the FILE_LOAD Variable, and `ERROR_LOG_FOLDER` also in the FILE_CHECK Variable.
 
 **Error file and failed files.** For every file that fails, `FILE_CHECK` writes
 `<inbound folder>/ErrorLog/<file name without extension>_errors.txt` (`X.txt` -> `X_errors.txt`) (settings `WRITE_ERROR_FILE`, on by default, and

@@ -1,8 +1,8 @@
 # Government Regulatory Batch Framework (Airflow / Teradata): open items
 
-State at version 0.3.82. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
+State at version 0.3.83. Replaces the earlier `REVIEW_RECOMMENDATIONS.md` (0.3.27) and `BUSINESS_REVIEW.md` (0.3.41);
 everything they list that is not below is done. Tested: 25 scenarios on Python 3.13 and 3.9 against a PostgreSQL
-stand-in for Teradata; the 19 DAG files (CMS Universe 9, UMCM 10) build with their Variables, and a step DAG runs (stubbed step) on Airflow 3.3.0. **Nothing has run on Teradata, the NAS or a real
+stand-in for Teradata; the 22 DAG files (11 each for CMS Universe and UMCM) build with their Variables, and a step DAG runs (stubbed step) on Airflow 3.3.0; FILE_MOVE ran 31 scenarios on local folders (the SMB rename and folder removal not yet on the NAS). **Nothing has run on Teradata, the NAS or a real
 Airflow deployment yet.**
 
 ## 1. Before the first production run
@@ -28,6 +28,7 @@ the Connections (`DEV`, `comp_oper_creds`, `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `sm
 | 11 | A Teradata logon failure (wrong password in the Connection) | Task retried once after 5 minutes, then fails with the incident |
 | 12 | NOTIFY | One email per open audit event through `smtp_default` |
 | 14 | EXPORT_LOAD of ODAG + CDAG, then FILE_RULES (pool `gre_rules`, triggerer running) | EXPORT_LOAD waits; one GRE run per exported batch, `run_key` = batch ID, only that batch's rows (`Btch_ID` filter); results `PASSED` / `FAILED` on the loads; rule SQL in the log |
+| 15 | FILE_MOVE with copy, copy, move on the NAS (targets on the source's share and on another share); then the same file name with other content in a target (`on_exists` `fail`), and a run stopped during a copy | Copies and move done, `_file_move_tmp` gone, FILE_LOAD triggered; the clash leaves the file in the source and fails without retry; the stopped run resumes with `already in` and no duplicates |
 | 13 | A file into a core table with typed columns (`DATE`, `TIMESTAMP(0)`, `DECIMAL`); then one with a bad date | Values converted with the core column's `FORMAT`; the bad file `REJECTED` `CORE_TYPE_MISMATCH` naming the column, core unchanged |
 
 ### Still to configure

@@ -1,6 +1,6 @@
 # Government Regulatory Batch Framework – Test Cases (Airflow / Teradata)
 
-**Version:** framework 0.3.82. **Environment:** CMSUNIV DEV (`HSABC_DEV`, `CMSUNIV_FILELAND_DEV_T`,
+**Version:** framework 0.3.83. **Environment:** CMSUNIV DEV (`HSABC_DEV`, `CMSUNIV_FILELAND_DEV_T`,
 `CMSUNIV_STAGE_DEV_T`, `CMSUNIV_CORE_DEV_T`, `EXPORT_FEED_DEV_T`, NAS `chs_dms/Dev/OSS_Inbound/External/CMSUNIV`).
 Run types `DLY`, `WKLY`, `MNT`, `IN1`, `CMS`. Replace dates, batch IDs and sources with the ones of your run.
 
@@ -35,6 +35,7 @@ Run types `DLY`, `WKLY`, `MNT`, `IN1`, `CMS`. Replace dates, batch IDs and sourc
 14. Logging and security (LG)
 15. End-to-end scenarios (E2E)
 16. Upgrade statements (UP)
+17. File move (FM)
 
 ---
 
@@ -44,12 +45,12 @@ Run types `DLY`, `WKLY`, `MNT`, `IN1`, `CMS`. Replace dates, batch IDs and sourc
 
 | # | Item | How to check |
 |---|---|---|
-| P1 | Framework 0.3.67 and `rules_engine` deployed in the DAGs folder; 9 DAGs visible, no import errors | Airflow UI → DAGs; Browse → DAG import errors empty |
+| P1 | Framework 0.3.83 and `rules_engine` deployed in the DAGs folder; the 11 CMS Universe DAGs (`GOVT_RGLTRY_CMS_UNIVERSE_*`) visible, no import errors | Airflow UI → DAGs; Browse → DAG import errors empty |
 | P2 | Metadata tables from `sql/schema.sql` exist in `HSABC_DEV` (20 tables) | Q12 |
 | P3 | CMSUNIV configuration loaded (`examples/cmsuniv_setup.sql`), run types `DLY` / `WKLY` | `SELECT Run_Ty, Sched_Cd, SLA_Days FROM HSABC_DEV.GOVT_RGLTRY_RunType;` |
 | P4 | Staging and core tables created; feed tables `EXPORT_FEED_DEV_T.SDO_CMSUNIV_*` exist with `Btch_ID` and `Src_Data_Key` | `SHOW TABLE` on a few |
 | P5 | Airflow Connections: `DEV` (Teradata), `comp_oper_creds` (NAS), `SQL_CHS`, `SQL_AZ`, `SQL_SNPCC`, `smtp_default` | Admin → Connections |
-| P6 | 9 Airflow Variables from `examples/cmsuniv_dev/` | Admin → Variables |
+| P6 | 11 Airflow Variables from `examples/cmsuniv_dev/` | Admin → Variables |
 | P7 | Pool `gre_rules` with 1 slot; Airflow triggerer running | Admin → Pools; `airflow jobs check --job-type TriggererJob` |
 | P8 | GRE tables (`gre_rules`, `gre_results`, `gre_exceptions`, `gre_rule_audit`, `gre_rule_errors`) and CMSUNIV rules | `SELECT RULE_GROUP, RULE_VARIANT, COUNT(*) FROM HSABC_DEV.gre_rules WHERE ACT_IND = 1 GROUP BY 1, 2;` |
 | P9 | Export feed views `EXPORT_FEED_DEV_V.SDO_CMSUNIV_*` with a `Btch_ID` column | `SHOW VIEW` |
@@ -142,7 +143,7 @@ SELECT TableName FROM DBC.TablesV WHERE DatabaseName = 'HSABC_DEV' AND (TableNam
 | FL-SP5 | Folder decides | As FL-SP4, but one project's config has its own folder and the file is there | Loaded for that project |
 | CFG-10 | Test connections | `test-connection` | Teradata and NAS OK; failures show the reason, no password |
 | CFG-11 | Missing framework table | Rename `GOVT_RGLTRY_FileLoad` (DEV only), run FILE_LOAD, rename back | Load `PROCESS_FAILURE` / step "COULD NOT RUN" with error 3807; retried; nothing half done |
-| CFG-12 | Variables minimal | Open each Variable | Only `td_conn_var`, `meta_db`, `load_env`, `email_recipient`, `project` (+ `trigger_dags`, FILE_CHECK `settings`, FILE_RULES `pool`, EXPORT_LOAD `wait_for_triggered`) |
+| CFG-12 | Variables minimal | Open each Variable | Only `td_conn_var`, `meta_db`, `load_env`, `email_recipient`, `project` (+ FILE_CHECK / FILE_LOAD / FILE_MOVE `wdc_comp_oper_nas_var`, `trigger_dags`, FILE_CHECK `settings`, FILE_RULES `pool`, EXPORT_LOAD `wait_for_triggered`) |
 
 ---
 
@@ -192,7 +193,7 @@ VALUES ('CMSUNIV', 'ODAG3', '51', 'CMS', '2200', DATE '2026-09-01', DATE '2026-0
 | IN-03 | No crosswalk needed | Source without a CMS crosswalk row | Batch still created |
 | IN-04 | Missing config | Source with no file / internal config for the table | `INTAKE_FAILED` alert; no batch; `validate-config` `INTAKE_REQUEST` |
 | IN-05 | Ad hoc held | Load the file | Loaded; SOURCE_LOAD / EXPORT_LOAD list it under `held` until released |
-| IN-06 | Release | EXPORT_LOAD `{"project":"CMSUNIV","run_type":"CMS","release":"true"}` | Exported; `BATCH_RELEASED` on the timeline |
+| IN-06 | Release | `GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD_ADHOC` `{"release":"true"}` | Exported; `BATCH_RELEASED` on the timeline |
 | IN-07 | Rerun | Run BATCH_CREATION again same day | No duplicate |
 
 ---
@@ -249,6 +250,9 @@ Trigger FILE_LOAD. Check Q4 (load), Q6 (staging), Q7 (core), Q3 (timeline), file
 | FL-25 | FastLoad, value too long | BAD_VALUE (too long for the staging column) with `LOAD_ENGINE` `FASTLOAD` | `REJECTED` `FILE_PARSE_ERROR` (no batched retry); no work table left |
 | FL-26 | AUTO | `LOAD_ENGINE` `AUTO`: one file under `FASTLOAD_MIN_BYTES`, one over | The small file "with batched inserts", the large one "with FASTLOAD" |
 | FL-27 | Skip reason | Run FILE_CHECK (with `CHECK_MOVE_FAILED`) and FILE_LOAD together on a failing file; a file of no template in a shared folder | FILE_LOAD log `skipped: already moved by another run ...` / `skipped: the folder is also the inbound folder ...`; report `skipped_files` with the reasons; run not failed |
+| FL-28 | Reports to another path | FILE_LOAD and FILE_CHECK `settings` `CONTROL_REPORT_FOLDER` = `nas://chs_dms/$Env/OSS_Reports/CMSUNIV/ControlReport`, `ERROR_LOG_FOLDER` = `nas://chs_dms/$Env/OSS_Reports/CMSUNIV/ErrorLog`; one GOOD and one BAD_VALUE file | Report `ControlReport_CMSUNIV_<time>.txt` and `<file>_errors.txt` in those folders (`$env` resolved, folders created); none in the inbound folder; `error_log` in the step report points there |
+| FL-29 | Reports default | Same without the two settings | `ControlReport/ControlReport_<time>.txt` and `ErrorLog/` inside the inbound folder, as before |
+| FL-30 | Bad report path | `ERROR_LOG_FOLDER` = `ftp://x/y` | Task fails "ERROR_LOG_FOLDER: unsupported file location"; nothing loaded |
 
 ---
 
@@ -312,7 +316,7 @@ feed views (extract).
 | EX-07 | Newest batch of the period | Two batches same dates; later one `MISSING` | The later one `SKIPPED` ("the period's data is batch …"); data of the earlier one kept |
 | EX-08 | No data batch | `NO_DATA` batch | Earlier export rows of the period removed, nothing inserted |
 | EX-09 | Carry-forward copy | OV-01 batch | `data_from` = reused batch; rows inserted under the new batch ID; reused batch's rows kept |
-| EX-10 | Ad hoc only when released | CMS batch | Held; with `release: true` exported |
+| EX-10 | Ad hoc only when released | CMS batch, `GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD_ADHOC` | Held; with `release: true` exported |
 | EX-11 | Hold | `{"hold": "WKLY"}` | WKLY batches held |
 | EX-12 | Release time | `"settings":{"RELEASE_TIME":"20:00"}` | Due batches exported only from 20:00 on the close date |
 | EX-13 | Named batch | `{"project":"CMSUNIV","batch":"<batch>"}` | Only that batch, even if exported before |
@@ -400,6 +404,7 @@ Trigger BATCH_CLOSE on / after the close date. Check Q1 / Q2 / Q5.
 | AF-10 | Missing Variable | Delete a Variable (DEV) | DAG still listed; task fails with "Variable … is not set" |
 | AF-11 | LOCK_TTL raised | `execution_timeout_minutes` above `LOCK_TTL_MINUTES` | Log "LOCK_TTL_MINUTES raised" |
 | AF-12 | Locks released | After any run | Q10 has no leftover locks of finished runs |
+| AF-13 | NAS Connection required | Remove `wdc_comp_oper_nas_var` from the FILE_LOAD Variable (DEV), run FILE_LOAD; then the same on FILE_CHECK; put it back | Task fails with `'wdc_comp_oper_nas_var' is required in Airflow Variable '…'`; no file touched; other steps (e.g. SOURCE_LOAD) run without the key |
 
 ---
 
@@ -458,6 +463,30 @@ For an installation created before the version shown (runbook section 16).
 | UP-06 | Run type rename | Old `DAILY` / `WEEKLY` inactive; `DLY` / `WKLY` in periods and crosswalk; old batches closed under their old IDs |
 | UP-07 | 0.3.82 | `upgrade_0.3.82.sql` run with the DAGs paused: the row counts of step 0 and step 3 are the same; the 20 tables are `GOVT_RGLTRY_<Name>` / `CMS_GOVT_RGLTRY_ExceptionsAudit` (no `Compliance*` table left); `Rpt_Version` in `GOVT_RGLTRY_DataSetSourceXwalk`, `GOVT_RGLTRY_RequestInTake`, `GOVT_RGLTRY_RequestControl`; `schema_check.sql` returns no rows; the `GOVT_RGLTRY_CMS_UNIVERSE_*` / `GOVT_RGLTRY_UMCM_*` DAGs, tagged `Universe` / `UMCM`, run with the new Variables |
 
+## 17. File move (FM)
+
+FILE_MOVE copies / moves files between NAS folders; no batches or tables. Variable as in
+`examples/cmsuniv_dev/govt_rgltry_cms_universe_file_move_config_var.json` (job `CMSUNIV_LANDING`: landing folder →
+`OSS_Backup` copy, `on_exists` `rename` → `OSS_Audit` copy → `OSS_Inbound` move; `trigger_dags` FILE_LOAD), with
+test folders. Trigger `GOVT_RGLTRY_CMS_UNIVERSE_FILE_MOVE` and look at the folders and the task log.
+
+| ID | Test | Preparation | Expected |
+|---|---|---|---|
+| FM-01 | Copy, copy, move | Two GOOD files `CMSAUTH_*.txt` and one `other.csv` in the landing folder, one file in a subfolder | Log `2 of 3 file(s) match CMSAUTH_*.txt`; both files in `OSS_Backup` and `OSS_Audit` and moved to `OSS_Inbound`; `other.csv` and the subfolder untouched; no `_file_move_tmp` left; report `COMPLETED`, `moved` 2; FILE_LOAD triggered |
+| FM-02 | Nothing to do | Run FM-01 again | `0 of 1 file(s) match`; `COMPLETED`; `check_files_handled` skipped, FILE_LOAD not triggered |
+| FM-03 | Pattern and case | Patterns `["*.txt"]`, then `["*.*"]`; a file `cmsauth_x.TXT` | Upper / lower case ignored; `*.*` takes every file with a dot in its name |
+| FM-04 | Name clash, `on_exists` `fail` | A file of the same name, other content, already in `OSS_Audit` | `OSS_Backup` gets its copy; `failed: … is already in … (on_exists fail); the file stays in the source`; nothing in `OSS_Inbound`; task fails at once (no retry), incident + email |
+| FM-05 | Resume after FM-04 | Remove the old file from `OSS_Audit`, run again | `OSS_Backup` `already in … (same content)` (no second copy), `OSS_Audit` copied, `OSS_Inbound` moved; `COMPLETED` |
+| FM-06 | `on_exists` `rename` / `overwrite` | Same name, other content, in `OSS_Backup` (`rename`) and in the move target with `on_exists` `overwrite` | `OSS_Backup` keeps the old file and gets `<name>_1.txt`; the move target's file is replaced |
+| FM-07 | Copy only | A job with copy targets only, run twice | The file stays in the source; the second run `already in`, no duplicates |
+| FM-08 | One job from the trigger | Two jobs; trigger with `{"job": "<second>"}`, then `{"job": "NOPE"}` | Only the second job runs; `NOPE`: `COULD NOT RUN`, "job NOPE is not in jobs (…)", task retried |
+| FM-09 | Variable checks | In turn: no `wdc_comp_oper_nas_var`; no `load_env`; a move that is not the last target; `action` `cut`; a target equal to the source | The task fails naming the problem (`'<key>' is required in Airflow Variable '…'`, "only the last target can be a move", "must be copy or move", "is the source folder") |
+| FM-10 | Source folder missing | `src_folder` to a folder that does not exist | `COULD NOT RUN`, `could not list //…`; task retried, then fails |
+| FM-11 | Still arriving | Copy a file into the landing folder and run within 120 s | Not taken (`0 of n` match); taken on the next run |
+| FM-12 | No file data in the log | Any run | The log has file names, folders and counts only |
+| FM-13 | `rename` and a rerun | `OSS_Backup` (`rename`) has an older `X.txt`; `OSS_Audit` has another `X.txt` (`fail`); run, then remove the file from `OSS_Audit` and run again | First run: `X_1.txt` in `OSS_Backup`, failed at `OSS_Audit`, file stays. Second run: `already in … as X_1.txt (same content)` (no `X_2.txt`), `OSS_Audit` copied, moved |
+| FM-14 | Same size, other content | A file in the target with the same name and size but one changed trailer count (`T|100` vs `T|101`) | Not `already in`: the content differs (SHA-256), so `on_exists` applies |
+
 ---
 
 ## Sign-off
@@ -468,15 +497,16 @@ For an installation created before the version shown (runbook section 16).
 | BC | 21 | | | | | |
 | IN | 7 | | | | | |
 | FC | 10 | | | | | |
-| FL | 27 | | | | | |
+| FL | 30 | | | | | |
 | SL | 14 | | | | | |
 | OV | 8 | | | | | |
 | EX | 24 | | | | | |
 | RU | 15 | | | | | |
 | CL | 10 | | | | | |
 | NT | 5 | | | | | |
-| AF | 12 | | | | | |
+| AF | 13 | | | | | |
 | AD | 6 | | | | | |
 | LG | 5 | | | | | |
 | E2E | 9 | | | | | |
-| UP | 6 | | | | | |
+| UP | 7 | | | | | |
+| FM | 14 | | | | | |

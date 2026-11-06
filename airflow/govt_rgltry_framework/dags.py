@@ -31,10 +31,9 @@ from govt_rgltry_framework.db import Settings
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONNECTION_ID = "compliance_teradata"
 TD_CONN_KEY = "td_conn_var"
 NAS_CONN_KEY = "wdc_comp_oper_nas_var"
-DEFAULT_NAS_CONNECTION_ID = "comp_oper_creds"
+FILE_STEPS = ("FILE_CHECK", "FILE_LOAD", "FILE_MOVE")
 DEFAULT_TIMEZONE = "America/Chicago"
 STEPS = ("BATCH_CREATION", "FILE_CHECK", "FILE_LOAD", "SOURCE_LOAD", "EXPORT_LOAD", "FILE_RULES", "OVERRIDE_DECISIONS", "BATCH_CLOSE",
          "NOTIFY")
@@ -166,14 +165,13 @@ def resolve_config(variable_key: str, overrides: dict = None, scope_index: int =
     merged = {key: {k: v for layer in layers for k, v in (layer.get(key) or {}).items()} for key in _MERGED}
     config = {k: v for layer in layers for k, v in layer.items() if k not in (*_MERGED, "runs")}
     config["gre"] = merged["gre"]
-    if not config.get("meta_db"):
-        raise ValueError(f"'meta_db' is required in Airflow Variable '{variable_key}'")
+    for key in ("meta_db", TD_CONN_KEY, "load_env"):
+        if not config.get(key):
+            raise ValueError(f"'{key}' is required in Airflow Variable '{variable_key}'")
     settings = {str(k).upper(): ",".join(map(str, v)) if isinstance(v, (list, tuple)) else v
                 for k, v in merged["settings"].items()}
     settings["METADATA_SCHEMA"] = config["meta_db"]
-    environment = config.get("load_env")
-    if environment:
-        settings.setdefault("ENVIRONMENT", environment)
+    settings.setdefault("ENVIRONMENT", config["load_env"])
     recipients = _names(config.get("email_recipient"))
     settings.setdefault("NOTIFY_BACKEND", "airflow")
     if recipients:
@@ -184,7 +182,7 @@ def resolve_config(variable_key: str, overrides: dict = None, scope_index: int =
 
 def _connect_environment(config: dict, connection_id: str = None) -> None:
     gre = config.get("gre") or {}
-    _load_teradata_connection(connection_id or config.get(TD_CONN_KEY) or DEFAULT_CONNECTION_ID)
+    _load_teradata_connection(connection_id or config[TD_CONN_KEY])
     if config.get(NAS_CONN_KEY):
         _load_nas_connection(config[NAS_CONN_KEY])
     if gre and str(gre.get("connection_type") or "teradata").lower() != "teradata":
@@ -237,14 +235,19 @@ def trigger_values(step: str, given: Optional[dict]) -> dict:
     return out
 
 
+def _require_nas_connection(step: str, config: dict, settings: dict, variable_key: str) -> None:
+    """The steps that read or move files on the NAS need the NAS Connection named in the Variable (no default)."""
+    if step in FILE_STEPS and str(settings.get("FILE_STORE") or "nas").lower() == "nas" and not config.get(NAS_CONN_KEY):
+        raise ValueError(f"'{NAS_CONN_KEY}' is required in Airflow Variable '{variable_key}'")
+
+
 def run_govt_rgltry_step(step: str, variable_key: str, overrides: dict = None, scope_index: int = None,
                         connection_id: str = None):
     """Run one framework step. Problems the step reports (exit code 1, e.g. a rejected file) fail the task without a
     retry; a step that could not run (exit code 2) raises RuntimeError, which Airflow retries."""
     step = step.strip().upper()
     config, settings = resolve_config(variable_key, trigger_values(step, overrides), scope_index)
-    if step in ("FILE_LOAD", "FILE_CHECK") and str(settings.get("FILE_STORE") or "nas").lower() == "nas":
-        config[NAS_CONN_KEY] = config.get(NAS_CONN_KEY) or DEFAULT_NAS_CONNECTION_ID
+    _require_nas_connection(step, config, settings, variable_key)
     _connect_environment(config, connection_id)
 
     params = {k: config.get(k) for k in SCOPE_KEYS if config.get(k) not in (None, "")}
@@ -261,11 +264,19 @@ def run_govt_rgltry_step(step: str, variable_key: str, overrides: dict = None, s
         logging.getLogger(name).setLevel(logging.WARNING)
     outcome, exit_code = run_step(step, as_of=config.get("as_of") or None, settings=settings,
                                   log_level=config.get("log_level") or "INFO", **params)
-    fail_on_problems = _flag(config.get("fail_on_problems"), FAIL_ON_PROBLEMS.get(step, True))
+    return _step_result(step, outcome, exit_code,
+                        _flag(config.get("fail_on_problems"), FAIL_ON_PROBLEMS.get(step, True)))
+
+
+def _step_result(step: str, outcome: dict, exit_code: int, fail_on_problems: bool) -> dict:
+    """Log the step report and turn its exit code into the task result: 2 (could not run) raises RuntimeError, which
+    Airflow retries; 1 (problems reported) fails without a retry unless fail_on_problems is off; 0 returns."""
     text = json.dumps(outcome, indent=2, default=str)
     if exit_code == 2:
         logger.error("%s report:\n%s", step, text)
-        raise RuntimeError(f"{step}: {outcome.get('result') or 'failed'} (exit code 2); the report is above")
+        error = RuntimeError(f"{step}: {outcome.get('result') or 'failed'} (exit code 2); the report is above")
+        error.outcome = outcome
+        raise error
     if exit_code == 1 and fail_on_problems:
         logger.error("%s report:\n%s", step, text)
         problem = AirflowFailException(f"{step}: {outcome.get('result') or 'completed with problems'} (exit code 1); "
@@ -549,4 +560,86 @@ def build_step_dag(dag_id: str, step: str, variable_key: str) -> DAG:
         [*tasks, *triggers] >> PythonOperator(task_id=f"{step.lower()}_result", dag=dag, python_callable=step_result,
                                               trigger_rule="all_done", retries=0, on_failure_callback=None)
     _add_emails(dag, dag_config, [*tasks, *gate, *triggers])
+    return dag
+
+
+# file_move_dag: The standalone FILE_MOVE DAG: copies / moves files between folders (filemove.py); no database.
+
+FILE_MOVE = "FILE_MOVE"
+FILE_MOVE_TIMEOUT = timedelta(hours=1)
+FILE_MOVE_PARAMS = ("job",)
+
+
+def run_file_move_step(variable_key: str, overrides: dict = None) -> dict:
+    """Run FILE_MOVE with its Variable (`job` from the trigger runs only the named jobs). Exit code 1 (a file could not
+    be copied or moved) fails the task without a retry; exit code 2 (could not run) raises RuntimeError (retried)."""
+    from govt_rgltry_framework.filemove import run_file_move
+
+    config = _load_variable(variable_key)
+    if not config.get("load_env"):
+        raise ValueError(f"'load_env' is required in Airflow Variable '{variable_key}'")
+    given = {k: v for k, v in _keys(overrides).items() if v not in (None, "", [])}
+    ignored = sorted(k for k in given if k not in (*FILE_MOVE_PARAMS, "log_level", "fail_on_problems"))
+    if ignored:
+        logger.warning("%s: not taken from the trigger (set them in the Variable): %s", FILE_MOVE, ", ".join(ignored))
+    config.update({k: v for k, v in given.items() if k not in ignored})
+    settings = {str(k).upper(): v for k, v in (config.get("settings") or {}).items()}
+    settings["ENVIRONMENT"] = config["load_env"]
+    _require_nas_connection(FILE_MOVE, config, settings, variable_key)
+    if config.get(NAS_CONN_KEY):
+        _load_nas_connection(config[NAS_CONN_KEY])
+    for name in QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+    outcome, exit_code = run_file_move(config.get("jobs"), settings, only=config.get("job"),
+                                       log_level=config.get("log_level") or "INFO")
+    return _step_result(FILE_MOVE, outcome, exit_code, _flag(config.get("fail_on_problems"), True))
+
+
+def build_file_move_dag(dag_id: str, variable_key: str) -> DAG:
+    """The FILE_MOVE DAG: one task running the Variable's jobs; its trigger_dags start only when it moved or copied
+    at least one file (also when some other file failed, and then the DAG run still fails)."""
+    dag_config = load_dag_config(variable_key)
+    params = {name: Param(None, type=_TEXT) for name in FILE_MOVE_PARAMS}
+    dag = _dag(dag_id, dag_config, f"Government Regulatory batch framework - {FILE_MOVE}", params, "File_Move")
+
+    def move(**context):
+        try:
+            outcome = run_file_move_step(variable_key, _overrides(context, FILE_MOVE_PARAMS))
+        except Exception as e:
+            context["ti"].xcom_push(key="handled", value={"ok": False, "count": int((getattr(e, "outcome", None) or {}).get("handled") or 0)})
+            raise
+        context["ti"].xcom_push(key="handled", value={"ok": True, "count": int(outcome.get("handled") or 0)})
+        return outcome
+
+    pool = {"pool": dag_config["pool"]} if dag_config.get("pool") else {}
+    task = PythonOperator(task_id="file_move", dag=dag, python_callable=move, show_return_value_in_logs=False,
+                          execution_timeout=_minutes(dag_config, "execution_timeout_minutes", FILE_MOVE_TIMEOUT), **pool)
+    wait = {"wait_for_completion": True, "deferrable": True, "poke_interval": 60, "allowed_states": ["success"],
+            "failed_states": ["failed"]} if _flag(dag_config.get("wait_for_triggered"), False) else {}
+    triggers = [TriggerDagRunOperator(task_id=f"trigger_{str(target).lower()}", dag=dag, trigger_dag_id=str(target),
+                                      trigger_rule="all_success", **wait)
+                for target in _names(dag_config.get("trigger_dags"))]
+    tail = [task]
+    if triggers:
+        def check_handled(**context):
+            found = context["ti"].xcom_pull(task_ids="file_move", key="handled") or {"ok": False, "count": 0}
+            if not found["count"]:
+                raise AirflowSkipException(f"{FILE_MOVE} moved or copied no file; the triggered DAGs do not start")
+            if not found["ok"]:
+                logger.warning("%s failed, but %s file(s) were moved or copied: the triggered DAGs start",
+                               FILE_MOVE, found["count"])
+
+        def move_result(**context):
+            found = context["ti"].xcom_pull(task_ids="file_move", key="handled") or {"ok": False}
+            if not found["ok"]:
+                raise AirflowFailException(f"{FILE_MOVE} failed; see its task log (the ticket and email are already sent)")
+
+        gate = PythonOperator(task_id="check_files_handled", dag=dag, python_callable=check_handled, trigger_rule="all_done")
+        task >> gate
+        for trigger in triggers:
+            gate >> trigger
+        [task, *triggers] >> PythonOperator(task_id="file_move_result", dag=dag, python_callable=move_result,
+                                            trigger_rule="all_done", retries=0, on_failure_callback=None)
+        tail = [task, gate, *triggers]
+    _add_emails(dag, dag_config, tail)
     return dag

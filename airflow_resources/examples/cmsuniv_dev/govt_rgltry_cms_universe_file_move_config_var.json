@@ -1,0 +1,37 @@
+{
+  "wdc_comp_oper_nas_var": "comp_oper_creds",
+  "load_env": "DEV",
+  "snow_assignment_group": "D&AE - EDE Govt Compliance",
+  "tags": [
+    "Universe"
+  ],
+  "email_recipient": "TRINATH_gundavaram@example.com",
+  "schedule_interval": null,
+  "trigger_dags": [
+    "GOVT_RGLTRY_CMS_UNIVERSE_FILE_LOAD"
+  ],
+  "jobs": [
+    {
+      "name": "CMSUNIV_LANDING",
+      "src_folder": "nas://chs_dms/$Env/OSS_Landing/External/CMSUNIV",
+      "patterns": [
+        "CMSAUTH_*.txt"
+      ],
+      "targets": [
+        {
+          "folder": "nas://chs_dms/$Env/OSS_Backup/External/CMSUNIV",
+          "action": "copy",
+          "on_exists": "rename"
+        },
+        {
+          "folder": "nas://chs_dms/$Env/OSS_Audit/External/CMSUNIV",
+          "action": "copy"
+        },
+        {
+          "folder": "nas://chs_dms/$Env/OSS_Inbound/External/CMSUNIV",
+          "action": "move"
+        }
+      ]
+    }
+  ]
+}

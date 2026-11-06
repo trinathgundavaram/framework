@@ -1,7 +1,7 @@
 # Government Regulatory Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.82 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.83 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -64,6 +64,7 @@ changing the combined file, export the pages again so the three stay the same.
 | 12 NOTIFY | Alert emails | 2.10 | [png](diagrams/png/12_notify.png) · [drawio](diagrams/pages/12_notify.drawio) |
 | 13 Batch lifecycle | Statuses of a batch row | 3 | [png](diagrams/png/13_batch_lifecycle.png) · [drawio](diagrams/pages/13_batch_lifecycle.drawio) |
 | 14 Metadata tables | The tables, who fills them, how they connect | 4 | [png](diagrams/png/14_metadata_tables.png) · [drawio](diagrams/pages/14_metadata_tables.drawio) |
+| 15 FILE_MOVE | Copy / move files by name pattern to several folders in order: already there, on_exists, temporary copy, move last, triggers | 9.7, 11.24 | [png](diagrams/png/15_file_move.png) · [drawio](diagrams/pages/15_file_move.drawio) |
 
 ---
 
@@ -233,7 +234,7 @@ from the NAS to core").
 - A file is identified by its path, size and time: the same name delivered again is a new delivery; the same
   content for another batch is loaded and reported (`FILE_SAME_CONTENT_OTHER_BATCH`).
 - Before core: the NOT NULL and type checks (5.7 step 4); staging and core columns pair by name, then by order.
-- One control report line per file goes to `ControlReport/`.
+- One control report line per file goes to `ControlReport/` (or the path in `CONTROL_REPORT_FOLDER`, 9.4).
 - **Problems (exit 1):** any rejected file. The task fails (incident + email) and the triggered EXPORT_LOAD /
   OVERRIDE_DECISIONS do not start; the other files of the run are still loaded. `"fail_on_problems": false` keeps
   the chain going.
@@ -1333,7 +1334,7 @@ Emailed by NOTIFY unless marked "no".
 | Connection | Type / fields | Used by |
 |---|---|---|
 | Teradata (name in `td_conn_var`, e.g. `DEV`) | host, login, password; Extra `{"logmech": "LDAP"}` | Every step |
-| NAS (`comp_oper_creds`, or the name in `wdc_comp_oper_nas_var`) | host, login, password, port (445) | FILE_CHECK, FILE_LOAD |
+| NAS (the name in `wdc_comp_oper_nas_var`, e.g. `comp_oper_creds`) | host, login, password, port (445) | FILE_CHECK, FILE_LOAD, FILE_MOVE |
 | SQL Server source (name = `Src_Conn_Cd`) | host or `server\instance`, port, schema = database, login, password; Extra `{"driver": "ODBC Driver 17 for SQL Server", "encrypt": "yes", "trust_server_certificate": "yes"}` (`driver` is optional: without it the newest `ODBC Driver NN for SQL Server` installed on the worker is used, and the log names it) | SOURCE_LOAD |
 | `smtp_default` | Airflow SMTP connection | DAG emails, NOTIFY (`NOTIFY_BACKEND = airflow`) |
 
@@ -1349,10 +1350,12 @@ own DAG ids and Variable names.
 | FILE_LOAD | `GOVT_RGLTRY_CMS_UNIVERSE_FILE_LOAD` | `govt_rgltry_cms_universe_file_load_config_var` |
 | SOURCE_LOAD | `GOVT_RGLTRY_CMS_UNIVERSE_SOURCE_LOAD` | `govt_rgltry_cms_universe_source_load_config_var` |
 | EXPORT_LOAD | `GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD` | `govt_rgltry_cms_universe_export_load_config_var` |
+| EXPORT_LOAD, ad hoc (`run_type` `CMS`) | `GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD_ADHOC` | `govt_rgltry_cms_universe_export_load_adhoc_config_var` |
 | OVERRIDE_DECISIONS | `GOVT_RGLTRY_CMS_UNIVERSE_OVERRIDE_DECISIONS` | `govt_rgltry_cms_universe_override_decisions_config_var` |
 | BATCH_CLOSE | `GOVT_RGLTRY_CMS_UNIVERSE_BATCH_CLOSE` | `govt_rgltry_cms_universe_batch_close_config_var` |
 | NOTIFY | `GOVT_RGLTRY_CMS_UNIVERSE_NOTIFY` | `govt_rgltry_cms_universe_notify_config_var` |
 | FILE_RULES | `GOVT_RGLTRY_CMS_UNIVERSE_FILE_RULES` | `govt_rgltry_cms_universe_file_rules_config_var` |
+| FILE_MOVE (standalone: copies / moves files between folders, 9.7) | `GOVT_RGLTRY_CMS_UNIVERSE_FILE_MOVE` | `govt_rgltry_cms_universe_file_move_config_var` |
 
 A DAG never runs twice at the same time; a run that is due while another runs waits.
 
@@ -1372,9 +1375,9 @@ the framework fills in everything else. A CMSUNIV DEV Variable (`airflow_resourc
 | Key | Required | Default | Values |
 |---|---|---|---|
 | `meta_db` | **Yes** | | The metadata database, e.g. `HSABC_DEV`, `HSABC_PROD` |
-| `td_conn_var` | No | `compliance_teradata` | The Airflow Connection id of Teradata (CMSUNIV: `DEV`) |
-| `wdc_comp_oper_nas_var` | No | `comp_oper_creds` | The Airflow Connection id of the NAS; used by FILE_CHECK and FILE_LOAD only |
-| `load_env` | No | `DEV` | `DEV`, `TEST`, `QA`, `UAT`, `PROD` (any letters / digits): the value of `$env` in database names and paths (uppercase where it stands in upper case) and the email subjects |
+| `td_conn_var` | **Yes** | | The Airflow Connection id of Teradata (CMSUNIV: `DEV`); without it the task fails with `'td_conn_var' is required in Airflow Variable '<variable>'` |
+| `wdc_comp_oper_nas_var` | FILE_CHECK, FILE_LOAD, FILE_MOVE: **Yes** | | The Airflow Connection id of the NAS (CMSUNIV: `comp_oper_creds`), needed by the steps that read or move files; without it they fail with `'wdc_comp_oper_nas_var' is required in Airflow Variable '<variable>'`. Not needed by the other steps, nor with `FILE_STORE` `local` |
+| `load_env` | **Yes** | | `DEV`, `TEST`, `QA`, `UAT`, `PROD` (any letters / digits): the value of `$env` in database names and paths (uppercase where it stands in upper case) and the email subjects; without it the task fails with `'load_env' is required in Airflow Variable '<variable>'` |
 | `email_recipient` | No | none | One address, a list `["a@x.com", "b@x.com"]` or `"a@x.com,b@x.com"`. Gets the DAG's success / failure emails and, in the NOTIFY Variable, the alert emails (9.4 `DEFAULT_NOTIFY_EMAILS`). Without it: no emails |
 
 **What the run works on** (also accepted from a trigger, 9.5)
@@ -1442,8 +1445,8 @@ come from the Variable: `NOTIFY_BACKEND = airflow`, `DEFAULT_NOTIFY_EMAILS` = `e
 | `LOCAL_STORE_ROOT` | `./.local_store` | Folder of `FILE_STORE = local` |
 | `ARCHIVE_FOLDER` | `Archive` | Subfolder of the inbound folder for loaded files |
 | `ERROR_FOLDER` | `Error` | Subfolder for rejected files |
-| `ERROR_LOG_FOLDER` | `ErrorLog` | Subfolder for the error logs of rejected files |
-| `CONTROL_REPORT_FOLDER` | `ControlReport` | Subfolder for the control reports |
+| `ERROR_LOG_FOLDER` | `ErrorLog` | Where the error logs of rejected files go (FILE_CHECK, FILE_LOAD). A folder name: that subfolder of the file's own folder. A full path (`nas://<share>/<path>`, `$env` allowed, e.g. `nas://chs_dms/$Env/OSS_Reports/CMSUNIV/ErrorLog`): that folder, for every file of the DAG; created when missing |
+| `CONTROL_REPORT_FOLDER` | `ControlReport` | Where the control reports go (FILE_LOAD). A folder name: that subfolder of each inbound folder, `ControlReport_<yyyymmdd_hhmmss>.txt`. A full path: that folder, one report per inbound folder and project named `ControlReport_<PROJECT>_<yyyymmdd_hhmmss>.txt` (numbered `_1`, `_2` when two have the same name) |
 | `ARCHIVE_BY_YEAR` | `false` | `true`: archive into `Archive/<year>/` |
 | `NAS_MIN_AGE_SECONDS` | `120` | Seconds: a file modified more recently is left for the next run (still arriving) |
 | `SUPPORTED_FILE_TYPES` | `.txt,.csv` | Comma-separated extensions; other files are rejected |
@@ -1499,7 +1502,7 @@ export TERADATA_HOST=<host> TERADATA_USER=<login> TERADATA_PASSWORD=<password> T
 export FRAMEWORK_METADATA_SCHEMA=HSABC_DEV FRAMEWORK_ENVIRONMENT=DEV
 ```
 
-Without `FRAMEWORK_METADATA_SCHEMA` the metadata database is `HSABC_$ENV`, resolved with `FRAMEWORK_ENVIRONMENT`: `HSABC_DEV`, `HSABC_TEST`, ..., `HSABC` in PROD.
+`FRAMEWORK_ENVIRONMENT` is required (no default): without it every command stops with "ENVIRONMENT is required". Without `FRAMEWORK_METADATA_SCHEMA` the metadata database is `HSABC_$ENV`, resolved with `FRAMEWORK_ENVIRONMENT`: `HSABC_DEV`, `HSABC_TEST`, ..., `HSABC` in PROD.
 
 | Command | What it does |
 |---|---|
@@ -1523,6 +1526,62 @@ Without `FRAMEWORK_METADATA_SCHEMA` the metadata database is `HSABC_$ENV`, resol
 
 A scheduled run uses the entry of its time; a manual run uses the entries named in `run` (else the Variable's own
 scope) plus what the trigger gives.
+
+### 9.7 FILE_MOVE: copy and move files between folders
+
+FILE_MOVE is a DAG of its own (one per project, `GOVT_RGLTRY_<PROJECT>_FILE_MOVE`). It does not use batches, metadata
+tables or Teradata (not to be confused with the event `FILE_MOVE_FAILED`, FILE_LOAD's move to Archive / Error). Each job takes the files of a source folder whose names fit one of its patterns and hands every
+file to its targets in order: copies first, and the job may end with one move. Example: source → `tgt1` copy →
+`tgt2` copy → `tgt3` move (`airflow_resources/examples/umcm_dev/govt_rgltry_umcm_file_move_config_var.json`):
+
+```json
+{"wdc_comp_oper_nas_var": "comp_oper_creds", "load_env": "DEV",
+ "snow_assignment_group": "D&AE - EDE Govt Compliance", "tags": ["UMCM"],
+ "trigger_dags": ["GOVT_RGLTRY_UMCM_FILE_LOAD"],
+ "jobs": [{"name": "UMCM_LANDING",
+           "src_folder": "nas://chs_dms/$Env/OSS_Landing/External/UMCM",
+           "patterns": ["UMCM_*.txt"],
+           "targets": [{"folder": "nas://chs_dms/$Env/OSS_Backup/External/UMCM", "action": "copy", "on_exists": "rename"},
+                       {"folder": "nas://chs_dms/$Env/OSS_Audit/External/UMCM", "action": "copy"},
+                       {"folder": "nas://chs_dms/$Env/OSS_Inbound/External/UMCM", "action": "move"}]}]}
+```
+
+**Variable keys**
+
+| Key | Required | Default | Values |
+|---|---|---|---|
+| `wdc_comp_oper_nas_var` | **Yes** | | The Airflow Connection id of the NAS; without it the task fails with `'wdc_comp_oper_nas_var' is required in Airflow Variable '<variable>'` |
+| `load_env` | **Yes** | | The value of `$env` in the folders; without it `'load_env' is required in Airflow Variable '<variable>'` |
+| `jobs` | **Yes** | | A list of jobs (below) |
+| `trigger_dags` | No | none | DAG ids started when the run moved or copied **at least one** file (also when another file failed); none when nothing was moved or copied |
+| `wait_for_triggered` | No | `false` | `true`: wait until the triggered DAGs finish |
+| `execution_timeout_minutes` | No | `60` | Minutes |
+| `schedule_interval`, `schedule_timezone`, `email_recipient`, `snow_assignment_group`, `tags`, `retries`, `fail_on_problems`, `dagrun_timeout_minutes`, `log_level`, `owner` | No | as in 9.3 | As in 9.3; the step tag is `File_Move` |
+| `settings` | No | none | Only `NAS_MIN_AGE_SECONDS` (default 120) matters here: a file changed in the last `NAS_MIN_AGE_SECONDS` may still be arriving and waits for the next run |
+
+**Job keys**
+
+| Key | Required | Values |
+|---|---|---|
+| `name` | **Yes** | A name, unique in the Variable (not case sensitive); shown in the log and used by the trigger key `job` |
+| `src_folder` | **Yes** | `nas://<share>/<path>`; `$env` allowed. Only the files directly in the folder are taken, not those in subfolders |
+| `patterns` | **Yes** | A list, or one comma-separated string. `*` = any characters, `?` = one character, `[abc]` = one of them; upper / lower case does not matter. E.g. `["CMSAUTH_*.txt"]`, `["*.*"]`, `["*.txt", "*.csv"]`, `["report_????????.dat"]` |
+| `targets` | **Yes** | A list of targets, handled in this order |
+
+**Target keys**
+
+| Key | Required | Default | Values |
+|---|---|---|---|
+| `folder` | **Yes** | | `nas://<share>/<path>`, `$env` allowed; not the source folder itself (a subfolder of it is fine) |
+| `action` | **Yes** | | `copy`: the file stays in the source. `move`: the file leaves the source once every target has it. Only the **last** target can be a `move`; a job of copies only leaves its files in the source |
+| `on_exists` | No | `fail` | What to do when the target already has a file of that name with **other** content: `fail` (the file stays in the source and is reported; the next targets are not tried), `rename` (keep the old file and write the new one as `name_1.txt`, or the next free `name_2.txt`, …; a rerun finds its own earlier `name_n` copy by content and writes no second one), `overwrite` (replace the old file). Set it per target, as each folder needs |
+
+A file of that name with the **same** content (same size and SHA-256) counts as already there, whatever `on_exists`
+says (`already in … (same content)`): a run that stopped half way is simply run again and makes no duplicates.
+
+**Trigger** (9.5): `{"job": "UMCM_LANDING"}` runs only that job (several: `"A,B"` or `["A", "B"]`; an unknown name
+fails the run with the list of jobs). `log_level` and `fail_on_problems` may also be given; any other key is logged
+as ignored (set it in the Variable).
 
 ---
 
@@ -1690,6 +1749,42 @@ with other file configs, already moved by
 another run (FILE_CHECK with `CHECK_MOVE_FAILED`, or a FILE_LOAD running at the same time), or already loaded. Act only
 when the reason is not expected (13).
 
+**11.24 Move or copy files between folders (FILE_MOVE).** Set up once: copy `govt_rgltry_cms_universe_file_move.py`
+(another project: with its own DAG id and Variable name) and create its Variable (9.7) with the jobs. Then trigger the
+DAG (all jobs, or `{"job": "<name>"}`), or give it a `schedule_interval`. To feed FILE_LOAD, make the last target a
+`move` into the inbound folder FILE_LOAD reads and put the FILE_LOAD DAG in `trigger_dags`.
+
+For each file, target by target:
+
+1. Is a file of that name already in the target? Same content: nothing to do. Other content: `on_exists`.
+2. A copy is written as `<target>/_file_move_tmp/<run id>_<name>`, its size is compared with the source, and only then
+   is it renamed to its name: whoever watches the target folder never sees a half-written file. The empty
+   `_file_move_tmp` folder is removed again. A move into a folder on the same share as the source is a rename (no copy).
+3. After the last target (a move) has the file, it is removed from the source.
+
+Any failure leaves the file in the source; the targets that already have it keep it, and the next run carries on
+from there. The log shows one line per job and per file and target:
+
+```
+INFO  - FILE_MOVE | job UMCM_LANDING | //chs_dms/DEV/OSS_Landing/External/UMCM/ | 2 of 3 file(s) match UMCM_*.txt
+INFO  - FILE_MOVE | job UMCM_LANDING | UMCM_20261105.txt | copied to //chs_dms/DEV/OSS_Backup/External/UMCM/UMCM_20261105.txt
+INFO  - FILE_MOVE | job UMCM_LANDING | UMCM_20261105.txt | copied to //chs_dms/DEV/OSS_Audit/External/UMCM/UMCM_20261105.txt
+INFO  - FILE_MOVE | job UMCM_LANDING | UMCM_20261105.txt | moved to //chs_dms/DEV/OSS_Inbound/External/UMCM/UMCM_20261105.txt
+ERROR - FILE_MOVE | job UMCM_LANDING | UMCM_20261106.txt | failed: copy to nas://…/OSS_Audit/…: UMCM_20261106.txt is already in //chs_dms/DEV/OSS_Audit/External/UMCM/ (on_exists fail); the file stays in the source
+```
+
+The report at the end has `result`, `matched`, `moved`, `copied`, `failed`, `handled` (moved + copied) and every
+file with the outcome per target. The file contents are never logged.
+
+| `result` | Exit | Task |
+|---|---|---|
+| `COMPLETED` (also when no file matched) | 0 | Succeeds |
+| `COMPLETED WITH PROBLEMS` (a file failed and stays in the source) | 1 | Fails at once, no retry (`fail_on_problems` `false`: succeeds with a warning) |
+| `COULD NOT RUN` (Variable error, or a source folder that cannot be listed) | 2 | Fails and is retried (`retries`) |
+
+With `trigger_dags`, the task `check_files_handled` starts the triggered DAGs when at least one file was moved or
+copied (otherwise it is skipped), and `file_move_result` still fails the DAG run when a file failed.
+
 ---
 
 ## 12. Monitoring queries
@@ -1807,6 +1902,14 @@ INFO - SOURCE_LOAD | 20261020_CMSUNIV_SNPCC1_DLY source 11 | Src_Sql_Txt on SQL_
 | EXPORT_LOAD says `NO BATCHES TO EXPORT` | No open batch in the scope (all closed or not created yet), the run type is held, or the Variable's `table` / `source` / `run_type` scope matches nothing | Check 12.1 for open batches of the scope and the Variable's scope; closed batches are exported again only when new data arrives |
 | Export by procedure writes 0 rows | The procedure reads another table than the framework fills (e.g. a provisioning table nobody loads), or filters on values the batch does not have | Run the CALL from the log (13, top) by hand; fix `Exp_Proc_Parm_Txt` or the table the procedure reads |
 | Teradata pull fails "Object '…_$ENV_V…' does not exist" | `$env` is not replaced in `Src_Sql_Txt` | Name the environment's database in the query (e.g. `CMSUNIV_CORE_DEV_V`) |
+| FILE_MOVE `failed: … is already in … (on_exists fail)` | The target has a file of that name with other content | Find out which file is right; rename or remove the old one, or set `on_exists` `rename` / `overwrite` on that target; run again (the targets already done show `already in`) |
+| `'wdc_comp_oper_nas_var' is required …` (FILE_CHECK, FILE_LOAD, FILE_MOVE) / FILE_MOVE `'load_env' is required …` | Key missing in its Variable (there is no default NAS Connection) | Add it (9.3, 9.7) |
+| FILE_MOVE `COULD NOT RUN`, `could not list //share/folder/` | Folder does not exist, wrong `$env`, or the NAS login has no access | Check the folder and the Connection; the task is retried |
+| FILE_MOVE `0 of n file(s) match …` | The pattern does not fit the names, or the files changed in the last `NAS_MIN_AGE_SECONDS` | Compare the names with `patterns` (case does not matter, no subfolders); wait for the next run |
+| FILE_MOVE `in every target, but not removed from the source` | The NAS login may not delete in the source folder | Give it the right; the next run finds the file `already in` every target and removes it |
+| FILE_MOVE `copy of … has n bytes, the source m` | The copy was cut short (network) | Nothing: the temporary copy is removed and the next run copies again |
+| `_file_move_tmp` folder left in a target | A FILE_MOVE run was stopped during a copy | When no FILE_MOVE runs, delete the folder; the file is still in the source |
+| Triggered DAGs of FILE_MOVE did not start (`check_files_handled` skipped) | No file was moved or copied | Expected |
 
 ---
 
@@ -1890,6 +1993,7 @@ differs from `schema.sql` (no rows = up to date). A NOT NULL column that should 
 | 0.3.77 | `ALTER TABLE HSABC_DEV.GOVT_RGLTRY_ExportConfig DROP Exp_Btch_Col_Nm;` The extra export batch column (`Exp_Btch_ID`) and the `{exp_btch_id}` placeholder are gone: export tables carry the batch in `Btch_ID` only. Rows whose `Exp_Proc_Parm_Txt` / `Exp_Pre_Sql_Txt` / `Exp_Post_Sql_Txt` use `{exp_btch_id}` change it to `{btch_id}` (`validate-config` lists them); an empty `Exp_Proc_Parm_Txt` now means `{btch_id}, {data_btch_id}` |
 | 0.3.71 | `airflow_resources/sql/upgrade_0.3.71.sql`: the audit columns of every framework table renamed (`Created_Dtts` → `Load_Dtts`, `Created_By` → `LoadUser_ID`, `Updated_Dtts` → `LastUpdt_Dtts`, `Updated_By` → `LastUpdt_ID`); six tables (`GOVT_RGLTRY_RunType`, `GOVT_RGLTRY_DataSetSourceXwalk`, `GOVT_RGLTRY_SourceFileConfig`, `GOVT_RGLTRY_RequestControl`, `GOVT_RGLTRY_FileLoad`, `CMS_GOVT_RGLTRY_ExceptionsAudit`) backed up, recreated in the new column order (audit columns last) and filled again, then the backups dropped; `GOVT_RGLTRY_RequestControl` and `GOVT_RGLTRY_FileLoad` get `LoadUser_ID` / `LastUpdt_ID`. Fill the four `{{NEXT_...}}` start values from step 2.0 first so the IDs are kept. Every framework update now sets `LastUpdt_ID` to the database user. Run it with the DAGs paused, then deploy the code |
 | 0.3.82 | `airflow_resources/sql/upgrade_0.3.82.sql`: renames only, no data changes. The 20 framework tables `Compliance<Name>` → `GOVT_RGLTRY_<Name>` (`CMS_ComplianceExceptionsAudit` → `CMS_GOVT_RGLTRY_ExceptionsAudit`), and the column `Cmplnc_Vrsn` → `Rpt_Version` in `GOVT_RGLTRY_DataSetSourceXwalk`, `GOVT_RGLTRY_RequestInTake` and `GOVT_RGLTRY_RequestControl`; it lists the row counts before and after. The rows above name the tables by their new names: on an installation older than 0.3.82, run them against the `Compliance*` names first, then this script. Airflow cutover: (1) pause the DAGs; (2) run the script; (3) in the DAGs folder replace `compliance_framework/` with `govt_rgltry_framework/` and the DAG files `compliance_umcm_*.py` / `osstd_core_cms_compliance_*.py` with `govt_rgltry_umcm_*.py` / `govt_rgltry_cms_universe_*.py` (DAG ids `GOVT_RGLTRY_UMCM_*`, `GOVT_RGLTRY_CMS_UNIVERSE_*`); (4) create each Variable under its new key (`govt_rgltry_umcm_<step>_config_var`, `govt_rgltry_cms_universe_<step>_config_var`) with the old content, `trigger_dags` changed to the new DAG ids, and `snow_assignment_group` set (the code has no default: without it a failed task opens no ServiceNow incident); (5) unpause the new DAGs; (6) delete the old DAGs (their run history stays under the old ids until then) and the old Variables. Tags: the `Compliance` and `Compliance_Batch_Framework` tags are gone (no default tags in the code); each Variable sets its project's tag in `tags` (`Universe`, `UMCM`) and the step's name is still added. Variable keys: the Teradata Connection is read only from `td_conn_var` (no longer from `connection_id` or `gre.connection_id`) and the environment only from `load_env` (no longer from `environment` or `gre.environment`); move any such key to `td_conn_var` / `load_env`. The Connection `compliance_teradata` and the email subjects do not change |
+| 0.3.83 | No database change. `td_conn_var` and `load_env` are required in every Variable, like `meta_db` (no `compliance_teradata` or `DEV` default): a Variable without one fails the task with `'<key>' is required in Airflow Variable '<variable>'`. The command line needs `FRAMEWORK_ENVIRONMENT` ("ENVIRONMENT is required" without it). `wdc_comp_oper_nas_var` is required in the FILE_CHECK, FILE_LOAD and FILE_MOVE Variables (no `comp_oper_creds` default): add `"wdc_comp_oper_nas_var": "comp_oper_creds"` (or your NAS Connection id) to those Variables before deploying. CMS Universe gets the ad-hoc export DAG `GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD_ADHOC` (Variable `govt_rgltry_cms_universe_export_load_adhoc_config_var`, `run_type` `CMS`), like UMCM: copy the DAG file, create the Variable, and release CMS requests from that DAG; the scheduled export DAG is unchanged. `CONTROL_REPORT_FOLDER` and `ERROR_LOG_FOLDER` also take a full path (9.4); a folder name works as before. New standalone DAG FILE_MOVE (`GOVT_RGLTRY_<PROJECT>_FILE_MOVE`, 9.7 and 11.24): copies / moves files by name pattern from a folder to one or more folders; to use it copy the DAG file and create its Variable |
 
 ```sql
 -- 0.3.62: load statuses

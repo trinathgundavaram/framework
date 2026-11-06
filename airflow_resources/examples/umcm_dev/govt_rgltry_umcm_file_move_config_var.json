@@ -1,0 +1,37 @@
+{
+  "wdc_comp_oper_nas_var": "comp_oper_creds",
+  "load_env": "DEV",
+  "snow_assignment_group": "D&AE - EDE Govt Compliance",
+  "tags": [
+    "UMCM"
+  ],
+  "email_recipient": "TRINATH_gundavaram@example.com",
+  "schedule_interval": null,
+  "trigger_dags": [
+    "GOVT_RGLTRY_UMCM_FILE_LOAD"
+  ],
+  "jobs": [
+    {
+      "name": "UMCM_LANDING",
+      "src_folder": "nas://chs_dms/$Env/OSS_Landing/External/UMCM",
+      "patterns": [
+        "UMCM_*.txt"
+      ],
+      "targets": [
+        {
+          "folder": "nas://chs_dms/$Env/OSS_Backup/External/UMCM",
+          "action": "copy",
+          "on_exists": "rename"
+        },
+        {
+          "folder": "nas://chs_dms/$Env/OSS_Audit/External/UMCM",
+          "action": "copy"
+        },
+        {
+          "folder": "nas://chs_dms/$Env/OSS_Inbound/External/UMCM",
+          "action": "move"
+        }
+      ]
+    }
+  ]
+}

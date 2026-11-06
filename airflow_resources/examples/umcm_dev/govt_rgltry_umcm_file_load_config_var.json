@@ -1,5 +1,6 @@
 {
   "td_conn_var": "DEV",
+  "wdc_comp_oper_nas_var": "comp_oper_creds",
   "meta_db": "HSABC_DEV",
   "snow_assignment_group": "D&AE - EDE Govt Compliance",
   "tags": ["UMCM"],

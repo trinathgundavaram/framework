@@ -13,7 +13,7 @@ from typing import Iterable, Iterator, Mapping, Optional, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from govt_rgltry_framework import db
-from govt_rgltry_framework.adapters import basename, dirname
+from govt_rgltry_framework.adapters import basename, dirname, parse_uri
 from govt_rgltry_framework.common import ConfigError, FileRejected, RowCountMismatch, code
 from govt_rgltry_framework.config import CheckOptions, MatchError, trailer_problems
 from govt_rgltry_framework.db import Connection
@@ -963,22 +963,31 @@ def _local(value, tz: str) -> str:
     return "" if value is None else str(value)[:19]
 
 
+def report_folder(setting: str, share: str, folder: str) -> tuple:
+    """Where a report goes: the folder of a full path setting, else that subfolder of the file's own folder."""
+    if db.is_location(setting):
+        return parse_uri(setting)
+    return share, f"{folder}{setting}/"
+
+
 def write_error_log(store, settings, share: str, path: str, rows: list) -> Optional[str]:
-    """Write <folder>/<ERROR_LOG_FOLDER>/<file name without extension>_errors.txt: one (check, line, message, record) per row.
+    """Write <ERROR_LOG_FOLDER>/<file name without extension>_errors.txt: one (check, line, message, record) per row.
+    ERROR_LOG_FOLDER is a full path, or a folder name inside the file's own folder.
 
     Returns where it was written, or None when error logs are off or the file could not be written.
     """
     if not settings.write_error_file:
         return None
     name = basename(path)
-    target = store.free_path(share, f"{dirname(path)}{settings.error_log_folder}/{os.path.splitext(name)[0]}_errors.txt")
+    log_share, log_folder = report_folder(settings.error_log_folder, share, dirname(path))
+    target = store.free_path(log_share, f"{log_folder}{os.path.splitext(name)[0]}_errors.txt")
     lines = [ERROR_LOG_HEADER, *("|".join("" if v is None else str(v) for v in (name, *row)) for row in rows)]
     try:
-        store.put(share, target, ("\n".join(lines) + "\n").encode(settings.file_encoding, "replace"))
+        store.put(log_share, target, ("\n".join(lines) + "\n").encode(settings.file_encoding, "replace"))
     except Exception as e:  # noqa: BLE001
         log.warning("could not write the error log of %s: %s", name, e)
         return None
-    return store.uri(share, target)
+    return store.uri(log_share, target)
 
 
 def business_message(load: dict) -> str:
@@ -1020,36 +1029,48 @@ def file_details(conn, load_ids: list, matcher, tz: str) -> list[dict]:
             continue
         source, name, status, rows_in, rows_loaded, submitted, processed, reason = report_line(conn, load, matcher, tz,
                                                                                                 sources)
-        batch = conn.execute("SELECT Req_Stat FROM GOVT_RGLTRY_RequestControl WHERE Req_ID=%s",
+        batch = conn.execute("SELECT Req_Stat, Project_Cd FROM GOVT_RGLTRY_RequestControl WHERE Req_ID=%s",
                              (load["req_id"],)).fetchone() if load["req_id"] is not None else None
+        project = batch["project_cd"] if batch else None
+        if project is None and load["cfg_id"] is not None:
+            cfg = conn.execute("SELECT Project_Cd FROM GOVT_RGLTRY_SourceFileConfig WHERE Cfg_ID=%s",
+                               (load["cfg_id"],)).fetchone()
+            project = cfg["project_cd"] if cfg else None
         text, _, error_log = str(load["error_txt"] or "").partition("; details in ")
         out.append({"file": name, "status": status, "source": source, "load_id": load_id, "batch": load["btch_id"],
                     "batch_status": batch["req_stat"] if batch else None, "rows_in_file": rows_in,
                     "rows_loaded": rows_loaded, "file_date": submitted, "processed": processed, "reason": reason,
                     "detail": text or None if status != "ACCEPTED" else None, "error_log": error_log or None,
-                    "share": load[LOCATION[0]], "folder": dirname(load[LOCATION[1]])})
+                    "share": load[LOCATION[0]], "folder": dirname(load[LOCATION[1]]),
+                    "project": code(project) if project else None})
     return out
 
 
 def write_reports(store, settings, clock, details: list) -> list[str]:
-    """One control report per inbound folder for the files a run handled; returns where they were written."""
+    """One control report per inbound folder for the files a run handled; returns where they were written.
+
+    CONTROL_REPORT_FOLDER is a folder name inside the inbound folder, or a full path: then the reports of every
+    inbound folder go there, one per inbound folder and project, named ControlReport_<project>_<time>.txt."""
     if not settings.write_control_report or not details:
         return []
     by_folder: dict = {}
     for d in details:
         if str(d["share"]).startswith(QUERY_PREFIX):
             continue
-        by_folder.setdefault((d["share"], d["folder"]), []).append(
+        project = d.get("project") if db.is_location(settings.control_report_folder) else None
+        by_folder.setdefault((d["share"], d["folder"], project), []).append(
             [d["source"], d["file"], d["status"], d["rows_in_file"], d["rows_loaded"], d["file_date"], d["processed"],
              d["reason"]])
     stamp = clock.now().astimezone(ZoneInfo(settings.business_tz)).strftime("%Y%m%d_%H%M%S")
     written = []
-    for (share, folder), lines in by_folder.items():
-        target = store.free_path(share, f"{folder}{settings.control_report_folder}/ControlReport_{stamp}.txt")
+    for (share, folder, project), lines in by_folder.items():
+        rpt_share, rpt_folder = report_folder(settings.control_report_folder, share, folder)
+        name = f"ControlReport_{project}_{stamp}.txt" if project else f"ControlReport_{stamp}.txt"
+        target = store.free_path(rpt_share, f"{rpt_folder}{name}")
         text = "\n".join("|".join("" if v is None else str(v) for v in row) for row in [HEADER, *lines]) + "\n"
         try:
-            store.put(share, target, text.encode(settings.file_encoding, "replace"))
-            written.append(store.uri(share, target))
+            store.put(rpt_share, target, text.encode(settings.file_encoding, "replace"))
+            written.append(store.uri(rpt_share, target))
         except Exception as e:  # noqa: BLE001
             log.warning("could not write the control report %s: %s", target, e)
     return written
