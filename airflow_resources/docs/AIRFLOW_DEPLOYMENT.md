@@ -171,7 +171,7 @@ default is right (the examples carry only what differs: connections, `load_env`,
 | `load_env` (required) | `DEV`, `TEST`, `QA`, `PROD`, ...: shown in the email subjects, and what `$env` in configured database names and paths resolves to (below); no default |
 | `schedule_interval` | Cron expression of the DAG; leave out for a DAG that is only triggered |
 | `schedule_timezone` | Optional; schedules run in Central time (`America/Chicago`, with daylight saving) |
-| `trigger_dags` | DAG ids to start when the step succeeds (a list, or one comma-separated string); the scope (`project`, `table_group`, `table`, `run_type`, `source`) and `as_of` of this run are passed on, so a chain started for one table group stays on it |
+| `trigger_dags` | DAG ids to start when the step succeeds (a list, or one comma-separated string); the scope (`project`, `table_group`, `table`, `run_type`, `source`) and `as_of` given in this run's **trigger** are passed on, so a chain started for one table group stays on it. The Variable's own scope is not passed on: a scheduled run's started DAGs use their own Variables (runbook 9.8) |
 | `email_recipient` | Who gets the DAG's success / failure emails (`success_email`, `fail_email` tasks). Without it the DAG has no email tasks |
 | `snow_assignment_group` | ServiceNow assignment group of the incident opened when a task fails, e.g. `D&AE - EDE Govt Compliance`. No default in the code: without it a failed task logs a warning and opens no incident |
 | `owner`, `tags` | DAG owner (default `oss`) and tags (a list, or one comma-separated string): the project's tag, e.g. `Universe` (CMS Universe), `UMCM`. No default tags; the step's name is always added |
@@ -416,7 +416,9 @@ times) is the current Central time with its offset (e.g. `2026-10-14 22:59:02-05
 ## Scope of a run: project, table group, table, run type
 
 Every step takes the same scope parameters: `project`, then optionally `table_group` **or** `table`, and
-optionally `run_type`. The levels:
+optionally `run_type` (one) and `source` (one or more). They come from the Variable, its `runs` entry, then the
+trigger (the later wins); only a trigger's scope is passed on to the DAGs it starts. Per DAG, what it is started by,
+what it starts and which trigger keys it takes: runbook 9.8. The levels:
 
 | Given | The step works on |
 |---|---|
@@ -425,6 +427,7 @@ optionally `run_type`. The levels:
 | `project` + `table_group` | the project's tables in that group (`GOVT_RGLTRY_Table`) |
 | `project` + `table` | that table |
 | any of the above + `run_type` | only that run type |
+| any of the above + `source` | only those sources' batches, files and pulls |
 
 - `table_group` and `table` need `project`; give one of them, not both.
 - Table groups are optional: `GOVT_RGLTRY_Table` (`Project_Cd`, `Table_Nm`, `Table_Grp_Cd`, `Table_Desc`,
@@ -864,6 +867,11 @@ and runs that table's GRE rules on that batch's rows only, calling the GRE's `ru
   --project <project>` runs the step by hand.
 - An EXPORT_LOAD with a failed batch fails and does not start FILE_RULES; the batches it did export get their rules
   on the next EXPORT_LOAD (they stay `NOT_RUN`).
+- FILE_RULES has no `batch` key: a trigger narrows it with `table`, `run_type`, `source`. A batch whose rules ended is
+  not taken again; new data for it (reload, correction, reopen) runs them again after its re-export, under the same
+  `run_key`. To run them again without new data, set the batch's loads back to `Rules_Stat = 'NOT_RUN'` and trigger
+  FILE_RULES (runbook 11.26).
+- The rules never change `Req_Stat` (`GOVT_RGLTRY_RequestControl`).
 
 
 ## Failure tickets and emails

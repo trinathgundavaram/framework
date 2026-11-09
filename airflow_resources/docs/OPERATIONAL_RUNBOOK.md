@@ -173,7 +173,7 @@ hand.
 - **Never twice at once:** a DAG waits for its own previous run; different DAGs can overlap (batch and table locks
   keep them apart; a busy staging table makes a file or pull `LOAD_INCOMPLETE`, picked up by the next run).
 - **Scope:** `project`, `table_group`, `table`, `run_type`, `source` narrow what a run works on (Variable, `runs`
-  entry or trigger: 9.3, 9.5). `as_of` runs it as if it were another day (a missed day).
+  entry or trigger: 9.3, 9.5; what each DAG takes and passes on: 9.8). `as_of` runs it as if it were another day (a missed day).
 - **Logs:** each step writes its progress (`FILE_LOAD | <file> | load 1 | 4 data row(s) staged …`), every configured
   SQL with its parameters (section 13), and the step report.
 
@@ -334,6 +334,22 @@ two rules runs never write the GRE tables at the same time.
 | A rule could not run, or the GRE failed | `ERROR`, tried again on the next run | `RULES_ENGINE_TECHNICAL_FAILURE` (emailed once) | Fails at the end; the other batches still run |
 
 Options: the scope (`project`, `table_group`, `table`, `run_type`, `source`), `as_of`. Each rule's final SQL is in the task log.
+
+- **Which batches a run takes:** every pending batch of its scope. FILE_RULES has **no `batch` key**: to reach one
+  batch, narrow the scope with `table`, `run_type` and `source` (11.26). The scope is the trigger's when the run was
+  started with one (EXPORT_LOAD passes on the scope of its own trigger), otherwise the FILE_RULES Variable's (9.8).
+- **The rules do not change the batch:** `Req_Stat` (8.11), the close and the export do not depend on them. A batch
+  whose rules failed still closes and is exported; the failure is the `RULES_VALIDATION_FAILED` email and the
+  timeline event.
+- **Not twice:** a batch whose rules ended (`PASSED`, `PASSED_WITH_WARNINGS`, `FAILED`, `SKIPPED`) is not taken again
+  by a later run or a trigger. New data for the batch (reload, late file, correction, reopen, re-pull) gives its new
+  load `NOT_RUN`: after the re-export the rules run again under the same `run_key` and the GRE's results of the batch
+  are refreshed. A re-export without new data does not run them again. To run them again by hand: 11.26.
+- **Several batches, several run types:** one batch at a time, each with its own `run_key`, `extra_filters` and
+  variant; a batch never sees another's rows. A batch in `ERROR` does not stop the others; one waiting for its export
+  is left for the next run.
+- **After a failed EXPORT_LOAD** (a batch could not be exported, e.g. a lock timeout) FILE_RULES is not started; the
+  batches it did export get their rules on the next EXPORT_LOAD (they stay `NOT_RUN`).
 
 ### 2.11 Command line (admin)
 
@@ -864,6 +880,13 @@ VALUES ('CMSUNIV', 'ODAG3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG3_2022', NULL
 | Custom SELECT | `Exp_Sql_Txt` set, no procedure | The framework removes the source's earlier rows of the period, then inserts the SELECT's rows, stamped with the batch and source |
 | Copy | Neither | The framework removes the source's earlier rows of the period, then copies the rows from the source's own core table: columns of the same name, the framework's columns by what fills them (batch, source, version …), the rest by column order (a core table with other names, e.g. an internal source's); a text value going into a typed export column is converted; export columns left over stay empty (`validate-config` lists them and the pairs by order) |
 
+**Procedure calls.** The procedure is called once per batch **and source** (a table with three sources: three
+calls per batch), on every run that exports the batch: an open batch on every EXPORT_LOAD run (2.8). Pass the batch
+and the source in `Exp_Proc_Parm_Txt` (`{btch_id}` or `{data_btch_id}`, and `{src_id}`) and let the procedure work on
+those rows only. A procedure that ignores them (for example a fixed filter `'1'='1'`) repeats its whole work for every
+source of every batch, keeps the export table locked meanwhile (11.25) and may rewrite other batches' rows. When a
+procedure can only work on the whole table, call it once per batch with `Exp_Post_Sql_Txt` instead.
+
 **Pre / post statements.** With `Exp_Pre_Sql_Txt` or `Exp_Post_Sql_Txt`, a batch is exported as one transaction:
 pre, then every source of the batch (in any mode), then post. If any of them fails, all of it is rolled back, every
 source of the batch is reported `FAILED` (`EXPORT_LOAD_FAILED`, emailed) and it is tried again on the next run.
@@ -1030,8 +1053,20 @@ yet, `1` = emailed or not to be emailed). NOTIFY emails every row with `Notified
 
 ### 7.5 GOVT_RGLTRY_Lock – running work
 
-One row per lock held by a running step (a batch row, a staging table, an export table …). A crashed run leaves its
-locks until they expire (`LOCK_TTL_MINUTES`, default 240) or are released (section 11.15).
+One row per lock held by a running step. A run removes its locks when it ends; a run that is killed (execution
+timeout, marked failed, worker lost) cannot, and its locks stay until `Expires_Dtts` (`LOCK_TTL_MINUTES`, default 240,
+raised to the DAG's `execution_timeout_minutes` + 30 when lower). The next run that needs an expired lock replaces
+it by itself. To remove one earlier: 11.15.
+
+| `Lock_Key` | Held by | While | When another run finds it taken |
+|---|---|---|---|
+| `SEQ:<project>\|<table>\|<run type>` | BATCH_CREATION | Creating batch IDs of that table and run type | Waits up to `LOCK_TIMEOUT_SECONDS`, then the request fails (`LockTimeout`) and is tried again next run |
+| `REQ:<Req_ID>` | FILE_LOAD, SOURCE_LOAD, EXPORT_LOAD | Loading / exporting that batch row | Loads and exports wait up to `LOCK_TIMEOUT_SECONDS`, then fail (`LockTimeout`: a load becomes `PROCESS_FAILURE`, an export `EXPORT_LOAD_FAILED`; both tried again next run). BATCH_CLOSE and OVERRIDE_DECISIONS do not wait: the close is postponed (`BATCH_CLOSE_DEFERRED_LOCKED`), the override is left for the next run |
+| `BTCH:STAGE <database>.<table>` | FILE_LOAD, SOURCE_LOAD | Loading into that staging table | Waits briefly, then the file / pull is `LOAD_INCOMPLETE` (`STAGING_TABLE_BUSY`) and picked up next run; held 30 minutes or more: `STAGING_LOCK_STALE` (emailed) |
+| `BTCH:EXPORT <database>.<table>` | EXPORT_LOAD (scheduled and ad hoc) | Exporting a batch into that export table (a procedure call included) | Waits up to `LOCK_TIMEOUT_SECONDS`, then that batch and source fail: `LockTimeout: could not acquire lock BTCH:EXPORT … within 300s`, `EXPORT_LOAD_FAILED` (11.25) |
+| `RULES:<Btch_ID>` | FILE_RULES | Running the rules of that batch | No wait: left for the next run |
+| `OBJ:<hash>` | FILE_LOAD, FILE_CHECK | Handling that file | No wait: the file is skipped this run |
+| `EVT:<Event_ID>`, `INTAKE:<Intake_ID>` | NOTIFY, BATCH_CREATION | Sending that event / handling that request | No wait: left for the other run |
 
 ---
 
@@ -1414,14 +1449,14 @@ the framework fills in everything else. A CMSUNIV DEV Variable (`airflow_resourc
 |---|---|---|
 | `retries` | `1` | `0` or more: how often a task that hit a technical error is tried again (5 minutes later). Problems the step reports (a rejected file) fail at once |
 | `fail_on_problems` | `true` (OVERRIDE_DECISIONS `false`) | `true` / `false`: fail the task when the step reports problems |
-| `execution_timeout_minutes` | BATCH_CREATION, FILE_CHECK 60; FILE_LOAD, SOURCE_LOAD, EXPORT_LOAD 120; OVERRIDE_DECISIONS, BATCH_CLOSE, NOTIFY 30 | Minutes. `LOCK_TTL_MINUTES` is raised to this + 30 when lower |
+| `execution_timeout_minutes` | BATCH_CREATION, FILE_CHECK 60; FILE_LOAD, SOURCE_LOAD, EXPORT_LOAD, FILE_RULES 120; OVERRIDE_DECISIONS, BATCH_CLOSE, NOTIFY 30 | Minutes. `LOCK_TTL_MINUTES` is raised to this + 30 when lower. Set it above the longest run: a task killed at the timeout leaves its locks (7.5) |
 | `dagrun_timeout_minutes` | `480` | Minutes |
 | `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `owner` | `oss` | Airflow owner |
 | `tags` | none | A list: the project's tag (CMS Universe `Universe`, UMCM `UMCM`); the step's name is always added |
 | `snow_assignment_group` | none (set `D&AE - EDE Govt Compliance` in every Variable) | ServiceNow group of the incident opened when a task fails; without it the failed task logs "no snow_assignment_group in the Airflow Variable; no ServiceNow incident" and opens none |
 | `settings` | none | Framework settings that differ from their default (9.4) |
-| `pool` | none | An Airflow pool for the step's task (FILE_RULES: `gre_rules`, 1 slot, created under Admin → Pools) |
+| `pool` | none | An Airflow pool for the step's task (FILE_RULES: `gre_rules`, 1 slot, created under Admin → Pools). The scheduled and the ad-hoc EXPORT_LOAD of a project: one shared pool with 1 slot, so they never export at the same time (11.25) |
 | `wait_for_triggered` | `false` | `true`: the `trigger_dags` tasks wait until the started DAG ends (deferred: no worker slot held; needs the Airflow triggerer) and fail if it fails. EXPORT_LOAD: `true` |
 | `gre` | from the Variable | GRE rules engine settings (FILE_RULES only), all optional: `batch_column` (`Btch_ID`: the batch column of the rules' tables / views), `meta_db` (the GRE tables' database, default `meta_db`), `environment` (`load_env`, for `$env` in rules), `project_name` / `process_name` (the project), `log_level`, `max_parallel_rules` (1), `package_dir` (`<dags>/rules_engine`), `run_params` / `text_params` / `extra_filters` (added to the framework's) |
 
@@ -1466,8 +1501,8 @@ come from the Variable: `NOTIFY_BACKEND = airflow`, `DEFAULT_NOTIFY_EMAILS` = `e
 | `GRE_ENTRYPOINT` | `govt_rgltry_framework.export:run_gre` | The function that runs a batch's rules (the framework's GRE bridge) |
 | `FILE_RULES_MODE` | `GATE` | `GATE` (a failed rule = `FAILED`) or `ANNOTATE` (= `PASSED_WITH_WARNINGS`) |
 | `RELEASE_TIME` | none | `HH:MM`: on the close date, export (or pull) only from that time |
-| `LOCK_TIMEOUT_SECONDS` | `300` | Seconds a step waits for a busy batch |
-| `LOCK_TTL_MINUTES` | `240` | Minutes after which a lock left by a crashed run expires |
+| `LOCK_TIMEOUT_SECONDS` | `300` | Seconds a step waits for a busy batch or export table before that batch fails (`LockTimeout`, 7.5); raise it in the export Variables when an export can take longer (11.25) |
+| `LOCK_TTL_MINUTES` | `240` | Minutes after which a lock left by a crashed run expires (at least `execution_timeout_minutes` + 30); removing one earlier: 11.15 |
 | `HEARTBEAT_STALE_MINUTES` | `30` | Minutes after which `health` lists a load still in progress as stuck |
 | `NOTIFY_BACKEND` | `airflow` (command line: `log`) | `airflow` (email through `smtp_default`) or `log` (write the alert to the log only) |
 | `DEFAULT_NOTIFY_EMAILS` | `email_recipient` | Alert recipients, comma-separated |
@@ -1584,6 +1619,52 @@ says (`already in … (same content)`): a run that stopped half way is simply ru
 fails the run with the list of jobs). `log_level` and `fail_on_problems` may also be given; any other key is logged
 as ignored (set it in the Variable).
 
+### 9.8 Scope of every DAG: Variable, trigger and the DAGs it starts
+
+**Where a run's scope comes from.** In this order, the later winning: the DAG's Variable, the `runs` entry of the
+task (9.6), the trigger's JSON (or the trigger form). The scope keys are `project`, `table_group` (or `table`),
+`run_type` (one run type) and `source`; empty values in a trigger are ignored (the Variable's stay).
+
+**What a DAG passes on.** The DAGs in `trigger_dags` get the **trigger's** `project`, `table_group`, `table`,
+`run_type`, `source` and `as_of` of the run that starts them, never its Variable's or `runs` entry's scope. So:
+
+- a chain started by hand for one table, run type or source stays on it;
+- a scheduled run passes nothing on: each started DAG uses its own Variable's scope. Put the same scope in the next
+  DAG's Variable when it should always stay narrowed (e.g. `run_type` `CMS` in an ad-hoc EXPORT_LOAD does not reach
+  FILE_RULES: FILE_RULES then takes every pending batch of its own scope; batches not exported yet just wait);
+- `batch`, `release`, `hold` and `period` are never passed on.
+
+| DAG | Started by (CMSUNIV examples) | Starts | Trigger keys besides the scope |
+|---|---|---|---|
+| BATCH_CREATION | Its schedule, BATCH_CLOSE | – | `period`, `lookback_days`, `lookback_weeks`, `as_of` |
+| FILE_CHECK | Its schedule | FILE_LOAD (when at least one file passed) | `as_of` |
+| FILE_LOAD | Its schedule, FILE_CHECK, FILE_MOVE | EXPORT_LOAD, OVERRIDE_DECISIONS | `share`, `file`, `folder`, `as_of` |
+| SOURCE_LOAD | Its schedule | EXPORT_LOAD | `batch`, `release`, `hold`, `as_of` |
+| EXPORT_LOAD | Its schedule, FILE_LOAD, SOURCE_LOAD | FILE_RULES (waits for it) | `batch`, `release`, `hold`, `as_of` |
+| EXPORT_LOAD_ADHOC (`run_type` `CMS` in its Variable) | By hand | FILE_RULES (waits for it) | `batch`, `release`, `hold`, `as_of` |
+| FILE_RULES | EXPORT_LOAD, EXPORT_LOAD_ADHOC, by hand | – | `as_of` (no `batch`: 11.26) |
+| OVERRIDE_DECISIONS | FILE_LOAD, its schedule | – | `as_of` |
+| BATCH_CLOSE | Its schedule | BATCH_CREATION, NOTIFY | `hold`, `release`, `as_of` |
+| NOTIFY | BATCH_CLOSE, its schedule | – | `as_of` |
+| FILE_MOVE | Its schedule or by hand | FILE_LOAD (when a file was moved or copied) | `job` only; no scope, nothing passed on |
+
+Every step DAG also takes `settings`, `gre`, `log_level` and `fail_on_problems` from a trigger; anything else is
+ignored with the warning `not taken from the trigger (set them in the Variable): …`.
+
+**Scheduled and ad-hoc runs of one step.** One DAG never runs twice at once (a run that is due waits for the one
+before). Two DAGs of the same step (e.g. EXPORT_LOAD and EXPORT_LOAD_ADHOC) are separate DAGs and can run together;
+they are kept apart only by the batch and table locks (7.5). To keep them from waiting on each other's locks, give
+both the same Airflow pool with 1 slot (11.25).
+
+- **Ad-hoc batches in the scheduled DAG:** a scheduled EXPORT_LOAD exports every run category that is due, ad-hoc
+  batches (`CMS`) from their close date too (2.8). To export `CMS` batches only from the ad-hoc DAG, add
+  `"hold": ["CMS"]` to the scheduled DAG's Variable; they are then exported only when the ad-hoc DAG runs (by hand,
+  or give it a `schedule_interval`).
+- **Several run types in one DAG:** `run_type` takes one value. Use `runs` (one task per entry, 9.6), or leave
+  `run_type` out and `hold` the ones it should not touch.
+- **Some tables less often:** a `runs` entry per group of tables with its own `schedule_interval` (9.6), e.g. a slow
+  table in an evening entry and the others hourly. There is no "all tables except": list the tables or table groups.
+
 ---
 
 ## 10. Set up a new project – step by step
@@ -1659,7 +1740,7 @@ after new data, or with `close-batch`.
 **11.10 Re-pull an internal source.** Trigger SOURCE_LOAD with `{"batch": "<Btch_ID>"}` (replaces the rows; a closed
 batch needs its override).
 
-**11.11 Re-export a batch.** Trigger EXPORT_LOAD with `{"batch": "<Btch_ID>"}`.
+**11.11 Re-export a batch.** Trigger EXPORT_LOAD with `{"batch": "<Btch_ID>"}` (several: comma separated; an ad-hoc `CMS` batch from the ad-hoc DAG). It exports the batch even when held or not due, then starts FILE_RULES, which runs the rules only when the batch has a pending load (11.26).
 
 **11.12 Close a batch by hand.** `close-batch` from the command line (2.11); every open source of the batch, or `--src-id` for
 one. Refused before the close date unless released.
@@ -1675,8 +1756,34 @@ QNXT (10) and SNPCC (11, whose `Src_Nm` is `DatamartSNPMOC`) in SOURCE_LOAD (not
 
 **11.14 An alert email arrived.** Look up the event in 8.15 and the batch in 12.1 / 12.2.
 
-**11.15 A step waits or says "locked".** `locks` from the command line (2.11); if the owner run no longer exists:
-`release-lock --key <Lock_Key>`.
+**11.15 A step waits or says "locked" (`LockTimeout`, `STAGING_TABLE_BUSY`, `STAGING_LOCK_STALE`).** Which lock
+does what: 7.5. A lock is either held by a run that is still working (wait: the next run does the work) or left by a
+run that was killed (it stays until `Expires_Dtts`, then the next run replaces it).
+
+1. Look at the lock (the key is in the message, e.g. `BTCH:EXPORT EXPORT_FEED_DEV_T.SDO_CMSUNIV_ODAG1_2022`):
+   ```sql
+   SELECT Lock_Key, Owner_ID, Acquired_Dtts, Expires_Dtts FROM HSABC_DEV.GOVT_RGLTRY_Lock
+   WHERE Lock_Key = '<Lock_Key>';
+   ```
+   No row: it is free already. Or list them all: `locks` from the command line, or the same query without `WHERE`.
+2. Find its run: `Owner_ID` is a random ID per run, so compare `Acquired_Dtts` with the DAG runs in Airflow (Grid
+   view of the DAGs that hold that kind of lock, 7.5, scheduled and ad hoc). A run that is still `running` owns it:
+   leave it.
+3. Only when no such run is running (killed, timed out, marked failed), remove it, either from the command line on an
+   Airflow worker:
+   ```bash
+   python -m govt_rgltry_framework.cli release-lock --key "<Lock_Key>"
+   ```
+   or, without access to the Airflow box, in Teradata, with the `Owner_ID` from step 1 (if a new run took the lock
+   meanwhile, nothing is deleted):
+   ```sql
+   DELETE FROM HSABC_DEV.GOVT_RGLTRY_Lock WHERE Lock_Key = '<Lock_Key>' AND Owner_ID = '<Owner_ID>';
+   ```
+   Or do nothing: after `Expires_Dtts` the next run replaces the lock by itself.
+4. Run the step again (trigger the DAG, e.g. EXPORT_LOAD with `{"batch": "<Btch_ID>"}`), or wait for its schedule.
+
+Never remove a lock whose run is still working: two runs would then write the same batch or table at once. Locks
+left by killed runs come back when a task runs longer than its `execution_timeout_minutes`: raise it (9.3, 11.25).
 
 **11.16 Change a version.** For every run type of the source: end the crosswalk row (`Effective_End_Dt_Key`) and
 add a new row with the new `Rpt_Version` from the next day. For one run type only: add a row for that run type with
@@ -1786,6 +1893,62 @@ file with the outcome per target. The file contents are never logged.
 With `trigger_dags`, the task `check_files_handled` starts the triggered DAGs when at least one file was moved or
 copied (otherwise it is skipped), and `file_move_result` still fails the DAG run when a file failed.
 
+**11.25 An export takes long, or fails with `LockTimeout … BTCH:EXPORT …`.** An export table is locked while one batch
+and source is exported into it (7.5), a procedure call included; any other export into the same table waits up to
+`LOCK_TIMEOUT_SECONDS` (300) and then fails for that batch (`EXPORT_LOAD_FAILED`, tried again next run). The usual
+reasons: the scheduled and the ad-hoc EXPORT_LOAD run at the same time; one export (often a procedure) takes longer
+than 5 minutes; or a run killed during an export left the lock (11.15). The task log shows each batch's start and
+`exported by procedure …` lines: the time between them is that batch's export.
+
+1. Free a lock left by a killed run (11.15).
+2. Give the scheduled and the ad-hoc EXPORT_LOAD the same pool with 1 slot (create it under Admin → Pools, e.g.
+   `cms_universe_export`), so they queue instead of colliding.
+3. Set `execution_timeout_minutes` above the longest export run, so the task is not killed during a procedure call
+   (its locks then stay until they expire), and `LOCK_TIMEOUT_SECONDS` as a backstop. In both export Variables:
+   ```json
+   "pool": "cms_universe_export",
+   "execution_timeout_minutes": 300,
+   "settings": {"LOCK_TIMEOUT_SECONDS": "3900"}
+   ```
+   (add the setting inside an existing `settings`).
+4. Make the export cheaper: an open batch is exported again on every run (2.8), so a slow procedure runs for every
+   source of every open batch each time. Run the scheduled EXPORT_LOAD less often, or put the slow tables in their own
+   `runs` entry with an evening schedule (9.6, 9.8); triggered exports after FILE_LOAD and SOURCE_LOAD still happen.
+   Let the procedure work on the batch and source only (5.11).
+5. Optionally `"hold": ["CMS"]` in the scheduled EXPORT_LOAD, so `CMS` batches are exported only by the ad-hoc DAG
+   (9.8).
+
+**11.26 Run the rules by hand, or again for a batch that already had them.** FILE_RULES runs every **pending** batch
+of its scope (loads `FILE_LOADED` with `Rules_Stat` `NOT_RUN` or `ERROR`; a table with an export table only after the
+batch's export since its load). It has no `batch` key.
+
+- *Rules of batches that are waiting:* trigger `GOVT_RGLTRY_CMS_UNIVERSE_FILE_RULES` with a scope, e.g.
+  `{"project": "CMSUNIV", "table": "ODAG1", "run_type": "DLY"}` (add `"source"` to narrow further).
+- *Export and rules of one batch:* trigger EXPORT_LOAD with `{"batch": "<Btch_ID>"}` (11.11); it starts FILE_RULES
+  and waits for it.
+- *Again, for a batch whose rules already ran* (`PASSED`, `FAILED`, `SKIPPED`), e.g. after a rule was changed in the
+  GRE: set its loads back to pending, then trigger FILE_RULES with the batch's table and run type:
+  ```sql
+  UPDATE HSABC_DEV.GOVT_RGLTRY_FileLoad SET Rules_Stat = 'NOT_RUN', LastUpdt_Dtts = CURRENT_TIMESTAMP(6), LastUpdt_ID = USER
+  WHERE Btch_ID = '<Btch_ID>' AND Load_Stat = 'FILE_LOADED';
+  ```
+  ```json
+  {"project": "CMSUNIV", "table": "<Table_Nm>", "run_type": "<Run_Ty>"}
+  ```
+  The rules run under the same `run_key` (the batch ID): the GRE's results and exceptions of the batch are
+  refreshed. Other pending batches of the scope run in the same run.
+- *Batches in `ERROR`* are tried again by every run; fix the cause (`RULES_ENGINE_TECHNICAL_FAILURE`, the GRE log and
+  `gre_rule_errors` for the `run_key`) and wait or trigger.
+- *Check the result:*
+  ```sql
+  SELECT f.Btch_ID, f.Src_ID, f.Load_ID, f.Rules_Stat, f.LastUpdt_Dtts FROM HSABC_DEV.GOVT_RGLTRY_FileLoad f
+  WHERE f.Btch_ID = '<Btch_ID>' AND f.Load_Stat = 'FILE_LOADED';
+  SELECT Event_Ty, Event_Dtts, Event_Txt FROM HSABC_DEV.GOVT_RGLTRY_RequestFileDetail
+  WHERE Btch_ID = '<Btch_ID>' AND Event_Ty LIKE 'FILE_RULES%' ORDER BY Event_Dtts DESC;
+  ```
+  With several sources, the newest `FILE_RULES_…` event is the batch's current result (a load from before the last
+  run keeps its earlier `Rules_Stat`).
+
 ---
 
 ## 12. Monitoring queries
@@ -1892,6 +2055,19 @@ INFO - SOURCE_LOAD | 20261020_CMSUNIV_SNPCC1_DLY source 11 | Src_Sql_Txt on SQL_
 | Pull rejected `SOURCE_QUERY_FAILED` "could not connect to …" | Worker cannot reach the source: `[01000] … Can't open lib 'ODBC Driver 18 …'` = that driver is not installed on the worker (list them with `odbcinst -q -d`; set the installed one as `driver` in the Connection's Extra, or leave `driver` out); `[08001]` / `[HYT00]` = server, port, firewall or certificate (`trust_server_certificate`); `[28000]` = login | Fix the worker or the Connection; the next run pulls again |
 | Pull rejected `SOURCE_QUERY_FAILED` "the query on … failed" | The `Src_Sql_Txt` fails on the source (`Invalid object name` = table / database name; the Connection has no database unless its Schema is set) | Run the query on the source with the batch's values; fix `Src_Sql_Txt` |
 | Step "locked" | Another run is working on it, or a crashed run | Wait; else 11.15 |
+| `EXPORT_LOAD_FAILED` `LockTimeout: could not acquire lock BTCH:EXPORT <table> within 300s` | Another export into that export table took longer than `LOCK_TIMEOUT_SECONDS` (the scheduled and ad-hoc EXPORT_LOAD at once, or a slow procedure), or a killed run left the lock | 11.25; a left lock: 11.15. The batch is exported again by the next run |
+| Load `PROCESS_FAILURE` / export failed `LockTimeout: could not acquire lock REQ:<Req_ID> …` | Another run loads or exports that batch row for longer than `LOCK_TIMEOUT_SECONDS`, or a killed run left the lock | Wait for the next run; a left lock: 11.15 |
+| File / pull `LOAD_INCOMPLETE`, `STAGING_TABLE_BUSY` | Another run is loading into the same staging table | Nothing: the next run loads it. `STAGING_LOCK_STALE` (30 minutes or more): 11.15 |
+| `BATCH_CLOSE_DEFERRED_LOCKED` | The batch was being loaded or exported at the close run | Nothing: the next BATCH_CLOSE closes it |
+| FILE_RULES `left for the next run: another run is evaluating it` | Another FILE_RULES run (e.g. `cli run --module FILE_RULES`) is on that batch | Nothing |
+| A task ran past `execution_timeout_minutes` and later runs say "locked" | The killed task could not remove its locks | 11.15; raise `execution_timeout_minutes` (9.3) |
+| Export DAG run starts minutes after it was triggered | It waits for its own previous run, or for a slot in its pool | Expected; see the queued run in Airflow |
+| Export runs for hours | Every open batch is exported on every run; a procedure that ignores the batch and source repeats its work per source | 11.25, 5.11 |
+| Rules not run again after a trigger | The batch's rules already ended; FILE_RULES only takes pending loads | 11.26 |
+| FILE_RULES started by EXPORT_LOAD checks other batches too | A Variable's scope is not passed on, only a trigger's (9.8) | Expected (each batch is checked on its own); or set the scope in the FILE_RULES Variable / trigger the export with the scope |
+| `not taken from the trigger (set them in the Variable): batch` (FILE_RULES) | FILE_RULES has no `batch` key | Narrow with `table`, `run_type`, `source` (11.26) |
+| Rules `FAILED` but the batch closed and was exported | The rules do not hold the close or the export (2.12) | Expected; fix the data (reload) and the rules run again after the re-export |
+| FILE_RULES did not start after EXPORT_LOAD | A batch failed to export, so the DAG failed before its triggers | Fix the export failure; the next EXPORT_LOAD starts FILE_RULES for all exported batches |
 | No alert emails | NOTIFY not scheduled / not triggered, no `email_recipient` in its Variable, no `smtp_default` | Check 12.6 and the NOTIFY Variable |
 | Rules never run | Table has an export and the batch is not exported yet | Normal: rules wait for the export |
 | FILE_CHECK failed but FILE_LOAD started | At least one file passed (`check_passed`); the failed file is in `Error/` (`CHECK_MOVE_FAILED`) with its error log | Expected: the good files load; fix and resend the failed file. `file_check_result` keeps the run failed |
