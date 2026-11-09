@@ -154,6 +154,14 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
 
     header_code, detail_code, _ = opts.record_types or (None, None, None)
     blank, wrong_type, wrong_cols, wrong_chars, wrong_values = _Lines(), _Lines(), _Lines(), _Lines(), _Lines()
+    invalid = _Lines()
+
+    def forbidden(line_no: int, rec: list[str]) -> None:
+        found = [i for i in opts.invalid_chars if any(i in v for v in rec)]
+        if found:
+            shown = ", ".join(repr(i) for i in found)
+            invalid.add(line_no, shown)
+            note("INVALID_CHARACTERS", line_no, f"invalid character(s) {shown}", rec)
 
     def characters(line_no: int, rec: list[str]) -> None:
         text = delim.join(rec)
@@ -238,6 +246,8 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
             counts["content"] += 1
             if opts.charset:
                 characters(reader.line_num, rec)
+            if opts.invalid_chars:
+                forbidden(reader.line_num, rec)
             if counts["content"] == 1 and cfg.has_header:
                 header = (reader.line_num, rec)
                 continue
@@ -281,6 +291,9 @@ def check_content(path: str, name: str, cfg: FileConfig, expected_cols: Optional
     if wrong_chars.count:
         out.append(("CHARACTER_SET", f"{wrong_chars.count} row(s) with a control character or a character that is not in {opts.charset}: "
                                      f"{wrong_chars.text()}"))
+    if invalid.count:
+        out.append(("INVALID_CHARACTERS", f"{invalid.count} line(s) with an invalid character "
+                                          f"({', '.join(opts.invalid_chars)}): {invalid.text()}"))
     if wrong_values.count:
         out.append(("COLUMN_VALUES", f"{wrong_values.count} row(s) with a value the target column cannot hold: "
                                      f"{wrong_values.text()}"))

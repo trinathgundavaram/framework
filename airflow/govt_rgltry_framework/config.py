@@ -810,7 +810,7 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
     cfgs = active_file_configs(conn, settings)
 
     checks = file_checks(conn)
-    from govt_rgltry_framework.load import header_columns
+    from govt_rgltry_framework.load import delimiter_for, header_columns
 
     for c in cfgs:
         try:
@@ -818,6 +818,14 @@ def validate_all(conn: Connection, settings=None, run_date: Optional[date] = Non
         except ConfigError as e:
             add("FILE_CHECK_CONFIG", str(e))
             continue
+        try:
+            delim = delimiter_for(c)
+        except ConfigError:
+            delim = None
+        clash = [i for i in opts.invalid_chars if delim and delim in i]
+        if clash:
+            add("FILE_CHECK_CONFIG", f"file config {c.cfg_id} ({c.project_cd}/{c.table_nm}/{c.src_id}): INVALID_CHARACTERS "
+                                     f"{clash[0]!r} holds the file's delimiter {delim!r}, which never appears inside a value")
         extra = 1 if opts.record_types else 0
         counts = {k: v for k, v in (("COLUMN_COUNT", opts.column_count),
                                     ("TARGET_COLUMNS", len(opts.target_columns) + extra if opts.target_columns else None),
@@ -1174,7 +1182,8 @@ def resolve_scope(conn, project: Optional[str] = None, table_group: Optional[str
 TRAILER_FIELDS = ("RECORD_TYPE", "FILE_NAME", "DATA_ROW_COUNT", "TOTAL_ROW_COUNT", "TIMESTAMP", "SKIP")
 FIELD_CHECKS = ("MIN_LENGTH", "MAX_LENGTH", "MIN_VALUE", "MAX_VALUE", "VALUE_IN", "PATTERN", "DATE_FORMAT")
 LIMIT_CHECKS = ("MIN_RECORD_LENGTH", "MAX_RECORD_LENGTH", "MIN_ROWS", "MAX_ROWS")
-CHECKS = ("RECORD_TYPE", "HEADER_NAMES", "COLUMN_COUNT", "TARGET_COLUMNS", "TRAILER", "CHARACTER_SET", "COLUMN_VALUES",
+CHECKS = ("RECORD_TYPE", "HEADER_NAMES", "COLUMN_COUNT", "TARGET_COLUMNS", "TRAILER", "CHARACTER_SET", "INVALID_CHARACTERS",
+          "COLUMN_VALUES",
           *LIMIT_CHECKS, *FIELD_CHECKS)
 _DATE_TOKENS = (("YYYY", "%Y"), ("MM", "%m"), ("DD", "%d"), ("HH", "%H"), ("MI", "%M"), ("SS", "%S"))
 VALUE_RULES = ("LENGTH", "NUMBER", "REQUIRED")
@@ -1193,6 +1202,7 @@ class CheckOptions:
     target_columns: tuple = ()
     limits: tuple = ()
     field_rules: tuple = ()
+    invalid_chars: tuple = ()
 
     def limit(self, check_cd: str) -> Optional[int]:
         return next((v for c, v in self.limits if c == check_cd), None)
@@ -1289,6 +1299,12 @@ def check_options(cfg, checks) -> CheckOptions:
         except LookupError:
             raise ConfigError(f"{values['CHARACTER_SET'].label}: Check_Val_Txt {charset!r} is not a character set "
                               "(for example latin-1, ascii, cp1252)") from None
+    invalid = ()
+    if "INVALID_CHARACTERS" in values:
+        invalid = tuple(dict.fromkeys(_names(values["INVALID_CHARACTERS"].check_val_txt)))
+        if not invalid:
+            raise ConfigError(f"{values['INVALID_CHARACTERS'].label}: Check_Val_Txt must list the characters, comma "
+                              "separated (for example <,>,~)")
     rules = tuple(r.upper() for r in _names(values["COLUMN_VALUES"].check_val_txt)) if "COLUMN_VALUES" in values else ()
     if rules == ("ALL",):
         rules = VALUE_RULES
@@ -1310,7 +1326,7 @@ def check_options(cfg, checks) -> CheckOptions:
         if len(set(targets)) != len(targets):
             raise ConfigError(f"{values['TARGET_COLUMNS'].label}: Check_Val_Txt names a column twice")
     return CheckOptions(tuple(types) if types else None, fields, header, charset, rules, count, targets, tuple(limits),
-                        tuple(field_rules))
+                        tuple(field_rules), invalid)
 
 
 def data_fields(opts: CheckOptions, names: tuple) -> Optional[int]:

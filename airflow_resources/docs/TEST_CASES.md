@@ -1,6 +1,6 @@
 # Government Regulatory Batch Framework – Test Cases (Airflow / Teradata)
 
-**Version:** framework 0.3.83. **Environment:** CMSUNIV DEV (`HSABC_DEV`, `CMSUNIV_FILELAND_DEV_T`,
+**Version:** framework 0.3.84. **Environment:** CMSUNIV DEV (`HSABC_DEV`, `CMSUNIV_FILELAND_DEV_T`,
 `CMSUNIV_STAGE_DEV_T`, `CMSUNIV_CORE_DEV_T`, `EXPORT_FEED_DEV_T`, NAS `chs_dms/Dev/OSS_Inbound/External/CMSUNIV`).
 Run types `DLY`, `WKLY`, `MNT`, `IN1`, `CMS`. Replace dates, batch IDs and sources with the ones of your run.
 
@@ -45,7 +45,7 @@ Run types `DLY`, `WKLY`, `MNT`, `IN1`, `CMS`. Replace dates, batch IDs and sourc
 
 | # | Item | How to check |
 |---|---|---|
-| P1 | Framework 0.3.83 and `rules_engine` deployed in the DAGs folder; the 11 CMS Universe DAGs (`GOVT_RGLTRY_CMS_UNIVERSE_*`) visible, no import errors | Airflow UI → DAGs; Browse → DAG import errors empty |
+| P1 | Framework 0.3.84 and `rules_engine` deployed in the DAGs folder; the 11 CMS Universe DAGs (`GOVT_RGLTRY_CMS_UNIVERSE_*`) visible, no import errors | Airflow UI → DAGs; Browse → DAG import errors empty |
 | P2 | Metadata tables from `sql/schema.sql` exist in `HSABC_DEV` (20 tables) | Q12 |
 | P3 | CMSUNIV configuration loaded (`examples/cmsuniv_setup.sql`), run types `DLY` / `WKLY` | `SELECT Run_Ty, Sched_Cd, SLA_Days FROM HSABC_DEV.GOVT_RGLTRY_RunType;` |
 | P4 | Staging and core tables created; feed tables `EXPORT_FEED_DEV_T.SDO_CMSUNIV_*` exist with `Btch_ID` and `Src_Data_Key` | `SHOW TABLE` on a few |
@@ -214,6 +214,7 @@ Put the file in the inbound folder, trigger FILE_CHECK. Nothing is loaded. FILE_
 | FC-08 | Still arriving | Copy a file and run within 120 s | File skipped ("still arriving"), checked next run |
 | FC-09 | Keep the chain going | FILE_CHECK Variable `"fail_on_problems": false`; one good + one bad file | Task succeeds; FILE_LOAD still triggered and loads the good file |
 | FC-10 | Case | File name in other case, record types lower case | Passes (nothing is case sensitive) |
+| FC-11 | Invalid characters | `INVALID_CHARACTERS` `<,>,~`; a file with `<` in the header, `>` and `~` in data rows, `<` in the trailer | `FAILED` `INVALID_CHARACTERS`, every offending line listed with the characters found (header and trailer included); error log has one row per line; a file without them passes; FILE_LOAD rejects the same file (`FILE_CONTENT_CHECK_FAILED`) |
 
 ---
 
@@ -496,7 +497,7 @@ test folders. Trigger `GOVT_RGLTRY_CMS_UNIVERSE_FILE_MOVE` and look at the folde
 | CFG | 12 | | | | | |
 | BC | 21 | | | | | |
 | IN | 7 | | | | | |
-| FC | 10 | | | | | |
+| FC | 11 | | | | | |
 | FL | 30 | | | | | |
 | SL | 14 | | | | | |
 | OV | 8 | | | | | |
