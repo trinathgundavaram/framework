@@ -1,0 +1,1722 @@
+# Government Regulatory Framework – Guide
+
+This guide explains what the framework does, how each step works, every table and column, how to set up a project, the Airflow setup, and how to operate and troubleshoot it.
+
+In the SQL examples, replace `HSABC_DEV` with your metadata database, `CMSUNIV` with your project code and `ODAG3` with your table code.
+
+## Contents
+
+1. What the framework does
+2. Main terms
+3. Daily flow
+4. Life of a batch
+5. Common rules for all tables
+6. Steps and their tables
+7. Reference lists
+8. Airflow setup
+9. Set up a new project
+10. How-to procedures
+11. Monitoring queries
+12. Troubleshooting
+
+---
+
+## 1. What the framework does
+
+The framework collects data for Government Regulatory reporting. Data comes from many sources: vendors (FDRs) that send files, and internal systems that are read with a query. It is collected for the tables (datasets) of a project, either on a schedule (daily, weekly, monthly) or on request (ad hoc).
+
+For every table, run type and report period, the framework:
+
+1. Creates a batch.
+2. Waits for each source's data.
+3. Checks the files.
+4. Loads the data into staging and then core.
+5. Copies it to an export table (optional).
+6. Runs data quality rules (optional).
+7. Closes the batch on its close date.
+
+Every action is recorded in a timeline per batch. Problems are recorded as alerts and emailed.
+
+Everything is set up in metadata tables. No code changes are needed for a new project, table, source or run type.
+
+| You want to | Table |
+|---|---|
+| Add a project, its tables and sources | `GOVT_RGLTRY_Project`, `GOVT_RGLTRY_Table`, `GOVT_RGLTRY_SourceSystem` |
+| Say which source sends which table, for which run types, from when | `GOVT_RGLTRY_DataSetSourceXwalk` |
+| Say when batches are created and when they close | `GOVT_RGLTRY_RunType`, `GOVT_RGLTRY_BatchCalendar` |
+| Say which report dates a run type covers | `GOVT_RGLTRY_RunTypePeriod` |
+| Describe a source's file | `GOVT_RGLTRY_SourceFileConfig` |
+| Pull an internal source with a query | `GOVT_RGLTRY_InternalSourceConfig` |
+| Check files | `GOVT_RGLTRY_FileCheckConfig` |
+| Fill derived columns (batch ID, version, load time, row ID) | `GOVT_RGLTRY_TargetColumnConfig` |
+| Copy data to an export table | `GOVT_RGLTRY_ExportConfig` |
+| Run data quality rules | `GOVT_RGLTRY_RuleBinding` |
+| Request an ad-hoc batch | `GOVT_RGLTRY_RequestInTake` |
+| Reuse data, accept late or corrected data, reopen a batch | `GOVT_RGLTRY_BatchOverride` |
+
+---
+
+## 2. Main terms
+
+| Term | Meaning |
+|---|---|
+| Project | A reporting program, e.g. CMS Universes (`Project_Cd`) |
+| Table | A dataset of the project, e.g. ODAG3 (`Table_Nm`). Has staging, core and optionally export tables |
+| Table group | Tables run together, e.g. ODAG1 to ODAG6 |
+| Source | Who provides the data: an FDR sending files, or an internal system read by a query (`Src_ID`) |
+| Run type | How often or why batches are made: DLY, WKLY, MNT, CMS (`Run_Ty`) |
+| Crosswalk | Which source sends which table, for which run types, from when, at which version |
+| Batch | One table + run type + report period + request date. One row per source (`Btch_ID`, `Req_ID`) |
+| Report period | The dates the data is about (`Rpt_Start_Dt_Key` to `Rpt_End_Dt_Key`) |
+| Request date | The day the batch is created for (`Req_Dt_Key`) |
+| Close date | Request date + `SLA_Days` - 1. The batch closes and is exported from this date |
+| Staging / core / export | Landing table of a load / the table's data of record / the copy for downstream use and rules |
+| Carry-forward (REUSE) | Using an earlier batch's data for a batch with no data |
+| Late arrival / correction | Data for a closed batch, accepted with an approved override |
+| Reopen | Opening a closed batch again |
+| Release / hold | Let a batch go before its date / keep a run type back |
+| Timeline | Every event of a batch (`GOVT_RGLTRY_RequestFileDetail`) |
+| Alerts | Problems and approvals, emailed by NOTIFY (`CMS_GOVT_RGLTRY_ExceptionsAudit`) |
+| Step report | The summary each step writes at the end of its Airflow task log |
+
+### Batch ID
+
+Format: `YYYYMMDD_PROJECT_TABLE_RUNTYPE`, for example `20261109_CMSUNIV_ODAG1_MNT`.
+
+- `YYYYMMDD` is the request date.
+- Every source of the table gets the same batch ID. Each source has its own row (`Req_ID`) in `GOVT_RGLTRY_RequestControl`.
+- A second report period for the same table and run type on the same day gets `_2`, then `_3`.
+- If a batch with the same report dates already exists for that day, it is used again.
+- Maximum length is 250 characters.
+
+---
+
+## 3. Daily flow
+
+Each step is an Airflow DAG with its own Variable. When a step succeeds it starts the next steps listed in its Variable (`trigger_dags`).
+
+```
+ BATCH_CREATION (daily, e.g. 06:00)
+        |
+        v
+ FILE_CHECK (optional, e.g. every 15 min)       SOURCE_LOAD (e.g. 06:30)
+        |                                              |
+        v                                              |
+ FILE_LOAD (e.g. hourly) ----> OVERRIDE_DECISIONS      |
+        |                                              |
+        +----------------------+-----------------------+
+                               v
+                 EXPORT_LOAD (triggered, and daily e.g. 20:00)
+                               |
+                               v
+                 FILE_RULES (EXPORT_LOAD waits for it)
+
+ BATCH_CLOSE (nightly, e.g. 22:00) ----> BATCH_CREATION (next day) and NOTIFY
+ NOTIFY (after BATCH_CLOSE, and e.g. hourly)
+```
+
+| # | Step | Runs | Starts |
+|---|---|---|---|
+| 1 | BATCH_CREATION | Start of day, and after BATCH_CLOSE | – |
+| 2 | FILE_CHECK (optional) | When files are expected | FILE_LOAD |
+| 3 | FILE_LOAD | After FILE_CHECK, or on its own | OVERRIDE_DECISIONS, EXPORT_LOAD |
+| 4 | SOURCE_LOAD | After the source systems have loaded their data | EXPORT_LOAD |
+| 5 | OVERRIDE_DECISIONS | After FILE_LOAD, or scheduled | – |
+| 6 | EXPORT_LOAD | After FILE_LOAD / SOURCE_LOAD, and once in the evening | FILE_RULES (waits for it) |
+| 7 | FILE_RULES | Started by EXPORT_LOAD | – |
+| 8 | BATCH_CLOSE | End of day | BATCH_CREATION, NOTIFY |
+| 9 | NOTIFY | After BATCH_CLOSE, and on its own schedule | – |
+
+Order rules:
+
+- Batches must exist before files and pulls arrive (step 1 before steps 2 to 4).
+- Carry-forwards are applied before the close (step 5 before step 8).
+- The evening export runs before the close (step 6 before step 8).
+- Keep FILE_LOAD out of the time between BATCH_CLOSE and BATCH_CREATION, or a file for a closed period is rejected.
+
+### What every step does the same way
+
+**Tasks in a DAG run:**
+- The step's task, one per `runs` entry.
+- A `trigger_<dag id>` task for each DAG in `trigger_dags`.
+- `success_email` / `fail_email`, sent to `email_recipient`.
+
+**Result of a step**
+
+| Exit | Meaning | Task | Next DAGs |
+|---|---|---|---|
+| 0 | Done, nothing to report | Success | Started |
+| 1 | Done, with problems (a rejected file, a failed export) | Fails at once, no retry. ServiceNow incident and failure email | Not started |
+| 2 | Could not run (database down, missing table, bad Variable) | Fails, retried after 5 minutes (`retries`), then incident and email | Not started |
+
+`"fail_on_problems": false` makes exit 1 a success. It is the default for OVERRIDE_DECISIONS.
+
+- **Safe to repeat:** every step can run again at any time and only does what is still left. A batch is never created twice, a file is never loaded twice, and an export replaces its own rows.
+- **Never twice at once:** a DAG waits for its own previous run. Different DAGs can run together; locks keep them apart.
+- **Scope:** `project`, `table_group`, `table`, `run_type` and `source` limit what a run works on. `as_of` runs it as if it were another day.
+- **Logs:** each step logs its progress, every configured SQL with its values, and the step report. File data is never logged.
+
+---
+
+## 4. Life of a batch
+
+```
+                         BATCH_CREATION
+                               |
+                       REQUEST_CREATED
+        +----------------------+------------------------+
+        | file / pull          | empty file, or         | approved REUSE
+        | with rows            | empty pull on/after    |
+        |                      | close date             |
+        v                      v                        v
+ SOURCE_DATA_READY   SOURCE_DATA_READY_NO_DATA   SOURCE_DATA_CARRY_FORWARD
+        |                      |                        |
+        | BATCH_CLOSE          | BATCH_CLOSE            | BATCH_CLOSE
+        v                      v                        v
+ REQUEST_COMPLETE        DATA_NOT_PROVIDED         REQUEST_COMPLETE
+ (NEW_FILE)              (NO_DATA)                 (CARRY_FORWARD)
+
+ REQUEST_CREATED with nothing by the close date --> DATA_NOT_PROVIDED (MISSING)
+                                                    + alert SOURCE_MISSING_AT_CLOSE
+ Closed batch + approved LATE_ARRIVAL / CORRECTION --> file loaded, batch stays closed
+ Closed batch + approved REOPEN --> open again until new data, then closed again
+```
+
+- Close date = `Req_Dt_Key + SLA_Days - 1`. For example, a batch created Sunday 10/18 with `SLA_Days = 6` has a close date of Friday 10/23. BATCH_CLOSE closes it on its first run on or after that date.
+- `REQUEST_COMPLETE` and `DATA_NOT_PROVIDED` are the closed statuses.
+
+---
+
+## 5. Common rules for all tables
+
+| Item | Rule |
+|---|---|
+| Codes | Upper case letters, digits and `_`. Not case sensitive. Max length: project 30, table 63, source 30, run type 20, version 10 |
+| `*` | Means "all". Allowed in `Table_Nm`, `Src_ID`, `Run_Ty`, `Check_Field_Nm` where stated. A specific row wins over a `*` row |
+| `Active_Ind` | `1` = in use, `0` = switched off. Rows are switched off, not deleted |
+| Lists | Comma separated, no spaces. Example: `DLY,WKLY,MNT` |
+| Dates | `DATE '2026-10-20'`. Empty end date (`NULL`) = no end |
+| `$env` | Allowed in database names and NAS paths. Replaced by the environment (DEV, QA, PROD). Not replaced inside SQL text |
+| SQL text columns | One statement only. Placeholders like `{rpt_start}` are passed as values. Write `{rpt_start}`, not `'{rpt_start}'` |
+| Audit columns | `Load_Dtts`, `LoadUser_ID`, `LastUpdt_Dtts`, `LastUpdt_ID` are filled by the database. Leave them out of inserts |
+| Framework tables | `GOVT_RGLTRY_RequestControl`, `GOVT_RGLTRY_FileLoad`, `GOVT_RGLTRY_RequestFileDetail`, `CMS_GOVT_RGLTRY_ExceptionsAudit`, `GOVT_RGLTRY_Lock` are written by the framework only. Do not change them by hand unless a runbook procedure says so |
+
+---
+
+## 6. Steps and their tables
+
+### 6.1 BATCH_CREATION
+
+Creates one row per batch and source in `GOVT_RGLTRY_RequestControl`. Batches come from run type schedules, the batch calendar and ad-hoc requests.
+
+| Where batches come from | When | Report dates |
+|---|---|---|
+| A `SCHEDULED` run type with schedule codes | On its scheduled day, moved by `Sched_Offset_Days`. A missed day is still created within `Sched_Window_Days` | `GOVT_RGLTRY_RunTypePeriod` or crosswalk, counted from the scheduled day |
+| A run type with `Batch_Schedule_Sql_Txt` | When the SQL returns a row | From that row, or the period row |
+| `GOVT_RGLTRY_BatchCalendar` | On the calendar dates | The calendar row's dates |
+| An `ADHOC` run type with a schedule | Same as scheduled, for the sources whose crosswalk row lists it | Same as scheduled |
+| `GOVT_RGLTRY_RequestInTake` | Every day of the request window, one batch per day | The request's dates |
+
+- **Which sources:** every crosswalk row active and effective on the batch's date that lists the run type.
+- **Version:** the crosswalk row's `Rpt_Version`, or the request's.
+- **Options:** `period`, `lookback_days`, `lookback_weeks`, `run_type`, `table` / `table_group`, `as_of`.
+- **Problems (exit 1):** a configuration error (bad period code, failing SQL) or a failed request (`INTAKE_FAILED`). The other batches are still created.
+
+
+| Table | Read / Write | Used for |
+|---|---|---|
+| `GOVT_RGLTRY_Project` | Read | Project must be active |
+| `GOVT_RGLTRY_Table` | Read | Table group, when a run is limited to a group |
+| `GOVT_RGLTRY_SourceSystem` | Read | Source must be active (ad-hoc requests) |
+| `GOVT_RGLTRY_RunType` | Read | Schedule, SLA, category |
+| `GOVT_RGLTRY_RunTypePeriod` | Read | Report dates of each run type |
+| `GOVT_RGLTRY_DataSetSourceXwalk` | Read | Which sources get batches for which run types, version |
+| `GOVT_RGLTRY_BatchCalendar` | Read | Extra batches on fixed dates |
+| `GOVT_RGLTRY_RequestInTake` | Read / Write | Ad-hoc requests. Writes the last day handled |
+| `GOVT_RGLTRY_SourceFileConfig`, `GOVT_RGLTRY_InternalSourceConfig` | Read | An ad-hoc request's source must have a file or query config |
+| `GOVT_RGLTRY_RequestControl` | Write | The batch rows |
+| `GOVT_RGLTRY_RequestFileDetail` | Write | `BATCH_CREATED` event |
+| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `INTAKE_FAILED`, configuration errors |
+| `GOVT_RGLTRY_Lock` | Write | `SEQ:` lock while a batch ID is chosen, `INTAKE:` lock per request |
+
+#### GOVT_RGLTRY_Project
+
+One row per project.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Project_Cd` | Yes | Up to 30 characters | Project code. Part of the batch ID and used in every other table |
+| `Project_Desc` | Yes | Text | Description |
+| `Active_Ind` | Default 1 | `1`, `0` | `0` = no batches are created for the project |
+
+#### GOVT_RGLTRY_Table (optional)
+
+Groups tables so a step can run for a group (for example all ODAG tables).
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Project_Cd` | Yes | A project | |
+| `Table_Nm` | Yes | Up to 63 characters | Table code used in all other tables |
+| `Table_Grp_Cd` | Yes | Up to 30 characters, e.g. `ODAG` | Group name. Used by the `table_group` run option |
+| `Table_Desc` | No | Text | Description |
+| `Active_Ind` | Default 1 | `1`, `0` | `0` = the table is left out of its group |
+
+#### GOVT_RGLTRY_SourceSystem
+
+One row per source. Shared by all projects.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Src_ID` | Yes | Up to 30 characters, e.g. `51` | Source code. Stored on batch rows, file configs and core rows |
+| `Src_Nm` | Yes | Text, e.g. `MedHOK` | Name shown in reports and the control report |
+| `Src_Ty` | Yes | Free text, e.g. `FDR`, `INTERNAL` | Information only |
+| `Active_Ind` | Default 1 | `1`, `0` | `0` = files of this source are rejected and ad-hoc requests fail |
+
+#### GOVT_RGLTRY_RunType
+
+One row per run type. Shared by all projects. Decides when batches are created, when they close, and whether they are scheduled or ad hoc.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Run_Ty` | Yes | Letters and digits, up to 20, e.g. `DLY`, `WKLY`, `MNT`, `CMS` | Run type code. Appears in file names and batch IDs |
+| `Run_Ty_Desc` | Yes | Text | Description |
+| `Run_Category_Cd` | Yes | `SCHEDULED`, `ADHOC` | `SCHEDULED` = batches from the schedule, exported from the close date. `ADHOC` = batches from requests (and from a schedule if set), stay open until released |
+| `SLA_Days` | Yes | Whole number, 1 or more | Close date = request date + `SLA_Days` - 1. `1` = closes the same day |
+| `Carry_Fwd_Ind` | Default 0 | `1`, `0` | `1` = REUSE (carry-forward) overrides are allowed |
+| `Sched_Cd` | No | `DAILY`, `WEEKLY`, `MONTHLY` | When batches are created. Empty = no schedule code |
+| `Sched_Day_Cd` | With `WEEKLY` / `MONTHLY` | `MON`…`SUN`, `1`…`31`, `LAST` | WEEKLY: the weekday. MONTHLY: the day number, `LAST`, or a weekday with `Sched_Week_Cd` |
+| `Sched_Week_Cd` | MONTHLY on a weekday | `1`, `2`, `3`, `4`, `LAST` | Which weekday of the month, e.g. 3rd Tuesday |
+| `Sched_Months_Txt` | No | e.g. `1,4,7,10` | MONTHLY only in these months (quarterly) |
+| `Sched_Window_Days` | Default 1 | 1 or more | A missed day is still created up to this many days later, with the same report dates |
+| `Sched_Offset_Days` | Default 0 | -31 to 31 | Moves the scheduled date. `-2` with 3rd Tuesday = the Sunday before |
+| `Batch_Schedule_Sql_Txt` | No | One `SELECT` | Used when `Sched_Cd` is empty. Returns a row on a due day, no row otherwise |
+| `Active_Ind` | Default 1 | `1`, `0` | `0` = no batches for this run type |
+
+#### GOVT_RGLTRY_RunTypePeriod
+
+Report dates of each scheduled run type, set once per project. A table row wins over the `*` row. A period on the crosswalk row wins over both.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Project_Cd` | Yes | A project | |
+| `Table_Nm` | Default `*` | A table or `*` | `*` = every table of the project |
+| `Run_Ty` | Yes | A run type | |
+| `Rpt_Period_Cd` | This or the SQL | Period code, e.g. `PREV_DAY`, `PREV_CALENDAR_WEEK`, `PREV_CALENDAR_MONTH`, `PREV_CALENDAR_QUARTER`, `RANGE(WEEK,5,1)`, `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])` | Report start and end dates, counted from the scheduled date. `ANNUAL_WINDOW` gives the same dates every year, e.g. `12-01,01-31`; the optional third date is when it moves to the next window |
+| `Rpt_Dt_Sql_Txt` | This or the code | One `SELECT` returning `rpt_start`, `rpt_end` | For dates no code can express. Use the code or the SQL, not both |
+| `Active_Ind` | Default 1 | `1`, `0` | |
+
+Ad-hoc run types need no row. Their dates come from the request.
+
+#### GOVT_RGLTRY_DataSetSourceXwalk (crosswalk)
+
+One row per table and source. Lists the run types the source gets batches for, from which date, and the report version.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Project_Cd`, `Table_Nm`, `Src_ID` | Yes | Existing codes | This source sends this table |
+| `Run_Ty` | Yes | One run type or a list, e.g. `DLY,WKLY,MNT` (up to 200) | Run types the source gets batches for. Only listed run types apply |
+| `Effective_Start_Dt_Key` | Yes | Date | First run date the row applies |
+| `Effective_End_Dt_Key` | No | Date | Last run date. Empty = no end. End a row and add a new one to change the version |
+| `Rpt_Version` | Yes | Up to 10, e.g. `2200` | Report version. Stored on each batch and written to the `VERSION` column |
+| `Rpt_Period_Cd` | No | Period code | Only when this source's dates differ from `GOVT_RGLTRY_RunTypePeriod` |
+| `Rpt_Dt_Sql_Txt` | No | One `SELECT` | Same as above, for dates no code can express |
+| `Include_Ind` | Default 1 | `1`, `0` | On a row for a single run type: `0` stops that run type for the source from the start date |
+| `Active_Ind` | Default 1 | `1`, `0` | |
+
+A row for a single run type that is also in the source's list replaces the list entry for that run type while it is effective (different version, dates, or `Include_Ind = 0`).
+
+Report dates are taken from the first that has them: crosswalk `Rpt_Period_Cd`, crosswalk `Rpt_Dt_Sql_Txt`, table row in `GOVT_RGLTRY_RunTypePeriod`, project `*` row.
+
+#### GOVT_RGLTRY_BatchCalendar (optional)
+
+Batches on fixed dates with fixed report dates. Used for an extra or moved submission.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Project_Cd` | Yes | A project | |
+| `Table_Nm` | Default `*` | A table or `*` | `*` = every table of the run type |
+| `Run_Ty` | Yes | Any active run type | |
+| `Req_Dt_Key` | Yes | Date | The day the batch is created |
+| `Rpt_Start_Dt_Key`, `Rpt_End_Dt_Key` | Yes | Dates | Report dates of the batch |
+| `Active_Ind` | Default 1 | `1`, `0` | |
+
+#### GOVT_RGLTRY_RequestInTake (ad-hoc requests)
+
+One row per request and source. A batch is created on each day of the request window. No crosswalk row is needed.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Intake_ID` | Generated | Number | Request number. Leave out |
+| `Project_Cd`, `Table_Nm` | Yes | | |
+| `Src_ID` | Yes | A source | One request per source |
+| `Run_Ty` | Yes | Any active run type | Usually an ad-hoc one, e.g. `CMS` |
+| `Rpt_Version` | Yes | e.g. `2200` | Report version stored on the batch |
+| `Rpt_Start_Dt_Key`, `Rpt_End_Dt_Key` | Yes | Dates | Report dates of the batch |
+| `Req_Start_Dt_Key`, `Req_End_Dt_Key` | Yes | Dates | Days batches are created. Same date twice = one batch |
+| `Last_Run_Dt_Key` | Framework | Date | Last day the request was handled. Stops the same day being done twice. Leave out |
+
+If an open batch already exists for the same source, run type and report dates, the request uses it.
+
+#### GOVT_RGLTRY_RequestControl (written here, used by all later steps)
+
+One row per batch and source.
+
+| Column | Values | What it is for |
+|---|---|---|
+| `Req_ID` | Generated number | The batch row number. Used by loads, overrides and the timeline |
+| `Project_Cd`, `Table_Nm`, `Src_ID`, `Run_Ty` | Codes | What the batch row is for |
+| `Rpt_Version` | e.g. `2200` | From the crosswalk or the request |
+| `Rpt_Start_Dt_Key`, `Rpt_End_Dt_Key` | Dates | Report period |
+| `Req_Dt_Key` | Date | Request date: the day the batch is for. Close date = `Req_Dt_Key + SLA_Days - 1` |
+| `Btch_ID` | `YYYYMMDD_PROJECT_TABLE_RUNTYPE`, plus `_2`, `_3` for another report period on the same day | Batch ID. Same for every source of the table |
+| `Req_Stat` | `REQUEST_CREATED`, `SOURCE_DATA_READY`, `SOURCE_DATA_READY_NO_DATA`, `SOURCE_DATA_CARRY_FORWARD`, `REQUEST_COMPLETE`, `DATA_NOT_PROVIDED` | Batch status. The last two are closed |
+| `Resolution_Ty` | `NEW_FILE`, `NO_DATA`, `CARRY_FORWARD`, `MISSING` | How the batch got (or did not get) its data |
+| `Reuse_Btch_ID` | A batch ID | For a carry-forward: the batch whose data is reused |
+| `Batch_Close_Ind` | `0`, `1` | `0` = open, `1` = closed |
+
+| `Req_Stat` | Meaning |
+|---|---|
+| `REQUEST_CREATED` | Created, no data yet |
+| `SOURCE_DATA_READY` | Data loaded |
+| `SOURCE_DATA_READY_NO_DATA` | Source sent "no data" (empty file, or empty pull on or after the close date) |
+| `SOURCE_DATA_CARRY_FORWARD` | Earlier data reused |
+| `REQUEST_COMPLETE` | Closed with data |
+| `DATA_NOT_PROVIDED` | Closed without data |
+
+---
+
+### 6.2 FILE_CHECK
+
+Checks the files waiting in the inbound folders. Loads nothing. A failed file can be moved to `Error/` so FILE_LOAD does not pick it up.
+
+- Files changed in the last `NAS_MIN_AGE_SECONDS` (120) are left for the next run, because they may still be arriving.
+- **Each file is checked for:**
+  - its name, against `Src_File_Nm_Tmplt` (exactly one config must match);
+  - the open batch for its run type and dates;
+  - the checks set in `GOVT_RGLTRY_FileCheckConfig`.
+- **Passed:** `FILE_CHECK_PASSED` is recorded, not emailed.
+- **Failed:** `FILE_CHECK_FAILED` is recorded and emailed, an error log is written to `ErrorLog/`, and with `CHECK_MOVE_FAILED = true` the file moves to `Error/`.
+- **One failed file fails the task.** If at least one file passed, FILE_LOAD still starts so the good files load right away.
+- **Settings:** `CHECK_CONTENT`, `CHECK_MOVE_FAILED`, and the file settings.
+
+
+| Table | Read / Write | Used for |
+|---|---|---|
+| `GOVT_RGLTRY_SourceFileConfig` | Read | Folders to look in, file name pattern, delimiter, header and trailer |
+| `GOVT_RGLTRY_FileCheckConfig` | Read | Which checks each file gets |
+| `GOVT_RGLTRY_RequestControl` | Read | The file must have an open batch |
+| `GOVT_RGLTRY_SourceSystem` | Read | The source must exist and be active |
+| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `FILE_CHECK_PASSED` (not emailed), `FILE_CHECK_FAILED` (emailed). One row per file and result |
+| `GOVT_RGLTRY_Lock` | Write | `OBJ:` lock while a file is checked |
+
+#### GOVT_RGLTRY_SourceFileConfig (file sources)
+
+One row per source that sends files, per table.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Cfg_ID` | Generated | Number | Config number. Stored on each load. Leave out |
+| `Project_Cd`, `Table_Nm`, `Src_ID` | Yes | | |
+| `Src_File_Nm_Tmplt` | Yes | Fixed text + tokens (see below) | File name pattern. The name gives the run type and report dates, which find the batch |
+| `File_Vrsn_Cd` | With `{VERSION}` | e.g. `22` | Version as written in the file name |
+| `Delmtr_Cd` | No | One character: `\|`, `,`, `;`, `*`, `\t` (tab) | Field delimiter. Empty = comma |
+| `Src_File_Has_Hdr_Ind` | Yes | `1`, `0` | `1` = first line is a header (not loaded) |
+| `Src_File_Has_Trlr_Ind` | Yes | `1`, `0` | `1` = last line is a trailer (not loaded, checked with `TRAILER`) |
+| `Allow_Zero_Rcd_Ind` | Yes | `0` | Not used. Put `0`. A file with no rows means "no data" |
+| `Src_File_Path` | Yes | `\\server\share\folder`, `//server/share/folder`, `smb://...`, `nas://share/folder` | Inbound NAS folder. `Archive`, `Error`, `ErrorLog`, `ControlReport` are created inside it |
+| `Stg_Schema_Nm`, `Stg_Table_Nm` | Yes | Database and table | Staging table |
+| `Core_Schema_Nm`, `Core_Table_Nm` | Yes | Database and table | Core table |
+| `Active_Ind` | Default 1 | `1`, `0` | `0` = files matching this config are not picked up |
+
+| Token | Meaning |
+|---|---|
+| `{RUNTY}` | Run type. Required, once |
+| `{RPTSTART}`, `{RPTEND}` | Report dates, `YYYYMMDD` unless a format is given. Required, once each |
+| `{RPTMONTH}` | Instead of the two dates: a month (`YYYYMM`), first to last day |
+| `{TS}` | File timestamp, 12 or 14 digits unless a format is given. Optional |
+| `{VERSION}` | Must equal `File_Vrsn_Cd` |
+| `{PROJECT}`, `{TABLE}`, `{SRC}` | The row's project, table and source codes |
+| `{ANY}` | Any text, ignored |
+
+Formats can be given, for example `{RPTSTART:MMDDYYYY}`, `{RPTEND:YYYY-MM-DD}`, `{TS:YYYYMMDD}`. Two tokens need fixed text between them. The pattern ends with the extension (`.txt`, `.csv`).
+
+Example: `CMSAuth_MedHOK_PYMT_C_22_MNT_20260901_20260930_20261019093000.txt` matches `CMSAuth_MedHOK_PYMT_C_{VERSION}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt` with `File_Vrsn_Cd = 22`.
+
+#### GOVT_RGLTRY_FileCheckConfig (file checks)
+
+Rows add up: checks set for the project (`*`), the table and the source all apply. For the same check, the most specific row wins: table + source, then table, then source, then `*`.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Project_Cd` | Yes | A project | |
+| `Table_Nm` | Default `*` | A table or `*` | |
+| `Src_ID` | Default `*` | A source or `*` | |
+| `Check_Cd` | Yes | See list below | The check |
+| `Check_Field_Nm` | Default `*` | A field name or `*` | The field for field checks. `*` for file-level checks |
+| `Check_Val_Txt` | When included | Depends on the check | The check's value |
+| `Include_Ind` | Default 1 | `1`, `0` | `0` = switches an inherited check off for the files this row covers |
+| `Active_Ind` | Default 1 | `1`, `0` | |
+
+| `Check_Cd` | Field | `Check_Val_Txt` example | What it checks |
+|---|---|---|---|
+| `RECORD_TYPE` | `*` | `H,D,T` | First field of the header, data rows and trailer |
+| `HEADER_NAMES` | `*` | `MemberFirstName\|MemberID\|Amount` | Header names in order (case and spaces ignored). Also decides which staging column each field loads to |
+| `COLUMN_COUNT` | `*` | `23` | Number of fields on the header and each data row |
+| `TARGET_COLUMNS` | `*` | `MemberFirstName\|MemberID` | Not a check. The staging column of each field, in file order |
+| `TRAILER` | `*` | `RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP` | Layout of the trailer. Fields: `RECORD_TYPE`, `FILE_NAME`, `DATA_ROW_COUNT`, `TOTAL_ROW_COUNT`, `TIMESTAMP`, `SKIP`. Counts must match the file |
+| `CHARACTER_SET` | `*` | `latin-1` | Only characters of that set, no control characters |
+| `INVALID_CHARACTERS` | `*` | `<,>,~` | None of the listed characters in any line (header, data, trailer). An entry of several characters is looked for as that sequence. A comma or the file's delimiter cannot be listed |
+| `COLUMN_VALUES` | `*` | `ALL` or `LENGTH,NUMBER,REQUIRED` | Each value fits its staging column: length, number, not empty |
+| `MIN_RECORD_LENGTH`, `MAX_RECORD_LENGTH` | `*` | `250` | Characters per data line |
+| `MIN_ROWS`, `MAX_ROWS` | `*` | `100` | Number of data rows in the file |
+| `MIN_LENGTH`, `MAX_LENGTH` | field | `9` | Characters in the field's value |
+| `MIN_VALUE`, `MAX_VALUE` | field | `0` | Field is a number not below / above the value |
+| `VALUE_IN` | field | `Y\|N` | Field is one of the listed values |
+| `PATTERN` | field | `[A-Z][0-9]{8}` | Whole value matches the regular expression |
+| `DATE_FORMAT` | field | `YYYYMMDD`, `MM/DD/YYYY` | Field is a valid date or timestamp in that format |
+
+Always checked, no row needed: file name, batch, source, encoding, blank lines, structure. Field checks skip empty values (use `COLUMN_VALUES` with `REQUIRED` for those).
+
+---
+
+### 6.3 FILE_LOAD
+
+Loads every waiting file: name → batch → checks → staging → core. Then moves the file to `Archive/` or `Error/`.
+
+| What happens to a file | `Load_Stat` | File moves to | Batch |
+|---|---|---|---|
+| Loaded, with rows | `FILE_LOADED` | `Archive/` | `SOURCE_DATA_READY` (`NEW_FILE`) |
+| Loaded, no data rows | `FILE_LOADED` | `Archive/` | `SOURCE_DATA_READY_NO_DATA` (`NO_DATA`) |
+| A newer file for the same batch before the close | Earlier load becomes `RELOADED` | | Data replaced |
+| Name, batch, check or type problem | `REJECTED` (`Reject_Rsn_Cd` says why) | `Error/`, error log in `ErrorLog/` | Unchanged |
+| Batch closed, no approved override | `REJECTED` (`FILE_REJECTED_BATCH_CLOSED`) | `Error/` | Unchanged |
+| Closed batch with approved `LATE_ARRIVAL` / `CORRECTION` | `FILE_LOADED` | `Archive/` | Stays closed, data replaced |
+| Staging table busy | `LOAD_INCOMPLETE` | Stays | Picked up next run |
+| System problem | `PROCESS_FAILURE` | Stays | Tried again |
+
+- A file is identified by its path, size and time. The same name delivered again is a new delivery.
+- The same content loaded for another batch is loaded and reported (`FILE_SAME_CONTENT_OTHER_BATCH`).
+- One control report line per file is written to `ControlReport/`.
+- **Problems (exit 1):** any rejected file. The other files are still loaded.
+- **Options:** the scope, `as_of`. From a trigger also `share`, `folder`, `file`.
+
+
+| Table | Read / Write | Used for |
+|---|---|---|
+| `GOVT_RGLTRY_SourceFileConfig` | Read | File layout, folder, staging and core tables |
+| `GOVT_RGLTRY_FileCheckConfig` | Read | Checks run at load |
+| `GOVT_RGLTRY_TargetColumnConfig` | Read | Columns the framework fills (batch, source, version, load date …) |
+| `GOVT_RGLTRY_SourceSystem` | Read | Source active, source name for the control report |
+| `GOVT_RGLTRY_RequestControl` | Read / Write | Finds the open batch. Sets status and resolution |
+| `GOVT_RGLTRY_BatchOverride` | Read | Approved `LATE_ARRIVAL` / `CORRECTION` lets a file into a closed batch |
+| `GOVT_RGLTRY_FileLoad` | Write | One row per file pickup |
+| `GOVT_RGLTRY_RequestFileDetail` | Write | `FILE_RECEIVED`, `FILE_LOADED`, `FILE_REPLACED_BEFORE_CLOSE`, `LATE_ARRIVAL_LOADED`, `CORRECTION_LOADED` |
+| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | Rejections and load problems |
+| `GOVT_RGLTRY_Lock` | Write | `OBJ:` per file, `REQ:` per batch row, `BTCH:STAGE` per staging table |
+| Staging and core tables | Write | The data |
+
+#### GOVT_RGLTRY_TargetColumnConfig (derived columns)
+
+Columns of the staging and core tables that the framework fills. Every other staging column is a file field, in table order.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Project_Cd` | Yes | A project | |
+| `Table_Nm` | Default `*` | A table or `*` | A table row wins over the `*` row for the same column |
+| `Column_Nm` | Yes | A staging / core column | The column to fill |
+| `Value_Cd` | Yes | See list below | What fills it |
+| `Value_Txt` | For `CONSTANT`, `SQL` | The value, or one `SELECT` returning one value | |
+| `Active_Ind` | Default 1 | `1`, `0` | |
+
+| `Value_Cd` | Fills the column with |
+|---|---|
+| `BATCH_ID` | The batch ID, when the table's batch column is not called `Btch_ID` |
+| `SOURCE_ID` | The source code. Required in every staging, core and export table |
+| `RUN_TYPE` | The run type |
+| `VERSION` | The report version (`Rpt_Version`) |
+| `FILE_NAME` | The file name. For pulls: `PROJECT_TABLE_SOURCE_YYYYMMDDHHMISS` |
+| `LOAD_TIMESTAMP` | Load date and time. Same value on every row of one load |
+| `LOAD_DATE` | Load date |
+| `ROW_SEQUENCE` | Running row number, continuing from the highest in staging and core |
+| `LOAD_ID`, `REQ_ID` | The load number, the batch row number |
+| `PROJECT`, `TABLE` | Project and table codes |
+| `RPT_START`, `RPT_END` | Report dates |
+| `CURRENT_FLAG` | Core only. Always 1 |
+| `END_TIMESTAMP` | Core only. Always empty |
+| `CONSTANT` | `Value_Txt` on every row |
+| `SQL` | The one value returned by the `SELECT` in `Value_Txt` |
+
+`Btch_ID` needs no row. It is always the batch ID.
+
+Staging can hold every column as text. Core can use real types. Values are converted to the core column's type on the way. A value that does not convert, or an empty value for a NOT NULL column, rejects the whole file (`CORE_TYPE_MISMATCH`) and core is not touched.
+
+#### GOVT_RGLTRY_BatchOverride (read here)
+
+FILE_LOAD uses approved `LATE_ARRIVAL` and `CORRECTION` rows to load a file into a closed batch. Full column list under OVERRIDE_DECISIONS.
+
+#### GOVT_RGLTRY_FileLoad (loads and pulls)
+
+One row per file pickup or internal pull.
+
+| Column | Values | What it is for |
+|---|---|---|
+| `Load_ID` | Generated number | The load number |
+| `Cfg_ID` | Number | The file config used (empty for pulls and unmatched files) |
+| `Req_ID`, `Btch_ID` | From `GOVT_RGLTRY_RequestControl` | The batch row the load belongs to |
+| `File_Hash` | 64 characters | Unique key of the pickup |
+| `File_Share` | NAS share, or `QUERY:<connection>` / `QUERY:LOCAL` for pulls | Where the file came from |
+| `File_Path` | Folder and file name; for pulls `PROJECT/TABLE/SOURCE/BATCH` | The file |
+| `File_Version` | Size and modified time of the file | Tells a new delivery of the same name from the same file |
+| `File_Size_Byte` | Number | File size (0 for pulls) |
+| `File_Sha256` | 64 characters | Content hash. Same content in another batch raises `FILE_SAME_CONTENT_OTHER_BATCH` |
+| `Load_Stat` | See list below | Load status |
+| `Rules_Stat` | `NOT_RUN`, `PASSED`, `PASSED_WITH_WARNINGS`, `FAILED`, `SKIPPED`, `ERROR` | Data quality rule result (FILE_RULES) |
+| `Reject_Rsn_Cd` | An audit event code, e.g. `FILE_REJECTED_NO_BATCH`, `CORE_TYPE_MISMATCH`, `STAGING_TABLE_BUSY` | Why it was rejected or delayed |
+| `Stg_Rcd_Cnt` | Number | Rows staged |
+| `Error_Txt` | Text | Technical detail of a failure |
+
+| `Load_Stat` | Meaning |
+|---|---|
+| `RECEIVED`, `STAGING`, `STAGED` | In progress |
+| `FILE_LOADED` | In core. The batch's current data |
+| `RELOADED` | Was loaded, replaced by a newer load or a carry-forward |
+| `REJECTED` | Rejected. File moved to `Error/` |
+| `PROCESS_FAILURE` | System problem. Tried again next run |
+| `NO_DATA_YET` | Pull had no rows before the close date. Tried again |
+| `LOAD_INCOMPLETE` | Staging table busy. Picked up next run |
+
+#### GOVT_RGLTRY_RequestFileDetail (batch timeline)
+
+One row per event of a batch row. Written by every step.
+
+| Column | Values | What it is for |
+|---|---|---|
+| `Detail_ID` | Generated number | |
+| `Req_ID`, `Btch_ID` | From `GOVT_RGLTRY_RequestControl` | The batch row |
+| `Load_ID`, `Ovrd_ID`, `Intake_ID` | Numbers or empty | The load, override or request involved |
+| `Event_Ty` | See list below | What happened |
+| `Actor` | `SYSTEM` or a user | Who did it |
+| `Event_Txt` | Text | Detail |
+| `Event_Dtts` | Timestamp, Central time | When |
+
+| `Event_Ty` | When |
+|---|---|
+| `BATCH_CREATED` | Batch row created |
+| `FILE_RECEIVED` | A file or pull reached the batch |
+| `FILE_LOADED` | Data loaded into core |
+| `LATE_ARRIVAL_LOADED`, `CORRECTION_LOADED` | Data loaded into a closed batch with an override |
+| `FILE_REPLACED_BEFORE_CLOSE` | A new file replaced the batch's data before close |
+| `SOURCE_NO_DATA_YET` | Pull had no rows before the close date |
+| `CARRY_FORWARD_APPLIED`, `CARRY_FORWARD_REMOVED` | Carry-forward applied or ended |
+| `BATCH_RELEASED` | Released early |
+| `BATCH_REOPENED` | Reopened |
+| `EXPORT_LOADED` | Exported |
+| `FILE_RULES_PASSED`, `FILE_RULES_FAILED` | Rules result |
+| `BATCH_CLOSED` | Closed |
+
+#### CMS_GOVT_RGLTRY_ExceptionsAudit (alerts)
+
+One row per problem or approval. Written by every step. Emailed by NOTIFY.
+
+| Column | Values | What it is for |
+|---|---|---|
+| `Event_ID` | Generated number | |
+| `Event_Ty` | Event code, e.g. `FILE_REJECTED_NO_BATCH`, `SOURCE_MISSING_AT_CLOSE` | What happened |
+| `Sevrty` | `ERROR`, `WARNING`, `INFO` | How serious |
+| `Project_Cd`, `Table_Nm`, `Src_ID`, `Run_Ty` | Codes | What it is about |
+| `Req_ID`, `Load_ID`, `Ovrd_ID`, `Intake_ID`, `Btch_ID` | Numbers / batch ID | The batch, load, override or request involved |
+| `File_Ref` | NAS path | The file involved |
+| `Actor` | `SYSTEM` or a user | Who did it |
+| `Event_Txt` | Text | Detail |
+| `Notified_Ind` | `0`, `1` | `0` = not emailed yet. `1` = emailed, or not to be emailed |
+| `Event_Dtts` | Timestamp | When |
+
+---
+
+### 6.4 SOURCE_LOAD
+
+Pulls every open batch whose source has an internal source config, using its query. Rows go to staging, then core.
+
+- Ad-hoc run types are pulled like scheduled ones. Held run types (`hold`) are skipped.
+- The query's column names fill the staging columns of the same name (use `AS`).
+- A column the query returns wins over its `GOVT_RGLTRY_TargetColumnConfig` row, except the batch, source and load columns.
+- **Options:** the scope, `batch`, `release`, `hold`, `as_of`.
+
+
+| Table | Read / Write | Used for |
+|---|---|---|
+| `GOVT_RGLTRY_InternalSourceConfig` | Read | Query, connection, staging and core tables |
+| `GOVT_RGLTRY_TargetColumnConfig` | Read | Derived columns (see FILE_LOAD) |
+| `GOVT_RGLTRY_RequestControl` | Read / Write | Open batches. Sets status and resolution |
+| `GOVT_RGLTRY_FileLoad` | Write | One row per pull |
+| `GOVT_RGLTRY_RequestFileDetail` | Write | `FILE_RECEIVED`, `FILE_LOADED`, `SOURCE_NO_DATA_YET` |
+| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `SOURCE_QUERY_FAILED`, `SOURCE_DATA_REJECTED`, `CORE_TYPE_MISMATCH` |
+| `GOVT_RGLTRY_Lock` | Write | `REQ:` per batch row, `BTCH:STAGE` per staging table |
+| Staging and core tables | Write | The data |
+
+#### GOVT_RGLTRY_InternalSourceConfig (internal sources)
+
+One row per internal source pulled with a query. Such a source has no file config.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Project_Cd`, `Table_Nm`, `Src_ID` | Yes | | |
+| `Src_Db_Ty` | Yes | `TERADATA`, `SQLSERVER` | Where the source data is |
+| `Src_Conn_Cd` | No | Airflow Connection id | Empty = the framework's own Teradata. Otherwise the source server's connection |
+| `Src_Sql_Txt` | Yes | One `SELECT` | The pull. Column names (`AS`) must match staging columns. Placeholders: `{btch_id}`, `{src_id}`, `{run_ty}`, `{version}`, `{project_cd}`, `{table_nm}`, `{req_id}`, `{load_id}`, `{rpt_start}`, `{rpt_end}`, `{load_date}`, `{file_name}`. `{btch_id}` is shared by all sources, so add `{src_id}` to pull one source |
+| `Stg_Schema_Nm`, `Stg_Table_Nm` | Yes | Database and table | Staging table |
+| `Core_Schema_Nm`, `Core_Table_Nm` | Yes | Database and table | Core table |
+| `Active_Ind` | Default 1 | `1`, `0` | |
+
+| Pull result | `Load_Stat` | Batch status |
+|---|---|---|
+| Rows | `FILE_LOADED` | `SOURCE_DATA_READY` |
+| No rows, before close date | `NO_DATA_YET` | Unchanged. Pulled again next run |
+| No rows, on or after close date | `FILE_LOADED` | `SOURCE_DATA_READY_NO_DATA`. Still pulled again until it closes |
+| Query failed | `REJECTED` (`SOURCE_QUERY_FAILED`) | Unchanged |
+| Columns do not fit | `REJECTED` (`SOURCE_DATA_REJECTED` / `CORE_TYPE_MISMATCH`) | Unchanged |
+
+---
+
+### 6.5 OVERRIDE_DECISIONS
+
+Applies approved `REUSE` (carry-forward) and `REOPEN` overrides. Reports expired and invalid ones.
+
+- Applies approved `REUSE` overrides: carries the data of an earlier closed batch forward. The run type must have `Carry_Fwd_Ind = 1`, and the override must be applied before the close.
+- Applies approved `REOPEN` overrides: opens a closed batch again until new data arrives.
+- Expires carry-forwards past `Valid_Thru_Dt_Key`.
+- `LATE_ARRIVAL` and `CORRECTION` are used by FILE_LOAD directly, not by this step.
+- An override that cannot apply is reported (`OVERRIDE_INVALID_DETECTED`, emailed), and the task still succeeds.
+
+
+| Table | Read / Write | Used for |
+|---|---|---|
+| `GOVT_RGLTRY_BatchOverride` | Read / Write | Approved overrides. Writes the reused batch ID when it was left empty |
+| `GOVT_RGLTRY_RequestControl` | Read / Write | Batch to change. Sets carry-forward or reopens |
+| `GOVT_RGLTRY_RunType` | Read | `Carry_Fwd_Ind` must be 1 for `REUSE` |
+| `GOVT_RGLTRY_FileLoad` | Write | Earlier load becomes `RELOADED` when data is carried forward |
+| `GOVT_RGLTRY_RequestFileDetail` | Write | `CARRY_FORWARD_APPLIED`, `CARRY_FORWARD_REMOVED`, `BATCH_REOPENED` |
+| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `OVERRIDE_APPROVED`, `OVERRIDE_INVALID_DETECTED`, `OVERRIDE_EXPIRED`, `BATCH_REOPENED` |
+| `GOVT_RGLTRY_Lock` | Write | `REQ:` per batch row (no wait) |
+
+#### GOVT_RGLTRY_BatchOverride (overrides)
+
+One row per exception, for one source of a batch. Applied only when `Apprvl_Stat = 'APPROVED'` and `Valid_Thru_Dt_Key` is today or later.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Ovrd_ID` | Generated | Number | Override number |
+| `Override_Ty` | Yes | `REUSE`, `LATE_ARRIVAL`, `CORRECTION`, `REOPEN` | See list below |
+| `Req_ID`, `Btch_ID` | Yes | From `GOVT_RGLTRY_RequestControl` | The batch row (one source) |
+| `Reuse_Btch_ID` | REUSE only | A batch ID or empty | Batch whose data is reused. Empty = latest earlier closed batch with data |
+| `Apprvl_Stat` | Default `PENDING_REVIEW` | `PENDING_REVIEW`, `APPROVED`, `REJECTED` | Only `APPROVED` is used |
+| `Valid_Thru_Dt_Key` | Yes to apply | Date | Last day the override can be used |
+| `Rsn_Txt` | Recommended | Text | Reason |
+| `Reviewed_By`, `Reviewed_Dtts` | When approved | Name, timestamp | Approver |
+
+| `Override_Ty` | Used by | What it does |
+|---|---|---|
+| `REUSE` | OVERRIDE_DECISIONS | Open batch takes the data of an earlier closed batch. Apply before the close |
+| `LATE_ARRIVAL` | FILE_LOAD | Closed batch without data accepts a late file |
+| `CORRECTION` | FILE_LOAD | Closed batch with data accepts a corrected file |
+| `REOPEN` | OVERRIDE_DECISIONS | Closed batch opens again until new data arrives |
+
+---
+
+### 6.6 EXPORT_LOAD
+
+Copies each due batch from core into the export table: by plain copy, by a custom SELECT, or by calling a procedure.
+
+- **Which data:** the newest batch of the period whose resolution is `NEW_FILE`, `CARRY_FORWARD` or `NO_DATA`. A later batch of the same dates that closed with nothing (`MISSING`) does not replace it.
+- **Re-exports:** a re-export replaces the batch's own export rows (batch + source).
+- **Carry-forwards:** a carried-forward batch gets a copy of the reused rows under its own batch ID.
+- **Pre / post SQL:** with `Exp_Pre_Sql_Txt` or `Exp_Post_Sql_Txt` set, a batch is exported as one transaction: pre, every source, post. If any part fails, all of it is rolled back and tried again next run.
+- **Success:** timeline event `EXPORT_LOADED`.
+- **Failure:** rolled back and reported (`EXPORT_LOAD_FAILED`, exit 1).
+- **Options:** the scope, `batch`, `release`, `hold`, `as_of`.
+
+
+| Table | Read / Write | Used for |
+|---|---|---|
+| `GOVT_RGLTRY_ExportConfig` | Read | Export table, procedure, SQL |
+| `GOVT_RGLTRY_RequestControl` | Read | Batches due (open, or changed since the last export) |
+| `GOVT_RGLTRY_RequestFileDetail` | Read / Write | Last load and last export of each batch. Writes `EXPORT_LOADED` |
+| `GOVT_RGLTRY_RunType` | Read | Category, for held and released run types |
+| `GOVT_RGLTRY_SourceFileConfig`, `GOVT_RGLTRY_InternalSourceConfig` | Read | Core table of each source |
+| `GOVT_RGLTRY_TargetColumnConfig` | Read | The source column and other derived columns |
+| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `EXPORT_LOAD_FAILED` |
+| `GOVT_RGLTRY_Lock` | Write | `REQ:` per batch row, `BTCH:EXPORT` per export table |
+| Export tables | Write | The exported rows |
+
+#### GOVT_RGLTRY_ExportConfig
+
+One row per project and table.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Project_Cd`, `Table_Nm` | Yes | | |
+| `Exp_Schema_Nm`, `Exp_Table_Nm` | Yes | Database and table | Export table. Needs the core columns, `Btch_ID` and the source column |
+| `Exp_Proc_Nm` | No | `database.procedure` | Procedure that does the export. It must delete and insert the rows of the batch and source itself |
+| `Exp_Proc_Parm_Txt` | No | e.g. `{btch_id}, {data_btch_id}, {src_id}` | Procedure arguments in order. Placeholders, fixed values in quotes, OUT parameter name. Empty = `{btch_id}, {data_btch_id}` |
+| `Exp_Sql_Txt` | No | One `SELECT` | Used when there is no procedure. Its rows are the export rows of the batch and source. Name columns after export columns (`AS`) |
+| `Exp_Pre_Sql_Txt` | No | One statement | Runs once per batch, before its sources are exported |
+| `Exp_Post_Sql_Txt` | No | One statement | Runs once per batch, after all its sources. Use this for a procedure that works on the whole table |
+| `Active_Ind` | Default 1 | `1`, `0` | |
+
+| Mode | When | What writes the rows |
+|---|---|---|
+| Procedure | `Exp_Proc_Nm` set | The procedure. Called once per batch and source |
+| Custom SELECT | `Exp_Sql_Txt` set, no procedure | Framework deletes the source's earlier rows of the period, inserts the SELECT's rows |
+| Copy | Neither set | Framework deletes the source's earlier rows of the period, copies from core |
+
+Placeholders: `{btch_id}` (the batch), `{data_btch_id}` (the batch holding the data, which differs for a carry-forward), `{src_id}`, `{run_ty}`, `{project_cd}`, `{table_nm}`, `{version}`, `{req_dt}`, `{rpt_start}`, `{rpt_end}`, `{exp_schema_nm}`, `{exp_table_nm}`.
+
+When is a batch exported:
+
+- Every open batch, on every run.
+- A closed batch only when it has new data since its last export (late arrival, correction), or when named in the `batch` option.
+- Scheduled run types from the close date. Ad-hoc run types when released, unless held with `hold`.
+
+---
+
+### 6.7 FILE_RULES
+
+Runs the GRE data quality rules on each batch whose loaded data has not had its rules yet. Started by EXPORT_LOAD. Rules never change the batch status, the export or the close.
+
+- **Timing:** EXPORT_LOAD waits for FILE_RULES to finish, so the export tables are not written while the rules read them.
+- **Pool:** FILE_RULES runs in the pool `gre_rules` (1 slot), so two rules runs never write the GRE tables at once.
+- **Order:** one batch at a time. A batch never sees another batch's rows.
+- **Errors:** a batch in `ERROR` does not stop the others. A batch waiting for its export is left for the next run.
+- **No `batch` key:** narrow the run with `table`, `run_type` and `source`.
+- **Not run twice:** a batch whose rules have ended is not taken again. New data for the batch (reload, late file, correction, re-pull) gives the new load `NOT_RUN`, so the rules run again after the re-export.
+- **After a failed EXPORT_LOAD:** FILE_RULES is not started. The batches that were exported get their rules on the next EXPORT_LOAD.
+
+
+| Table | Read / Write | Used for |
+|---|---|---|
+| `GOVT_RGLTRY_FileLoad` | Read / Write | Loads with `Load_Stat = FILE_LOADED` and `Rules_Stat = NOT_RUN` or `ERROR`. Writes `Rules_Stat` |
+| `GOVT_RGLTRY_RequestControl` | Read | Batch details passed to the rules |
+| `GOVT_RGLTRY_RuleBinding` | Read | Which GRE rule groups to run |
+| `GOVT_RGLTRY_ExportConfig` | Read | A table with an export waits for the batch's export |
+| `GOVT_RGLTRY_RequestFileDetail` | Read / Write | Export time of the batch. Writes `FILE_RULES_PASSED` / `FILE_RULES_FAILED` |
+| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `RULES_VALIDATION_FAILED`, `RULES_ENGINE_TECHNICAL_FAILURE` |
+| `GOVT_RGLTRY_Lock` | Write | `RULES:<Btch_ID>` |
+| GRE tables (`gre_results`, `gre_exceptions` …) | Write (by GRE) | Rule results per batch. `run_key` = `Btch_ID` |
+
+#### GOVT_RGLTRY_RuleBinding (optional)
+
+Without a row, the rule group named like the table runs, with the run type as variant. A row names other rule groups. Rows add up.
+
+| Column | Required | Values | What it is for |
+|---|---|---|---|
+| `Project_Cd` | Yes | A project | |
+| `Table_Nm` | Yes | A table or `*` | |
+| `Src_ID` | Yes | `*` | Rules run per batch, for all its sources |
+| `Run_Ty` | Default `*` | A run type or `*` | |
+| `Gre_Rule_Group` | Yes | As defined in GRE | Rule group to run |
+| `Gre_Rule_Variant` | Yes | As defined in GRE, or `*` | Variant. `*` = all |
+| `Active_Ind` | Default 1 | `1`, `0` | |
+
+What is passed to GRE for each batch:
+
+| Item | Value |
+|---|---|
+| `run_key` | The batch ID. A rerun replaces the batch's results |
+| `extra_filters` | `Btch_ID = <batch>`. Only the batch's rows are checked |
+| `text_params` | `btch_id`, `run_ty`, `table_nm`, `project_cd`, report dates, for `{name}` in a rule |
+
+| Result | `Rules_Stat` | Event |
+|---|---|---|
+| All rules passed | `PASSED` (`PASSED_WITH_WARNINGS` in ANNOTATE mode) | `FILE_RULES_PASSED` |
+| A rule failed | `FAILED` | `FILE_RULES_FAILED`, `RULES_VALIDATION_FAILED` (emailed) |
+| No active rules, or no data rows | `SKIPPED` | – |
+| GRE could not run | `ERROR`, tried again next run | `RULES_ENGINE_TECHNICAL_FAILURE` (emailed) |
+
+To run the rules again for a batch, set its loads' `Rules_Stat` back to `NOT_RUN` and trigger FILE_RULES with the batch's table, run type and source.
+
+---
+
+### 6.8 BATCH_CLOSE
+
+Closes every open batch whose close date has come, with or without data.
+
+- Held run types (`hold`), and reopened batches still waiting for data, stay open.
+- An `ADHOC` batch with data stays open until it is released. `"release": "true"` releases the scope's open batches with data and closes them in the same run.
+- A file that arrives after the close needs a `LATE_ARRIVAL` or `REOPEN` override.
+- **Options:** the scope, `hold`, `release`, `as_of`.
+
+
+| Table | Read / Write | Used for |
+|---|---|---|
+| `GOVT_RGLTRY_RequestControl` | Read / Write | Open batches. Sets closed status, resolution, `Batch_Close_Ind = 1` |
+| `GOVT_RGLTRY_RunType` | Read | `SLA_Days` (close date), category (ad-hoc stays open until released) |
+| `GOVT_RGLTRY_RequestFileDetail` | Read / Write | Release and reopen events. Writes `BATCH_CLOSED`, `BATCH_RELEASED` |
+| `GOVT_RGLTRY_BatchOverride` | Read | Reopened batches waiting for data stay open |
+| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `SOURCE_MISSING_AT_CLOSE`, `BATCH_CLOSE_DEFERRED_LOCKED` |
+| `GOVT_RGLTRY_Lock` | Read | A batch being loaded is closed by the next run |
+
+| Batch at close | `Req_Stat` | `Resolution_Ty` | Alert |
+|---|---|---|---|
+| Data loaded | `REQUEST_COMPLETE` | `NEW_FILE` | – |
+| Data carried forward | `REQUEST_COMPLETE` | `CARRY_FORWARD` | – |
+| Source sent "no data" | `DATA_NOT_PROVIDED` | `NO_DATA` | – |
+| Nothing arrived | `DATA_NOT_PROVIDED` | `MISSING` | `SOURCE_MISSING_AT_CLOSE` (emailed) |
+| Being loaded now | Stays open | – | `BATCH_CLOSE_DEFERRED_LOCKED` |
+
+Close date = `Req_Dt_Key + SLA_Days - 1`.
+
+---
+
+### 6.9 NOTIFY
+
+Emails every alert not sent yet, one email per alert, then marks it sent. A failed email is tried again next run.
+
+- One email per alert, to the Variable's `email_recipient`. A failed email stays for the next run.
+- Without `project`, it sends the alerts of every project, and alerts that belong to no project.
+- The DAG success / failure emails do not replace NOTIFY: many alerts (a rejected file, a missing source, a stuck lock) do not fail any DAG.
+
+
+| Table | Read / Write | Used for |
+|---|---|---|
+| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Read / Write | Rows with `Notified_Ind = 0`. Sets `Notified_Ind = 1` after sending |
+| `GOVT_RGLTRY_Lock` | Write | `EVT:<Event_ID>` while an alert is sent |
+
+---
+
+### 6.10 GOVT_RGLTRY_Lock (all steps)
+
+Stops two runs from doing the same work at once. A run removes its locks when it ends. A killed run's lock stays until it expires (default 240 minutes).
+
+| Column | Values | What it is for |
+|---|---|---|
+| `Lock_Key` | See list below | What is locked |
+| `Owner_ID` | Random id | The run holding it |
+| `Acquired_Dtts` | Timestamp | When it was taken |
+| `Expires_Dtts` | Timestamp | When it can be taken over by another run |
+
+| `Lock_Key` | Held by | What happens when it is taken |
+|---|---|---|
+| `SEQ:<project>\|<table>\|<run type>` | BATCH_CREATION | Waits up to 300 seconds, then fails and retries next run |
+| `REQ:<Req_ID>` | FILE_LOAD, SOURCE_LOAD, EXPORT_LOAD | Waits up to 300 seconds, then fails. BATCH_CLOSE and OVERRIDE_DECISIONS skip to next run |
+| `BTCH:STAGE <db>.<table>` | FILE_LOAD, SOURCE_LOAD | File or pull becomes `LOAD_INCOMPLETE`, picked up next run |
+| `BTCH:EXPORT <db>.<table>` | EXPORT_LOAD | Waits up to 300 seconds, then `EXPORT_LOAD_FAILED` |
+| `RULES:<Btch_ID>` | FILE_RULES | Left for next run |
+| `OBJ:<hash>` | FILE_CHECK, FILE_LOAD | File skipped this run |
+| `EVT:<Event_ID>`, `INTAKE:<Intake_ID>` | NOTIFY, BATCH_CREATION | Left for the other run |
+
+---
+
+## 7. Reference lists
+
+### Run categories (`GOVT_RGLTRY_RunType.Run_Category_Cd`)
+
+| Value | Batches created | Internal sources pulled | Exported | Closed |
+|---|---|---|---|---|
+| `SCHEDULED` | By the schedule, the calendar, or a request | From the request date | From the close date (from `RELEASE_TIME` that day, if set), or when released | From the close date |
+| `ADHOC` | By requests, and by a schedule if the run type has one (for the crosswalk rows that list it) | Same as scheduled | Same as scheduled | With data: when released. Without data: from the close date |
+
+### Schedule codes (`GOVT_RGLTRY_RunType`)
+
+| `Sched_Cd` | `Sched_Day_Cd` | `Sched_Week_Cd` | `Sched_Months_Txt` | Due on |
+|---|---|---|---|---|
+| `DAILY` | | | | Every day |
+| `WEEKLY` | `MON` … `SUN` | | | That weekday |
+| `MONTHLY` | `1` … `31` | | optional | That day (a day past month end = last day) |
+| `MONTHLY` | `LAST` | | optional | Last day of the month |
+| `MONTHLY` | `MON` … `SUN` | `1` … `4`, `LAST` | optional | The nth (or last) weekday of the month |
+
+- `Sched_Offset_Days` (-31 to 31) moves the date. Example: `MONTHLY`, `TUE`, `3`, `-2` = the Sunday before the 3rd Tuesday.
+- `Sched_Window_Days` lets a missed batch still be created up to that many days later. One batch per scheduled date, never one per day of the window.
+
+When no code fits, use SQL:
+
+- `Batch_Schedule_Sql_Txt` returns one row on a due day and no row otherwise. Placeholders: `{run_date}`, `{project_cd}`, `{run_ty}`.
+- `Rpt_Dt_Sql_Txt` returns one row with `rpt_start` and `rpt_end`. Placeholders: `{run_date}`, `{project_cd}`, `{run_ty}`, `{table_nm}`, `{src_id}`, and the schedule row's columns.
+
+```sql
+-- due every Monday
+SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE TD_DAY_OF_WEEK(d) = 2
+-- previous day
+SELECT CAST({run_date} AS DATE) - 1 AS rpt_start, CAST({run_date} AS DATE) - 1 AS rpt_end
+```
+
+### Report period codes (`Rpt_Period_Cd`)
+
+Counted from the batch's scheduled date (D).
+
+| Code | Report dates |
+|---|---|
+| `SAME_DAY` | D to D |
+| `PREV_DAY` | D-1 to D-1 |
+| `PREV_N_DAYS(n)` | D-n to D-1 |
+| `PREV_WEEK_SAME_DAY(n)` | D - 7n to D-1 |
+| `PREV_CALENDAR_WEEK` | Monday to Sunday of the week before D |
+| `CURRENT_CALENDAR_MONTH` | First to last day of D's month |
+| `PREV_CALENDAR_MONTH` | First to last day of the month before D |
+| `ROLLING_1_MONTH` | Same day one month before D, to D-1 |
+| `PREV_CALENDAR_QUARTER` | The quarter before D's quarter |
+| `PREV_CALENDAR_YEAR` | 1 Jan to 31 Dec of the year before D |
+| `ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])` | The same dates every year, e.g. `12-01,01-31`. The optional third date is when it moves to the next year's window |
+| `RANGE(unit,back,length)` | `length` units, starting `back` units before D's unit. Units: `DAY`, `WEEK` (Monday to Sunday), `MONTH`, `QUARTER`, `YEAR` |
+| `FIRST_DAYS(unit,back,days)` | The first `days` days of that unit |
+| `LAST_DAYS(unit,back,days)` | The last `days` days of that unit |
+
+Examples for D = Sunday 2026-10-18:
+
+| Code | Report dates | In words |
+|---|---|---|
+| `RANGE(DAY,1,1)` | 10-17 | The day before |
+| `RANGE(DAY,7,7)` | 10-11 to 10-17 | The last 7 days |
+| `RANGE(WEEK,1,1)` | 10-05 to 10-11 | Last week |
+| `RANGE(WEEK,5,1)` | 09-07 to 09-13 | The week 5 weeks back |
+| `RANGE(MONTH,1,1)` | 09-01 to 09-30 | Last month |
+| `RANGE(MONTH,3,3)` | 07-01 to 09-30 | The last 3 full months |
+| `RANGE(QUARTER,1,1)` | 07-01 to 09-30 | Last quarter |
+| `RANGE(YEAR,1,1)` | 2025-01-01 to 2025-12-31 | Last year |
+| `LAST_DAYS(MONTH,1,14)` | 09-17 to 09-30 | Last 14 days of last month |
+| `FIRST_DAYS(MONTH,0,10)` | 10-01 to 10-10 | First 10 days of this month |
+
+For fixed dates every year use `ANNUAL_WINDOW`. For one-off dates use `GOVT_RGLTRY_BatchCalendar`.
+
+### Placeholders in SQL text
+
+Placeholders are passed as values, never pasted into the text.
+
+| Where | Placeholders |
+|---|---|
+| `Src_Sql_Txt`, `Value_Txt` of `SQL` columns | `{btch_id}`, `{src_id}`, `{run_ty}`, `{version}`, `{project_cd}`, `{table_nm}`, `{req_id}`, `{load_id}`, `{rpt_start}`, `{rpt_end}`, `{load_date}`, `{file_name}` |
+| `Batch_Schedule_Sql_Txt` | `{run_date}`, `{project_cd}`, `{run_ty}` |
+| `Rpt_Dt_Sql_Txt` | `{run_date}`, `{project_cd}`, `{run_ty}`, `{table_nm}`, `{src_id}`, the schedule row's columns |
+| `Exp_Proc_Parm_Txt`, `Exp_Sql_Txt` | `{btch_id}`, `{data_btch_id}`, `{reused_btch_ids}`, `{project_cd}`, `{table_nm}`, `{src_id}`, `{run_ty}`, `{version}`, `{req_id}`, `{req_dt}`, `{rpt_start}`, `{rpt_end}` |
+| `Exp_Pre_Sql_Txt`, `Exp_Post_Sql_Txt` | `{btch_id}`, `{project_cd}`, `{table_nm}`, `{run_ty}`, `{version}`, `{req_dt}`, `{rpt_start}`, `{rpt_end}`, `{exp_schema_nm}`, `{exp_table_nm}` |
+
+`{btch_id}` is shared by every source of the batch. Add `{src_id}`, or use `{req_id}`, when a lookup is per source.
+
+### Export procedure parameters (`Exp_Proc_Parm_Txt`)
+
+Besides placeholders, the list can contain:
+
+| Item | Example | Passed as |
+|---|---|---|
+| Fixed value, in quotes (a quote inside is doubled) | `'EXPORT_FEED_$ENV_T'` | The text between the quotes. `$ENV` is replaced by the environment (`EXPORT_FEED_DEV_T` in DEV, `EXPORT_FEED_T` where the environment is empty) |
+| OUT parameter name, without quotes or braces | `MSG` | Written into the `CALL`. Its value goes to the task log and the step report |
+
+```sql
+UPDATE HSABC_DEV.GOVT_RGLTRY_ExportConfig
+SET Exp_Proc_Nm = 'HSPROCS_$ENV.sp_EXPORT_CMSUNIV',
+    Exp_Proc_Parm_Txt = '{btch_id}, {data_btch_id}, {src_id}, ''EXPORT_FEED_$ENV_T'', MSG'
+WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'ODAG3';
+```
+
+### Override types (`GOVT_RGLTRY_BatchOverride.Override_Ty`)
+
+| Type | For | Effect | Applied by |
+|---|---|---|---|
+| `REUSE` | An open batch without data. Run type has `Carry_Fwd_Ind = 1` | Carries the data of an earlier closed batch (same table, source, run type) forward. Closes as `REQUEST_COMPLETE` / `CARRY_FORWARD`. Apply before the close run | OVERRIDE_DECISIONS |
+| `LATE_ARRIVAL` | A closed batch without data | A late file is accepted. The batch stays closed and becomes `REQUEST_COMPLETE` | FILE_LOAD |
+| `CORRECTION` | A closed batch with data | A corrected file replaces the data. The batch stays closed | FILE_LOAD |
+| `REOPEN` | Any closed batch | Opens it again. It closes again after new data arrives, or with `close-batch`. Applied once per row | OVERRIDE_DECISIONS |
+
+### Alert events (`CMS_GOVT_RGLTRY_ExceptionsAudit.Event_Ty`)
+
+| Event | Severity | Emailed | Meaning |
+|---|---|---|---|
+| `FILE_REJECTED_UNPARSEABLE` | ERROR | Yes | File name does not match the template |
+| `FILE_REJECTED_AMBIGUOUS_TEMPLATE` | ERROR | Yes | File name fits more than one file config |
+| `FILE_REJECTED_INVALID_TOKEN` | ERROR | Yes | Invalid date or version in the name |
+| `FILE_REJECTED_NO_BATCH` | ERROR | Yes | No batch for that run type and period |
+| `FILE_REJECTED_BATCH_CLOSED` | ERROR | Yes | Batch closed and no valid override |
+| `FILE_TYPE_NOT_SUPPORTED` | ERROR | Yes | File type not supported |
+| `FILE_PARSE_ERROR`, `FILE_COLUMN_COUNT_MISMATCH`, `FILE_TRAILER_COUNT_MISMATCH` | ERROR | Yes | File content problems |
+| `FILE_CONTENT_CHECK_FAILED` | ERROR | Yes | Checks failed at load |
+| `FILE_CHECK_FAILED` | WARNING | Yes | FILE_CHECK found problems |
+| `FILE_CHECK_PASSED` | INFO | No | FILE_CHECK passed |
+| `FILE_SAME_CONTENT_OTHER_BATCH` | WARNING | Yes | Same content already loaded for another batch |
+| `FILE_MOVE_FAILED` | WARNING | Yes | File could not be moved to Archive / Error. Later runs only retry the move |
+| `STAGING_LOCK_STALE` | WARNING | Yes | A staging table has been locked for 30 minutes or more |
+| `FILE_TECHNICAL_FAILURE` | ERROR | Yes | System problem loading a file |
+| `CORE_LOAD_ROWCOUNT_MISMATCH` | ERROR | Yes | Core rows differ from staged rows |
+| `SOURCE_QUERY_FAILED`, `SOURCE_DATA_REJECTED` | ERROR | Yes | Internal source query failed / data does not fit |
+| `CORE_TYPE_MISMATCH` | ERROR | Yes | A value does not convert to its core column's type |
+| `SOURCE_MISSING_AT_CLOSE` | WARNING | Yes | No data by the close date |
+| `EXPORT_LOAD_FAILED` | ERROR | Yes | Export of a batch failed (rolled back) |
+| `RULES_VALIDATION_FAILED` | ERROR | Yes | A data quality rule failed |
+| `RULES_ENGINE_TECHNICAL_FAILURE` | ERROR | Yes | Rules engine could not run |
+| `INTAKE_FAILED` | ERROR | Yes | Ad-hoc request could not create its batches |
+| `OVERRIDE_APPROVED` | WARNING | Yes | A carry-forward was applied |
+| `OVERRIDE_INVALID_DETECTED` | ERROR | Yes | An override cannot be applied (reason in the text) |
+| `OVERRIDE_EXPIRED` | WARNING | Yes | A carry-forward ran out |
+| `BATCH_REOPENED` | WARNING | Yes | A batch was reopened |
+| `BATCH_CLOSE_BLOCKED` | WARNING | No | A manual close was refused |
+| `BATCH_CLOSE_DEFERRED_LOCKED` | INFO | No | Close postponed, batch busy |
+| `CONFIG_VALIDATION_FAILED` | ERROR | Yes | Configuration problem |
+
+---
+
+## 8. Airflow setup
+
+### Connections
+
+| Connection | Fields | Used by |
+|---|---|---|
+| Teradata (id in `td_conn_var`) | host, login, password. Extra `{"logmech": "LDAP"}` | Every step |
+| NAS (id in `wdc_comp_oper_nas_var`) | host, login, password, port 445 | FILE_CHECK, FILE_LOAD, FILE_MOVE |
+| SQL Server source (id = `Src_Conn_Cd`) | host or `server\instance`, port, schema = database, login, password. Extra `{"driver": "ODBC Driver 17 for SQL Server", "encrypt": "yes", "trust_server_certificate": "yes"}`. `driver` is optional | SOURCE_LOAD |
+| `smtp_default` | Airflow SMTP connection | DAG emails, NOTIFY |
+
+### DAGs
+
+One DAG file per step. Another project copies the files with its own DAG ids and Variable names.
+
+| Step | DAG id | Variable |
+|---|---|---|
+| BATCH_CREATION | `GOVT_RGLTRY_CMS_UNIVERSE_BATCH_CREATION` | `govt_rgltry_cms_universe_batch_creation_config_var` |
+| FILE_CHECK | `GOVT_RGLTRY_CMS_UNIVERSE_FILE_CHECK` | `govt_rgltry_cms_universe_file_check_config_var` |
+| FILE_LOAD | `GOVT_RGLTRY_CMS_UNIVERSE_FILE_LOAD` | `govt_rgltry_cms_universe_file_load_config_var` |
+| SOURCE_LOAD | `GOVT_RGLTRY_CMS_UNIVERSE_SOURCE_LOAD` | `govt_rgltry_cms_universe_source_load_config_var` |
+| EXPORT_LOAD | `GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD` | `govt_rgltry_cms_universe_export_load_config_var` |
+| EXPORT_LOAD ad hoc (`run_type` `CMS`) | `GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD_ADHOC` | `govt_rgltry_cms_universe_export_load_adhoc_config_var` |
+| OVERRIDE_DECISIONS | `GOVT_RGLTRY_CMS_UNIVERSE_OVERRIDE_DECISIONS` | `govt_rgltry_cms_universe_override_decisions_config_var` |
+| BATCH_CLOSE | `GOVT_RGLTRY_CMS_UNIVERSE_BATCH_CLOSE` | `govt_rgltry_cms_universe_batch_close_config_var` |
+| NOTIFY | `GOVT_RGLTRY_CMS_UNIVERSE_NOTIFY` | `govt_rgltry_cms_universe_notify_config_var` |
+| FILE_RULES | `GOVT_RGLTRY_CMS_UNIVERSE_FILE_RULES` | `govt_rgltry_cms_universe_file_rules_config_var` |
+| FILE_MOVE | `GOVT_RGLTRY_CMS_UNIVERSE_FILE_MOVE` | `govt_rgltry_cms_universe_file_move_config_var` |
+
+### Variable keys
+
+Each DAG has one Variable (a JSON object). Put in only what differs from the default.
+
+```json
+{"td_conn_var": "DEV", "meta_db": "HSABC_DEV", "load_env": "DEV",
+ "email_recipient": "team@example.com", "project": "CMSUNIV",
+ "snow_assignment_group": "D&AE - EDE Govt Compliance", "tags": ["Universe"],
+ "trigger_dags": ["GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD", "GOVT_RGLTRY_CMS_UNIVERSE_OVERRIDE_DECISIONS"]}
+```
+
+**Connection and environment**
+
+| Key | Required | Values |
+|---|---|---|
+| `meta_db` | Yes | Metadata database, e.g. `HSABC_DEV` |
+| `td_conn_var` | Yes | Airflow Connection id of Teradata |
+| `wdc_comp_oper_nas_var` | Yes for FILE_CHECK, FILE_LOAD, FILE_MOVE | Airflow Connection id of the NAS |
+| `load_env` | Yes | `DEV`, `TEST`, `QA`, `UAT`, `PROD`. The value of `$env` and the email subjects |
+| `email_recipient` | No | One address, a list, or comma separated. Gets the DAG's success / failure emails and, in NOTIFY, the alerts |
+
+**What the run works on** (also from a trigger)
+
+| Key | Steps | Default | Values |
+|---|---|---|---|
+| `project` | All | Every project | A `Project_Cd` |
+| `table_group` | All | All | One or more `Table_Grp_Cd`: `"ODAG"`, `"ODAG,FA"` or `["ODAG","FA"]` |
+| `table` | All | All | One or more `Table_Nm`. Give table groups or tables, not both |
+| `run_type` | All | All | One `Run_Ty` |
+| `source` | All | All | One or more `Src_ID` or `Src_Nm`: `"10,11"` or `["10","QNXT"]` |
+| `period` | BATCH_CREATION | From the schedule | A period code: create batches with those dates now |
+| `lookback_days`, `lookback_weeks` | BATCH_CREATION | None | Create missed batches of the last n days / weeks |
+| `batch` | SOURCE_LOAD, EXPORT_LOAD | All due | One or more `Btch_ID`, comma separated |
+| `release` | SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE | `false` | `true` = release the scope's batches now |
+| `hold` | SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE | None | Run types to leave alone, e.g. `["WKLY","MNT"]` |
+| `as_of` | All | Now | `2026-10-18` or `2026-10-18T06:00`: run as if it were then (Central time) |
+| `share`, `folder`, `file` | FILE_LOAD (trigger) | All files | Load one folder or file |
+
+**Schedule and chaining**
+
+| Key | Default | Values |
+|---|---|---|
+| `schedule_interval` | None (runs only when triggered) | Cron, e.g. `0 6 * * *` (06:00 daily), `*/15 * * * *` (every 15 minutes) |
+| `schedule_timezone` | `America/Chicago` | Time zone name |
+| `trigger_dags` | None | DAG ids started after the step succeeds |
+| `runs` | None | A list of scopes, one task each. With `name` and `schedule_interval` per entry they run at different times |
+| `wait_for_triggered` | `false` | `true` = wait for the started DAGs to finish and fail if they fail. EXPORT_LOAD: `true` |
+
+**Task behaviour**
+
+| Key | Default | Values |
+|---|---|---|
+| `retries` | `1` | Times a task with a technical error is retried (5 minutes later) |
+| `fail_on_problems` | `true` (OVERRIDE_DECISIONS `false`) | `false` = the task succeeds even when the step reports problems |
+| `execution_timeout_minutes` | 60 (BATCH_CREATION, FILE_CHECK), 120 (FILE_LOAD, SOURCE_LOAD, EXPORT_LOAD, FILE_RULES), 30 (others) | Set above the longest run. A task killed at the timeout leaves its locks |
+| `dagrun_timeout_minutes` | `480` | Minutes |
+| `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `owner` | `oss` | Airflow owner |
+| `tags` | None | The project's tag, e.g. `["Universe"]`. The step name is added |
+| `snow_assignment_group` | None | ServiceNow group for incidents. Without it no incident is opened |
+| `pool` | None | Airflow pool for the step task. FILE_RULES: `gre_rules` (1 slot). Both EXPORT_LOAD DAGs of a project: one shared pool with 1 slot |
+| `settings` | None | Framework settings that differ from the default (below) |
+| `gre` | None | FILE_RULES only: `batch_column` (default `Btch_ID`), `meta_db`, `environment`, `project_name`, `process_name`, `log_level`, `max_parallel_rules` (1), `package_dir`, `run_params`, `text_params`, `extra_filters` |
+
+The DAG success / failure emails tell whether a run worked. NOTIFY emails the business alerts (a rejected file, a missing source, a failed export). Many alerts do not fail any DAG, so schedule NOTIFY on its own as well (for example hourly).
+
+### Framework settings (`"settings": {...}`)
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `BUSINESS_TZ` | `America/Chicago` | Time zone of the business day |
+| `FILE_STORE` | `nas` | `nas` or `local` (tests) |
+| `ARCHIVE_FOLDER` | `Archive` | Subfolder for loaded files |
+| `ERROR_FOLDER` | `Error` | Subfolder for rejected files |
+| `ERROR_LOG_FOLDER` | `ErrorLog` | Error logs of rejected files. A folder name (subfolder of the file's folder) or a full path `nas://share/path` |
+| `CONTROL_REPORT_FOLDER` | `ControlReport` | Control reports of FILE_LOAD. A folder name or a full path |
+| `ARCHIVE_BY_YEAR` | `false` | `true` = archive into `Archive/<year>/` |
+| `NAS_MIN_AGE_SECONDS` | `120` | A file changed more recently is left for the next run (still arriving) |
+| `SUPPORTED_FILE_TYPES` | `.txt,.csv` | Other file types are rejected |
+| `FILE_ENCODING` | `utf-8` | `utf-8`, `latin-1`, `cp1252` … |
+| `QUOTE_CHAR` | `"` | One character, or empty for none |
+| `EMPTY_AS_NULL` | `true` | `true` = an empty field is NULL |
+| `CHECK_CONTENT` | `true` | FILE_CHECK reads the content. `false` = name and batch only |
+| `CHECK_MOVE_FAILED` | `false` | `true` = FILE_CHECK moves a failed file to `Error/` |
+| `CHECK_ON_LOAD` | `false` | `true` = FILE_LOAD runs the content checks before loading |
+| `WRITE_ERROR_FILE` | `true` | Write an error log for a rejected file |
+| `WRITE_CONTROL_REPORT` | `true` | Write the control report of each FILE_LOAD run |
+| `LOAD_ENGINE` | `BATCH` | `BATCH` (batched inserts), `FASTLOAD`, or `AUTO` (FastLoad from `FASTLOAD_MIN_BYTES`) |
+| `FASTLOAD_MIN_BYTES` | `100000000` | File size from which `AUTO` uses FastLoad |
+| `INSERT_BATCH_ROWS`, `INSERT_BATCH_BYTES` | `2000`, `500000` | Rows / bytes per insert batch |
+| `RULE_ENGINE` | `gre` | `gre` or `none` (no rules) |
+| `FILE_RULES_MODE` | `GATE` | `GATE` = a failed rule gives `FAILED`. `ANNOTATE` = `PASSED_WITH_WARNINGS` |
+| `RELEASE_TIME` | None | `HH:MM`: on the close date, export or pull only from that time |
+| `LOCK_TIMEOUT_SECONDS` | `300` | Seconds a step waits for a busy batch or export table before that batch fails |
+| `LOCK_TTL_MINUTES` | `240` | Minutes after which a lock left by a killed run expires (at least `execution_timeout_minutes` + 30) |
+| `HEARTBEAT_STALE_MINUTES` | `30` | Minutes after which `health` lists a load in progress as stuck |
+| `NOTIFY_BACKEND` | `airflow` | `airflow` (email through `smtp_default`) or `log` |
+| `DEFAULT_NOTIFY_EMAILS` | `email_recipient` | Alert recipients |
+| `NOTIFY_FROM_EMAIL` | First `email_recipient` | Sender of the alerts |
+| `ENV_VALUE` | From `load_env` | Value of `$env` when it should differ from `load_env`. Empty in UAT / PROD, where the extra underscore is dropped (`EXPORT_FEED_$ENV_T` becomes `EXPORT_FEED_T`) |
+
+### Triggering a DAG by hand
+
+Trigger keys override the Variable for that run. The database, the connections and the settings `RULE_ENGINE`, `GRE_ENTRYPOINT`, `FILE_STORE`, `LOCAL_STORE_ROOT`, `METADATA_SCHEMA`, `ENVIRONMENT`, `ENV_VALUE` cannot be changed from a trigger.
+
+| Key | Steps | Meaning |
+|---|---|---|
+| `project`, `table_group`, `table`, `run_type`, `source` | All | Scope |
+| `batch` | SOURCE_LOAD, EXPORT_LOAD | One or more `Btch_ID` |
+| `release` | SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE | `true` = release now |
+| `hold` | SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE | Run types to hold for this run |
+| `period`, `lookback_days`, `lookback_weeks` | BATCH_CREATION | Create batches for a period now |
+| `as_of` | All | Run as if it were that date |
+| `run` | DAGs with `runs` | Which `runs` entries to use, e.g. `"MNT"` |
+| `settings`, `gre`, `log_level`, `fail_on_problems` | All | |
+
+```json
+{"project": "CMSUNIV", "run_type": "CMS", "batch": "20261019_CMSUNIV_ODAG3_CMS", "release": "true"}
+```
+
+### Scope of a run and what is passed on
+
+- **Where the scope comes from**, later wins: the DAG's Variable, then the `runs` entry, then the trigger. Empty values in a trigger are ignored.
+- **What a DAG passes on** to the DAGs it starts: only the trigger's `project`, `table_group`, `table`, `run_type`, `source` and `as_of`. Never the Variable's scope, and never `batch`, `release`, `hold` or `period`.
+  - A chain started by hand for one table, run type or source stays on it.
+  - A scheduled run passes nothing on. Each started DAG uses its own Variable's scope. Put the same scope in the next DAG's Variable when it must always stay narrowed.
+- **Two DAGs of the same step** (EXPORT_LOAD and EXPORT_LOAD_ADHOC) can run at the same time. Give both the same pool with 1 slot so they never collide.
+- **Ad-hoc batches in the scheduled export:** the scheduled EXPORT_LOAD also exports `CMS` batches from their close date. To export them only from the ad-hoc DAG, add `"hold": ["CMS"]` to the scheduled DAG's Variable.
+- **Several run types in one DAG:** `run_type` takes one value. Use `runs` (one task per entry), or leave `run_type` out and `hold` the ones to skip.
+
+| DAG | Started by | Starts | Trigger keys besides the scope |
+|---|---|---|---|
+| BATCH_CREATION | Schedule, BATCH_CLOSE | – | `period`, `lookback_days`, `lookback_weeks`, `as_of` |
+| FILE_CHECK | Schedule | FILE_LOAD (when at least one file passed) | `as_of` |
+| FILE_LOAD | Schedule, FILE_CHECK, FILE_MOVE | EXPORT_LOAD, OVERRIDE_DECISIONS | `share`, `folder`, `file`, `as_of` |
+| SOURCE_LOAD | Schedule | EXPORT_LOAD | `batch`, `release`, `hold`, `as_of` |
+| EXPORT_LOAD | Schedule, FILE_LOAD, SOURCE_LOAD | FILE_RULES (waits) | `batch`, `release`, `hold`, `as_of` |
+| EXPORT_LOAD_ADHOC | By hand | FILE_RULES (waits) | `batch`, `release`, `hold`, `as_of` |
+| FILE_RULES | EXPORT_LOAD, by hand | – | `as_of` (no `batch` key) |
+| OVERRIDE_DECISIONS | FILE_LOAD, schedule | – | `as_of` |
+| BATCH_CLOSE | Schedule | BATCH_CREATION, NOTIFY | `hold`, `release`, `as_of` |
+| NOTIFY | BATCH_CLOSE, schedule | – | `as_of` |
+| FILE_MOVE | Schedule, by hand | FILE_LOAD (when a file was moved or copied) | `job` only |
+
+### One DAG at several times (timed runs)
+
+```json
+{"meta_db": "HSABC_DEV", "td_conn_var": "DEV", "load_env": "DEV", "project": "CMSUNIV", "schedule_interval": null,
+ "trigger_dags": ["GOVT_RGLTRY_CMS_UNIVERSE_NOTIFY"],
+ "runs": [{"name": "DLY", "run_type": "DLY", "schedule_interval": "0 20 * * *", "settings": {"RELEASE_TIME": "20:00"}},
+          {"name": "MNT", "run_type": "MNT", "schedule_interval": "0 6 * * *"}]}
+```
+
+A scheduled run uses the entry for its time. A manual run uses the entries named in `run`, or the Variable's own scope, plus what the trigger gives.
+
+### FILE_MOVE: copy and move files between folders
+
+FILE_MOVE is a separate DAG. It uses no batches, no metadata tables and no Teradata. Each job takes the files of a source folder whose names match its patterns and hands each file to its targets in order: copies first, and the job can end with one move.
+
+```json
+{"wdc_comp_oper_nas_var": "comp_oper_creds", "load_env": "DEV",
+ "snow_assignment_group": "D&AE - EDE Govt Compliance", "tags": ["UMCM"],
+ "trigger_dags": ["GOVT_RGLTRY_UMCM_FILE_LOAD"],
+ "jobs": [{"name": "UMCM_LANDING",
+           "src_folder": "nas://chs_dms/$Env/OSS_Landing/External/UMCM",
+           "patterns": ["UMCM_*.txt"],
+           "targets": [{"folder": "nas://chs_dms/$Env/OSS_Backup/External/UMCM", "action": "copy", "on_exists": "rename"},
+                       {"folder": "nas://chs_dms/$Env/OSS_Audit/External/UMCM", "action": "copy"},
+                       {"folder": "nas://chs_dms/$Env/OSS_Inbound/External/UMCM", "action": "move"}]}]}
+```
+
+| Key | Required | Values |
+|---|---|---|
+| `wdc_comp_oper_nas_var` | Yes | NAS Connection id |
+| `load_env` | Yes | Value of `$env` in the folders |
+| `jobs` | Yes | List of jobs |
+| `trigger_dags` | No | DAGs started when at least one file was moved or copied |
+| `execution_timeout_minutes` | No | Default 60 |
+| `settings` | No | Only `NAS_MIN_AGE_SECONDS` is used |
+
+| Job key | Required | Values |
+|---|---|---|
+| `name` | Yes | Unique name. Used by the trigger key `job` |
+| `src_folder` | Yes | `nas://share/path`, `$env` allowed. Subfolders are not read |
+| `patterns` | Yes | `*` = any characters, `?` = one character, `[abc]` = one of them. Not case sensitive. E.g. `["CMSAUTH_*.txt"]` |
+| `targets` | Yes | List of targets, handled in order |
+
+| Target key | Required | Default | Values |
+|---|---|---|---|
+| `folder` | Yes | | `nas://share/path`. Not the source folder itself |
+| `action` | Yes | | `copy` (file stays in the source) or `move` (file leaves the source once every target has it). Only the last target can be a move |
+| `on_exists` | No | `fail` | When the target has a file of that name with other content: `fail` (file stays in the source and is reported), `rename` (new file written as `name_1.txt`, `name_2.txt` …), `overwrite` |
+
+- A file with the same name and the same content in the target counts as already there. A run that stopped half way can simply be run again without making duplicates.
+- Each copy is first written to `<target>/_file_move_tmp/`, checked for size, then renamed, so the target never sees a half-written file.
+
+| `result` | Exit | Task |
+|---|---|---|
+| `COMPLETED` (also when no file matched) | 0 | Succeeds |
+| `COMPLETED WITH PROBLEMS` (a file failed and stays in the source) | 1 | Fails, no retry |
+| `COULD NOT RUN` (Variable error, folder cannot be listed) | 2 | Fails and is retried |
+
+### Admin commands
+
+Run on an Airflow worker, in the DAGs folder. The Teradata login is set in that shell only, never saved in a file.
+
+```bash
+export TERADATA_HOST=<host> TERADATA_USER=<login> TERADATA_PASSWORD=<password> TERADATA_LOGMECH=LDAP
+export FRAMEWORK_METADATA_SCHEMA=HSABC_DEV FRAMEWORK_ENVIRONMENT=DEV
+```
+
+| Command | What it does |
+|---|---|
+| `python -m govt_rgltry_framework.cli validate-config` | Checks every configuration table |
+| `python -m govt_rgltry_framework.cli health [--project <project>]` | Open batches past their close date, stuck loads, rejected counts |
+| `python -m govt_rgltry_framework.cli locks` | Locks held by running or killed steps |
+| `python -m govt_rgltry_framework.cli release-lock --key <Lock_Key>` | Removes a lock left by a run that no longer exists |
+| `python -m govt_rgltry_framework.cli close-batch --btch-id <Btch_ID> --closed-by <you> [--src-id <Src_ID>]` | Closes a batch, or one source of it, by hand |
+| `python -m govt_rgltry_framework.cli test-connection --source <Src_Conn_Cd> --db-type SQLSERVER` | Tests an internal source's connection |
+| `python -m govt_rgltry_framework.cli show-config` | Settings in effect and where each came from |
+| `python -m govt_rgltry_framework.cli run --module <STEP> --project CMSUNIV [--source 10,11] [--as-of <date>]` | Runs any step by hand |
+
+---
+
+## 9. Set up a new project
+
+```
+ 1 Metadata tables --> 2 Project, sources, run types --> 3 Report dates and crosswalk
+ 4 Staging / core / export tables (DBA) --> 5 File / query configs --> 6 Derived columns
+ 7 File checks --> 8 Export and rules (optional) --> 9 Airflow Connections and Variables
+ 10 validate-config --> 11 First cycle in DEV --> 12 Production
+```
+
+1. **Metadata tables** (once per environment): run `airflow_resources/sql/schema.sql` with `{{META_DB}}` replaced.
+2. **Project, sources, run types:** `GOVT_RGLTRY_Project`, `GOVT_RGLTRY_Table` (for groups), `GOVT_RGLTRY_SourceSystem`, `GOVT_RGLTRY_RunType`.
+3. **Report dates and crosswalk:** one `GOVT_RGLTRY_RunTypePeriod` row per scheduled run type, then one crosswalk row per table + source listing its run types.
+4. **Staging, core, export tables** (DBA): the file columns, `Btch_ID`, a source column, the derived columns. Export = the core columns plus `Btch_ID` and the source column.
+5. **How data arrives:** a file config per file source, a query config per internal source.
+6. **Derived columns:** at least `SOURCE_ID`. Usually also `RUN_TYPE`, `VERSION`, `FILE_NAME`, `LOAD_TIMESTAMP`, `ROW_SEQUENCE`.
+7. **File checks:** header names, record types or trailer, value checks.
+8. **Optional:** export config, rule bindings, batch calendar.
+9. **Airflow:**
+   - Create the Connections.
+   - Put the GRE code in `<dags>/rules_engine` and create the pool `gre_rules` (1 slot).
+   - Copy the DAG files with the project's names (e.g. `GOVT_RGLTRY_PRJB_*`, Variables `govt_rgltry_prjb_<step>_config_var`) and create their Variables.
+   - In every Variable set `project` and the project's tag, and point `trigger_dags` at the project's own DAGs.
+   - Keep one NOTIFY without `project`, for alerts that belong to no project.
+10. **Validate:** run `validate-config` and fix every ERROR.
+11. **First cycle in DEV:** BATCH_CREATION → test file or source rows → FILE_LOAD / SOURCE_LOAD → EXPORT_LOAD → BATCH_CLOSE → NOTIFY. Then try a bad file, a missing source and a late file.
+12. **Production:** add the same rows to the PROD metadata database. `$env` makes the database names and paths follow the environment.
+
+### Example setup
+
+```sql
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_Project (Project_Cd, Project_Desc, Active_Ind) VALUES ('CMSUNIV', 'CMS Universe submissions', 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_Table (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind) VALUES ('CMSUNIV', 'ODAG3', 'ODAG', 'ODAG table 3', 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_SourceSystem (Src_ID, Src_Nm, Src_Ty, Active_Ind) VALUES ('51', 'MedHOK', 'FDR', 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_SourceSystem (Src_ID, Src_Nm, Src_Ty, Active_Ind) VALUES ('30', 'UMAuth', 'INTERNAL', 1);
+
+-- run types
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Sched_Cd, Sched_Window_Days, Active_Ind)
+VALUES ('DLY', 'Daily, previous day', 'SCHEDULED', 1, 0, 'DAILY', 1, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Sched_Cd, Sched_Day_Cd, Sched_Window_Days, Active_Ind)
+VALUES ('WKLY', 'Weekly, created Sunday, closes Friday', 'SCHEDULED', 6, 0, 'WEEKLY', 'SUN', 2, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Sched_Cd, Sched_Day_Cd, Sched_Week_Cd, Sched_Window_Days, Active_Ind)
+VALUES ('MNT', 'Monthly on the 3rd Tuesday', 'SCHEDULED', 10, 0, 'MONTHLY', 'TUE', '3', 5, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Active_Ind)
+VALUES ('CMS', 'CMS ad-hoc request', 'ADHOC', 5, 1, 1);
+
+-- report dates
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'DLY', 'PREV_DAY', 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'WKLY', 'PREV_CALENDAR_WEEK', 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'MNT', 'PREV_CALENDAR_MONTH', 1);
+
+-- crosswalk: source 51 sends ODAG3 weekly, monthly and ad hoc, version 2200
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_DataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Rpt_Version, Include_Ind, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '51', 'WKLY,MNT,CMS', DATE '2026-01-01', NULL, '2200', 1, 1);
+
+-- file config of source 51
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_SourceFileConfig
+  (Project_Cd, Table_Nm, Src_ID, Src_File_Nm_Tmplt, Delmtr_Cd, Src_File_Has_Hdr_Ind, Src_File_Has_Trlr_Ind, Allow_Zero_Rcd_Ind,
+   Src_File_Path, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, File_Vrsn_Cd, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '51', 'CMSAuth_MedHOK_PYMT_C_{VERSION}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt', '|', 1, 1, 0,
+        '\\nas01\Compliance\$env\cmsuniv\FDR\PYMT_C', 'CMSUNIV_FILELAND_$ENV_T', 'ODAG_DE_TABLE3_2022',
+        'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', '22', 1);
+
+-- internal source 30 pulled by query
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_InternalSourceConfig
+  (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '30', 'TERADATA', NULL,
+        'SELECT a.Mbr_First_Nm AS MemberFirstName, a.Mbr_ID AS MemberID FROM CMSUNIV_SRC_DEV_V.UM_AUTH a WHERE a.Btch_ID = {btch_id} AND a.Src_ID = {src_id}',
+        'CMSUNIV_STAGE_$ENV_T', 'ODAG_DE_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', 1);
+
+-- file checks
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_FileCheckConfig (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '*', 'HEADER_NAMES', '*', 'MemberFirstName|MemberID|Amount', 1, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_FileCheckConfig (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
+VALUES ('CMSUNIV', '*', '*', 'COLUMN_VALUES', '*', 'ALL', 1, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_FileCheckConfig (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
+VALUES ('CMSUNIV', '*', '*', 'INVALID_CHARACTERS', '*', '<,>,~', 1, 1);
+
+-- derived columns
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_TargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'Src_Data_Key', 'SOURCE_ID', NULL, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_TargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'Run_Ty', 'RUN_TYPE', NULL, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_TargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'Universe_Vrsn', 'VERSION', NULL, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_TargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'FileName', 'FILE_NAME', NULL, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_TargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'Load_Dtts', 'LOAD_TIMESTAMP', NULL, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_TargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', 'ODAG3', 'ODAG_DE_Table3_2022_ID', 'ROW_SEQUENCE', NULL, 1);
+
+-- export table
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_ExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG3_2022', NULL, NULL, 1);
+
+-- rules (optional: without a row the rule group named like the table runs)
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RuleBinding (Project_Cd, Table_Nm, Src_ID, Run_Ty, Gre_Rule_Group, Gre_Rule_Variant, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '*', '*', 'CMSUNIV_ODAG3', 'DEFAULT', 1);
+```
+
+### How a file goes from the NAS to core
+
+| # | Step | Result |
+|---|---|---|
+| 1 | The name is matched to its file config and its open batch. A load row is written | `RECEIVED` |
+| 2 | File checks | Failed: `REJECTED`, file to `Error/`, error log in `ErrorLog/`, alert |
+| 3 | The source's earlier staging rows are removed and the file's records inserted, with the derived columns | `STAGED`, `Stg_Rcd_Cnt` |
+| 4 | Every NOT NULL core column must get a value, and every text value is test-converted to its core column's type and `FORMAT` | Failed: `REJECTED` (`CORE_TYPE_MISMATCH`), staged rows removed, core untouched |
+| 5 | One transaction: the batch's core rows of the source are removed and the staged rows copied in. Copied count must equal staged count | `FILE_LOADED`, batch `SOURCE_DATA_READY` |
+| 6 | The file moves to `Archive/` and a line goes to the control report | |
+
+- **Conversion:** an empty value becomes NULL. Dates use the core column's own `FORMAT`, so give a DATE column the file's format, e.g. `DATE FORMAT 'MM/DD/YYYY'`.
+- **System errors:** a database error at any step gives `PROCESS_FAILURE`. Nothing is half done; the file stays in the inbound folder and is tried again on the next run.
+- **Which staging column fills which core column:**
+  - A column of the same name is used first.
+  - A derived column takes the staging column with the same value code.
+  - The remaining columns pair in table order, so keep them in the same order in both tables.
+- **Staging is cleared per source and run type** before each load. Another source's rows stay, so a file and an internal pull of the same table do not remove each other's rows.
+
+---
+
+## 10. How-to procedures
+
+**Check the configuration.** Run `validate-config`. Fix every ERROR. WARNINGs point at something to look at.
+
+**Create batches for a missed day.** Trigger BATCH_CREATION with `{"project": "CMSUNIV", "as_of": "2026-10-19"}`.
+
+**Request an ad-hoc batch.** Insert a row into `GOVT_RGLTRY_RequestInTake`. The next BATCH_CREATION creates the batch.
+
+```sql
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RequestInTake (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Version, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key)
+VALUES ('CMSUNIV', 'ODAG3', '51', 'CMS', '2200', DATE '2026-07-01', DATE '2026-09-30', DATE '2026-10-19', DATE '2026-10-19');
+
+-- the same request for every source of ODAG3 that has a file or query config
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RequestInTake (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Version, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key)
+SELECT 'CMSUNIV', 'ODAG3', Src_ID, 'CMS', '2200', DATE '2026-07-01', DATE '2026-09-30', DATE '2026-10-19', DATE '2026-10-19'
+FROM (SELECT Src_ID FROM HSABC_DEV.GOVT_RGLTRY_SourceFileConfig WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'ODAG3' AND Active_Ind = 1
+      UNION SELECT Src_ID FROM HSABC_DEV.GOVT_RGLTRY_InternalSourceConfig WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'ODAG3' AND Active_Ind = 1) s;
+```
+
+**A file was rejected.**
+1. Find the reason with the rejected loads query (section 11). The file is in `<inbound>\Error\` and its error log in `<inbound>\ErrorLog\<name>_errors.txt`.
+2. Ask the source to fix and resend the file, or fix the configuration.
+3. Put the file back into the inbound folder.
+
+**A file was skipped.** A skipped file is not an error, and nothing is written for it. The FILE_LOAD report lists it under `skipped_files`, and the log gives the reason:
+- still arriving (`NAS_MIN_AGE_SECONDS`);
+- another project's or another run type's file;
+- a name that fits no template in a shared folder;
+- already moved or loaded by another run.
+
+**A source will not send (carry-forward).** Before the batch's close run, insert an approved `REUSE` override. The run type needs `Carry_Fwd_Ind = 1`.
+
+```sql
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_BatchOverride (Override_Ty, Req_ID, Btch_ID, Reuse_Btch_ID, Apprvl_Stat, Valid_Thru_Dt_Key, Rsn_Txt, Reviewed_By, Reviewed_Dtts)
+SELECT 'REUSE', Req_ID, Btch_ID, NULL, 'APPROVED', DATE '2026-10-31', 'Source confirmed no change', 'approver_id', CURRENT_TIMESTAMP(6)
+FROM HSABC_DEV.GOVT_RGLTRY_RequestControl WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_DLY' AND Src_ID = '51';
+```
+
+**A late or corrected file for a closed batch.** Insert an approved `LATE_ARRIVAL` override (batch without data) or `CORRECTION` override (batch with data), then put the file in the inbound folder.
+
+```sql
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_BatchOverride (Override_Ty, Req_ID, Btch_ID, Apprvl_Stat, Valid_Thru_Dt_Key, Rsn_Txt, Reviewed_By, Reviewed_Dtts)
+SELECT 'LATE_ARRIVAL', Req_ID, Btch_ID, 'APPROVED', DATE '2026-10-31', 'File came late', 'approver_id', CURRENT_TIMESTAMP(6)
+FROM HSABC_DEV.GOVT_RGLTRY_RequestControl WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_DLY' AND Src_ID = '140';
+```
+
+**Reopen a closed batch.** Insert an approved `REOPEN` override. The next OVERRIDE_DECISIONS reopens the batch. It closes again after new data arrives, or with `close-batch`.
+
+**Approve, reject or stop an override.**
+
+```sql
+UPDATE HSABC_DEV.GOVT_RGLTRY_BatchOverride SET Apprvl_Stat = 'APPROVED', Reviewed_By = 'approver_id', Reviewed_Dtts = CURRENT_TIMESTAMP(6), Valid_Thru_Dt_Key = DATE '2026-10-31'
+WHERE Ovrd_ID = 123 AND Apprvl_Stat = 'PENDING_REVIEW';
+UPDATE HSABC_DEV.GOVT_RGLTRY_BatchOverride SET Apprvl_Stat = 'REJECTED', Reviewed_By = 'approver_id', Reviewed_Dtts = CURRENT_TIMESTAMP(6)
+WHERE Ovrd_ID = 123 AND Apprvl_Stat = 'PENDING_REVIEW';
+UPDATE HSABC_DEV.GOVT_RGLTRY_BatchOverride SET Valid_Thru_Dt_Key = CURRENT_DATE - 1 WHERE Ovrd_ID = 123 AND Apprvl_Stat = 'APPROVED';
+```
+
+**Release early, or close ad-hoc batches.**
+- An ad-hoc batch with data closes only after it is released. Trigger BATCH_CLOSE with `{"project": "CMSUNIV", "run_type": "CMS", "release": "true"}`; add `source` or `table` to narrow it.
+- To export a scheduled batch before its close date, trigger EXPORT_LOAD (and SOURCE_LOAD for internal sources) with `{"project": "CMSUNIV", "run_type": "WKLY", "release": "true"}` or `{"batch": "<Btch_ID>"}`.
+
+**Hold a run type.** Add `"hold": "WKLY"` to the SOURCE_LOAD, EXPORT_LOAD and BATCH_CLOSE Variables. Remove it to go back to normal.
+
+**Re-pull an internal source.** Trigger SOURCE_LOAD with `{"batch": "<Btch_ID>"}`. This replaces the rows. A closed batch needs an override first.
+
+**Re-export a batch.** Trigger EXPORT_LOAD with `{"batch": "<Btch_ID>"}`; for several batches, separate them with commas. Use the ad-hoc DAG for an ad-hoc `CMS` batch. The batch is exported even when held or not yet due. FILE_RULES then starts, but runs the rules only when the batch has a pending load.
+
+**Close a batch by hand.** Run `close-batch` from the command line, with `--src-id` for one source. It is refused before the close date unless the batch was released.
+
+**Run a step for some tables, a run type or some sources.**
+- Trigger with `table_group` or `table`, and/or `run_type`, and/or `source`. Example: `{"project": "CMSUNIV", "table_group": "ODAG,FA"}` or `{"project": "CMSUNIV", "source": "10,11"}`.
+- `"runs": [{"source": "10"}, {"source": "11"}]` gives one task per source.
+
+**Run the rules by hand, or again.** FILE_RULES runs every pending batch of its scope. It has no `batch` key.
+- *Waiting batches:* trigger FILE_RULES with a scope, e.g. `{"project": "CMSUNIV", "table": "ODAG1", "run_type": "DLY"}`.
+- *Export and rules of one batch:* trigger EXPORT_LOAD with `{"batch": "<Btch_ID>"}`. It starts FILE_RULES and waits for it.
+- *Again, for a batch whose rules already ran* (for example after a rule was changed): set its loads back to pending, then trigger FILE_RULES with the batch's table and run type. The GRE results of the batch are replaced.
+
+```sql
+UPDATE HSABC_DEV.GOVT_RGLTRY_FileLoad SET Rules_Stat = 'NOT_RUN', LastUpdt_Dtts = CURRENT_TIMESTAMP(6), LastUpdt_ID = USER
+WHERE Btch_ID = '<Btch_ID>' AND Load_Stat = 'FILE_LOADED';
+```
+
+```json
+{"project": "CMSUNIV", "table": "<Table_Nm>", "run_type": "<Run_Ty>"}
+```
+
+Check the result:
+
+```sql
+SELECT Btch_ID, Load_ID, Rules_Stat, LastUpdt_Dtts FROM HSABC_DEV.GOVT_RGLTRY_FileLoad
+WHERE Btch_ID = '<Btch_ID>' AND Load_Stat = 'FILE_LOADED';
+SELECT Event_Ty, Event_Dtts, Event_Txt FROM HSABC_DEV.GOVT_RGLTRY_RequestFileDetail
+WHERE Btch_ID = '<Btch_ID>' AND Event_Ty LIKE 'FILE_RULES%' ORDER BY Event_Dtts DESC;
+```
+
+**A step waits or says "locked"** (`LockTimeout`, `STAGING_TABLE_BUSY`, `STAGING_LOCK_STALE`). A lock is either held by a run that is still working, or left behind by a run that was killed. A left lock stays until `Expires_Dtts`, then the next run replaces it.
+
+1. Look at the lock. The key is in the message.
+   ```sql
+   SELECT Lock_Key, Owner_ID, Acquired_Dtts, Expires_Dtts FROM HSABC_DEV.GOVT_RGLTRY_Lock WHERE Lock_Key = '<Lock_Key>';
+   ```
+   No row means it is already free.
+2. Compare `Acquired_Dtts` with the DAG runs in Airflow. If a run is still running, leave the lock alone.
+3. If no run is running, remove the lock, either with `release-lock --key "<Lock_Key>"` or in Teradata:
+   ```sql
+   DELETE FROM HSABC_DEV.GOVT_RGLTRY_Lock WHERE Lock_Key = '<Lock_Key>' AND Owner_ID = '<Owner_ID>';
+   ```
+   Or do nothing and let it expire.
+4. Run the step again.
+
+Never remove a lock whose run is still working. If locks keep being left behind, raise `execution_timeout_minutes`.
+
+**An export takes long, or fails with `LockTimeout … BTCH:EXPORT …`.** An export table is locked while one batch and source is exported into it, including a procedure call. Any other export into the same table waits up to `LOCK_TIMEOUT_SECONDS`, then fails for that batch and is tried again next run.
+
+1. Free a lock left by a killed run (see above).
+2. Give the scheduled and the ad-hoc EXPORT_LOAD the same pool with 1 slot (Admin → Pools, e.g. `cms_universe_export`).
+3. Set the timeout above the longest export, in both export Variables:
+   ```json
+   "pool": "cms_universe_export",
+   "execution_timeout_minutes": 300,
+   "settings": {"LOCK_TIMEOUT_SECONDS": "3900"}
+   ```
+4. Make the export cheaper. Every open batch is exported on every run, so a slow procedure runs for every source each time.
+   - Run the scheduled EXPORT_LOAD less often, or put the slow tables in their own evening `runs` entry.
+   - Let the procedure work only on the batch and source it is given (`{btch_id}`, `{src_id}`). If it can only work on the whole table, call it once per batch with `Exp_Post_Sql_Txt`.
+5. Optionally add `"hold": ["CMS"]` to the scheduled EXPORT_LOAD.
+
+**Change a version.**
+- For every run type of a source: end the crosswalk row (`Effective_End_Dt_Key`) and add a new row with the new `Rpt_Version` from the next day.
+- For one run type only: add a row for that run type with the new version from its start date.
+- Update `File_Vrsn_Cd` if the file names change.
+
+**Yearly protocol change (e.g. 2200 to 2300).** The project and table codes stay. Only the tables the new protocol changes move to new staging, core and export tables (e.g. `ODAG_DE_TABLE1_2022` to `ODAG_DE_TABLE1_2023`). Use `airflow_resources/sql/version_cutover_template.sql`:
+
+| Step | When | What |
+|---|---|---|
+| Fill the placeholders | – | Project, changed tables, old / new version, year tags, cutover date |
+| DBA | Before Part 1 | Create the new staging, core and export tables |
+| Part 0 | First | Preview only. Changes nothing |
+| Part 1 | Any day before the cutover | New crosswalk rows from the cutover date, new file configs, new ID columns |
+| Part 2 | Cutover day, after the last old files are loaded and exported | Switch file configs, query sources and export to the new tables |
+| Part 3 | After Part 2 | Check the configs and crosswalk windows |
+| Validate | After Part 2 | `validate-config` |
+
+A batch takes the version in effect on the day it is created, not on its report period.
+
+**Stop a source or table.** Set `Active_Ind = 0` on its crosswalk rows and file / query config. To stop one run type of a source, remove it from the row's list, or add a row for that run type with `Include_Ind = 0`.
+
+**Add a run type to a source.** Add it to the `Run_Ty` list of the source's crosswalk row, and add a `GOVT_RGLTRY_RunTypePeriod` row if the run type is new for the project. Run `validate-config`.
+
+**Change the report dates of a run type.** Update `Rpt_Period_Cd` on its `GOVT_RGLTRY_RunTypePeriod` row. Batches already created keep their dates.
+
+**Load a large file faster.** In the FILE_LOAD Variable's `settings`, set `LOAD_ENGINE` to `AUTO` (FastLoad from 100 MB) and raise `INSERT_BATCH_ROWS` / `INSERT_BATCH_BYTES` (e.g. `10000` / `4000000`).
+- FastLoad needs CREATE TABLE and DROP TABLE rights in the staging database, and a free FastLoad slot.
+- Without them the file still loads with batched inserts, and the log gives the reason.
+
+**Copy a file to the NAS safely.** Copy it into a subfolder of the inbound folder first, then move it up when the copy is complete. Or raise `NAS_MIN_AGE_SECONDS` above the longest pause in a copy. A `TRAILER` check with a row count catches a cut-off file.
+
+**Move or copy files between folders.** Set up the FILE_MOVE DAG and its Variable with jobs. To feed FILE_LOAD, make the last target a `move` into the inbound folder and put FILE_LOAD in `trigger_dags`.
+
+**An alert email arrived.** Look up the event in the alert events list, then look at the batch and its timeline (section 11).
+
+---
+
+## 11. Monitoring queries
+
+**Batches of the last 7 days**
+
+```sql
+SELECT Btch_ID, Src_ID, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key, Req_Stat, Resolution_Ty, Batch_Close_Ind
+FROM HSABC_DEV.GOVT_RGLTRY_RequestControl
+WHERE Project_Cd = 'CMSUNIV' AND Req_Dt_Key >= CURRENT_DATE - 7
+ORDER BY Req_Dt_Key, Btch_ID, Src_ID;
+```
+
+**Timeline of a batch**
+
+```sql
+SELECT c.Src_ID, d.Event_Dtts, d.Event_Ty, d.Actor, d.Load_ID, d.Event_Txt
+FROM HSABC_DEV.GOVT_RGLTRY_RequestFileDetail d JOIN HSABC_DEV.GOVT_RGLTRY_RequestControl c ON c.Req_ID = d.Req_ID
+WHERE c.Btch_ID = '20261019_CMSUNIV_ODAG3_DLY'
+ORDER BY c.Src_ID, d.Detail_ID;
+```
+
+**Rejected or failed loads (last 7 days)**
+
+```sql
+SELECT Load_ID, File_Path, Btch_ID, Load_Stat, Reject_Rsn_Cd, Error_Txt, LastUpdt_Dtts
+FROM HSABC_DEV.GOVT_RGLTRY_FileLoad
+WHERE Load_Stat IN ('REJECTED', 'PROCESS_FAILURE') AND LastUpdt_Dtts >= CURRENT_TIMESTAMP - INTERVAL '7' DAY
+ORDER BY LastUpdt_Dtts DESC;
+```
+
+**Open batches past their close date**
+
+```sql
+SELECT c.Btch_ID, c.Src_ID, c.Run_Ty, c.Req_Dt_Key, c.Req_Dt_Key + (r.SLA_Days - 1) AS Close_Dt, c.Req_Stat
+FROM HSABC_DEV.GOVT_RGLTRY_RequestControl c JOIN HSABC_DEV.GOVT_RGLTRY_RunType r ON r.Run_Ty = c.Run_Ty
+WHERE c.Batch_Close_Ind = 0 AND c.Req_Dt_Key + (r.SLA_Days - 1) < CURRENT_DATE
+ORDER BY Close_Dt;
+```
+
+**Sources missing at close (last 30 days)**
+
+```sql
+SELECT Event_Dtts, Project_Cd, Table_Nm, Src_ID, Run_Ty, Btch_ID, Event_Txt
+FROM HSABC_DEV.CMS_GOVT_RGLTRY_ExceptionsAudit
+WHERE Event_Ty = 'SOURCE_MISSING_AT_CLOSE' AND Event_Dtts >= CURRENT_TIMESTAMP - INTERVAL '30' DAY
+ORDER BY Event_Dtts DESC;
+```
+
+**Unsent alerts** (NOTIFY not running, or email failing)
+
+```sql
+SELECT Event_ID, Event_Ty, Sevrty, Project_Cd, Btch_ID, Event_Dtts FROM HSABC_DEV.CMS_GOVT_RGLTRY_ExceptionsAudit
+WHERE Notified_Ind = 0 ORDER BY Event_Dtts;
+```
+
+**Overrides and their state**
+
+```sql
+SELECT o.Ovrd_ID, o.Override_Ty, o.Btch_ID, c.Src_ID, o.Apprvl_Stat, o.Valid_Thru_Dt_Key, o.Reviewed_By, o.Rsn_Txt
+FROM HSABC_DEV.GOVT_RGLTRY_BatchOverride o JOIN HSABC_DEV.GOVT_RGLTRY_RequestControl c ON c.Req_ID = o.Req_ID
+ORDER BY o.Ovrd_ID DESC;
+```
+
+**Internal sources waiting for data**
+
+```sql
+SELECT c.Btch_ID, c.Src_ID, d.Event_Dtts, d.Event_Txt
+FROM HSABC_DEV.GOVT_RGLTRY_RequestFileDetail d JOIN HSABC_DEV.GOVT_RGLTRY_RequestControl c ON c.Req_ID = d.Req_ID
+WHERE d.Event_Ty = 'SOURCE_NO_DATA_YET' AND c.Req_Stat = 'REQUEST_CREATED'
+ORDER BY d.Event_Dtts DESC;
+```
+
+**Locks held now**
+
+```sql
+SELECT Lock_Key, Owner_ID, Acquired_Dtts, Expires_Dtts FROM HSABC_DEV.GOVT_RGLTRY_Lock ORDER BY Acquired_Dtts;
+```
+
+---
+
+## 12. Troubleshooting
+
+Every configured SQL is written to the task log as it runs: internal source queries, `SQL` columns, report date and schedule SQL, and export procedure calls. Each entry shows the SQL as sent, every parameter with its value, and the statement with the values filled in, so it can be copied and run by hand.
+
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| `FILE_REJECTED_UNPARSEABLE` | Name does not match `Src_File_Nm_Tmplt` | Compare the name with the template. Fix the template or ask for the right name |
+| `FILE_REJECTED_NO_BATCH` | No batch for that run type and report dates | Check the crosswalk and schedule. Create the batch with `as_of` / `period` or a request |
+| `FILE_REJECTED_BATCH_CLOSED` | Batch already closed | `LATE_ARRIVAL`, `CORRECTION` or `REOPEN` override, then resend |
+| Version error in the name | `{VERSION}` differs from `File_Vrsn_Cd` | Fix `File_Vrsn_Cd` or the file name |
+| Column count or header problems | File layout changed | Check `HEADER_NAMES`, `COLUMN_COUNT`, `TARGET_COLUMNS` |
+| `CORE_TYPE_MISMATCH` | A value does not convert to its core column's type or `FORMAT`, or a NOT NULL core column is empty | Fix the file, or the core column's type / `FORMAT`, then resend |
+| `PROCESS_FAILURE`, "Object '…' does not exist" (3807) | A framework, staging or core table is missing, or no rights | Create the table or grant rights. The next run loads the file |
+| `FILE_PARSE_ERROR` "Invalid date" / "Invalid timestamp" | A typed staging column cannot take the value | Make the staging column text, or fix the file |
+| `MALFORMED` "field larger than field limit (131072)" | The file copy was cut off, or a quote is never closed | Copy the file again. If the data has unmatched `"`, set `QUOTE_CHAR` to empty |
+| "must return one row" (SQL column) | `{btch_id}` lookup returns one row per source | Add `AND Src_ID = {src_id}` or use `{req_id}` |
+| "needs a column mapped to SOURCE_ID" | Staging, core or export table has no source column | Add the column and a `SOURCE_ID` row |
+| `SOURCE_QUERY_FAILED` "could not connect" | `Can't open lib 'ODBC Driver 18…'` = driver not installed. `[08001]` / `[HYT00]` = server, port, firewall or certificate. `[28000]` = login | Fix the worker or the Connection. The next run pulls again |
+| `SOURCE_QUERY_FAILED` "the query on … failed" | `Src_Sql_Txt` fails on the source | Run the query from the log by hand and fix it |
+| Teradata pull fails "Object '…_$ENV_V…' does not exist" | `$env` is not replaced inside `Src_Sql_Txt` | Name the environment's database in the query |
+| Internal source `WAITING` | No rows yet before the close date | Normal. Tried again each run |
+| `LOAD_INCOMPLETE`, `STAGING_TABLE_BUSY` | Another run is loading into the same staging table | Nothing. The next run loads it. For `STAGING_LOCK_STALE` see the lock procedure |
+| `LockTimeout … REQ:<Req_ID>` | Another run is on that batch row, or a killed run left the lock | Wait for the next run. For a left lock see the lock procedure |
+| `EXPORT_LOAD_FAILED` `LockTimeout … BTCH:EXPORT …` | Another export into that table took longer than `LOCK_TIMEOUT_SECONDS`, or a killed run left the lock | See "An export takes long". The next run exports the batch again |
+| Later runs say "locked" after a task ran past its timeout | The killed task could not remove its locks | See the lock procedure. Raise `execution_timeout_minutes` |
+| `BATCH_CLOSE_DEFERRED_LOCKED` | Batch was being loaded at the close run | Nothing. The next BATCH_CLOSE closes it |
+| Batch not exported | Not due yet, or held | See `held` in the step report. Release or wait |
+| EXPORT_LOAD says `NO BATCHES TO EXPORT` | No open batch in the scope, the run type is held, or the scope matches nothing | Check the open batches and the Variable's scope |
+| Export by procedure writes 0 rows | The procedure reads a table nobody fills, or filters on values the batch does not have | Run the CALL from the log by hand. Fix `Exp_Proc_Parm_Txt` |
+| Export runs for hours | Every open batch is exported each run, and the procedure repeats its work for every source | See "An export takes long" |
+| Export DAG starts minutes after its trigger | It waits for its previous run or for a pool slot | Expected |
+| Ad-hoc batch with data stays open | Not released | Release on BATCH_CLOSE |
+| Batch closed `DATA_NOT_PROVIDED` / `MISSING` | Nothing arrived by the close date | Expected. For late data use `LATE_ARRIVAL` or `REOPEN` |
+| Carry-forward refused | Batch closed, run type without `Carry_Fwd_Ind`, or no earlier batch with data | Apply before the close run. Read the `OVERRIDE_INVALID_DETECTED` text |
+| Rules never run | Table has an export and the batch is not exported yet | Normal. Rules wait for the export |
+| Rules not run again after a trigger | The batch's rules already ended | Reset `Rules_Stat` to `NOT_RUN` (see "Run the rules by hand") |
+| Rules `FAILED` but the batch closed and was exported | Rules do not hold the close or the export | Expected. Fix the data. Rules run again after the re-export |
+| FILE_RULES did not start after EXPORT_LOAD | A batch failed to export, so the DAG failed before its triggers | Fix the export. The next EXPORT_LOAD starts FILE_RULES |
+| FILE_RULES checks other batches too | Only a trigger's scope is passed on, not a Variable's | Expected, or set the scope in the FILE_RULES Variable |
+| `not taken from the trigger: batch` (FILE_RULES) | FILE_RULES has no `batch` key | Narrow with `table`, `run_type`, `source` |
+| FILE_RULES "left for the next run: another run is evaluating it" | Another FILE_RULES run is on that batch | Nothing |
+| FILE_CHECK failed but FILE_LOAD started | At least one file passed. The failed file is in `Error/` | Expected. Fix and resend the failed file |
+| FILE_CHECK failed and FILE_LOAD did not start | No file passed | Fix and resend the files |
+| File listed in `skipped_files` | Reason is in the log | Expected for most reasons. Otherwise fix the name or template, or wait for the copy |
+| Large file stages slowly | Batched inserts | `LOAD_ENGINE` `AUTO` / `FASTLOAD` and larger insert batches |
+| WARNING "FastLoad not used" | No CREATE / DROP TABLE right, or no FastLoad slot | The file still loads. Ask the DBA |
+| No alert emails | NOTIFY not scheduled, no `email_recipient`, or no `smtp_default` | Check unsent alerts and the NOTIFY Variable |
+| `'<key>' is required in Airflow Variable` | `meta_db`, `td_conn_var`, `load_env` or `wdc_comp_oper_nas_var` missing | Add the key to the Variable |
+| "ENVIRONMENT is required" (command line) | `FRAMEWORK_ENVIRONMENT` not set | Export it in the shell |
+| FILE_MOVE "already in … (on_exists fail)" | Target has a file of that name with other content | Decide which file is right. Rename or remove the old one, or set `on_exists` |
+| FILE_MOVE `COULD NOT RUN`, "could not list" | Folder missing, wrong `$env`, or no access | Check the folder and the Connection |
+| FILE_MOVE "0 of n file(s) match" | Pattern does not fit, or files still arriving | Compare the names with `patterns`. Wait for the next run |
+| FILE_MOVE "in every target, but not removed from the source" | NAS login cannot delete in the source folder | Grant the right. The next run removes the file |
+| `_file_move_tmp` folder left in a target | A run stopped during a copy | When no FILE_MOVE is running, delete the folder |

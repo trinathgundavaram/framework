@@ -1,0 +1,4738 @@
+<!doctype html><html><head><meta charset='utf-8'><title>Government Regulatory Framework Guide</title><style>body{font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.45;max-width:1100px;margin:24px auto;padding:0 16px;color:#172b4d;background:#fff}table{border-collapse:collapse;margin:8px 0 16px}th,td{border:1px solid #c1c7d0;padding:6px 8px;vertical-align:top;text-align:left}th{background:#f4f5f7}code{font-family:Consolas,monospace;font-size:13px}pre{background:#f4f5f7;padding:10px;overflow-x:auto}</style></head><body><h1>Government Regulatory Framework – Guide</h1>
+<p>This guide explains what the framework does, how each step works, every table and column, how to set up a project, the Airflow setup, and how to operate and troubleshoot it.</p>
+<p>In the SQL examples, replace <code>HSABC_DEV</code> with your metadata database, <code>CMSUNIV</code> with your project code and <code>ODAG3</code> with your table code.</p>
+<h2>Contents</h2>
+<ol>
+<li>What the framework does</li>
+<li>Main terms</li>
+<li>Daily flow</li>
+<li>Life of a batch</li>
+<li>Common rules for all tables</li>
+<li>Steps and their tables</li>
+<li>Reference lists</li>
+<li>Airflow setup</li>
+<li>Set up a new project</li>
+<li>How-to procedures</li>
+<li>Monitoring queries</li>
+<li>Troubleshooting</li>
+</ol>
+<hr />
+<h2>1. What the framework does</h2>
+<p>The framework collects data for Government Regulatory reporting. Data comes from many sources: vendors (FDRs) that send files, and internal systems that are read with a query. It is collected for the tables (datasets) of a project, either on a schedule (daily, weekly, monthly) or on request (ad hoc).</p>
+<p>For every table, run type and report period, the framework:</p>
+<ol>
+<li>Creates a batch.</li>
+<li>Waits for each source's data.</li>
+<li>Checks the files.</li>
+<li>Loads the data into staging and then core.</li>
+<li>Copies it to an export table (optional).</li>
+<li>Runs data quality rules (optional).</li>
+<li>Closes the batch on its close date.</li>
+</ol>
+<p>Every action is recorded in a timeline per batch. Problems are recorded as alerts and emailed.</p>
+<p>Everything is set up in metadata tables. No code changes are needed for a new project, table, source or run type.</p>
+<table>
+<thead>
+<tr>
+<th>You want to</th>
+<th>Table</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Add a project, its tables and sources</td>
+<td><code>GOVT_RGLTRY_Project</code>, <code>GOVT_RGLTRY_Table</code>, <code>GOVT_RGLTRY_SourceSystem</code></td>
+</tr>
+<tr>
+<td>Say which source sends which table, for which run types, from when</td>
+<td><code>GOVT_RGLTRY_DataSetSourceXwalk</code></td>
+</tr>
+<tr>
+<td>Say when batches are created and when they close</td>
+<td><code>GOVT_RGLTRY_RunType</code>, <code>GOVT_RGLTRY_BatchCalendar</code></td>
+</tr>
+<tr>
+<td>Say which report dates a run type covers</td>
+<td><code>GOVT_RGLTRY_RunTypePeriod</code></td>
+</tr>
+<tr>
+<td>Describe a source's file</td>
+<td><code>GOVT_RGLTRY_SourceFileConfig</code></td>
+</tr>
+<tr>
+<td>Pull an internal source with a query</td>
+<td><code>GOVT_RGLTRY_InternalSourceConfig</code></td>
+</tr>
+<tr>
+<td>Check files</td>
+<td><code>GOVT_RGLTRY_FileCheckConfig</code></td>
+</tr>
+<tr>
+<td>Fill derived columns (batch ID, version, load time, row ID)</td>
+<td><code>GOVT_RGLTRY_TargetColumnConfig</code></td>
+</tr>
+<tr>
+<td>Copy data to an export table</td>
+<td><code>GOVT_RGLTRY_ExportConfig</code></td>
+</tr>
+<tr>
+<td>Run data quality rules</td>
+<td><code>GOVT_RGLTRY_RuleBinding</code></td>
+</tr>
+<tr>
+<td>Request an ad-hoc batch</td>
+<td><code>GOVT_RGLTRY_RequestInTake</code></td>
+</tr>
+<tr>
+<td>Reuse data, accept late or corrected data, reopen a batch</td>
+<td><code>GOVT_RGLTRY_BatchOverride</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>2. Main terms</h2>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Project</td>
+<td>A reporting program, e.g. CMS Universes (<code>Project_Cd</code>)</td>
+</tr>
+<tr>
+<td>Table</td>
+<td>A dataset of the project, e.g. ODAG3 (<code>Table_Nm</code>). Has staging, core and optionally export tables</td>
+</tr>
+<tr>
+<td>Table group</td>
+<td>Tables run together, e.g. ODAG1 to ODAG6</td>
+</tr>
+<tr>
+<td>Source</td>
+<td>Who provides the data: an FDR sending files, or an internal system read by a query (<code>Src_ID</code>)</td>
+</tr>
+<tr>
+<td>Run type</td>
+<td>How often or why batches are made: DLY, WKLY, MNT, CMS (<code>Run_Ty</code>)</td>
+</tr>
+<tr>
+<td>Crosswalk</td>
+<td>Which source sends which table, for which run types, from when, at which version</td>
+</tr>
+<tr>
+<td>Batch</td>
+<td>One table + run type + report period + request date. One row per source (<code>Btch_ID</code>, <code>Req_ID</code>)</td>
+</tr>
+<tr>
+<td>Report period</td>
+<td>The dates the data is about (<code>Rpt_Start_Dt_Key</code> to <code>Rpt_End_Dt_Key</code>)</td>
+</tr>
+<tr>
+<td>Request date</td>
+<td>The day the batch is created for (<code>Req_Dt_Key</code>)</td>
+</tr>
+<tr>
+<td>Close date</td>
+<td>Request date + <code>SLA_Days</code> - 1. The batch closes and is exported from this date</td>
+</tr>
+<tr>
+<td>Staging / core / export</td>
+<td>Landing table of a load / the table's data of record / the copy for downstream use and rules</td>
+</tr>
+<tr>
+<td>Carry-forward (REUSE)</td>
+<td>Using an earlier batch's data for a batch with no data</td>
+</tr>
+<tr>
+<td>Late arrival / correction</td>
+<td>Data for a closed batch, accepted with an approved override</td>
+</tr>
+<tr>
+<td>Reopen</td>
+<td>Opening a closed batch again</td>
+</tr>
+<tr>
+<td>Release / hold</td>
+<td>Let a batch go before its date / keep a run type back</td>
+</tr>
+<tr>
+<td>Timeline</td>
+<td>Every event of a batch (<code>GOVT_RGLTRY_RequestFileDetail</code>)</td>
+</tr>
+<tr>
+<td>Alerts</td>
+<td>Problems and approvals, emailed by NOTIFY (<code>CMS_GOVT_RGLTRY_ExceptionsAudit</code>)</td>
+</tr>
+<tr>
+<td>Step report</td>
+<td>The summary each step writes at the end of its Airflow task log</td>
+</tr>
+</tbody>
+</table>
+<h3>Batch ID</h3>
+<p>Format: <code>YYYYMMDD_PROJECT_TABLE_RUNTYPE</code>, for example <code>20261109_CMSUNIV_ODAG1_MNT</code>.</p>
+<ul>
+<li><code>YYYYMMDD</code> is the request date.</li>
+<li>Every source of the table gets the same batch ID. Each source has its own row (<code>Req_ID</code>) in <code>GOVT_RGLTRY_RequestControl</code>.</li>
+<li>A second report period for the same table and run type on the same day gets <code>_2</code>, then <code>_3</code>.</li>
+<li>If a batch with the same report dates already exists for that day, it is used again.</li>
+<li>Maximum length is 250 characters.</li>
+</ul>
+<hr />
+<h2>3. Daily flow</h2>
+<p>Each step is an Airflow DAG with its own Variable. When a step succeeds it starts the next steps listed in its Variable (<code>trigger_dags</code>).</p>
+<pre><code> BATCH_CREATION (daily, e.g. 06:00)
+        |
+        v
+ FILE_CHECK (optional, e.g. every 15 min)       SOURCE_LOAD (e.g. 06:30)
+        |                                              |
+        v                                              |
+ FILE_LOAD (e.g. hourly) ----&gt; OVERRIDE_DECISIONS      |
+        |                                              |
+        +----------------------+-----------------------+
+                               v
+                 EXPORT_LOAD (triggered, and daily e.g. 20:00)
+                               |
+                               v
+                 FILE_RULES (EXPORT_LOAD waits for it)
+
+ BATCH_CLOSE (nightly, e.g. 22:00) ----&gt; BATCH_CREATION (next day) and NOTIFY
+ NOTIFY (after BATCH_CLOSE, and e.g. hourly)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Step</th>
+<th>Runs</th>
+<th>Starts</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>BATCH_CREATION</td>
+<td>Start of day, and after BATCH_CLOSE</td>
+<td>–</td>
+</tr>
+<tr>
+<td>2</td>
+<td>FILE_CHECK (optional)</td>
+<td>When files are expected</td>
+<td>FILE_LOAD</td>
+</tr>
+<tr>
+<td>3</td>
+<td>FILE_LOAD</td>
+<td>After FILE_CHECK, or on its own</td>
+<td>OVERRIDE_DECISIONS, EXPORT_LOAD</td>
+</tr>
+<tr>
+<td>4</td>
+<td>SOURCE_LOAD</td>
+<td>After the source systems have loaded their data</td>
+<td>EXPORT_LOAD</td>
+</tr>
+<tr>
+<td>5</td>
+<td>OVERRIDE_DECISIONS</td>
+<td>After FILE_LOAD, or scheduled</td>
+<td>–</td>
+</tr>
+<tr>
+<td>6</td>
+<td>EXPORT_LOAD</td>
+<td>After FILE_LOAD / SOURCE_LOAD, and once in the evening</td>
+<td>FILE_RULES (waits for it)</td>
+</tr>
+<tr>
+<td>7</td>
+<td>FILE_RULES</td>
+<td>Started by EXPORT_LOAD</td>
+<td>–</td>
+</tr>
+<tr>
+<td>8</td>
+<td>BATCH_CLOSE</td>
+<td>End of day</td>
+<td>BATCH_CREATION, NOTIFY</td>
+</tr>
+<tr>
+<td>9</td>
+<td>NOTIFY</td>
+<td>After BATCH_CLOSE, and on its own schedule</td>
+<td>–</td>
+</tr>
+</tbody>
+</table>
+<p>Order rules:</p>
+<ul>
+<li>Batches must exist before files and pulls arrive (step 1 before steps 2 to 4).</li>
+<li>Carry-forwards are applied before the close (step 5 before step 8).</li>
+<li>The evening export runs before the close (step 6 before step 8).</li>
+<li>Keep FILE_LOAD out of the time between BATCH_CLOSE and BATCH_CREATION, or a file for a closed period is rejected.</li>
+</ul>
+<h3>What every step does the same way</h3>
+<p><strong>Tasks in a DAG run:</strong>
+- The step's task, one per <code>runs</code> entry.
+- A <code>trigger_&lt;dag id&gt;</code> task for each DAG in <code>trigger_dags</code>.
+- <code>success_email</code> / <code>fail_email</code>, sent to <code>email_recipient</code>.</p>
+<p><strong>Result of a step</strong></p>
+<table>
+<thead>
+<tr>
+<th>Exit</th>
+<th>Meaning</th>
+<th>Task</th>
+<th>Next DAGs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>Done, nothing to report</td>
+<td>Success</td>
+<td>Started</td>
+</tr>
+<tr>
+<td>1</td>
+<td>Done, with problems (a rejected file, a failed export)</td>
+<td>Fails at once, no retry. ServiceNow incident and failure email</td>
+<td>Not started</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Could not run (database down, missing table, bad Variable)</td>
+<td>Fails, retried after 5 minutes (<code>retries</code>), then incident and email</td>
+<td>Not started</td>
+</tr>
+</tbody>
+</table>
+<p><code>"fail_on_problems": false</code> makes exit 1 a success. It is the default for OVERRIDE_DECISIONS.</p>
+<ul>
+<li><strong>Safe to repeat:</strong> every step can run again at any time and only does what is still left. A batch is never created twice, a file is never loaded twice, and an export replaces its own rows.</li>
+<li><strong>Never twice at once:</strong> a DAG waits for its own previous run. Different DAGs can run together; locks keep them apart.</li>
+<li><strong>Scope:</strong> <code>project</code>, <code>table_group</code>, <code>table</code>, <code>run_type</code> and <code>source</code> limit what a run works on. <code>as_of</code> runs it as if it were another day.</li>
+<li><strong>Logs:</strong> each step logs its progress, every configured SQL with its values, and the step report. File data is never logged.</li>
+</ul>
+<hr />
+<h2>4. Life of a batch</h2>
+<pre><code>                         BATCH_CREATION
+                               |
+                       REQUEST_CREATED
+        +----------------------+------------------------+
+        | file / pull          | empty file, or         | approved REUSE
+        | with rows            | empty pull on/after    |
+        |                      | close date             |
+        v                      v                        v
+ SOURCE_DATA_READY   SOURCE_DATA_READY_NO_DATA   SOURCE_DATA_CARRY_FORWARD
+        |                      |                        |
+        | BATCH_CLOSE          | BATCH_CLOSE            | BATCH_CLOSE
+        v                      v                        v
+ REQUEST_COMPLETE        DATA_NOT_PROVIDED         REQUEST_COMPLETE
+ (NEW_FILE)              (NO_DATA)                 (CARRY_FORWARD)
+
+ REQUEST_CREATED with nothing by the close date --&gt; DATA_NOT_PROVIDED (MISSING)
+                                                    + alert SOURCE_MISSING_AT_CLOSE
+ Closed batch + approved LATE_ARRIVAL / CORRECTION --&gt; file loaded, batch stays closed
+ Closed batch + approved REOPEN --&gt; open again until new data, then closed again
+</code></pre>
+<ul>
+<li>Close date = <code>Req_Dt_Key + SLA_Days - 1</code>. For example, a batch created Sunday 10/18 with <code>SLA_Days = 6</code> has a close date of Friday 10/23. BATCH_CLOSE closes it on its first run on or after that date.</li>
+<li><code>REQUEST_COMPLETE</code> and <code>DATA_NOT_PROVIDED</code> are the closed statuses.</li>
+</ul>
+<hr />
+<h2>5. Common rules for all tables</h2>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Rule</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Codes</td>
+<td>Upper case letters, digits and <code>_</code>. Not case sensitive. Max length: project 30, table 63, source 30, run type 20, version 10</td>
+</tr>
+<tr>
+<td><code>*</code></td>
+<td>Means "all". Allowed in <code>Table_Nm</code>, <code>Src_ID</code>, <code>Run_Ty</code>, <code>Check_Field_Nm</code> where stated. A specific row wins over a <code>*</code> row</td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td><code>1</code> = in use, <code>0</code> = switched off. Rows are switched off, not deleted</td>
+</tr>
+<tr>
+<td>Lists</td>
+<td>Comma separated, no spaces. Example: <code>DLY,WKLY,MNT</code></td>
+</tr>
+<tr>
+<td>Dates</td>
+<td><code>DATE '2026-10-20'</code>. Empty end date (<code>NULL</code>) = no end</td>
+</tr>
+<tr>
+<td><code>$env</code></td>
+<td>Allowed in database names and NAS paths. Replaced by the environment (DEV, QA, PROD). Not replaced inside SQL text</td>
+</tr>
+<tr>
+<td>SQL text columns</td>
+<td>One statement only. Placeholders like <code>{rpt_start}</code> are passed as values. Write <code>{rpt_start}</code>, not <code>'{rpt_start}'</code></td>
+</tr>
+<tr>
+<td>Audit columns</td>
+<td><code>Load_Dtts</code>, <code>LoadUser_ID</code>, <code>LastUpdt_Dtts</code>, <code>LastUpdt_ID</code> are filled by the database. Leave them out of inserts</td>
+</tr>
+<tr>
+<td>Framework tables</td>
+<td><code>GOVT_RGLTRY_RequestControl</code>, <code>GOVT_RGLTRY_FileLoad</code>, <code>GOVT_RGLTRY_RequestFileDetail</code>, <code>CMS_GOVT_RGLTRY_ExceptionsAudit</code>, <code>GOVT_RGLTRY_Lock</code> are written by the framework only. Do not change them by hand unless a runbook procedure says so</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>6. Steps and their tables</h2>
+<h3>6.1 BATCH_CREATION</h3>
+<p>Creates one row per batch and source in <code>GOVT_RGLTRY_RequestControl</code>. Batches come from run type schedules, the batch calendar and ad-hoc requests.</p>
+<table>
+<thead>
+<tr>
+<th>Where batches come from</th>
+<th>When</th>
+<th>Report dates</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A <code>SCHEDULED</code> run type with schedule codes</td>
+<td>On its scheduled day, moved by <code>Sched_Offset_Days</code>. A missed day is still created within <code>Sched_Window_Days</code></td>
+<td><code>GOVT_RGLTRY_RunTypePeriod</code> or crosswalk, counted from the scheduled day</td>
+</tr>
+<tr>
+<td>A run type with <code>Batch_Schedule_Sql_Txt</code></td>
+<td>When the SQL returns a row</td>
+<td>From that row, or the period row</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_BatchCalendar</code></td>
+<td>On the calendar dates</td>
+<td>The calendar row's dates</td>
+</tr>
+<tr>
+<td>An <code>ADHOC</code> run type with a schedule</td>
+<td>Same as scheduled, for the sources whose crosswalk row lists it</td>
+<td>Same as scheduled</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestInTake</code></td>
+<td>Every day of the request window, one batch per day</td>
+<td>The request's dates</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>Which sources:</strong> every crosswalk row active and effective on the batch's date that lists the run type.</li>
+<li><strong>Version:</strong> the crosswalk row's <code>Rpt_Version</code>, or the request's.</li>
+<li><strong>Options:</strong> <code>period</code>, <code>lookback_days</code>, <code>lookback_weeks</code>, <code>run_type</code>, <code>table</code> / <code>table_group</code>, <code>as_of</code>.</li>
+<li><strong>Problems (exit 1):</strong> a configuration error (bad period code, failing SQL) or a failed request (<code>INTAKE_FAILED</code>). The other batches are still created.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Read / Write</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GOVT_RGLTRY_Project</code></td>
+<td>Read</td>
+<td>Project must be active</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_Table</code></td>
+<td>Read</td>
+<td>Table group, when a run is limited to a group</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_SourceSystem</code></td>
+<td>Read</td>
+<td>Source must be active (ad-hoc requests)</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RunType</code></td>
+<td>Read</td>
+<td>Schedule, SLA, category</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RunTypePeriod</code></td>
+<td>Read</td>
+<td>Report dates of each run type</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_DataSetSourceXwalk</code></td>
+<td>Read</td>
+<td>Which sources get batches for which run types, version</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_BatchCalendar</code></td>
+<td>Read</td>
+<td>Extra batches on fixed dates</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestInTake</code></td>
+<td>Read / Write</td>
+<td>Ad-hoc requests. Writes the last day handled</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_SourceFileConfig</code>, <code>GOVT_RGLTRY_InternalSourceConfig</code></td>
+<td>Read</td>
+<td>An ad-hoc request's source must have a file or query config</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestControl</code></td>
+<td>Write</td>
+<td>The batch rows</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestFileDetail</code></td>
+<td>Write</td>
+<td><code>BATCH_CREATED</code> event</td>
+</tr>
+<tr>
+<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td>Write</td>
+<td><code>INTAKE_FAILED</code>, configuration errors</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_Lock</code></td>
+<td>Write</td>
+<td><code>SEQ:</code> lock while a batch ID is chosen, <code>INTAKE:</code> lock per request</td>
+</tr>
+</tbody>
+</table>
+<h4>GOVT_RGLTRY_Project</h4>
+<p>One row per project.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Project_Cd</code></td>
+<td>Yes</td>
+<td>Up to 30 characters</td>
+<td>Project code. Part of the batch ID and used in every other table</td>
+</tr>
+<tr>
+<td><code>Project_Desc</code></td>
+<td>Yes</td>
+<td>Text</td>
+<td>Description</td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td><code>0</code> = no batches are created for the project</td>
+</tr>
+</tbody>
+</table>
+<h4>GOVT_RGLTRY_Table (optional)</h4>
+<p>Groups tables so a step can run for a group (for example all ODAG tables).</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Project_Cd</code></td>
+<td>Yes</td>
+<td>A project</td>
+<td></td>
+</tr>
+<tr>
+<td><code>Table_Nm</code></td>
+<td>Yes</td>
+<td>Up to 63 characters</td>
+<td>Table code used in all other tables</td>
+</tr>
+<tr>
+<td><code>Table_Grp_Cd</code></td>
+<td>Yes</td>
+<td>Up to 30 characters, e.g. <code>ODAG</code></td>
+<td>Group name. Used by the <code>table_group</code> run option</td>
+</tr>
+<tr>
+<td><code>Table_Desc</code></td>
+<td>No</td>
+<td>Text</td>
+<td>Description</td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td><code>0</code> = the table is left out of its group</td>
+</tr>
+</tbody>
+</table>
+<h4>GOVT_RGLTRY_SourceSystem</h4>
+<p>One row per source. Shared by all projects.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Src_ID</code></td>
+<td>Yes</td>
+<td>Up to 30 characters, e.g. <code>51</code></td>
+<td>Source code. Stored on batch rows, file configs and core rows</td>
+</tr>
+<tr>
+<td><code>Src_Nm</code></td>
+<td>Yes</td>
+<td>Text, e.g. <code>MedHOK</code></td>
+<td>Name shown in reports and the control report</td>
+</tr>
+<tr>
+<td><code>Src_Ty</code></td>
+<td>Yes</td>
+<td>Free text, e.g. <code>FDR</code>, <code>INTERNAL</code></td>
+<td>Information only</td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td><code>0</code> = files of this source are rejected and ad-hoc requests fail</td>
+</tr>
+</tbody>
+</table>
+<h4>GOVT_RGLTRY_RunType</h4>
+<p>One row per run type. Shared by all projects. Decides when batches are created, when they close, and whether they are scheduled or ad hoc.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Run_Ty</code></td>
+<td>Yes</td>
+<td>Letters and digits, up to 20, e.g. <code>DLY</code>, <code>WKLY</code>, <code>MNT</code>, <code>CMS</code></td>
+<td>Run type code. Appears in file names and batch IDs</td>
+</tr>
+<tr>
+<td><code>Run_Ty_Desc</code></td>
+<td>Yes</td>
+<td>Text</td>
+<td>Description</td>
+</tr>
+<tr>
+<td><code>Run_Category_Cd</code></td>
+<td>Yes</td>
+<td><code>SCHEDULED</code>, <code>ADHOC</code></td>
+<td><code>SCHEDULED</code> = batches from the schedule, exported from the close date. <code>ADHOC</code> = batches from requests (and from a schedule if set), stay open until released</td>
+</tr>
+<tr>
+<td><code>SLA_Days</code></td>
+<td>Yes</td>
+<td>Whole number, 1 or more</td>
+<td>Close date = request date + <code>SLA_Days</code> - 1. <code>1</code> = closes the same day</td>
+</tr>
+<tr>
+<td><code>Carry_Fwd_Ind</code></td>
+<td>Default 0</td>
+<td><code>1</code>, <code>0</code></td>
+<td><code>1</code> = REUSE (carry-forward) overrides are allowed</td>
+</tr>
+<tr>
+<td><code>Sched_Cd</code></td>
+<td>No</td>
+<td><code>DAILY</code>, <code>WEEKLY</code>, <code>MONTHLY</code></td>
+<td>When batches are created. Empty = no schedule code</td>
+</tr>
+<tr>
+<td><code>Sched_Day_Cd</code></td>
+<td>With <code>WEEKLY</code> / <code>MONTHLY</code></td>
+<td><code>MON</code>…<code>SUN</code>, <code>1</code>…<code>31</code>, <code>LAST</code></td>
+<td>WEEKLY: the weekday. MONTHLY: the day number, <code>LAST</code>, or a weekday with <code>Sched_Week_Cd</code></td>
+</tr>
+<tr>
+<td><code>Sched_Week_Cd</code></td>
+<td>MONTHLY on a weekday</td>
+<td><code>1</code>, <code>2</code>, <code>3</code>, <code>4</code>, <code>LAST</code></td>
+<td>Which weekday of the month, e.g. 3rd Tuesday</td>
+</tr>
+<tr>
+<td><code>Sched_Months_Txt</code></td>
+<td>No</td>
+<td>e.g. <code>1,4,7,10</code></td>
+<td>MONTHLY only in these months (quarterly)</td>
+</tr>
+<tr>
+<td><code>Sched_Window_Days</code></td>
+<td>Default 1</td>
+<td>1 or more</td>
+<td>A missed day is still created up to this many days later, with the same report dates</td>
+</tr>
+<tr>
+<td><code>Sched_Offset_Days</code></td>
+<td>Default 0</td>
+<td>-31 to 31</td>
+<td>Moves the scheduled date. <code>-2</code> with 3rd Tuesday = the Sunday before</td>
+</tr>
+<tr>
+<td><code>Batch_Schedule_Sql_Txt</code></td>
+<td>No</td>
+<td>One <code>SELECT</code></td>
+<td>Used when <code>Sched_Cd</code> is empty. Returns a row on a due day, no row otherwise</td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td><code>0</code> = no batches for this run type</td>
+</tr>
+</tbody>
+</table>
+<h4>GOVT_RGLTRY_RunTypePeriod</h4>
+<p>Report dates of each scheduled run type, set once per project. A table row wins over the <code>*</code> row. A period on the crosswalk row wins over both.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Project_Cd</code></td>
+<td>Yes</td>
+<td>A project</td>
+<td></td>
+</tr>
+<tr>
+<td><code>Table_Nm</code></td>
+<td>Default <code>*</code></td>
+<td>A table or <code>*</code></td>
+<td><code>*</code> = every table of the project</td>
+</tr>
+<tr>
+<td><code>Run_Ty</code></td>
+<td>Yes</td>
+<td>A run type</td>
+<td></td>
+</tr>
+<tr>
+<td><code>Rpt_Period_Cd</code></td>
+<td>This or the SQL</td>
+<td>Period code, e.g. <code>PREV_DAY</code>, <code>PREV_CALENDAR_WEEK</code>, <code>PREV_CALENDAR_MONTH</code>, <code>PREV_CALENDAR_QUARTER</code>, <code>RANGE(WEEK,5,1)</code>, <code>ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])</code></td>
+<td>Report start and end dates, counted from the scheduled date. <code>ANNUAL_WINDOW</code> gives the same dates every year, e.g. <code>12-01,01-31</code>; the optional third date is when it moves to the next window</td>
+</tr>
+<tr>
+<td><code>Rpt_Dt_Sql_Txt</code></td>
+<td>This or the code</td>
+<td>One <code>SELECT</code> returning <code>rpt_start</code>, <code>rpt_end</code></td>
+<td>For dates no code can express. Use the code or the SQL, not both</td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>Ad-hoc run types need no row. Their dates come from the request.</p>
+<h4>GOVT_RGLTRY_DataSetSourceXwalk (crosswalk)</h4>
+<p>One row per table and source. Lists the run types the source gets batches for, from which date, and the report version.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Project_Cd</code>, <code>Table_Nm</code>, <code>Src_ID</code></td>
+<td>Yes</td>
+<td>Existing codes</td>
+<td>This source sends this table</td>
+</tr>
+<tr>
+<td><code>Run_Ty</code></td>
+<td>Yes</td>
+<td>One run type or a list, e.g. <code>DLY,WKLY,MNT</code> (up to 200)</td>
+<td>Run types the source gets batches for. Only listed run types apply</td>
+</tr>
+<tr>
+<td><code>Effective_Start_Dt_Key</code></td>
+<td>Yes</td>
+<td>Date</td>
+<td>First run date the row applies</td>
+</tr>
+<tr>
+<td><code>Effective_End_Dt_Key</code></td>
+<td>No</td>
+<td>Date</td>
+<td>Last run date. Empty = no end. End a row and add a new one to change the version</td>
+</tr>
+<tr>
+<td><code>Rpt_Version</code></td>
+<td>Yes</td>
+<td>Up to 10, e.g. <code>2200</code></td>
+<td>Report version. Stored on each batch and written to the <code>VERSION</code> column</td>
+</tr>
+<tr>
+<td><code>Rpt_Period_Cd</code></td>
+<td>No</td>
+<td>Period code</td>
+<td>Only when this source's dates differ from <code>GOVT_RGLTRY_RunTypePeriod</code></td>
+</tr>
+<tr>
+<td><code>Rpt_Dt_Sql_Txt</code></td>
+<td>No</td>
+<td>One <code>SELECT</code></td>
+<td>Same as above, for dates no code can express</td>
+</tr>
+<tr>
+<td><code>Include_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td>On a row for a single run type: <code>0</code> stops that run type for the source from the start date</td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>A row for a single run type that is also in the source's list replaces the list entry for that run type while it is effective (different version, dates, or <code>Include_Ind = 0</code>).</p>
+<p>Report dates are taken from the first that has them: crosswalk <code>Rpt_Period_Cd</code>, crosswalk <code>Rpt_Dt_Sql_Txt</code>, table row in <code>GOVT_RGLTRY_RunTypePeriod</code>, project <code>*</code> row.</p>
+<h4>GOVT_RGLTRY_BatchCalendar (optional)</h4>
+<p>Batches on fixed dates with fixed report dates. Used for an extra or moved submission.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Project_Cd</code></td>
+<td>Yes</td>
+<td>A project</td>
+<td></td>
+</tr>
+<tr>
+<td><code>Table_Nm</code></td>
+<td>Default <code>*</code></td>
+<td>A table or <code>*</code></td>
+<td><code>*</code> = every table of the run type</td>
+</tr>
+<tr>
+<td><code>Run_Ty</code></td>
+<td>Yes</td>
+<td>Any active run type</td>
+<td></td>
+</tr>
+<tr>
+<td><code>Req_Dt_Key</code></td>
+<td>Yes</td>
+<td>Date</td>
+<td>The day the batch is created</td>
+</tr>
+<tr>
+<td><code>Rpt_Start_Dt_Key</code>, <code>Rpt_End_Dt_Key</code></td>
+<td>Yes</td>
+<td>Dates</td>
+<td>Report dates of the batch</td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h4>GOVT_RGLTRY_RequestInTake (ad-hoc requests)</h4>
+<p>One row per request and source. A batch is created on each day of the request window. No crosswalk row is needed.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Intake_ID</code></td>
+<td>Generated</td>
+<td>Number</td>
+<td>Request number. Leave out</td>
+</tr>
+<tr>
+<td><code>Project_Cd</code>, <code>Table_Nm</code></td>
+<td>Yes</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td><code>Src_ID</code></td>
+<td>Yes</td>
+<td>A source</td>
+<td>One request per source</td>
+</tr>
+<tr>
+<td><code>Run_Ty</code></td>
+<td>Yes</td>
+<td>Any active run type</td>
+<td>Usually an ad-hoc one, e.g. <code>CMS</code></td>
+</tr>
+<tr>
+<td><code>Rpt_Version</code></td>
+<td>Yes</td>
+<td>e.g. <code>2200</code></td>
+<td>Report version stored on the batch</td>
+</tr>
+<tr>
+<td><code>Rpt_Start_Dt_Key</code>, <code>Rpt_End_Dt_Key</code></td>
+<td>Yes</td>
+<td>Dates</td>
+<td>Report dates of the batch</td>
+</tr>
+<tr>
+<td><code>Req_Start_Dt_Key</code>, <code>Req_End_Dt_Key</code></td>
+<td>Yes</td>
+<td>Dates</td>
+<td>Days batches are created. Same date twice = one batch</td>
+</tr>
+<tr>
+<td><code>Last_Run_Dt_Key</code></td>
+<td>Framework</td>
+<td>Date</td>
+<td>Last day the request was handled. Stops the same day being done twice. Leave out</td>
+</tr>
+</tbody>
+</table>
+<p>If an open batch already exists for the same source, run type and report dates, the request uses it.</p>
+<h4>GOVT_RGLTRY_RequestControl (written here, used by all later steps)</h4>
+<p>One row per batch and source.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Req_ID</code></td>
+<td>Generated number</td>
+<td>The batch row number. Used by loads, overrides and the timeline</td>
+</tr>
+<tr>
+<td><code>Project_Cd</code>, <code>Table_Nm</code>, <code>Src_ID</code>, <code>Run_Ty</code></td>
+<td>Codes</td>
+<td>What the batch row is for</td>
+</tr>
+<tr>
+<td><code>Rpt_Version</code></td>
+<td>e.g. <code>2200</code></td>
+<td>From the crosswalk or the request</td>
+</tr>
+<tr>
+<td><code>Rpt_Start_Dt_Key</code>, <code>Rpt_End_Dt_Key</code></td>
+<td>Dates</td>
+<td>Report period</td>
+</tr>
+<tr>
+<td><code>Req_Dt_Key</code></td>
+<td>Date</td>
+<td>Request date: the day the batch is for. Close date = <code>Req_Dt_Key + SLA_Days - 1</code></td>
+</tr>
+<tr>
+<td><code>Btch_ID</code></td>
+<td><code>YYYYMMDD_PROJECT_TABLE_RUNTYPE</code>, plus <code>_2</code>, <code>_3</code> for another report period on the same day</td>
+<td>Batch ID. Same for every source of the table</td>
+</tr>
+<tr>
+<td><code>Req_Stat</code></td>
+<td><code>REQUEST_CREATED</code>, <code>SOURCE_DATA_READY</code>, <code>SOURCE_DATA_READY_NO_DATA</code>, <code>SOURCE_DATA_CARRY_FORWARD</code>, <code>REQUEST_COMPLETE</code>, <code>DATA_NOT_PROVIDED</code></td>
+<td>Batch status. The last two are closed</td>
+</tr>
+<tr>
+<td><code>Resolution_Ty</code></td>
+<td><code>NEW_FILE</code>, <code>NO_DATA</code>, <code>CARRY_FORWARD</code>, <code>MISSING</code></td>
+<td>How the batch got (or did not get) its data</td>
+</tr>
+<tr>
+<td><code>Reuse_Btch_ID</code></td>
+<td>A batch ID</td>
+<td>For a carry-forward: the batch whose data is reused</td>
+</tr>
+<tr>
+<td><code>Batch_Close_Ind</code></td>
+<td><code>0</code>, <code>1</code></td>
+<td><code>0</code> = open, <code>1</code> = closed</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th><code>Req_Stat</code></th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>REQUEST_CREATED</code></td>
+<td>Created, no data yet</td>
+</tr>
+<tr>
+<td><code>SOURCE_DATA_READY</code></td>
+<td>Data loaded</td>
+</tr>
+<tr>
+<td><code>SOURCE_DATA_READY_NO_DATA</code></td>
+<td>Source sent "no data" (empty file, or empty pull on or after the close date)</td>
+</tr>
+<tr>
+<td><code>SOURCE_DATA_CARRY_FORWARD</code></td>
+<td>Earlier data reused</td>
+</tr>
+<tr>
+<td><code>REQUEST_COMPLETE</code></td>
+<td>Closed with data</td>
+</tr>
+<tr>
+<td><code>DATA_NOT_PROVIDED</code></td>
+<td>Closed without data</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3>6.2 FILE_CHECK</h3>
+<p>Checks the files waiting in the inbound folders. Loads nothing. A failed file can be moved to <code>Error/</code> so FILE_LOAD does not pick it up.</p>
+<ul>
+<li>Files changed in the last <code>NAS_MIN_AGE_SECONDS</code> (120) are left for the next run, because they may still be arriving.</li>
+<li><strong>Each file is checked for:</strong></li>
+<li>its name, against <code>Src_File_Nm_Tmplt</code> (exactly one config must match);</li>
+<li>the open batch for its run type and dates;</li>
+<li>the checks set in <code>GOVT_RGLTRY_FileCheckConfig</code>.</li>
+<li><strong>Passed:</strong> <code>FILE_CHECK_PASSED</code> is recorded, not emailed.</li>
+<li><strong>Failed:</strong> <code>FILE_CHECK_FAILED</code> is recorded and emailed, an error log is written to <code>ErrorLog/</code>, and with <code>CHECK_MOVE_FAILED = true</code> the file moves to <code>Error/</code>.</li>
+<li><strong>One failed file fails the task.</strong> If at least one file passed, FILE_LOAD still starts so the good files load right away.</li>
+<li><strong>Settings:</strong> <code>CHECK_CONTENT</code>, <code>CHECK_MOVE_FAILED</code>, and the file settings.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Read / Write</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GOVT_RGLTRY_SourceFileConfig</code></td>
+<td>Read</td>
+<td>Folders to look in, file name pattern, delimiter, header and trailer</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_FileCheckConfig</code></td>
+<td>Read</td>
+<td>Which checks each file gets</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestControl</code></td>
+<td>Read</td>
+<td>The file must have an open batch</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_SourceSystem</code></td>
+<td>Read</td>
+<td>The source must exist and be active</td>
+</tr>
+<tr>
+<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td>Write</td>
+<td><code>FILE_CHECK_PASSED</code> (not emailed), <code>FILE_CHECK_FAILED</code> (emailed). One row per file and result</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_Lock</code></td>
+<td>Write</td>
+<td><code>OBJ:</code> lock while a file is checked</td>
+</tr>
+</tbody>
+</table>
+<h4>GOVT_RGLTRY_SourceFileConfig (file sources)</h4>
+<p>One row per source that sends files, per table.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Cfg_ID</code></td>
+<td>Generated</td>
+<td>Number</td>
+<td>Config number. Stored on each load. Leave out</td>
+</tr>
+<tr>
+<td><code>Project_Cd</code>, <code>Table_Nm</code>, <code>Src_ID</code></td>
+<td>Yes</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td><code>Src_File_Nm_Tmplt</code></td>
+<td>Yes</td>
+<td>Fixed text + tokens (see below)</td>
+<td>File name pattern. The name gives the run type and report dates, which find the batch</td>
+</tr>
+<tr>
+<td><code>File_Vrsn_Cd</code></td>
+<td>With <code>{VERSION}</code></td>
+<td>e.g. <code>22</code></td>
+<td>Version as written in the file name</td>
+</tr>
+<tr>
+<td><code>Delmtr_Cd</code></td>
+<td>No</td>
+<td>One character: <code>|</code>, <code>,</code>, <code>;</code>, <code>*</code>, <code>\t</code> (tab)</td>
+<td>Field delimiter. Empty = comma</td>
+</tr>
+<tr>
+<td><code>Src_File_Has_Hdr_Ind</code></td>
+<td>Yes</td>
+<td><code>1</code>, <code>0</code></td>
+<td><code>1</code> = first line is a header (not loaded)</td>
+</tr>
+<tr>
+<td><code>Src_File_Has_Trlr_Ind</code></td>
+<td>Yes</td>
+<td><code>1</code>, <code>0</code></td>
+<td><code>1</code> = last line is a trailer (not loaded, checked with <code>TRAILER</code>)</td>
+</tr>
+<tr>
+<td><code>Allow_Zero_Rcd_Ind</code></td>
+<td>Yes</td>
+<td><code>0</code></td>
+<td>Not used. Put <code>0</code>. A file with no rows means "no data"</td>
+</tr>
+<tr>
+<td><code>Src_File_Path</code></td>
+<td>Yes</td>
+<td><code>\\server\share\folder</code>, <code>//server/share/folder</code>, <code>smb://...</code>, <code>nas://share/folder</code></td>
+<td>Inbound NAS folder. <code>Archive</code>, <code>Error</code>, <code>ErrorLog</code>, <code>ControlReport</code> are created inside it</td>
+</tr>
+<tr>
+<td><code>Stg_Schema_Nm</code>, <code>Stg_Table_Nm</code></td>
+<td>Yes</td>
+<td>Database and table</td>
+<td>Staging table</td>
+</tr>
+<tr>
+<td><code>Core_Schema_Nm</code>, <code>Core_Table_Nm</code></td>
+<td>Yes</td>
+<td>Database and table</td>
+<td>Core table</td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td><code>0</code> = files matching this config are not picked up</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Token</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>{RUNTY}</code></td>
+<td>Run type. Required, once</td>
+</tr>
+<tr>
+<td><code>{RPTSTART}</code>, <code>{RPTEND}</code></td>
+<td>Report dates, <code>YYYYMMDD</code> unless a format is given. Required, once each</td>
+</tr>
+<tr>
+<td><code>{RPTMONTH}</code></td>
+<td>Instead of the two dates: a month (<code>YYYYMM</code>), first to last day</td>
+</tr>
+<tr>
+<td><code>{TS}</code></td>
+<td>File timestamp, 12 or 14 digits unless a format is given. Optional</td>
+</tr>
+<tr>
+<td><code>{VERSION}</code></td>
+<td>Must equal <code>File_Vrsn_Cd</code></td>
+</tr>
+<tr>
+<td><code>{PROJECT}</code>, <code>{TABLE}</code>, <code>{SRC}</code></td>
+<td>The row's project, table and source codes</td>
+</tr>
+<tr>
+<td><code>{ANY}</code></td>
+<td>Any text, ignored</td>
+</tr>
+</tbody>
+</table>
+<p>Formats can be given, for example <code>{RPTSTART:MMDDYYYY}</code>, <code>{RPTEND:YYYY-MM-DD}</code>, <code>{TS:YYYYMMDD}</code>. Two tokens need fixed text between them. The pattern ends with the extension (<code>.txt</code>, <code>.csv</code>).</p>
+<p>Example: <code>CMSAuth_MedHOK_PYMT_C_22_MNT_20260901_20260930_20261019093000.txt</code> matches <code>CMSAuth_MedHOK_PYMT_C_{VERSION}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt</code> with <code>File_Vrsn_Cd = 22</code>.</p>
+<h4>GOVT_RGLTRY_FileCheckConfig (file checks)</h4>
+<p>Rows add up: checks set for the project (<code>*</code>), the table and the source all apply. For the same check, the most specific row wins: table + source, then table, then source, then <code>*</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Project_Cd</code></td>
+<td>Yes</td>
+<td>A project</td>
+<td></td>
+</tr>
+<tr>
+<td><code>Table_Nm</code></td>
+<td>Default <code>*</code></td>
+<td>A table or <code>*</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>Src_ID</code></td>
+<td>Default <code>*</code></td>
+<td>A source or <code>*</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>Check_Cd</code></td>
+<td>Yes</td>
+<td>See list below</td>
+<td>The check</td>
+</tr>
+<tr>
+<td><code>Check_Field_Nm</code></td>
+<td>Default <code>*</code></td>
+<td>A field name or <code>*</code></td>
+<td>The field for field checks. <code>*</code> for file-level checks</td>
+</tr>
+<tr>
+<td><code>Check_Val_Txt</code></td>
+<td>When included</td>
+<td>Depends on the check</td>
+<td>The check's value</td>
+</tr>
+<tr>
+<td><code>Include_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td><code>0</code> = switches an inherited check off for the files this row covers</td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th><code>Check_Cd</code></th>
+<th>Field</th>
+<th><code>Check_Val_Txt</code> example</th>
+<th>What it checks</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RECORD_TYPE</code></td>
+<td><code>*</code></td>
+<td><code>H,D,T</code></td>
+<td>First field of the header, data rows and trailer</td>
+</tr>
+<tr>
+<td><code>HEADER_NAMES</code></td>
+<td><code>*</code></td>
+<td><code>MemberFirstName|MemberID|Amount</code></td>
+<td>Header names in order (case and spaces ignored). Also decides which staging column each field loads to</td>
+</tr>
+<tr>
+<td><code>COLUMN_COUNT</code></td>
+<td><code>*</code></td>
+<td><code>23</code></td>
+<td>Number of fields on the header and each data row</td>
+</tr>
+<tr>
+<td><code>TARGET_COLUMNS</code></td>
+<td><code>*</code></td>
+<td><code>MemberFirstName|MemberID</code></td>
+<td>Not a check. The staging column of each field, in file order</td>
+</tr>
+<tr>
+<td><code>TRAILER</code></td>
+<td><code>*</code></td>
+<td><code>RECORD_TYPE,FILE_NAME,TOTAL_ROW_COUNT,TIMESTAMP</code></td>
+<td>Layout of the trailer. Fields: <code>RECORD_TYPE</code>, <code>FILE_NAME</code>, <code>DATA_ROW_COUNT</code>, <code>TOTAL_ROW_COUNT</code>, <code>TIMESTAMP</code>, <code>SKIP</code>. Counts must match the file</td>
+</tr>
+<tr>
+<td><code>CHARACTER_SET</code></td>
+<td><code>*</code></td>
+<td><code>latin-1</code></td>
+<td>Only characters of that set, no control characters</td>
+</tr>
+<tr>
+<td><code>INVALID_CHARACTERS</code></td>
+<td><code>*</code></td>
+<td><code>&lt;,&gt;,~</code></td>
+<td>None of the listed characters in any line (header, data, trailer). An entry of several characters is looked for as that sequence. A comma or the file's delimiter cannot be listed</td>
+</tr>
+<tr>
+<td><code>COLUMN_VALUES</code></td>
+<td><code>*</code></td>
+<td><code>ALL</code> or <code>LENGTH,NUMBER,REQUIRED</code></td>
+<td>Each value fits its staging column: length, number, not empty</td>
+</tr>
+<tr>
+<td><code>MIN_RECORD_LENGTH</code>, <code>MAX_RECORD_LENGTH</code></td>
+<td><code>*</code></td>
+<td><code>250</code></td>
+<td>Characters per data line</td>
+</tr>
+<tr>
+<td><code>MIN_ROWS</code>, <code>MAX_ROWS</code></td>
+<td><code>*</code></td>
+<td><code>100</code></td>
+<td>Number of data rows in the file</td>
+</tr>
+<tr>
+<td><code>MIN_LENGTH</code>, <code>MAX_LENGTH</code></td>
+<td>field</td>
+<td><code>9</code></td>
+<td>Characters in the field's value</td>
+</tr>
+<tr>
+<td><code>MIN_VALUE</code>, <code>MAX_VALUE</code></td>
+<td>field</td>
+<td><code>0</code></td>
+<td>Field is a number not below / above the value</td>
+</tr>
+<tr>
+<td><code>VALUE_IN</code></td>
+<td>field</td>
+<td><code>Y|N</code></td>
+<td>Field is one of the listed values</td>
+</tr>
+<tr>
+<td><code>PATTERN</code></td>
+<td>field</td>
+<td><code>[A-Z][0-9]{8}</code></td>
+<td>Whole value matches the regular expression</td>
+</tr>
+<tr>
+<td><code>DATE_FORMAT</code></td>
+<td>field</td>
+<td><code>YYYYMMDD</code>, <code>MM/DD/YYYY</code></td>
+<td>Field is a valid date or timestamp in that format</td>
+</tr>
+</tbody>
+</table>
+<p>Always checked, no row needed: file name, batch, source, encoding, blank lines, structure. Field checks skip empty values (use <code>COLUMN_VALUES</code> with <code>REQUIRED</code> for those).</p>
+<hr />
+<h3>6.3 FILE_LOAD</h3>
+<p>Loads every waiting file: name → batch → checks → staging → core. Then moves the file to <code>Archive/</code> or <code>Error/</code>.</p>
+<table>
+<thead>
+<tr>
+<th>What happens to a file</th>
+<th><code>Load_Stat</code></th>
+<th>File moves to</th>
+<th>Batch</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Loaded, with rows</td>
+<td><code>FILE_LOADED</code></td>
+<td><code>Archive/</code></td>
+<td><code>SOURCE_DATA_READY</code> (<code>NEW_FILE</code>)</td>
+</tr>
+<tr>
+<td>Loaded, no data rows</td>
+<td><code>FILE_LOADED</code></td>
+<td><code>Archive/</code></td>
+<td><code>SOURCE_DATA_READY_NO_DATA</code> (<code>NO_DATA</code>)</td>
+</tr>
+<tr>
+<td>A newer file for the same batch before the close</td>
+<td>Earlier load becomes <code>RELOADED</code></td>
+<td></td>
+<td>Data replaced</td>
+</tr>
+<tr>
+<td>Name, batch, check or type problem</td>
+<td><code>REJECTED</code> (<code>Reject_Rsn_Cd</code> says why)</td>
+<td><code>Error/</code>, error log in <code>ErrorLog/</code></td>
+<td>Unchanged</td>
+</tr>
+<tr>
+<td>Batch closed, no approved override</td>
+<td><code>REJECTED</code> (<code>FILE_REJECTED_BATCH_CLOSED</code>)</td>
+<td><code>Error/</code></td>
+<td>Unchanged</td>
+</tr>
+<tr>
+<td>Closed batch with approved <code>LATE_ARRIVAL</code> / <code>CORRECTION</code></td>
+<td><code>FILE_LOADED</code></td>
+<td><code>Archive/</code></td>
+<td>Stays closed, data replaced</td>
+</tr>
+<tr>
+<td>Staging table busy</td>
+<td><code>LOAD_INCOMPLETE</code></td>
+<td>Stays</td>
+<td>Picked up next run</td>
+</tr>
+<tr>
+<td>System problem</td>
+<td><code>PROCESS_FAILURE</code></td>
+<td>Stays</td>
+<td>Tried again</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>A file is identified by its path, size and time. The same name delivered again is a new delivery.</li>
+<li>The same content loaded for another batch is loaded and reported (<code>FILE_SAME_CONTENT_OTHER_BATCH</code>).</li>
+<li>One control report line per file is written to <code>ControlReport/</code>.</li>
+<li><strong>Problems (exit 1):</strong> any rejected file. The other files are still loaded.</li>
+<li><strong>Options:</strong> the scope, <code>as_of</code>. From a trigger also <code>share</code>, <code>folder</code>, <code>file</code>.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Read / Write</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GOVT_RGLTRY_SourceFileConfig</code></td>
+<td>Read</td>
+<td>File layout, folder, staging and core tables</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_FileCheckConfig</code></td>
+<td>Read</td>
+<td>Checks run at load</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_TargetColumnConfig</code></td>
+<td>Read</td>
+<td>Columns the framework fills (batch, source, version, load date …)</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_SourceSystem</code></td>
+<td>Read</td>
+<td>Source active, source name for the control report</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestControl</code></td>
+<td>Read / Write</td>
+<td>Finds the open batch. Sets status and resolution</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_BatchOverride</code></td>
+<td>Read</td>
+<td>Approved <code>LATE_ARRIVAL</code> / <code>CORRECTION</code> lets a file into a closed batch</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_FileLoad</code></td>
+<td>Write</td>
+<td>One row per file pickup</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestFileDetail</code></td>
+<td>Write</td>
+<td><code>FILE_RECEIVED</code>, <code>FILE_LOADED</code>, <code>FILE_REPLACED_BEFORE_CLOSE</code>, <code>LATE_ARRIVAL_LOADED</code>, <code>CORRECTION_LOADED</code></td>
+</tr>
+<tr>
+<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td>Write</td>
+<td>Rejections and load problems</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_Lock</code></td>
+<td>Write</td>
+<td><code>OBJ:</code> per file, <code>REQ:</code> per batch row, <code>BTCH:STAGE</code> per staging table</td>
+</tr>
+<tr>
+<td>Staging and core tables</td>
+<td>Write</td>
+<td>The data</td>
+</tr>
+</tbody>
+</table>
+<h4>GOVT_RGLTRY_TargetColumnConfig (derived columns)</h4>
+<p>Columns of the staging and core tables that the framework fills. Every other staging column is a file field, in table order.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Project_Cd</code></td>
+<td>Yes</td>
+<td>A project</td>
+<td></td>
+</tr>
+<tr>
+<td><code>Table_Nm</code></td>
+<td>Default <code>*</code></td>
+<td>A table or <code>*</code></td>
+<td>A table row wins over the <code>*</code> row for the same column</td>
+</tr>
+<tr>
+<td><code>Column_Nm</code></td>
+<td>Yes</td>
+<td>A staging / core column</td>
+<td>The column to fill</td>
+</tr>
+<tr>
+<td><code>Value_Cd</code></td>
+<td>Yes</td>
+<td>See list below</td>
+<td>What fills it</td>
+</tr>
+<tr>
+<td><code>Value_Txt</code></td>
+<td>For <code>CONSTANT</code>, <code>SQL</code></td>
+<td>The value, or one <code>SELECT</code> returning one value</td>
+<td></td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th><code>Value_Cd</code></th>
+<th>Fills the column with</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BATCH_ID</code></td>
+<td>The batch ID, when the table's batch column is not called <code>Btch_ID</code></td>
+</tr>
+<tr>
+<td><code>SOURCE_ID</code></td>
+<td>The source code. Required in every staging, core and export table</td>
+</tr>
+<tr>
+<td><code>RUN_TYPE</code></td>
+<td>The run type</td>
+</tr>
+<tr>
+<td><code>VERSION</code></td>
+<td>The report version (<code>Rpt_Version</code>)</td>
+</tr>
+<tr>
+<td><code>FILE_NAME</code></td>
+<td>The file name. For pulls: <code>PROJECT_TABLE_SOURCE_YYYYMMDDHHMISS</code></td>
+</tr>
+<tr>
+<td><code>LOAD_TIMESTAMP</code></td>
+<td>Load date and time. Same value on every row of one load</td>
+</tr>
+<tr>
+<td><code>LOAD_DATE</code></td>
+<td>Load date</td>
+</tr>
+<tr>
+<td><code>ROW_SEQUENCE</code></td>
+<td>Running row number, continuing from the highest in staging and core</td>
+</tr>
+<tr>
+<td><code>LOAD_ID</code>, <code>REQ_ID</code></td>
+<td>The load number, the batch row number</td>
+</tr>
+<tr>
+<td><code>PROJECT</code>, <code>TABLE</code></td>
+<td>Project and table codes</td>
+</tr>
+<tr>
+<td><code>RPT_START</code>, <code>RPT_END</code></td>
+<td>Report dates</td>
+</tr>
+<tr>
+<td><code>CURRENT_FLAG</code></td>
+<td>Core only. Always 1</td>
+</tr>
+<tr>
+<td><code>END_TIMESTAMP</code></td>
+<td>Core only. Always empty</td>
+</tr>
+<tr>
+<td><code>CONSTANT</code></td>
+<td><code>Value_Txt</code> on every row</td>
+</tr>
+<tr>
+<td><code>SQL</code></td>
+<td>The one value returned by the <code>SELECT</code> in <code>Value_Txt</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>Btch_ID</code> needs no row. It is always the batch ID.</p>
+<p>Staging can hold every column as text. Core can use real types. Values are converted to the core column's type on the way. A value that does not convert, or an empty value for a NOT NULL column, rejects the whole file (<code>CORE_TYPE_MISMATCH</code>) and core is not touched.</p>
+<h4>GOVT_RGLTRY_BatchOverride (read here)</h4>
+<p>FILE_LOAD uses approved <code>LATE_ARRIVAL</code> and <code>CORRECTION</code> rows to load a file into a closed batch. Full column list under OVERRIDE_DECISIONS.</p>
+<h4>GOVT_RGLTRY_FileLoad (loads and pulls)</h4>
+<p>One row per file pickup or internal pull.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Load_ID</code></td>
+<td>Generated number</td>
+<td>The load number</td>
+</tr>
+<tr>
+<td><code>Cfg_ID</code></td>
+<td>Number</td>
+<td>The file config used (empty for pulls and unmatched files)</td>
+</tr>
+<tr>
+<td><code>Req_ID</code>, <code>Btch_ID</code></td>
+<td>From <code>GOVT_RGLTRY_RequestControl</code></td>
+<td>The batch row the load belongs to</td>
+</tr>
+<tr>
+<td><code>File_Hash</code></td>
+<td>64 characters</td>
+<td>Unique key of the pickup</td>
+</tr>
+<tr>
+<td><code>File_Share</code></td>
+<td>NAS share, or <code>QUERY:&lt;connection&gt;</code> / <code>QUERY:LOCAL</code> for pulls</td>
+<td>Where the file came from</td>
+</tr>
+<tr>
+<td><code>File_Path</code></td>
+<td>Folder and file name; for pulls <code>PROJECT/TABLE/SOURCE/BATCH</code></td>
+<td>The file</td>
+</tr>
+<tr>
+<td><code>File_Version</code></td>
+<td>Size and modified time of the file</td>
+<td>Tells a new delivery of the same name from the same file</td>
+</tr>
+<tr>
+<td><code>File_Size_Byte</code></td>
+<td>Number</td>
+<td>File size (0 for pulls)</td>
+</tr>
+<tr>
+<td><code>File_Sha256</code></td>
+<td>64 characters</td>
+<td>Content hash. Same content in another batch raises <code>FILE_SAME_CONTENT_OTHER_BATCH</code></td>
+</tr>
+<tr>
+<td><code>Load_Stat</code></td>
+<td>See list below</td>
+<td>Load status</td>
+</tr>
+<tr>
+<td><code>Rules_Stat</code></td>
+<td><code>NOT_RUN</code>, <code>PASSED</code>, <code>PASSED_WITH_WARNINGS</code>, <code>FAILED</code>, <code>SKIPPED</code>, <code>ERROR</code></td>
+<td>Data quality rule result (FILE_RULES)</td>
+</tr>
+<tr>
+<td><code>Reject_Rsn_Cd</code></td>
+<td>An audit event code, e.g. <code>FILE_REJECTED_NO_BATCH</code>, <code>CORE_TYPE_MISMATCH</code>, <code>STAGING_TABLE_BUSY</code></td>
+<td>Why it was rejected or delayed</td>
+</tr>
+<tr>
+<td><code>Stg_Rcd_Cnt</code></td>
+<td>Number</td>
+<td>Rows staged</td>
+</tr>
+<tr>
+<td><code>Error_Txt</code></td>
+<td>Text</td>
+<td>Technical detail of a failure</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th><code>Load_Stat</code></th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RECEIVED</code>, <code>STAGING</code>, <code>STAGED</code></td>
+<td>In progress</td>
+</tr>
+<tr>
+<td><code>FILE_LOADED</code></td>
+<td>In core. The batch's current data</td>
+</tr>
+<tr>
+<td><code>RELOADED</code></td>
+<td>Was loaded, replaced by a newer load or a carry-forward</td>
+</tr>
+<tr>
+<td><code>REJECTED</code></td>
+<td>Rejected. File moved to <code>Error/</code></td>
+</tr>
+<tr>
+<td><code>PROCESS_FAILURE</code></td>
+<td>System problem. Tried again next run</td>
+</tr>
+<tr>
+<td><code>NO_DATA_YET</code></td>
+<td>Pull had no rows before the close date. Tried again</td>
+</tr>
+<tr>
+<td><code>LOAD_INCOMPLETE</code></td>
+<td>Staging table busy. Picked up next run</td>
+</tr>
+</tbody>
+</table>
+<h4>GOVT_RGLTRY_RequestFileDetail (batch timeline)</h4>
+<p>One row per event of a batch row. Written by every step.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Detail_ID</code></td>
+<td>Generated number</td>
+<td></td>
+</tr>
+<tr>
+<td><code>Req_ID</code>, <code>Btch_ID</code></td>
+<td>From <code>GOVT_RGLTRY_RequestControl</code></td>
+<td>The batch row</td>
+</tr>
+<tr>
+<td><code>Load_ID</code>, <code>Ovrd_ID</code>, <code>Intake_ID</code></td>
+<td>Numbers or empty</td>
+<td>The load, override or request involved</td>
+</tr>
+<tr>
+<td><code>Event_Ty</code></td>
+<td>See list below</td>
+<td>What happened</td>
+</tr>
+<tr>
+<td><code>Actor</code></td>
+<td><code>SYSTEM</code> or a user</td>
+<td>Who did it</td>
+</tr>
+<tr>
+<td><code>Event_Txt</code></td>
+<td>Text</td>
+<td>Detail</td>
+</tr>
+<tr>
+<td><code>Event_Dtts</code></td>
+<td>Timestamp, Central time</td>
+<td>When</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th><code>Event_Ty</code></th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BATCH_CREATED</code></td>
+<td>Batch row created</td>
+</tr>
+<tr>
+<td><code>FILE_RECEIVED</code></td>
+<td>A file or pull reached the batch</td>
+</tr>
+<tr>
+<td><code>FILE_LOADED</code></td>
+<td>Data loaded into core</td>
+</tr>
+<tr>
+<td><code>LATE_ARRIVAL_LOADED</code>, <code>CORRECTION_LOADED</code></td>
+<td>Data loaded into a closed batch with an override</td>
+</tr>
+<tr>
+<td><code>FILE_REPLACED_BEFORE_CLOSE</code></td>
+<td>A new file replaced the batch's data before close</td>
+</tr>
+<tr>
+<td><code>SOURCE_NO_DATA_YET</code></td>
+<td>Pull had no rows before the close date</td>
+</tr>
+<tr>
+<td><code>CARRY_FORWARD_APPLIED</code>, <code>CARRY_FORWARD_REMOVED</code></td>
+<td>Carry-forward applied or ended</td>
+</tr>
+<tr>
+<td><code>BATCH_RELEASED</code></td>
+<td>Released early</td>
+</tr>
+<tr>
+<td><code>BATCH_REOPENED</code></td>
+<td>Reopened</td>
+</tr>
+<tr>
+<td><code>EXPORT_LOADED</code></td>
+<td>Exported</td>
+</tr>
+<tr>
+<td><code>FILE_RULES_PASSED</code>, <code>FILE_RULES_FAILED</code></td>
+<td>Rules result</td>
+</tr>
+<tr>
+<td><code>BATCH_CLOSED</code></td>
+<td>Closed</td>
+</tr>
+</tbody>
+</table>
+<h4>CMS_GOVT_RGLTRY_ExceptionsAudit (alerts)</h4>
+<p>One row per problem or approval. Written by every step. Emailed by NOTIFY.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Event_ID</code></td>
+<td>Generated number</td>
+<td></td>
+</tr>
+<tr>
+<td><code>Event_Ty</code></td>
+<td>Event code, e.g. <code>FILE_REJECTED_NO_BATCH</code>, <code>SOURCE_MISSING_AT_CLOSE</code></td>
+<td>What happened</td>
+</tr>
+<tr>
+<td><code>Sevrty</code></td>
+<td><code>ERROR</code>, <code>WARNING</code>, <code>INFO</code></td>
+<td>How serious</td>
+</tr>
+<tr>
+<td><code>Project_Cd</code>, <code>Table_Nm</code>, <code>Src_ID</code>, <code>Run_Ty</code></td>
+<td>Codes</td>
+<td>What it is about</td>
+</tr>
+<tr>
+<td><code>Req_ID</code>, <code>Load_ID</code>, <code>Ovrd_ID</code>, <code>Intake_ID</code>, <code>Btch_ID</code></td>
+<td>Numbers / batch ID</td>
+<td>The batch, load, override or request involved</td>
+</tr>
+<tr>
+<td><code>File_Ref</code></td>
+<td>NAS path</td>
+<td>The file involved</td>
+</tr>
+<tr>
+<td><code>Actor</code></td>
+<td><code>SYSTEM</code> or a user</td>
+<td>Who did it</td>
+</tr>
+<tr>
+<td><code>Event_Txt</code></td>
+<td>Text</td>
+<td>Detail</td>
+</tr>
+<tr>
+<td><code>Notified_Ind</code></td>
+<td><code>0</code>, <code>1</code></td>
+<td><code>0</code> = not emailed yet. <code>1</code> = emailed, or not to be emailed</td>
+</tr>
+<tr>
+<td><code>Event_Dtts</code></td>
+<td>Timestamp</td>
+<td>When</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3>6.4 SOURCE_LOAD</h3>
+<p>Pulls every open batch whose source has an internal source config, using its query. Rows go to staging, then core.</p>
+<ul>
+<li>Ad-hoc run types are pulled like scheduled ones. Held run types (<code>hold</code>) are skipped.</li>
+<li>The query's column names fill the staging columns of the same name (use <code>AS</code>).</li>
+<li>A column the query returns wins over its <code>GOVT_RGLTRY_TargetColumnConfig</code> row, except the batch, source and load columns.</li>
+<li><strong>Options:</strong> the scope, <code>batch</code>, <code>release</code>, <code>hold</code>, <code>as_of</code>.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Read / Write</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GOVT_RGLTRY_InternalSourceConfig</code></td>
+<td>Read</td>
+<td>Query, connection, staging and core tables</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_TargetColumnConfig</code></td>
+<td>Read</td>
+<td>Derived columns (see FILE_LOAD)</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestControl</code></td>
+<td>Read / Write</td>
+<td>Open batches. Sets status and resolution</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_FileLoad</code></td>
+<td>Write</td>
+<td>One row per pull</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestFileDetail</code></td>
+<td>Write</td>
+<td><code>FILE_RECEIVED</code>, <code>FILE_LOADED</code>, <code>SOURCE_NO_DATA_YET</code></td>
+</tr>
+<tr>
+<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td>Write</td>
+<td><code>SOURCE_QUERY_FAILED</code>, <code>SOURCE_DATA_REJECTED</code>, <code>CORE_TYPE_MISMATCH</code></td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_Lock</code></td>
+<td>Write</td>
+<td><code>REQ:</code> per batch row, <code>BTCH:STAGE</code> per staging table</td>
+</tr>
+<tr>
+<td>Staging and core tables</td>
+<td>Write</td>
+<td>The data</td>
+</tr>
+</tbody>
+</table>
+<h4>GOVT_RGLTRY_InternalSourceConfig (internal sources)</h4>
+<p>One row per internal source pulled with a query. Such a source has no file config.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Project_Cd</code>, <code>Table_Nm</code>, <code>Src_ID</code></td>
+<td>Yes</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td><code>Src_Db_Ty</code></td>
+<td>Yes</td>
+<td><code>TERADATA</code>, <code>SQLSERVER</code></td>
+<td>Where the source data is</td>
+</tr>
+<tr>
+<td><code>Src_Conn_Cd</code></td>
+<td>No</td>
+<td>Airflow Connection id</td>
+<td>Empty = the framework's own Teradata. Otherwise the source server's connection</td>
+</tr>
+<tr>
+<td><code>Src_Sql_Txt</code></td>
+<td>Yes</td>
+<td>One <code>SELECT</code></td>
+<td>The pull. Column names (<code>AS</code>) must match staging columns. Placeholders: <code>{btch_id}</code>, <code>{src_id}</code>, <code>{run_ty}</code>, <code>{version}</code>, <code>{project_cd}</code>, <code>{table_nm}</code>, <code>{req_id}</code>, <code>{load_id}</code>, <code>{rpt_start}</code>, <code>{rpt_end}</code>, <code>{load_date}</code>, <code>{file_name}</code>. <code>{btch_id}</code> is shared by all sources, so add <code>{src_id}</code> to pull one source</td>
+</tr>
+<tr>
+<td><code>Stg_Schema_Nm</code>, <code>Stg_Table_Nm</code></td>
+<td>Yes</td>
+<td>Database and table</td>
+<td>Staging table</td>
+</tr>
+<tr>
+<td><code>Core_Schema_Nm</code>, <code>Core_Table_Nm</code></td>
+<td>Yes</td>
+<td>Database and table</td>
+<td>Core table</td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Pull result</th>
+<th><code>Load_Stat</code></th>
+<th>Batch status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Rows</td>
+<td><code>FILE_LOADED</code></td>
+<td><code>SOURCE_DATA_READY</code></td>
+</tr>
+<tr>
+<td>No rows, before close date</td>
+<td><code>NO_DATA_YET</code></td>
+<td>Unchanged. Pulled again next run</td>
+</tr>
+<tr>
+<td>No rows, on or after close date</td>
+<td><code>FILE_LOADED</code></td>
+<td><code>SOURCE_DATA_READY_NO_DATA</code>. Still pulled again until it closes</td>
+</tr>
+<tr>
+<td>Query failed</td>
+<td><code>REJECTED</code> (<code>SOURCE_QUERY_FAILED</code>)</td>
+<td>Unchanged</td>
+</tr>
+<tr>
+<td>Columns do not fit</td>
+<td><code>REJECTED</code> (<code>SOURCE_DATA_REJECTED</code> / <code>CORE_TYPE_MISMATCH</code>)</td>
+<td>Unchanged</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3>6.5 OVERRIDE_DECISIONS</h3>
+<p>Applies approved <code>REUSE</code> (carry-forward) and <code>REOPEN</code> overrides. Reports expired and invalid ones.</p>
+<ul>
+<li>Applies approved <code>REUSE</code> overrides: carries the data of an earlier closed batch forward. The run type must have <code>Carry_Fwd_Ind = 1</code>, and the override must be applied before the close.</li>
+<li>Applies approved <code>REOPEN</code> overrides: opens a closed batch again until new data arrives.</li>
+<li>Expires carry-forwards past <code>Valid_Thru_Dt_Key</code>.</li>
+<li><code>LATE_ARRIVAL</code> and <code>CORRECTION</code> are used by FILE_LOAD directly, not by this step.</li>
+<li>An override that cannot apply is reported (<code>OVERRIDE_INVALID_DETECTED</code>, emailed), and the task still succeeds.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Read / Write</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GOVT_RGLTRY_BatchOverride</code></td>
+<td>Read / Write</td>
+<td>Approved overrides. Writes the reused batch ID when it was left empty</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestControl</code></td>
+<td>Read / Write</td>
+<td>Batch to change. Sets carry-forward or reopens</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RunType</code></td>
+<td>Read</td>
+<td><code>Carry_Fwd_Ind</code> must be 1 for <code>REUSE</code></td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_FileLoad</code></td>
+<td>Write</td>
+<td>Earlier load becomes <code>RELOADED</code> when data is carried forward</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestFileDetail</code></td>
+<td>Write</td>
+<td><code>CARRY_FORWARD_APPLIED</code>, <code>CARRY_FORWARD_REMOVED</code>, <code>BATCH_REOPENED</code></td>
+</tr>
+<tr>
+<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td>Write</td>
+<td><code>OVERRIDE_APPROVED</code>, <code>OVERRIDE_INVALID_DETECTED</code>, <code>OVERRIDE_EXPIRED</code>, <code>BATCH_REOPENED</code></td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_Lock</code></td>
+<td>Write</td>
+<td><code>REQ:</code> per batch row (no wait)</td>
+</tr>
+</tbody>
+</table>
+<h4>GOVT_RGLTRY_BatchOverride (overrides)</h4>
+<p>One row per exception, for one source of a batch. Applied only when <code>Apprvl_Stat = 'APPROVED'</code> and <code>Valid_Thru_Dt_Key</code> is today or later.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Ovrd_ID</code></td>
+<td>Generated</td>
+<td>Number</td>
+<td>Override number</td>
+</tr>
+<tr>
+<td><code>Override_Ty</code></td>
+<td>Yes</td>
+<td><code>REUSE</code>, <code>LATE_ARRIVAL</code>, <code>CORRECTION</code>, <code>REOPEN</code></td>
+<td>See list below</td>
+</tr>
+<tr>
+<td><code>Req_ID</code>, <code>Btch_ID</code></td>
+<td>Yes</td>
+<td>From <code>GOVT_RGLTRY_RequestControl</code></td>
+<td>The batch row (one source)</td>
+</tr>
+<tr>
+<td><code>Reuse_Btch_ID</code></td>
+<td>REUSE only</td>
+<td>A batch ID or empty</td>
+<td>Batch whose data is reused. Empty = latest earlier closed batch with data</td>
+</tr>
+<tr>
+<td><code>Apprvl_Stat</code></td>
+<td>Default <code>PENDING_REVIEW</code></td>
+<td><code>PENDING_REVIEW</code>, <code>APPROVED</code>, <code>REJECTED</code></td>
+<td>Only <code>APPROVED</code> is used</td>
+</tr>
+<tr>
+<td><code>Valid_Thru_Dt_Key</code></td>
+<td>Yes to apply</td>
+<td>Date</td>
+<td>Last day the override can be used</td>
+</tr>
+<tr>
+<td><code>Rsn_Txt</code></td>
+<td>Recommended</td>
+<td>Text</td>
+<td>Reason</td>
+</tr>
+<tr>
+<td><code>Reviewed_By</code>, <code>Reviewed_Dtts</code></td>
+<td>When approved</td>
+<td>Name, timestamp</td>
+<td>Approver</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th><code>Override_Ty</code></th>
+<th>Used by</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>REUSE</code></td>
+<td>OVERRIDE_DECISIONS</td>
+<td>Open batch takes the data of an earlier closed batch. Apply before the close</td>
+</tr>
+<tr>
+<td><code>LATE_ARRIVAL</code></td>
+<td>FILE_LOAD</td>
+<td>Closed batch without data accepts a late file</td>
+</tr>
+<tr>
+<td><code>CORRECTION</code></td>
+<td>FILE_LOAD</td>
+<td>Closed batch with data accepts a corrected file</td>
+</tr>
+<tr>
+<td><code>REOPEN</code></td>
+<td>OVERRIDE_DECISIONS</td>
+<td>Closed batch opens again until new data arrives</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3>6.6 EXPORT_LOAD</h3>
+<p>Copies each due batch from core into the export table: by plain copy, by a custom SELECT, or by calling a procedure.</p>
+<ul>
+<li><strong>Which data:</strong> the newest batch of the period whose resolution is <code>NEW_FILE</code>, <code>CARRY_FORWARD</code> or <code>NO_DATA</code>. A later batch of the same dates that closed with nothing (<code>MISSING</code>) does not replace it.</li>
+<li><strong>Re-exports:</strong> a re-export replaces the batch's own export rows (batch + source).</li>
+<li><strong>Carry-forwards:</strong> a carried-forward batch gets a copy of the reused rows under its own batch ID.</li>
+<li><strong>Pre / post SQL:</strong> with <code>Exp_Pre_Sql_Txt</code> or <code>Exp_Post_Sql_Txt</code> set, a batch is exported as one transaction: pre, every source, post. If any part fails, all of it is rolled back and tried again next run.</li>
+<li><strong>Success:</strong> timeline event <code>EXPORT_LOADED</code>.</li>
+<li><strong>Failure:</strong> rolled back and reported (<code>EXPORT_LOAD_FAILED</code>, exit 1).</li>
+<li><strong>Options:</strong> the scope, <code>batch</code>, <code>release</code>, <code>hold</code>, <code>as_of</code>.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Read / Write</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GOVT_RGLTRY_ExportConfig</code></td>
+<td>Read</td>
+<td>Export table, procedure, SQL</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestControl</code></td>
+<td>Read</td>
+<td>Batches due (open, or changed since the last export)</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestFileDetail</code></td>
+<td>Read / Write</td>
+<td>Last load and last export of each batch. Writes <code>EXPORT_LOADED</code></td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RunType</code></td>
+<td>Read</td>
+<td>Category, for held and released run types</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_SourceFileConfig</code>, <code>GOVT_RGLTRY_InternalSourceConfig</code></td>
+<td>Read</td>
+<td>Core table of each source</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_TargetColumnConfig</code></td>
+<td>Read</td>
+<td>The source column and other derived columns</td>
+</tr>
+<tr>
+<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td>Write</td>
+<td><code>EXPORT_LOAD_FAILED</code></td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_Lock</code></td>
+<td>Write</td>
+<td><code>REQ:</code> per batch row, <code>BTCH:EXPORT</code> per export table</td>
+</tr>
+<tr>
+<td>Export tables</td>
+<td>Write</td>
+<td>The exported rows</td>
+</tr>
+</tbody>
+</table>
+<h4>GOVT_RGLTRY_ExportConfig</h4>
+<p>One row per project and table.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Project_Cd</code>, <code>Table_Nm</code></td>
+<td>Yes</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td><code>Exp_Schema_Nm</code>, <code>Exp_Table_Nm</code></td>
+<td>Yes</td>
+<td>Database and table</td>
+<td>Export table. Needs the core columns, <code>Btch_ID</code> and the source column</td>
+</tr>
+<tr>
+<td><code>Exp_Proc_Nm</code></td>
+<td>No</td>
+<td><code>database.procedure</code></td>
+<td>Procedure that does the export. It must delete and insert the rows of the batch and source itself</td>
+</tr>
+<tr>
+<td><code>Exp_Proc_Parm_Txt</code></td>
+<td>No</td>
+<td>e.g. <code>{btch_id}, {data_btch_id}, {src_id}</code></td>
+<td>Procedure arguments in order. Placeholders, fixed values in quotes, OUT parameter name. Empty = <code>{btch_id}, {data_btch_id}</code></td>
+</tr>
+<tr>
+<td><code>Exp_Sql_Txt</code></td>
+<td>No</td>
+<td>One <code>SELECT</code></td>
+<td>Used when there is no procedure. Its rows are the export rows of the batch and source. Name columns after export columns (<code>AS</code>)</td>
+</tr>
+<tr>
+<td><code>Exp_Pre_Sql_Txt</code></td>
+<td>No</td>
+<td>One statement</td>
+<td>Runs once per batch, before its sources are exported</td>
+</tr>
+<tr>
+<td><code>Exp_Post_Sql_Txt</code></td>
+<td>No</td>
+<td>One statement</td>
+<td>Runs once per batch, after all its sources. Use this for a procedure that works on the whole table</td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>When</th>
+<th>What writes the rows</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Procedure</td>
+<td><code>Exp_Proc_Nm</code> set</td>
+<td>The procedure. Called once per batch and source</td>
+</tr>
+<tr>
+<td>Custom SELECT</td>
+<td><code>Exp_Sql_Txt</code> set, no procedure</td>
+<td>Framework deletes the source's earlier rows of the period, inserts the SELECT's rows</td>
+</tr>
+<tr>
+<td>Copy</td>
+<td>Neither set</td>
+<td>Framework deletes the source's earlier rows of the period, copies from core</td>
+</tr>
+</tbody>
+</table>
+<p>Placeholders: <code>{btch_id}</code> (the batch), <code>{data_btch_id}</code> (the batch holding the data, which differs for a carry-forward), <code>{src_id}</code>, <code>{run_ty}</code>, <code>{project_cd}</code>, <code>{table_nm}</code>, <code>{version}</code>, <code>{req_dt}</code>, <code>{rpt_start}</code>, <code>{rpt_end}</code>, <code>{exp_schema_nm}</code>, <code>{exp_table_nm}</code>.</p>
+<p>When is a batch exported:</p>
+<ul>
+<li>Every open batch, on every run.</li>
+<li>A closed batch only when it has new data since its last export (late arrival, correction), or when named in the <code>batch</code> option.</li>
+<li>Scheduled run types from the close date. Ad-hoc run types when released, unless held with <code>hold</code>.</li>
+</ul>
+<hr />
+<h3>6.7 FILE_RULES</h3>
+<p>Runs the GRE data quality rules on each batch whose loaded data has not had its rules yet. Started by EXPORT_LOAD. Rules never change the batch status, the export or the close.</p>
+<ul>
+<li><strong>Timing:</strong> EXPORT_LOAD waits for FILE_RULES to finish, so the export tables are not written while the rules read them.</li>
+<li><strong>Pool:</strong> FILE_RULES runs in the pool <code>gre_rules</code> (1 slot), so two rules runs never write the GRE tables at once.</li>
+<li><strong>Order:</strong> one batch at a time. A batch never sees another batch's rows.</li>
+<li><strong>Errors:</strong> a batch in <code>ERROR</code> does not stop the others. A batch waiting for its export is left for the next run.</li>
+<li><strong>No <code>batch</code> key:</strong> narrow the run with <code>table</code>, <code>run_type</code> and <code>source</code>.</li>
+<li><strong>Not run twice:</strong> a batch whose rules have ended is not taken again. New data for the batch (reload, late file, correction, re-pull) gives the new load <code>NOT_RUN</code>, so the rules run again after the re-export.</li>
+<li><strong>After a failed EXPORT_LOAD:</strong> FILE_RULES is not started. The batches that were exported get their rules on the next EXPORT_LOAD.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Read / Write</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GOVT_RGLTRY_FileLoad</code></td>
+<td>Read / Write</td>
+<td>Loads with <code>Load_Stat = FILE_LOADED</code> and <code>Rules_Stat = NOT_RUN</code> or <code>ERROR</code>. Writes <code>Rules_Stat</code></td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestControl</code></td>
+<td>Read</td>
+<td>Batch details passed to the rules</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RuleBinding</code></td>
+<td>Read</td>
+<td>Which GRE rule groups to run</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_ExportConfig</code></td>
+<td>Read</td>
+<td>A table with an export waits for the batch's export</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestFileDetail</code></td>
+<td>Read / Write</td>
+<td>Export time of the batch. Writes <code>FILE_RULES_PASSED</code> / <code>FILE_RULES_FAILED</code></td>
+</tr>
+<tr>
+<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td>Write</td>
+<td><code>RULES_VALIDATION_FAILED</code>, <code>RULES_ENGINE_TECHNICAL_FAILURE</code></td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_Lock</code></td>
+<td>Write</td>
+<td><code>RULES:&lt;Btch_ID&gt;</code></td>
+</tr>
+<tr>
+<td>GRE tables (<code>gre_results</code>, <code>gre_exceptions</code> …)</td>
+<td>Write (by GRE)</td>
+<td>Rule results per batch. <code>run_key</code> = <code>Btch_ID</code></td>
+</tr>
+</tbody>
+</table>
+<h4>GOVT_RGLTRY_RuleBinding (optional)</h4>
+<p>Without a row, the rule group named like the table runs, with the run type as variant. A row names other rule groups. Rows add up.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Required</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Project_Cd</code></td>
+<td>Yes</td>
+<td>A project</td>
+<td></td>
+</tr>
+<tr>
+<td><code>Table_Nm</code></td>
+<td>Yes</td>
+<td>A table or <code>*</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>Src_ID</code></td>
+<td>Yes</td>
+<td><code>*</code></td>
+<td>Rules run per batch, for all its sources</td>
+</tr>
+<tr>
+<td><code>Run_Ty</code></td>
+<td>Default <code>*</code></td>
+<td>A run type or <code>*</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>Gre_Rule_Group</code></td>
+<td>Yes</td>
+<td>As defined in GRE</td>
+<td>Rule group to run</td>
+</tr>
+<tr>
+<td><code>Gre_Rule_Variant</code></td>
+<td>Yes</td>
+<td>As defined in GRE, or <code>*</code></td>
+<td>Variant. <code>*</code> = all</td>
+</tr>
+<tr>
+<td><code>Active_Ind</code></td>
+<td>Default 1</td>
+<td><code>1</code>, <code>0</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>What is passed to GRE for each batch:</p>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>run_key</code></td>
+<td>The batch ID. A rerun replaces the batch's results</td>
+</tr>
+<tr>
+<td><code>extra_filters</code></td>
+<td><code>Btch_ID = &lt;batch&gt;</code>. Only the batch's rows are checked</td>
+</tr>
+<tr>
+<td><code>text_params</code></td>
+<td><code>btch_id</code>, <code>run_ty</code>, <code>table_nm</code>, <code>project_cd</code>, report dates, for <code>{name}</code> in a rule</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Result</th>
+<th><code>Rules_Stat</code></th>
+<th>Event</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>All rules passed</td>
+<td><code>PASSED</code> (<code>PASSED_WITH_WARNINGS</code> in ANNOTATE mode)</td>
+<td><code>FILE_RULES_PASSED</code></td>
+</tr>
+<tr>
+<td>A rule failed</td>
+<td><code>FAILED</code></td>
+<td><code>FILE_RULES_FAILED</code>, <code>RULES_VALIDATION_FAILED</code> (emailed)</td>
+</tr>
+<tr>
+<td>No active rules, or no data rows</td>
+<td><code>SKIPPED</code></td>
+<td>–</td>
+</tr>
+<tr>
+<td>GRE could not run</td>
+<td><code>ERROR</code>, tried again next run</td>
+<td><code>RULES_ENGINE_TECHNICAL_FAILURE</code> (emailed)</td>
+</tr>
+</tbody>
+</table>
+<p>To run the rules again for a batch, set its loads' <code>Rules_Stat</code> back to <code>NOT_RUN</code> and trigger FILE_RULES with the batch's table, run type and source.</p>
+<hr />
+<h3>6.8 BATCH_CLOSE</h3>
+<p>Closes every open batch whose close date has come, with or without data.</p>
+<ul>
+<li>Held run types (<code>hold</code>), and reopened batches still waiting for data, stay open.</li>
+<li>An <code>ADHOC</code> batch with data stays open until it is released. <code>"release": "true"</code> releases the scope's open batches with data and closes them in the same run.</li>
+<li>A file that arrives after the close needs a <code>LATE_ARRIVAL</code> or <code>REOPEN</code> override.</li>
+<li><strong>Options:</strong> the scope, <code>hold</code>, <code>release</code>, <code>as_of</code>.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Read / Write</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GOVT_RGLTRY_RequestControl</code></td>
+<td>Read / Write</td>
+<td>Open batches. Sets closed status, resolution, <code>Batch_Close_Ind = 1</code></td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RunType</code></td>
+<td>Read</td>
+<td><code>SLA_Days</code> (close date), category (ad-hoc stays open until released)</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_RequestFileDetail</code></td>
+<td>Read / Write</td>
+<td>Release and reopen events. Writes <code>BATCH_CLOSED</code>, <code>BATCH_RELEASED</code></td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_BatchOverride</code></td>
+<td>Read</td>
+<td>Reopened batches waiting for data stay open</td>
+</tr>
+<tr>
+<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td>Write</td>
+<td><code>SOURCE_MISSING_AT_CLOSE</code>, <code>BATCH_CLOSE_DEFERRED_LOCKED</code></td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_Lock</code></td>
+<td>Read</td>
+<td>A batch being loaded is closed by the next run</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Batch at close</th>
+<th><code>Req_Stat</code></th>
+<th><code>Resolution_Ty</code></th>
+<th>Alert</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Data loaded</td>
+<td><code>REQUEST_COMPLETE</code></td>
+<td><code>NEW_FILE</code></td>
+<td>–</td>
+</tr>
+<tr>
+<td>Data carried forward</td>
+<td><code>REQUEST_COMPLETE</code></td>
+<td><code>CARRY_FORWARD</code></td>
+<td>–</td>
+</tr>
+<tr>
+<td>Source sent "no data"</td>
+<td><code>DATA_NOT_PROVIDED</code></td>
+<td><code>NO_DATA</code></td>
+<td>–</td>
+</tr>
+<tr>
+<td>Nothing arrived</td>
+<td><code>DATA_NOT_PROVIDED</code></td>
+<td><code>MISSING</code></td>
+<td><code>SOURCE_MISSING_AT_CLOSE</code> (emailed)</td>
+</tr>
+<tr>
+<td>Being loaded now</td>
+<td>Stays open</td>
+<td>–</td>
+<td><code>BATCH_CLOSE_DEFERRED_LOCKED</code></td>
+</tr>
+</tbody>
+</table>
+<p>Close date = <code>Req_Dt_Key + SLA_Days - 1</code>.</p>
+<hr />
+<h3>6.9 NOTIFY</h3>
+<p>Emails every alert not sent yet, one email per alert, then marks it sent. A failed email is tried again next run.</p>
+<ul>
+<li>One email per alert, to the Variable's <code>email_recipient</code>. A failed email stays for the next run.</li>
+<li>Without <code>project</code>, it sends the alerts of every project, and alerts that belong to no project.</li>
+<li>The DAG success / failure emails do not replace NOTIFY: many alerts (a rejected file, a missing source, a stuck lock) do not fail any DAG.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Read / Write</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td>Read / Write</td>
+<td>Rows with <code>Notified_Ind = 0</code>. Sets <code>Notified_Ind = 1</code> after sending</td>
+</tr>
+<tr>
+<td><code>GOVT_RGLTRY_Lock</code></td>
+<td>Write</td>
+<td><code>EVT:&lt;Event_ID&gt;</code> while an alert is sent</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3>6.10 GOVT_RGLTRY_Lock (all steps)</h3>
+<p>Stops two runs from doing the same work at once. A run removes its locks when it ends. A killed run's lock stays until it expires (default 240 minutes).</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Values</th>
+<th>What it is for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Lock_Key</code></td>
+<td>See list below</td>
+<td>What is locked</td>
+</tr>
+<tr>
+<td><code>Owner_ID</code></td>
+<td>Random id</td>
+<td>The run holding it</td>
+</tr>
+<tr>
+<td><code>Acquired_Dtts</code></td>
+<td>Timestamp</td>
+<td>When it was taken</td>
+</tr>
+<tr>
+<td><code>Expires_Dtts</code></td>
+<td>Timestamp</td>
+<td>When it can be taken over by another run</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th><code>Lock_Key</code></th>
+<th>Held by</th>
+<th>What happens when it is taken</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SEQ:&lt;project&gt;|&lt;table&gt;|&lt;run type&gt;</code></td>
+<td>BATCH_CREATION</td>
+<td>Waits up to 300 seconds, then fails and retries next run</td>
+</tr>
+<tr>
+<td><code>REQ:&lt;Req_ID&gt;</code></td>
+<td>FILE_LOAD, SOURCE_LOAD, EXPORT_LOAD</td>
+<td>Waits up to 300 seconds, then fails. BATCH_CLOSE and OVERRIDE_DECISIONS skip to next run</td>
+</tr>
+<tr>
+<td><code>BTCH:STAGE &lt;db&gt;.&lt;table&gt;</code></td>
+<td>FILE_LOAD, SOURCE_LOAD</td>
+<td>File or pull becomes <code>LOAD_INCOMPLETE</code>, picked up next run</td>
+</tr>
+<tr>
+<td><code>BTCH:EXPORT &lt;db&gt;.&lt;table&gt;</code></td>
+<td>EXPORT_LOAD</td>
+<td>Waits up to 300 seconds, then <code>EXPORT_LOAD_FAILED</code></td>
+</tr>
+<tr>
+<td><code>RULES:&lt;Btch_ID&gt;</code></td>
+<td>FILE_RULES</td>
+<td>Left for next run</td>
+</tr>
+<tr>
+<td><code>OBJ:&lt;hash&gt;</code></td>
+<td>FILE_CHECK, FILE_LOAD</td>
+<td>File skipped this run</td>
+</tr>
+<tr>
+<td><code>EVT:&lt;Event_ID&gt;</code>, <code>INTAKE:&lt;Intake_ID&gt;</code></td>
+<td>NOTIFY, BATCH_CREATION</td>
+<td>Left for the other run</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>7. Reference lists</h2>
+<h3>Run categories (<code>GOVT_RGLTRY_RunType.Run_Category_Cd</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Batches created</th>
+<th>Internal sources pulled</th>
+<th>Exported</th>
+<th>Closed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SCHEDULED</code></td>
+<td>By the schedule, the calendar, or a request</td>
+<td>From the request date</td>
+<td>From the close date (from <code>RELEASE_TIME</code> that day, if set), or when released</td>
+<td>From the close date</td>
+</tr>
+<tr>
+<td><code>ADHOC</code></td>
+<td>By requests, and by a schedule if the run type has one (for the crosswalk rows that list it)</td>
+<td>Same as scheduled</td>
+<td>Same as scheduled</td>
+<td>With data: when released. Without data: from the close date</td>
+</tr>
+</tbody>
+</table>
+<h3>Schedule codes (<code>GOVT_RGLTRY_RunType</code>)</h3>
+<table>
+<thead>
+<tr>
+<th><code>Sched_Cd</code></th>
+<th><code>Sched_Day_Cd</code></th>
+<th><code>Sched_Week_Cd</code></th>
+<th><code>Sched_Months_Txt</code></th>
+<th>Due on</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DAILY</code></td>
+<td></td>
+<td></td>
+<td></td>
+<td>Every day</td>
+</tr>
+<tr>
+<td><code>WEEKLY</code></td>
+<td><code>MON</code> … <code>SUN</code></td>
+<td></td>
+<td></td>
+<td>That weekday</td>
+</tr>
+<tr>
+<td><code>MONTHLY</code></td>
+<td><code>1</code> … <code>31</code></td>
+<td></td>
+<td>optional</td>
+<td>That day (a day past month end = last day)</td>
+</tr>
+<tr>
+<td><code>MONTHLY</code></td>
+<td><code>LAST</code></td>
+<td></td>
+<td>optional</td>
+<td>Last day of the month</td>
+</tr>
+<tr>
+<td><code>MONTHLY</code></td>
+<td><code>MON</code> … <code>SUN</code></td>
+<td><code>1</code> … <code>4</code>, <code>LAST</code></td>
+<td>optional</td>
+<td>The nth (or last) weekday of the month</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><code>Sched_Offset_Days</code> (-31 to 31) moves the date. Example: <code>MONTHLY</code>, <code>TUE</code>, <code>3</code>, <code>-2</code> = the Sunday before the 3rd Tuesday.</li>
+<li><code>Sched_Window_Days</code> lets a missed batch still be created up to that many days later. One batch per scheduled date, never one per day of the window.</li>
+</ul>
+<p>When no code fits, use SQL:</p>
+<ul>
+<li><code>Batch_Schedule_Sql_Txt</code> returns one row on a due day and no row otherwise. Placeholders: <code>{run_date}</code>, <code>{project_cd}</code>, <code>{run_ty}</code>.</li>
+<li><code>Rpt_Dt_Sql_Txt</code> returns one row with <code>rpt_start</code> and <code>rpt_end</code>. Placeholders: <code>{run_date}</code>, <code>{project_cd}</code>, <code>{run_ty}</code>, <code>{table_nm}</code>, <code>{src_id}</code>, and the schedule row's columns.</li>
+</ul>
+<pre><code class="language-sql">-- due every Monday
+SELECT d AS run_dt FROM (SELECT CAST({run_date} AS DATE) AS d) x WHERE TD_DAY_OF_WEEK(d) = 2
+-- previous day
+SELECT CAST({run_date} AS DATE) - 1 AS rpt_start, CAST({run_date} AS DATE) - 1 AS rpt_end
+</code></pre>
+<h3>Report period codes (<code>Rpt_Period_Cd</code>)</h3>
+<p>Counted from the batch's scheduled date (D).</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Report dates</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SAME_DAY</code></td>
+<td>D to D</td>
+</tr>
+<tr>
+<td><code>PREV_DAY</code></td>
+<td>D-1 to D-1</td>
+</tr>
+<tr>
+<td><code>PREV_N_DAYS(n)</code></td>
+<td>D-n to D-1</td>
+</tr>
+<tr>
+<td><code>PREV_WEEK_SAME_DAY(n)</code></td>
+<td>D - 7n to D-1</td>
+</tr>
+<tr>
+<td><code>PREV_CALENDAR_WEEK</code></td>
+<td>Monday to Sunday of the week before D</td>
+</tr>
+<tr>
+<td><code>CURRENT_CALENDAR_MONTH</code></td>
+<td>First to last day of D's month</td>
+</tr>
+<tr>
+<td><code>PREV_CALENDAR_MONTH</code></td>
+<td>First to last day of the month before D</td>
+</tr>
+<tr>
+<td><code>ROLLING_1_MONTH</code></td>
+<td>Same day one month before D, to D-1</td>
+</tr>
+<tr>
+<td><code>PREV_CALENDAR_QUARTER</code></td>
+<td>The quarter before D's quarter</td>
+</tr>
+<tr>
+<td><code>PREV_CALENDAR_YEAR</code></td>
+<td>1 Jan to 31 Dec of the year before D</td>
+</tr>
+<tr>
+<td><code>ANNUAL_WINDOW(MM-DD,MM-DD[,MM-DD])</code></td>
+<td>The same dates every year, e.g. <code>12-01,01-31</code>. The optional third date is when it moves to the next year's window</td>
+</tr>
+<tr>
+<td><code>RANGE(unit,back,length)</code></td>
+<td><code>length</code> units, starting <code>back</code> units before D's unit. Units: <code>DAY</code>, <code>WEEK</code> (Monday to Sunday), <code>MONTH</code>, <code>QUARTER</code>, <code>YEAR</code></td>
+</tr>
+<tr>
+<td><code>FIRST_DAYS(unit,back,days)</code></td>
+<td>The first <code>days</code> days of that unit</td>
+</tr>
+<tr>
+<td><code>LAST_DAYS(unit,back,days)</code></td>
+<td>The last <code>days</code> days of that unit</td>
+</tr>
+</tbody>
+</table>
+<p>Examples for D = Sunday 2026-10-18:</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Report dates</th>
+<th>In words</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RANGE(DAY,1,1)</code></td>
+<td>10-17</td>
+<td>The day before</td>
+</tr>
+<tr>
+<td><code>RANGE(DAY,7,7)</code></td>
+<td>10-11 to 10-17</td>
+<td>The last 7 days</td>
+</tr>
+<tr>
+<td><code>RANGE(WEEK,1,1)</code></td>
+<td>10-05 to 10-11</td>
+<td>Last week</td>
+</tr>
+<tr>
+<td><code>RANGE(WEEK,5,1)</code></td>
+<td>09-07 to 09-13</td>
+<td>The week 5 weeks back</td>
+</tr>
+<tr>
+<td><code>RANGE(MONTH,1,1)</code></td>
+<td>09-01 to 09-30</td>
+<td>Last month</td>
+</tr>
+<tr>
+<td><code>RANGE(MONTH,3,3)</code></td>
+<td>07-01 to 09-30</td>
+<td>The last 3 full months</td>
+</tr>
+<tr>
+<td><code>RANGE(QUARTER,1,1)</code></td>
+<td>07-01 to 09-30</td>
+<td>Last quarter</td>
+</tr>
+<tr>
+<td><code>RANGE(YEAR,1,1)</code></td>
+<td>2025-01-01 to 2025-12-31</td>
+<td>Last year</td>
+</tr>
+<tr>
+<td><code>LAST_DAYS(MONTH,1,14)</code></td>
+<td>09-17 to 09-30</td>
+<td>Last 14 days of last month</td>
+</tr>
+<tr>
+<td><code>FIRST_DAYS(MONTH,0,10)</code></td>
+<td>10-01 to 10-10</td>
+<td>First 10 days of this month</td>
+</tr>
+</tbody>
+</table>
+<p>For fixed dates every year use <code>ANNUAL_WINDOW</code>. For one-off dates use <code>GOVT_RGLTRY_BatchCalendar</code>.</p>
+<h3>Placeholders in SQL text</h3>
+<p>Placeholders are passed as values, never pasted into the text.</p>
+<table>
+<thead>
+<tr>
+<th>Where</th>
+<th>Placeholders</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Src_Sql_Txt</code>, <code>Value_Txt</code> of <code>SQL</code> columns</td>
+<td><code>{btch_id}</code>, <code>{src_id}</code>, <code>{run_ty}</code>, <code>{version}</code>, <code>{project_cd}</code>, <code>{table_nm}</code>, <code>{req_id}</code>, <code>{load_id}</code>, <code>{rpt_start}</code>, <code>{rpt_end}</code>, <code>{load_date}</code>, <code>{file_name}</code></td>
+</tr>
+<tr>
+<td><code>Batch_Schedule_Sql_Txt</code></td>
+<td><code>{run_date}</code>, <code>{project_cd}</code>, <code>{run_ty}</code></td>
+</tr>
+<tr>
+<td><code>Rpt_Dt_Sql_Txt</code></td>
+<td><code>{run_date}</code>, <code>{project_cd}</code>, <code>{run_ty}</code>, <code>{table_nm}</code>, <code>{src_id}</code>, the schedule row's columns</td>
+</tr>
+<tr>
+<td><code>Exp_Proc_Parm_Txt</code>, <code>Exp_Sql_Txt</code></td>
+<td><code>{btch_id}</code>, <code>{data_btch_id}</code>, <code>{reused_btch_ids}</code>, <code>{project_cd}</code>, <code>{table_nm}</code>, <code>{src_id}</code>, <code>{run_ty}</code>, <code>{version}</code>, <code>{req_id}</code>, <code>{req_dt}</code>, <code>{rpt_start}</code>, <code>{rpt_end}</code></td>
+</tr>
+<tr>
+<td><code>Exp_Pre_Sql_Txt</code>, <code>Exp_Post_Sql_Txt</code></td>
+<td><code>{btch_id}</code>, <code>{project_cd}</code>, <code>{table_nm}</code>, <code>{run_ty}</code>, <code>{version}</code>, <code>{req_dt}</code>, <code>{rpt_start}</code>, <code>{rpt_end}</code>, <code>{exp_schema_nm}</code>, <code>{exp_table_nm}</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>{btch_id}</code> is shared by every source of the batch. Add <code>{src_id}</code>, or use <code>{req_id}</code>, when a lookup is per source.</p>
+<h3>Export procedure parameters (<code>Exp_Proc_Parm_Txt</code>)</h3>
+<p>Besides placeholders, the list can contain:</p>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Example</th>
+<th>Passed as</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Fixed value, in quotes (a quote inside is doubled)</td>
+<td><code>'EXPORT_FEED_$ENV_T'</code></td>
+<td>The text between the quotes. <code>$ENV</code> is replaced by the environment (<code>EXPORT_FEED_DEV_T</code> in DEV, <code>EXPORT_FEED_T</code> where the environment is empty)</td>
+</tr>
+<tr>
+<td>OUT parameter name, without quotes or braces</td>
+<td><code>MSG</code></td>
+<td>Written into the <code>CALL</code>. Its value goes to the task log and the step report</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-sql">UPDATE HSABC_DEV.GOVT_RGLTRY_ExportConfig
+SET Exp_Proc_Nm = 'HSPROCS_$ENV.sp_EXPORT_CMSUNIV',
+    Exp_Proc_Parm_Txt = '{btch_id}, {data_btch_id}, {src_id}, ''EXPORT_FEED_$ENV_T'', MSG'
+WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'ODAG3';
+</code></pre>
+<h3>Override types (<code>GOVT_RGLTRY_BatchOverride.Override_Ty</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>For</th>
+<th>Effect</th>
+<th>Applied by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>REUSE</code></td>
+<td>An open batch without data. Run type has <code>Carry_Fwd_Ind = 1</code></td>
+<td>Carries the data of an earlier closed batch (same table, source, run type) forward. Closes as <code>REQUEST_COMPLETE</code> / <code>CARRY_FORWARD</code>. Apply before the close run</td>
+<td>OVERRIDE_DECISIONS</td>
+</tr>
+<tr>
+<td><code>LATE_ARRIVAL</code></td>
+<td>A closed batch without data</td>
+<td>A late file is accepted. The batch stays closed and becomes <code>REQUEST_COMPLETE</code></td>
+<td>FILE_LOAD</td>
+</tr>
+<tr>
+<td><code>CORRECTION</code></td>
+<td>A closed batch with data</td>
+<td>A corrected file replaces the data. The batch stays closed</td>
+<td>FILE_LOAD</td>
+</tr>
+<tr>
+<td><code>REOPEN</code></td>
+<td>Any closed batch</td>
+<td>Opens it again. It closes again after new data arrives, or with <code>close-batch</code>. Applied once per row</td>
+<td>OVERRIDE_DECISIONS</td>
+</tr>
+</tbody>
+</table>
+<h3>Alert events (<code>CMS_GOVT_RGLTRY_ExceptionsAudit.Event_Ty</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>Severity</th>
+<th>Emailed</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FILE_REJECTED_UNPARSEABLE</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>File name does not match the template</td>
+</tr>
+<tr>
+<td><code>FILE_REJECTED_AMBIGUOUS_TEMPLATE</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>File name fits more than one file config</td>
+</tr>
+<tr>
+<td><code>FILE_REJECTED_INVALID_TOKEN</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>Invalid date or version in the name</td>
+</tr>
+<tr>
+<td><code>FILE_REJECTED_NO_BATCH</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>No batch for that run type and period</td>
+</tr>
+<tr>
+<td><code>FILE_REJECTED_BATCH_CLOSED</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>Batch closed and no valid override</td>
+</tr>
+<tr>
+<td><code>FILE_TYPE_NOT_SUPPORTED</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>File type not supported</td>
+</tr>
+<tr>
+<td><code>FILE_PARSE_ERROR</code>, <code>FILE_COLUMN_COUNT_MISMATCH</code>, <code>FILE_TRAILER_COUNT_MISMATCH</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>File content problems</td>
+</tr>
+<tr>
+<td><code>FILE_CONTENT_CHECK_FAILED</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>Checks failed at load</td>
+</tr>
+<tr>
+<td><code>FILE_CHECK_FAILED</code></td>
+<td>WARNING</td>
+<td>Yes</td>
+<td>FILE_CHECK found problems</td>
+</tr>
+<tr>
+<td><code>FILE_CHECK_PASSED</code></td>
+<td>INFO</td>
+<td>No</td>
+<td>FILE_CHECK passed</td>
+</tr>
+<tr>
+<td><code>FILE_SAME_CONTENT_OTHER_BATCH</code></td>
+<td>WARNING</td>
+<td>Yes</td>
+<td>Same content already loaded for another batch</td>
+</tr>
+<tr>
+<td><code>FILE_MOVE_FAILED</code></td>
+<td>WARNING</td>
+<td>Yes</td>
+<td>File could not be moved to Archive / Error. Later runs only retry the move</td>
+</tr>
+<tr>
+<td><code>STAGING_LOCK_STALE</code></td>
+<td>WARNING</td>
+<td>Yes</td>
+<td>A staging table has been locked for 30 minutes or more</td>
+</tr>
+<tr>
+<td><code>FILE_TECHNICAL_FAILURE</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>System problem loading a file</td>
+</tr>
+<tr>
+<td><code>CORE_LOAD_ROWCOUNT_MISMATCH</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>Core rows differ from staged rows</td>
+</tr>
+<tr>
+<td><code>SOURCE_QUERY_FAILED</code>, <code>SOURCE_DATA_REJECTED</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>Internal source query failed / data does not fit</td>
+</tr>
+<tr>
+<td><code>CORE_TYPE_MISMATCH</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>A value does not convert to its core column's type</td>
+</tr>
+<tr>
+<td><code>SOURCE_MISSING_AT_CLOSE</code></td>
+<td>WARNING</td>
+<td>Yes</td>
+<td>No data by the close date</td>
+</tr>
+<tr>
+<td><code>EXPORT_LOAD_FAILED</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>Export of a batch failed (rolled back)</td>
+</tr>
+<tr>
+<td><code>RULES_VALIDATION_FAILED</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>A data quality rule failed</td>
+</tr>
+<tr>
+<td><code>RULES_ENGINE_TECHNICAL_FAILURE</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>Rules engine could not run</td>
+</tr>
+<tr>
+<td><code>INTAKE_FAILED</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>Ad-hoc request could not create its batches</td>
+</tr>
+<tr>
+<td><code>OVERRIDE_APPROVED</code></td>
+<td>WARNING</td>
+<td>Yes</td>
+<td>A carry-forward was applied</td>
+</tr>
+<tr>
+<td><code>OVERRIDE_INVALID_DETECTED</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>An override cannot be applied (reason in the text)</td>
+</tr>
+<tr>
+<td><code>OVERRIDE_EXPIRED</code></td>
+<td>WARNING</td>
+<td>Yes</td>
+<td>A carry-forward ran out</td>
+</tr>
+<tr>
+<td><code>BATCH_REOPENED</code></td>
+<td>WARNING</td>
+<td>Yes</td>
+<td>A batch was reopened</td>
+</tr>
+<tr>
+<td><code>BATCH_CLOSE_BLOCKED</code></td>
+<td>WARNING</td>
+<td>No</td>
+<td>A manual close was refused</td>
+</tr>
+<tr>
+<td><code>BATCH_CLOSE_DEFERRED_LOCKED</code></td>
+<td>INFO</td>
+<td>No</td>
+<td>Close postponed, batch busy</td>
+</tr>
+<tr>
+<td><code>CONFIG_VALIDATION_FAILED</code></td>
+<td>ERROR</td>
+<td>Yes</td>
+<td>Configuration problem</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>8. Airflow setup</h2>
+<h3>Connections</h3>
+<table>
+<thead>
+<tr>
+<th>Connection</th>
+<th>Fields</th>
+<th>Used by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Teradata (id in <code>td_conn_var</code>)</td>
+<td>host, login, password. Extra <code>{"logmech": "LDAP"}</code></td>
+<td>Every step</td>
+</tr>
+<tr>
+<td>NAS (id in <code>wdc_comp_oper_nas_var</code>)</td>
+<td>host, login, password, port 445</td>
+<td>FILE_CHECK, FILE_LOAD, FILE_MOVE</td>
+</tr>
+<tr>
+<td>SQL Server source (id = <code>Src_Conn_Cd</code>)</td>
+<td>host or <code>server\instance</code>, port, schema = database, login, password. Extra <code>{"driver": "ODBC Driver 17 for SQL Server", "encrypt": "yes", "trust_server_certificate": "yes"}</code>. <code>driver</code> is optional</td>
+<td>SOURCE_LOAD</td>
+</tr>
+<tr>
+<td><code>smtp_default</code></td>
+<td>Airflow SMTP connection</td>
+<td>DAG emails, NOTIFY</td>
+</tr>
+</tbody>
+</table>
+<h3>DAGs</h3>
+<p>One DAG file per step. Another project copies the files with its own DAG ids and Variable names.</p>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>DAG id</th>
+<th>Variable</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BATCH_CREATION</td>
+<td><code>GOVT_RGLTRY_CMS_UNIVERSE_BATCH_CREATION</code></td>
+<td><code>govt_rgltry_cms_universe_batch_creation_config_var</code></td>
+</tr>
+<tr>
+<td>FILE_CHECK</td>
+<td><code>GOVT_RGLTRY_CMS_UNIVERSE_FILE_CHECK</code></td>
+<td><code>govt_rgltry_cms_universe_file_check_config_var</code></td>
+</tr>
+<tr>
+<td>FILE_LOAD</td>
+<td><code>GOVT_RGLTRY_CMS_UNIVERSE_FILE_LOAD</code></td>
+<td><code>govt_rgltry_cms_universe_file_load_config_var</code></td>
+</tr>
+<tr>
+<td>SOURCE_LOAD</td>
+<td><code>GOVT_RGLTRY_CMS_UNIVERSE_SOURCE_LOAD</code></td>
+<td><code>govt_rgltry_cms_universe_source_load_config_var</code></td>
+</tr>
+<tr>
+<td>EXPORT_LOAD</td>
+<td><code>GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD</code></td>
+<td><code>govt_rgltry_cms_universe_export_load_config_var</code></td>
+</tr>
+<tr>
+<td>EXPORT_LOAD ad hoc (<code>run_type</code> <code>CMS</code>)</td>
+<td><code>GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD_ADHOC</code></td>
+<td><code>govt_rgltry_cms_universe_export_load_adhoc_config_var</code></td>
+</tr>
+<tr>
+<td>OVERRIDE_DECISIONS</td>
+<td><code>GOVT_RGLTRY_CMS_UNIVERSE_OVERRIDE_DECISIONS</code></td>
+<td><code>govt_rgltry_cms_universe_override_decisions_config_var</code></td>
+</tr>
+<tr>
+<td>BATCH_CLOSE</td>
+<td><code>GOVT_RGLTRY_CMS_UNIVERSE_BATCH_CLOSE</code></td>
+<td><code>govt_rgltry_cms_universe_batch_close_config_var</code></td>
+</tr>
+<tr>
+<td>NOTIFY</td>
+<td><code>GOVT_RGLTRY_CMS_UNIVERSE_NOTIFY</code></td>
+<td><code>govt_rgltry_cms_universe_notify_config_var</code></td>
+</tr>
+<tr>
+<td>FILE_RULES</td>
+<td><code>GOVT_RGLTRY_CMS_UNIVERSE_FILE_RULES</code></td>
+<td><code>govt_rgltry_cms_universe_file_rules_config_var</code></td>
+</tr>
+<tr>
+<td>FILE_MOVE</td>
+<td><code>GOVT_RGLTRY_CMS_UNIVERSE_FILE_MOVE</code></td>
+<td><code>govt_rgltry_cms_universe_file_move_config_var</code></td>
+</tr>
+</tbody>
+</table>
+<h3>Variable keys</h3>
+<p>Each DAG has one Variable (a JSON object). Put in only what differs from the default.</p>
+<pre><code class="language-json">{&quot;td_conn_var&quot;: &quot;DEV&quot;, &quot;meta_db&quot;: &quot;HSABC_DEV&quot;, &quot;load_env&quot;: &quot;DEV&quot;,
+ &quot;email_recipient&quot;: &quot;team@example.com&quot;, &quot;project&quot;: &quot;CMSUNIV&quot;,
+ &quot;snow_assignment_group&quot;: &quot;D&amp;AE - EDE Govt Compliance&quot;, &quot;tags&quot;: [&quot;Universe&quot;],
+ &quot;trigger_dags&quot;: [&quot;GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD&quot;, &quot;GOVT_RGLTRY_CMS_UNIVERSE_OVERRIDE_DECISIONS&quot;]}
+</code></pre>
+<p><strong>Connection and environment</strong></p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Required</th>
+<th>Values</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>meta_db</code></td>
+<td>Yes</td>
+<td>Metadata database, e.g. <code>HSABC_DEV</code></td>
+</tr>
+<tr>
+<td><code>td_conn_var</code></td>
+<td>Yes</td>
+<td>Airflow Connection id of Teradata</td>
+</tr>
+<tr>
+<td><code>wdc_comp_oper_nas_var</code></td>
+<td>Yes for FILE_CHECK, FILE_LOAD, FILE_MOVE</td>
+<td>Airflow Connection id of the NAS</td>
+</tr>
+<tr>
+<td><code>load_env</code></td>
+<td>Yes</td>
+<td><code>DEV</code>, <code>TEST</code>, <code>QA</code>, <code>UAT</code>, <code>PROD</code>. The value of <code>$env</code> and the email subjects</td>
+</tr>
+<tr>
+<td><code>email_recipient</code></td>
+<td>No</td>
+<td>One address, a list, or comma separated. Gets the DAG's success / failure emails and, in NOTIFY, the alerts</td>
+</tr>
+</tbody>
+</table>
+<p><strong>What the run works on</strong> (also from a trigger)</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Steps</th>
+<th>Default</th>
+<th>Values</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>project</code></td>
+<td>All</td>
+<td>Every project</td>
+<td>A <code>Project_Cd</code></td>
+</tr>
+<tr>
+<td><code>table_group</code></td>
+<td>All</td>
+<td>All</td>
+<td>One or more <code>Table_Grp_Cd</code>: <code>"ODAG"</code>, <code>"ODAG,FA"</code> or <code>["ODAG","FA"]</code></td>
+</tr>
+<tr>
+<td><code>table</code></td>
+<td>All</td>
+<td>All</td>
+<td>One or more <code>Table_Nm</code>. Give table groups or tables, not both</td>
+</tr>
+<tr>
+<td><code>run_type</code></td>
+<td>All</td>
+<td>All</td>
+<td>One <code>Run_Ty</code></td>
+</tr>
+<tr>
+<td><code>source</code></td>
+<td>All</td>
+<td>All</td>
+<td>One or more <code>Src_ID</code> or <code>Src_Nm</code>: <code>"10,11"</code> or <code>["10","QNXT"]</code></td>
+</tr>
+<tr>
+<td><code>period</code></td>
+<td>BATCH_CREATION</td>
+<td>From the schedule</td>
+<td>A period code: create batches with those dates now</td>
+</tr>
+<tr>
+<td><code>lookback_days</code>, <code>lookback_weeks</code></td>
+<td>BATCH_CREATION</td>
+<td>None</td>
+<td>Create missed batches of the last n days / weeks</td>
+</tr>
+<tr>
+<td><code>batch</code></td>
+<td>SOURCE_LOAD, EXPORT_LOAD</td>
+<td>All due</td>
+<td>One or more <code>Btch_ID</code>, comma separated</td>
+</tr>
+<tr>
+<td><code>release</code></td>
+<td>SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE</td>
+<td><code>false</code></td>
+<td><code>true</code> = release the scope's batches now</td>
+</tr>
+<tr>
+<td><code>hold</code></td>
+<td>SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE</td>
+<td>None</td>
+<td>Run types to leave alone, e.g. <code>["WKLY","MNT"]</code></td>
+</tr>
+<tr>
+<td><code>as_of</code></td>
+<td>All</td>
+<td>Now</td>
+<td><code>2026-10-18</code> or <code>2026-10-18T06:00</code>: run as if it were then (Central time)</td>
+</tr>
+<tr>
+<td><code>share</code>, <code>folder</code>, <code>file</code></td>
+<td>FILE_LOAD (trigger)</td>
+<td>All files</td>
+<td>Load one folder or file</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Schedule and chaining</strong></p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Values</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>schedule_interval</code></td>
+<td>None (runs only when triggered)</td>
+<td>Cron, e.g. <code>0 6 * * *</code> (06:00 daily), <code>*/15 * * * *</code> (every 15 minutes)</td>
+</tr>
+<tr>
+<td><code>schedule_timezone</code></td>
+<td><code>America/Chicago</code></td>
+<td>Time zone name</td>
+</tr>
+<tr>
+<td><code>trigger_dags</code></td>
+<td>None</td>
+<td>DAG ids started after the step succeeds</td>
+</tr>
+<tr>
+<td><code>runs</code></td>
+<td>None</td>
+<td>A list of scopes, one task each. With <code>name</code> and <code>schedule_interval</code> per entry they run at different times</td>
+</tr>
+<tr>
+<td><code>wait_for_triggered</code></td>
+<td><code>false</code></td>
+<td><code>true</code> = wait for the started DAGs to finish and fail if they fail. EXPORT_LOAD: <code>true</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Task behaviour</strong></p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>Values</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>retries</code></td>
+<td><code>1</code></td>
+<td>Times a task with a technical error is retried (5 minutes later)</td>
+</tr>
+<tr>
+<td><code>fail_on_problems</code></td>
+<td><code>true</code> (OVERRIDE_DECISIONS <code>false</code>)</td>
+<td><code>false</code> = the task succeeds even when the step reports problems</td>
+</tr>
+<tr>
+<td><code>execution_timeout_minutes</code></td>
+<td>60 (BATCH_CREATION, FILE_CHECK), 120 (FILE_LOAD, SOURCE_LOAD, EXPORT_LOAD, FILE_RULES), 30 (others)</td>
+<td>Set above the longest run. A task killed at the timeout leaves its locks</td>
+</tr>
+<tr>
+<td><code>dagrun_timeout_minutes</code></td>
+<td><code>480</code></td>
+<td>Minutes</td>
+</tr>
+<tr>
+<td><code>log_level</code></td>
+<td><code>INFO</code></td>
+<td><code>DEBUG</code>, <code>INFO</code>, <code>WARNING</code>, <code>ERROR</code></td>
+</tr>
+<tr>
+<td><code>owner</code></td>
+<td><code>oss</code></td>
+<td>Airflow owner</td>
+</tr>
+<tr>
+<td><code>tags</code></td>
+<td>None</td>
+<td>The project's tag, e.g. <code>["Universe"]</code>. The step name is added</td>
+</tr>
+<tr>
+<td><code>snow_assignment_group</code></td>
+<td>None</td>
+<td>ServiceNow group for incidents. Without it no incident is opened</td>
+</tr>
+<tr>
+<td><code>pool</code></td>
+<td>None</td>
+<td>Airflow pool for the step task. FILE_RULES: <code>gre_rules</code> (1 slot). Both EXPORT_LOAD DAGs of a project: one shared pool with 1 slot</td>
+</tr>
+<tr>
+<td><code>settings</code></td>
+<td>None</td>
+<td>Framework settings that differ from the default (below)</td>
+</tr>
+<tr>
+<td><code>gre</code></td>
+<td>None</td>
+<td>FILE_RULES only: <code>batch_column</code> (default <code>Btch_ID</code>), <code>meta_db</code>, <code>environment</code>, <code>project_name</code>, <code>process_name</code>, <code>log_level</code>, <code>max_parallel_rules</code> (1), <code>package_dir</code>, <code>run_params</code>, <code>text_params</code>, <code>extra_filters</code></td>
+</tr>
+</tbody>
+</table>
+<p>The DAG success / failure emails tell whether a run worked. NOTIFY emails the business alerts (a rejected file, a missing source, a failed export). Many alerts do not fail any DAG, so schedule NOTIFY on its own as well (for example hourly).</p>
+<h3>Framework settings (<code>"settings": {...}</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BUSINESS_TZ</code></td>
+<td><code>America/Chicago</code></td>
+<td>Time zone of the business day</td>
+</tr>
+<tr>
+<td><code>FILE_STORE</code></td>
+<td><code>nas</code></td>
+<td><code>nas</code> or <code>local</code> (tests)</td>
+</tr>
+<tr>
+<td><code>ARCHIVE_FOLDER</code></td>
+<td><code>Archive</code></td>
+<td>Subfolder for loaded files</td>
+</tr>
+<tr>
+<td><code>ERROR_FOLDER</code></td>
+<td><code>Error</code></td>
+<td>Subfolder for rejected files</td>
+</tr>
+<tr>
+<td><code>ERROR_LOG_FOLDER</code></td>
+<td><code>ErrorLog</code></td>
+<td>Error logs of rejected files. A folder name (subfolder of the file's folder) or a full path <code>nas://share/path</code></td>
+</tr>
+<tr>
+<td><code>CONTROL_REPORT_FOLDER</code></td>
+<td><code>ControlReport</code></td>
+<td>Control reports of FILE_LOAD. A folder name or a full path</td>
+</tr>
+<tr>
+<td><code>ARCHIVE_BY_YEAR</code></td>
+<td><code>false</code></td>
+<td><code>true</code> = archive into <code>Archive/&lt;year&gt;/</code></td>
+</tr>
+<tr>
+<td><code>NAS_MIN_AGE_SECONDS</code></td>
+<td><code>120</code></td>
+<td>A file changed more recently is left for the next run (still arriving)</td>
+</tr>
+<tr>
+<td><code>SUPPORTED_FILE_TYPES</code></td>
+<td><code>.txt,.csv</code></td>
+<td>Other file types are rejected</td>
+</tr>
+<tr>
+<td><code>FILE_ENCODING</code></td>
+<td><code>utf-8</code></td>
+<td><code>utf-8</code>, <code>latin-1</code>, <code>cp1252</code> …</td>
+</tr>
+<tr>
+<td><code>QUOTE_CHAR</code></td>
+<td><code>"</code></td>
+<td>One character, or empty for none</td>
+</tr>
+<tr>
+<td><code>EMPTY_AS_NULL</code></td>
+<td><code>true</code></td>
+<td><code>true</code> = an empty field is NULL</td>
+</tr>
+<tr>
+<td><code>CHECK_CONTENT</code></td>
+<td><code>true</code></td>
+<td>FILE_CHECK reads the content. <code>false</code> = name and batch only</td>
+</tr>
+<tr>
+<td><code>CHECK_MOVE_FAILED</code></td>
+<td><code>false</code></td>
+<td><code>true</code> = FILE_CHECK moves a failed file to <code>Error/</code></td>
+</tr>
+<tr>
+<td><code>CHECK_ON_LOAD</code></td>
+<td><code>false</code></td>
+<td><code>true</code> = FILE_LOAD runs the content checks before loading</td>
+</tr>
+<tr>
+<td><code>WRITE_ERROR_FILE</code></td>
+<td><code>true</code></td>
+<td>Write an error log for a rejected file</td>
+</tr>
+<tr>
+<td><code>WRITE_CONTROL_REPORT</code></td>
+<td><code>true</code></td>
+<td>Write the control report of each FILE_LOAD run</td>
+</tr>
+<tr>
+<td><code>LOAD_ENGINE</code></td>
+<td><code>BATCH</code></td>
+<td><code>BATCH</code> (batched inserts), <code>FASTLOAD</code>, or <code>AUTO</code> (FastLoad from <code>FASTLOAD_MIN_BYTES</code>)</td>
+</tr>
+<tr>
+<td><code>FASTLOAD_MIN_BYTES</code></td>
+<td><code>100000000</code></td>
+<td>File size from which <code>AUTO</code> uses FastLoad</td>
+</tr>
+<tr>
+<td><code>INSERT_BATCH_ROWS</code>, <code>INSERT_BATCH_BYTES</code></td>
+<td><code>2000</code>, <code>500000</code></td>
+<td>Rows / bytes per insert batch</td>
+</tr>
+<tr>
+<td><code>RULE_ENGINE</code></td>
+<td><code>gre</code></td>
+<td><code>gre</code> or <code>none</code> (no rules)</td>
+</tr>
+<tr>
+<td><code>FILE_RULES_MODE</code></td>
+<td><code>GATE</code></td>
+<td><code>GATE</code> = a failed rule gives <code>FAILED</code>. <code>ANNOTATE</code> = <code>PASSED_WITH_WARNINGS</code></td>
+</tr>
+<tr>
+<td><code>RELEASE_TIME</code></td>
+<td>None</td>
+<td><code>HH:MM</code>: on the close date, export or pull only from that time</td>
+</tr>
+<tr>
+<td><code>LOCK_TIMEOUT_SECONDS</code></td>
+<td><code>300</code></td>
+<td>Seconds a step waits for a busy batch or export table before that batch fails</td>
+</tr>
+<tr>
+<td><code>LOCK_TTL_MINUTES</code></td>
+<td><code>240</code></td>
+<td>Minutes after which a lock left by a killed run expires (at least <code>execution_timeout_minutes</code> + 30)</td>
+</tr>
+<tr>
+<td><code>HEARTBEAT_STALE_MINUTES</code></td>
+<td><code>30</code></td>
+<td>Minutes after which <code>health</code> lists a load in progress as stuck</td>
+</tr>
+<tr>
+<td><code>NOTIFY_BACKEND</code></td>
+<td><code>airflow</code></td>
+<td><code>airflow</code> (email through <code>smtp_default</code>) or <code>log</code></td>
+</tr>
+<tr>
+<td><code>DEFAULT_NOTIFY_EMAILS</code></td>
+<td><code>email_recipient</code></td>
+<td>Alert recipients</td>
+</tr>
+<tr>
+<td><code>NOTIFY_FROM_EMAIL</code></td>
+<td>First <code>email_recipient</code></td>
+<td>Sender of the alerts</td>
+</tr>
+<tr>
+<td><code>ENV_VALUE</code></td>
+<td>From <code>load_env</code></td>
+<td>Value of <code>$env</code> when it should differ from <code>load_env</code>. Empty in UAT / PROD, where the extra underscore is dropped (<code>EXPORT_FEED_$ENV_T</code> becomes <code>EXPORT_FEED_T</code>)</td>
+</tr>
+</tbody>
+</table>
+<h3>Triggering a DAG by hand</h3>
+<p>Trigger keys override the Variable for that run. The database, the connections and the settings <code>RULE_ENGINE</code>, <code>GRE_ENTRYPOINT</code>, <code>FILE_STORE</code>, <code>LOCAL_STORE_ROOT</code>, <code>METADATA_SCHEMA</code>, <code>ENVIRONMENT</code>, <code>ENV_VALUE</code> cannot be changed from a trigger.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Steps</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>project</code>, <code>table_group</code>, <code>table</code>, <code>run_type</code>, <code>source</code></td>
+<td>All</td>
+<td>Scope</td>
+</tr>
+<tr>
+<td><code>batch</code></td>
+<td>SOURCE_LOAD, EXPORT_LOAD</td>
+<td>One or more <code>Btch_ID</code></td>
+</tr>
+<tr>
+<td><code>release</code></td>
+<td>SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE</td>
+<td><code>true</code> = release now</td>
+</tr>
+<tr>
+<td><code>hold</code></td>
+<td>SOURCE_LOAD, EXPORT_LOAD, BATCH_CLOSE</td>
+<td>Run types to hold for this run</td>
+</tr>
+<tr>
+<td><code>period</code>, <code>lookback_days</code>, <code>lookback_weeks</code></td>
+<td>BATCH_CREATION</td>
+<td>Create batches for a period now</td>
+</tr>
+<tr>
+<td><code>as_of</code></td>
+<td>All</td>
+<td>Run as if it were that date</td>
+</tr>
+<tr>
+<td><code>run</code></td>
+<td>DAGs with <code>runs</code></td>
+<td>Which <code>runs</code> entries to use, e.g. <code>"MNT"</code></td>
+</tr>
+<tr>
+<td><code>settings</code>, <code>gre</code>, <code>log_level</code>, <code>fail_on_problems</code></td>
+<td>All</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-json">{&quot;project&quot;: &quot;CMSUNIV&quot;, &quot;run_type&quot;: &quot;CMS&quot;, &quot;batch&quot;: &quot;20261019_CMSUNIV_ODAG3_CMS&quot;, &quot;release&quot;: &quot;true&quot;}
+</code></pre>
+<h3>Scope of a run and what is passed on</h3>
+<ul>
+<li><strong>Where the scope comes from</strong>, later wins: the DAG's Variable, then the <code>runs</code> entry, then the trigger. Empty values in a trigger are ignored.</li>
+<li><strong>What a DAG passes on</strong> to the DAGs it starts: only the trigger's <code>project</code>, <code>table_group</code>, <code>table</code>, <code>run_type</code>, <code>source</code> and <code>as_of</code>. Never the Variable's scope, and never <code>batch</code>, <code>release</code>, <code>hold</code> or <code>period</code>.</li>
+<li>A chain started by hand for one table, run type or source stays on it.</li>
+<li>A scheduled run passes nothing on. Each started DAG uses its own Variable's scope. Put the same scope in the next DAG's Variable when it must always stay narrowed.</li>
+<li><strong>Two DAGs of the same step</strong> (EXPORT_LOAD and EXPORT_LOAD_ADHOC) can run at the same time. Give both the same pool with 1 slot so they never collide.</li>
+<li><strong>Ad-hoc batches in the scheduled export:</strong> the scheduled EXPORT_LOAD also exports <code>CMS</code> batches from their close date. To export them only from the ad-hoc DAG, add <code>"hold": ["CMS"]</code> to the scheduled DAG's Variable.</li>
+<li><strong>Several run types in one DAG:</strong> <code>run_type</code> takes one value. Use <code>runs</code> (one task per entry), or leave <code>run_type</code> out and <code>hold</code> the ones to skip.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>DAG</th>
+<th>Started by</th>
+<th>Starts</th>
+<th>Trigger keys besides the scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BATCH_CREATION</td>
+<td>Schedule, BATCH_CLOSE</td>
+<td>–</td>
+<td><code>period</code>, <code>lookback_days</code>, <code>lookback_weeks</code>, <code>as_of</code></td>
+</tr>
+<tr>
+<td>FILE_CHECK</td>
+<td>Schedule</td>
+<td>FILE_LOAD (when at least one file passed)</td>
+<td><code>as_of</code></td>
+</tr>
+<tr>
+<td>FILE_LOAD</td>
+<td>Schedule, FILE_CHECK, FILE_MOVE</td>
+<td>EXPORT_LOAD, OVERRIDE_DECISIONS</td>
+<td><code>share</code>, <code>folder</code>, <code>file</code>, <code>as_of</code></td>
+</tr>
+<tr>
+<td>SOURCE_LOAD</td>
+<td>Schedule</td>
+<td>EXPORT_LOAD</td>
+<td><code>batch</code>, <code>release</code>, <code>hold</code>, <code>as_of</code></td>
+</tr>
+<tr>
+<td>EXPORT_LOAD</td>
+<td>Schedule, FILE_LOAD, SOURCE_LOAD</td>
+<td>FILE_RULES (waits)</td>
+<td><code>batch</code>, <code>release</code>, <code>hold</code>, <code>as_of</code></td>
+</tr>
+<tr>
+<td>EXPORT_LOAD_ADHOC</td>
+<td>By hand</td>
+<td>FILE_RULES (waits)</td>
+<td><code>batch</code>, <code>release</code>, <code>hold</code>, <code>as_of</code></td>
+</tr>
+<tr>
+<td>FILE_RULES</td>
+<td>EXPORT_LOAD, by hand</td>
+<td>–</td>
+<td><code>as_of</code> (no <code>batch</code> key)</td>
+</tr>
+<tr>
+<td>OVERRIDE_DECISIONS</td>
+<td>FILE_LOAD, schedule</td>
+<td>–</td>
+<td><code>as_of</code></td>
+</tr>
+<tr>
+<td>BATCH_CLOSE</td>
+<td>Schedule</td>
+<td>BATCH_CREATION, NOTIFY</td>
+<td><code>hold</code>, <code>release</code>, <code>as_of</code></td>
+</tr>
+<tr>
+<td>NOTIFY</td>
+<td>BATCH_CLOSE, schedule</td>
+<td>–</td>
+<td><code>as_of</code></td>
+</tr>
+<tr>
+<td>FILE_MOVE</td>
+<td>Schedule, by hand</td>
+<td>FILE_LOAD (when a file was moved or copied)</td>
+<td><code>job</code> only</td>
+</tr>
+</tbody>
+</table>
+<h3>One DAG at several times (timed runs)</h3>
+<pre><code class="language-json">{&quot;meta_db&quot;: &quot;HSABC_DEV&quot;, &quot;td_conn_var&quot;: &quot;DEV&quot;, &quot;load_env&quot;: &quot;DEV&quot;, &quot;project&quot;: &quot;CMSUNIV&quot;, &quot;schedule_interval&quot;: null,
+ &quot;trigger_dags&quot;: [&quot;GOVT_RGLTRY_CMS_UNIVERSE_NOTIFY&quot;],
+ &quot;runs&quot;: [{&quot;name&quot;: &quot;DLY&quot;, &quot;run_type&quot;: &quot;DLY&quot;, &quot;schedule_interval&quot;: &quot;0 20 * * *&quot;, &quot;settings&quot;: {&quot;RELEASE_TIME&quot;: &quot;20:00&quot;}},
+          {&quot;name&quot;: &quot;MNT&quot;, &quot;run_type&quot;: &quot;MNT&quot;, &quot;schedule_interval&quot;: &quot;0 6 * * *&quot;}]}
+</code></pre>
+<p>A scheduled run uses the entry for its time. A manual run uses the entries named in <code>run</code>, or the Variable's own scope, plus what the trigger gives.</p>
+<h3>FILE_MOVE: copy and move files between folders</h3>
+<p>FILE_MOVE is a separate DAG. It uses no batches, no metadata tables and no Teradata. Each job takes the files of a source folder whose names match its patterns and hands each file to its targets in order: copies first, and the job can end with one move.</p>
+<pre><code class="language-json">{&quot;wdc_comp_oper_nas_var&quot;: &quot;comp_oper_creds&quot;, &quot;load_env&quot;: &quot;DEV&quot;,
+ &quot;snow_assignment_group&quot;: &quot;D&amp;AE - EDE Govt Compliance&quot;, &quot;tags&quot;: [&quot;UMCM&quot;],
+ &quot;trigger_dags&quot;: [&quot;GOVT_RGLTRY_UMCM_FILE_LOAD&quot;],
+ &quot;jobs&quot;: [{&quot;name&quot;: &quot;UMCM_LANDING&quot;,
+           &quot;src_folder&quot;: &quot;nas://chs_dms/$Env/OSS_Landing/External/UMCM&quot;,
+           &quot;patterns&quot;: [&quot;UMCM_*.txt&quot;],
+           &quot;targets&quot;: [{&quot;folder&quot;: &quot;nas://chs_dms/$Env/OSS_Backup/External/UMCM&quot;, &quot;action&quot;: &quot;copy&quot;, &quot;on_exists&quot;: &quot;rename&quot;},
+                       {&quot;folder&quot;: &quot;nas://chs_dms/$Env/OSS_Audit/External/UMCM&quot;, &quot;action&quot;: &quot;copy&quot;},
+                       {&quot;folder&quot;: &quot;nas://chs_dms/$Env/OSS_Inbound/External/UMCM&quot;, &quot;action&quot;: &quot;move&quot;}]}]}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Required</th>
+<th>Values</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>wdc_comp_oper_nas_var</code></td>
+<td>Yes</td>
+<td>NAS Connection id</td>
+</tr>
+<tr>
+<td><code>load_env</code></td>
+<td>Yes</td>
+<td>Value of <code>$env</code> in the folders</td>
+</tr>
+<tr>
+<td><code>jobs</code></td>
+<td>Yes</td>
+<td>List of jobs</td>
+</tr>
+<tr>
+<td><code>trigger_dags</code></td>
+<td>No</td>
+<td>DAGs started when at least one file was moved or copied</td>
+</tr>
+<tr>
+<td><code>execution_timeout_minutes</code></td>
+<td>No</td>
+<td>Default 60</td>
+</tr>
+<tr>
+<td><code>settings</code></td>
+<td>No</td>
+<td>Only <code>NAS_MIN_AGE_SECONDS</code> is used</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Job key</th>
+<th>Required</th>
+<th>Values</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>Yes</td>
+<td>Unique name. Used by the trigger key <code>job</code></td>
+</tr>
+<tr>
+<td><code>src_folder</code></td>
+<td>Yes</td>
+<td><code>nas://share/path</code>, <code>$env</code> allowed. Subfolders are not read</td>
+</tr>
+<tr>
+<td><code>patterns</code></td>
+<td>Yes</td>
+<td><code>*</code> = any characters, <code>?</code> = one character, <code>[abc]</code> = one of them. Not case sensitive. E.g. <code>["CMSAUTH_*.txt"]</code></td>
+</tr>
+<tr>
+<td><code>targets</code></td>
+<td>Yes</td>
+<td>List of targets, handled in order</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Target key</th>
+<th>Required</th>
+<th>Default</th>
+<th>Values</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>folder</code></td>
+<td>Yes</td>
+<td></td>
+<td><code>nas://share/path</code>. Not the source folder itself</td>
+</tr>
+<tr>
+<td><code>action</code></td>
+<td>Yes</td>
+<td></td>
+<td><code>copy</code> (file stays in the source) or <code>move</code> (file leaves the source once every target has it). Only the last target can be a move</td>
+</tr>
+<tr>
+<td><code>on_exists</code></td>
+<td>No</td>
+<td><code>fail</code></td>
+<td>When the target has a file of that name with other content: <code>fail</code> (file stays in the source and is reported), <code>rename</code> (new file written as <code>name_1.txt</code>, <code>name_2.txt</code> …), <code>overwrite</code></td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>A file with the same name and the same content in the target counts as already there. A run that stopped half way can simply be run again without making duplicates.</li>
+<li>Each copy is first written to <code>&lt;target&gt;/_file_move_tmp/</code>, checked for size, then renamed, so the target never sees a half-written file.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th><code>result</code></th>
+<th>Exit</th>
+<th>Task</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>COMPLETED</code> (also when no file matched)</td>
+<td>0</td>
+<td>Succeeds</td>
+</tr>
+<tr>
+<td><code>COMPLETED WITH PROBLEMS</code> (a file failed and stays in the source)</td>
+<td>1</td>
+<td>Fails, no retry</td>
+</tr>
+<tr>
+<td><code>COULD NOT RUN</code> (Variable error, folder cannot be listed)</td>
+<td>2</td>
+<td>Fails and is retried</td>
+</tr>
+</tbody>
+</table>
+<h3>Admin commands</h3>
+<p>Run on an Airflow worker, in the DAGs folder. The Teradata login is set in that shell only, never saved in a file.</p>
+<pre><code class="language-bash">export TERADATA_HOST=&lt;host&gt; TERADATA_USER=&lt;login&gt; TERADATA_PASSWORD=&lt;password&gt; TERADATA_LOGMECH=LDAP
+export FRAMEWORK_METADATA_SCHEMA=HSABC_DEV FRAMEWORK_ENVIRONMENT=DEV
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>python -m govt_rgltry_framework.cli validate-config</code></td>
+<td>Checks every configuration table</td>
+</tr>
+<tr>
+<td><code>python -m govt_rgltry_framework.cli health [--project &lt;project&gt;]</code></td>
+<td>Open batches past their close date, stuck loads, rejected counts</td>
+</tr>
+<tr>
+<td><code>python -m govt_rgltry_framework.cli locks</code></td>
+<td>Locks held by running or killed steps</td>
+</tr>
+<tr>
+<td><code>python -m govt_rgltry_framework.cli release-lock --key &lt;Lock_Key&gt;</code></td>
+<td>Removes a lock left by a run that no longer exists</td>
+</tr>
+<tr>
+<td><code>python -m govt_rgltry_framework.cli close-batch --btch-id &lt;Btch_ID&gt; --closed-by &lt;you&gt; [--src-id &lt;Src_ID&gt;]</code></td>
+<td>Closes a batch, or one source of it, by hand</td>
+</tr>
+<tr>
+<td><code>python -m govt_rgltry_framework.cli test-connection --source &lt;Src_Conn_Cd&gt; --db-type SQLSERVER</code></td>
+<td>Tests an internal source's connection</td>
+</tr>
+<tr>
+<td><code>python -m govt_rgltry_framework.cli show-config</code></td>
+<td>Settings in effect and where each came from</td>
+</tr>
+<tr>
+<td><code>python -m govt_rgltry_framework.cli run --module &lt;STEP&gt; --project CMSUNIV [--source 10,11] [--as-of &lt;date&gt;]</code></td>
+<td>Runs any step by hand</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>9. Set up a new project</h2>
+<pre><code> 1 Metadata tables --&gt; 2 Project, sources, run types --&gt; 3 Report dates and crosswalk
+ 4 Staging / core / export tables (DBA) --&gt; 5 File / query configs --&gt; 6 Derived columns
+ 7 File checks --&gt; 8 Export and rules (optional) --&gt; 9 Airflow Connections and Variables
+ 10 validate-config --&gt; 11 First cycle in DEV --&gt; 12 Production
+</code></pre>
+<ol>
+<li><strong>Metadata tables</strong> (once per environment): run <code>airflow_resources/sql/schema.sql</code> with <code>{{META_DB}}</code> replaced.</li>
+<li><strong>Project, sources, run types:</strong> <code>GOVT_RGLTRY_Project</code>, <code>GOVT_RGLTRY_Table</code> (for groups), <code>GOVT_RGLTRY_SourceSystem</code>, <code>GOVT_RGLTRY_RunType</code>.</li>
+<li><strong>Report dates and crosswalk:</strong> one <code>GOVT_RGLTRY_RunTypePeriod</code> row per scheduled run type, then one crosswalk row per table + source listing its run types.</li>
+<li><strong>Staging, core, export tables</strong> (DBA): the file columns, <code>Btch_ID</code>, a source column, the derived columns. Export = the core columns plus <code>Btch_ID</code> and the source column.</li>
+<li><strong>How data arrives:</strong> a file config per file source, a query config per internal source.</li>
+<li><strong>Derived columns:</strong> at least <code>SOURCE_ID</code>. Usually also <code>RUN_TYPE</code>, <code>VERSION</code>, <code>FILE_NAME</code>, <code>LOAD_TIMESTAMP</code>, <code>ROW_SEQUENCE</code>.</li>
+<li><strong>File checks:</strong> header names, record types or trailer, value checks.</li>
+<li><strong>Optional:</strong> export config, rule bindings, batch calendar.</li>
+<li><strong>Airflow:</strong></li>
+<li>Create the Connections.</li>
+<li>Put the GRE code in <code>&lt;dags&gt;/rules_engine</code> and create the pool <code>gre_rules</code> (1 slot).</li>
+<li>Copy the DAG files with the project's names (e.g. <code>GOVT_RGLTRY_PRJB_*</code>, Variables <code>govt_rgltry_prjb_&lt;step&gt;_config_var</code>) and create their Variables.</li>
+<li>In every Variable set <code>project</code> and the project's tag, and point <code>trigger_dags</code> at the project's own DAGs.</li>
+<li>Keep one NOTIFY without <code>project</code>, for alerts that belong to no project.</li>
+<li><strong>Validate:</strong> run <code>validate-config</code> and fix every ERROR.</li>
+<li><strong>First cycle in DEV:</strong> BATCH_CREATION → test file or source rows → FILE_LOAD / SOURCE_LOAD → EXPORT_LOAD → BATCH_CLOSE → NOTIFY. Then try a bad file, a missing source and a late file.</li>
+<li><strong>Production:</strong> add the same rows to the PROD metadata database. <code>$env</code> makes the database names and paths follow the environment.</li>
+</ol>
+<h3>Example setup</h3>
+<pre><code class="language-sql">INSERT INTO HSABC_DEV.GOVT_RGLTRY_Project (Project_Cd, Project_Desc, Active_Ind) VALUES ('CMSUNIV', 'CMS Universe submissions', 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_Table (Project_Cd, Table_Nm, Table_Grp_Cd, Table_Desc, Active_Ind) VALUES ('CMSUNIV', 'ODAG3', 'ODAG', 'ODAG table 3', 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_SourceSystem (Src_ID, Src_Nm, Src_Ty, Active_Ind) VALUES ('51', 'MedHOK', 'FDR', 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_SourceSystem (Src_ID, Src_Nm, Src_Ty, Active_Ind) VALUES ('30', 'UMAuth', 'INTERNAL', 1);
+
+-- run types
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Sched_Cd, Sched_Window_Days, Active_Ind)
+VALUES ('DLY', 'Daily, previous day', 'SCHEDULED', 1, 0, 'DAILY', 1, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Sched_Cd, Sched_Day_Cd, Sched_Window_Days, Active_Ind)
+VALUES ('WKLY', 'Weekly, created Sunday, closes Friday', 'SCHEDULED', 6, 0, 'WEEKLY', 'SUN', 2, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Sched_Cd, Sched_Day_Cd, Sched_Week_Cd, Sched_Window_Days, Active_Ind)
+VALUES ('MNT', 'Monthly on the 3rd Tuesday', 'SCHEDULED', 10, 0, 'MONTHLY', 'TUE', '3', 5, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunType (Run_Ty, Run_Ty_Desc, Run_Category_Cd, SLA_Days, Carry_Fwd_Ind, Active_Ind)
+VALUES ('CMS', 'CMS ad-hoc request', 'ADHOC', 5, 1, 1);
+
+-- report dates
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'DLY', 'PREV_DAY', 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'WKLY', 'PREV_CALENDAR_WEEK', 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RunTypePeriod (Project_Cd, Table_Nm, Run_Ty, Rpt_Period_Cd, Active_Ind) VALUES ('CMSUNIV', '*', 'MNT', 'PREV_CALENDAR_MONTH', 1);
+
+-- crosswalk: source 51 sends ODAG3 weekly, monthly and ad hoc, version 2200
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_DataSetSourceXwalk (Project_Cd, Table_Nm, Src_ID, Run_Ty, Effective_Start_Dt_Key, Effective_End_Dt_Key, Rpt_Version, Include_Ind, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '51', 'WKLY,MNT,CMS', DATE '2026-01-01', NULL, '2200', 1, 1);
+
+-- file config of source 51
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_SourceFileConfig
+  (Project_Cd, Table_Nm, Src_ID, Src_File_Nm_Tmplt, Delmtr_Cd, Src_File_Has_Hdr_Ind, Src_File_Has_Trlr_Ind, Allow_Zero_Rcd_Ind,
+   Src_File_Path, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, File_Vrsn_Cd, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '51', 'CMSAuth_MedHOK_PYMT_C_{VERSION}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt', '|', 1, 1, 0,
+        '\\nas01\Compliance\$env\cmsuniv\FDR\PYMT_C', 'CMSUNIV_FILELAND_$ENV_T', 'ODAG_DE_TABLE3_2022',
+        'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', '22', 1);
+
+-- internal source 30 pulled by query
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_InternalSourceConfig
+  (Project_Cd, Table_Nm, Src_ID, Src_Db_Ty, Src_Conn_Cd, Src_Sql_Txt, Stg_Schema_Nm, Stg_Table_Nm, Core_Schema_Nm, Core_Table_Nm, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '30', 'TERADATA', NULL,
+        'SELECT a.Mbr_First_Nm AS MemberFirstName, a.Mbr_ID AS MemberID FROM CMSUNIV_SRC_DEV_V.UM_AUTH a WHERE a.Btch_ID = {btch_id} AND a.Src_ID = {src_id}',
+        'CMSUNIV_STAGE_$ENV_T', 'ODAG_DE_TABLE3_2022', 'CMSUNIV_CORE_$ENV_T', 'ODAG_DE_TABLE3_2022', 1);
+
+-- file checks
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_FileCheckConfig (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '*', 'HEADER_NAMES', '*', 'MemberFirstName|MemberID|Amount', 1, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_FileCheckConfig (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
+VALUES ('CMSUNIV', '*', '*', 'COLUMN_VALUES', '*', 'ALL', 1, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_FileCheckConfig (Project_Cd, Table_Nm, Src_ID, Check_Cd, Check_Field_Nm, Check_Val_Txt, Include_Ind, Active_Ind)
+VALUES ('CMSUNIV', '*', '*', 'INVALID_CHARACTERS', '*', '&lt;,&gt;,~', 1, 1);
+
+-- derived columns
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_TargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'Src_Data_Key', 'SOURCE_ID', NULL, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_TargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'Run_Ty', 'RUN_TYPE', NULL, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_TargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'Universe_Vrsn', 'VERSION', NULL, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_TargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'FileName', 'FILE_NAME', NULL, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_TargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', '*', 'Load_Dtts', 'LOAD_TIMESTAMP', NULL, 1);
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_TargetColumnConfig (Project_Cd, Table_Nm, Column_Nm, Value_Cd, Value_Txt, Active_Ind) VALUES ('CMSUNIV', 'ODAG3', 'ODAG_DE_Table3_2022_ID', 'ROW_SEQUENCE', NULL, 1);
+
+-- export table
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_ExportConfig (Project_Cd, Table_Nm, Exp_Schema_Nm, Exp_Table_Nm, Exp_Proc_Nm, Exp_Proc_Parm_Txt, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', 'EXPORT_FEED_$ENV_T', 'SDO_CMSUNIV_ODAG3_2022', NULL, NULL, 1);
+
+-- rules (optional: without a row the rule group named like the table runs)
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RuleBinding (Project_Cd, Table_Nm, Src_ID, Run_Ty, Gre_Rule_Group, Gre_Rule_Variant, Active_Ind)
+VALUES ('CMSUNIV', 'ODAG3', '*', '*', 'CMSUNIV_ODAG3', 'DEFAULT', 1);
+</code></pre>
+<h3>How a file goes from the NAS to core</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Step</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>The name is matched to its file config and its open batch. A load row is written</td>
+<td><code>RECEIVED</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>File checks</td>
+<td>Failed: <code>REJECTED</code>, file to <code>Error/</code>, error log in <code>ErrorLog/</code>, alert</td>
+</tr>
+<tr>
+<td>3</td>
+<td>The source's earlier staging rows are removed and the file's records inserted, with the derived columns</td>
+<td><code>STAGED</code>, <code>Stg_Rcd_Cnt</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td>Every NOT NULL core column must get a value, and every text value is test-converted to its core column's type and <code>FORMAT</code></td>
+<td>Failed: <code>REJECTED</code> (<code>CORE_TYPE_MISMATCH</code>), staged rows removed, core untouched</td>
+</tr>
+<tr>
+<td>5</td>
+<td>One transaction: the batch's core rows of the source are removed and the staged rows copied in. Copied count must equal staged count</td>
+<td><code>FILE_LOADED</code>, batch <code>SOURCE_DATA_READY</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td>The file moves to <code>Archive/</code> and a line goes to the control report</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>Conversion:</strong> an empty value becomes NULL. Dates use the core column's own <code>FORMAT</code>, so give a DATE column the file's format, e.g. <code>DATE FORMAT 'MM/DD/YYYY'</code>.</li>
+<li><strong>System errors:</strong> a database error at any step gives <code>PROCESS_FAILURE</code>. Nothing is half done; the file stays in the inbound folder and is tried again on the next run.</li>
+<li><strong>Which staging column fills which core column:</strong></li>
+<li>A column of the same name is used first.</li>
+<li>A derived column takes the staging column with the same value code.</li>
+<li>The remaining columns pair in table order, so keep them in the same order in both tables.</li>
+<li><strong>Staging is cleared per source and run type</strong> before each load. Another source's rows stay, so a file and an internal pull of the same table do not remove each other's rows.</li>
+</ul>
+<hr />
+<h2>10. How-to procedures</h2>
+<p><strong>Check the configuration.</strong> Run <code>validate-config</code>. Fix every ERROR. WARNINGs point at something to look at.</p>
+<p><strong>Create batches for a missed day.</strong> Trigger BATCH_CREATION with <code>{"project": "CMSUNIV", "as_of": "2026-10-19"}</code>.</p>
+<p><strong>Request an ad-hoc batch.</strong> Insert a row into <code>GOVT_RGLTRY_RequestInTake</code>. The next BATCH_CREATION creates the batch.</p>
+<pre><code class="language-sql">INSERT INTO HSABC_DEV.GOVT_RGLTRY_RequestInTake (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Version, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key)
+VALUES ('CMSUNIV', 'ODAG3', '51', 'CMS', '2200', DATE '2026-07-01', DATE '2026-09-30', DATE '2026-10-19', DATE '2026-10-19');
+
+-- the same request for every source of ODAG3 that has a file or query config
+INSERT INTO HSABC_DEV.GOVT_RGLTRY_RequestInTake (Project_Cd, Table_Nm, Src_ID, Run_Ty, Rpt_Version, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Start_Dt_Key, Req_End_Dt_Key)
+SELECT 'CMSUNIV', 'ODAG3', Src_ID, 'CMS', '2200', DATE '2026-07-01', DATE '2026-09-30', DATE '2026-10-19', DATE '2026-10-19'
+FROM (SELECT Src_ID FROM HSABC_DEV.GOVT_RGLTRY_SourceFileConfig WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'ODAG3' AND Active_Ind = 1
+      UNION SELECT Src_ID FROM HSABC_DEV.GOVT_RGLTRY_InternalSourceConfig WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'ODAG3' AND Active_Ind = 1) s;
+</code></pre>
+<p><strong>A file was rejected.</strong>
+1. Find the reason with the rejected loads query (section 11). The file is in <code>&lt;inbound&gt;\Error\</code> and its error log in <code>&lt;inbound&gt;\ErrorLog\&lt;name&gt;_errors.txt</code>.
+2. Ask the source to fix and resend the file, or fix the configuration.
+3. Put the file back into the inbound folder.</p>
+<p><strong>A file was skipped.</strong> A skipped file is not an error, and nothing is written for it. The FILE_LOAD report lists it under <code>skipped_files</code>, and the log gives the reason:
+- still arriving (<code>NAS_MIN_AGE_SECONDS</code>);
+- another project's or another run type's file;
+- a name that fits no template in a shared folder;
+- already moved or loaded by another run.</p>
+<p><strong>A source will not send (carry-forward).</strong> Before the batch's close run, insert an approved <code>REUSE</code> override. The run type needs <code>Carry_Fwd_Ind = 1</code>.</p>
+<pre><code class="language-sql">INSERT INTO HSABC_DEV.GOVT_RGLTRY_BatchOverride (Override_Ty, Req_ID, Btch_ID, Reuse_Btch_ID, Apprvl_Stat, Valid_Thru_Dt_Key, Rsn_Txt, Reviewed_By, Reviewed_Dtts)
+SELECT 'REUSE', Req_ID, Btch_ID, NULL, 'APPROVED', DATE '2026-10-31', 'Source confirmed no change', 'approver_id', CURRENT_TIMESTAMP(6)
+FROM HSABC_DEV.GOVT_RGLTRY_RequestControl WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_DLY' AND Src_ID = '51';
+</code></pre>
+<p><strong>A late or corrected file for a closed batch.</strong> Insert an approved <code>LATE_ARRIVAL</code> override (batch without data) or <code>CORRECTION</code> override (batch with data), then put the file in the inbound folder.</p>
+<pre><code class="language-sql">INSERT INTO HSABC_DEV.GOVT_RGLTRY_BatchOverride (Override_Ty, Req_ID, Btch_ID, Apprvl_Stat, Valid_Thru_Dt_Key, Rsn_Txt, Reviewed_By, Reviewed_Dtts)
+SELECT 'LATE_ARRIVAL', Req_ID, Btch_ID, 'APPROVED', DATE '2026-10-31', 'File came late', 'approver_id', CURRENT_TIMESTAMP(6)
+FROM HSABC_DEV.GOVT_RGLTRY_RequestControl WHERE Btch_ID = '20261019_CMSUNIV_ODAG3_DLY' AND Src_ID = '140';
+</code></pre>
+<p><strong>Reopen a closed batch.</strong> Insert an approved <code>REOPEN</code> override. The next OVERRIDE_DECISIONS reopens the batch. It closes again after new data arrives, or with <code>close-batch</code>.</p>
+<p><strong>Approve, reject or stop an override.</strong></p>
+<pre><code class="language-sql">UPDATE HSABC_DEV.GOVT_RGLTRY_BatchOverride SET Apprvl_Stat = 'APPROVED', Reviewed_By = 'approver_id', Reviewed_Dtts = CURRENT_TIMESTAMP(6), Valid_Thru_Dt_Key = DATE '2026-10-31'
+WHERE Ovrd_ID = 123 AND Apprvl_Stat = 'PENDING_REVIEW';
+UPDATE HSABC_DEV.GOVT_RGLTRY_BatchOverride SET Apprvl_Stat = 'REJECTED', Reviewed_By = 'approver_id', Reviewed_Dtts = CURRENT_TIMESTAMP(6)
+WHERE Ovrd_ID = 123 AND Apprvl_Stat = 'PENDING_REVIEW';
+UPDATE HSABC_DEV.GOVT_RGLTRY_BatchOverride SET Valid_Thru_Dt_Key = CURRENT_DATE - 1 WHERE Ovrd_ID = 123 AND Apprvl_Stat = 'APPROVED';
+</code></pre>
+<p><strong>Release early, or close ad-hoc batches.</strong>
+- An ad-hoc batch with data closes only after it is released. Trigger BATCH_CLOSE with <code>{"project": "CMSUNIV", "run_type": "CMS", "release": "true"}</code>; add <code>source</code> or <code>table</code> to narrow it.
+- To export a scheduled batch before its close date, trigger EXPORT_LOAD (and SOURCE_LOAD for internal sources) with <code>{"project": "CMSUNIV", "run_type": "WKLY", "release": "true"}</code> or <code>{"batch": "&lt;Btch_ID&gt;"}</code>.</p>
+<p><strong>Hold a run type.</strong> Add <code>"hold": "WKLY"</code> to the SOURCE_LOAD, EXPORT_LOAD and BATCH_CLOSE Variables. Remove it to go back to normal.</p>
+<p><strong>Re-pull an internal source.</strong> Trigger SOURCE_LOAD with <code>{"batch": "&lt;Btch_ID&gt;"}</code>. This replaces the rows. A closed batch needs an override first.</p>
+<p><strong>Re-export a batch.</strong> Trigger EXPORT_LOAD with <code>{"batch": "&lt;Btch_ID&gt;"}</code>; for several batches, separate them with commas. Use the ad-hoc DAG for an ad-hoc <code>CMS</code> batch. The batch is exported even when held or not yet due. FILE_RULES then starts, but runs the rules only when the batch has a pending load.</p>
+<p><strong>Close a batch by hand.</strong> Run <code>close-batch</code> from the command line, with <code>--src-id</code> for one source. It is refused before the close date unless the batch was released.</p>
+<p><strong>Run a step for some tables, a run type or some sources.</strong>
+- Trigger with <code>table_group</code> or <code>table</code>, and/or <code>run_type</code>, and/or <code>source</code>. Example: <code>{"project": "CMSUNIV", "table_group": "ODAG,FA"}</code> or <code>{"project": "CMSUNIV", "source": "10,11"}</code>.
+- <code>"runs": [{"source": "10"}, {"source": "11"}]</code> gives one task per source.</p>
+<p><strong>Run the rules by hand, or again.</strong> FILE_RULES runs every pending batch of its scope. It has no <code>batch</code> key.
+- <em>Waiting batches:</em> trigger FILE_RULES with a scope, e.g. <code>{"project": "CMSUNIV", "table": "ODAG1", "run_type": "DLY"}</code>.
+- <em>Export and rules of one batch:</em> trigger EXPORT_LOAD with <code>{"batch": "&lt;Btch_ID&gt;"}</code>. It starts FILE_RULES and waits for it.
+- <em>Again, for a batch whose rules already ran</em> (for example after a rule was changed): set its loads back to pending, then trigger FILE_RULES with the batch's table and run type. The GRE results of the batch are replaced.</p>
+<pre><code class="language-sql">UPDATE HSABC_DEV.GOVT_RGLTRY_FileLoad SET Rules_Stat = 'NOT_RUN', LastUpdt_Dtts = CURRENT_TIMESTAMP(6), LastUpdt_ID = USER
+WHERE Btch_ID = '&lt;Btch_ID&gt;' AND Load_Stat = 'FILE_LOADED';
+</code></pre>
+<pre><code class="language-json">{&quot;project&quot;: &quot;CMSUNIV&quot;, &quot;table&quot;: &quot;&lt;Table_Nm&gt;&quot;, &quot;run_type&quot;: &quot;&lt;Run_Ty&gt;&quot;}
+</code></pre>
+<p>Check the result:</p>
+<pre><code class="language-sql">SELECT Btch_ID, Load_ID, Rules_Stat, LastUpdt_Dtts FROM HSABC_DEV.GOVT_RGLTRY_FileLoad
+WHERE Btch_ID = '&lt;Btch_ID&gt;' AND Load_Stat = 'FILE_LOADED';
+SELECT Event_Ty, Event_Dtts, Event_Txt FROM HSABC_DEV.GOVT_RGLTRY_RequestFileDetail
+WHERE Btch_ID = '&lt;Btch_ID&gt;' AND Event_Ty LIKE 'FILE_RULES%' ORDER BY Event_Dtts DESC;
+</code></pre>
+<p><strong>A step waits or says "locked"</strong> (<code>LockTimeout</code>, <code>STAGING_TABLE_BUSY</code>, <code>STAGING_LOCK_STALE</code>). A lock is either held by a run that is still working, or left behind by a run that was killed. A left lock stays until <code>Expires_Dtts</code>, then the next run replaces it.</p>
+<ol>
+<li>Look at the lock. The key is in the message.
+   <code>sql
+   SELECT Lock_Key, Owner_ID, Acquired_Dtts, Expires_Dtts FROM HSABC_DEV.GOVT_RGLTRY_Lock WHERE Lock_Key = '&lt;Lock_Key&gt;';</code>
+   No row means it is already free.</li>
+<li>Compare <code>Acquired_Dtts</code> with the DAG runs in Airflow. If a run is still running, leave the lock alone.</li>
+<li>If no run is running, remove the lock, either with <code>release-lock --key "&lt;Lock_Key&gt;"</code> or in Teradata:
+   <code>sql
+   DELETE FROM HSABC_DEV.GOVT_RGLTRY_Lock WHERE Lock_Key = '&lt;Lock_Key&gt;' AND Owner_ID = '&lt;Owner_ID&gt;';</code>
+   Or do nothing and let it expire.</li>
+<li>Run the step again.</li>
+</ol>
+<p>Never remove a lock whose run is still working. If locks keep being left behind, raise <code>execution_timeout_minutes</code>.</p>
+<p><strong>An export takes long, or fails with <code>LockTimeout … BTCH:EXPORT …</code>.</strong> An export table is locked while one batch and source is exported into it, including a procedure call. Any other export into the same table waits up to <code>LOCK_TIMEOUT_SECONDS</code>, then fails for that batch and is tried again next run.</p>
+<ol>
+<li>Free a lock left by a killed run (see above).</li>
+<li>Give the scheduled and the ad-hoc EXPORT_LOAD the same pool with 1 slot (Admin → Pools, e.g. <code>cms_universe_export</code>).</li>
+<li>Set the timeout above the longest export, in both export Variables:
+   <code>json
+   "pool": "cms_universe_export",
+   "execution_timeout_minutes": 300,
+   "settings": {"LOCK_TIMEOUT_SECONDS": "3900"}</code></li>
+<li>Make the export cheaper. Every open batch is exported on every run, so a slow procedure runs for every source each time.</li>
+<li>Run the scheduled EXPORT_LOAD less often, or put the slow tables in their own evening <code>runs</code> entry.</li>
+<li>Let the procedure work only on the batch and source it is given (<code>{btch_id}</code>, <code>{src_id}</code>). If it can only work on the whole table, call it once per batch with <code>Exp_Post_Sql_Txt</code>.</li>
+<li>Optionally add <code>"hold": ["CMS"]</code> to the scheduled EXPORT_LOAD.</li>
+</ol>
+<p><strong>Change a version.</strong>
+- For every run type of a source: end the crosswalk row (<code>Effective_End_Dt_Key</code>) and add a new row with the new <code>Rpt_Version</code> from the next day.
+- For one run type only: add a row for that run type with the new version from its start date.
+- Update <code>File_Vrsn_Cd</code> if the file names change.</p>
+<p><strong>Yearly protocol change (e.g. 2200 to 2300).</strong> The project and table codes stay. Only the tables the new protocol changes move to new staging, core and export tables (e.g. <code>ODAG_DE_TABLE1_2022</code> to <code>ODAG_DE_TABLE1_2023</code>). Use <code>airflow_resources/sql/version_cutover_template.sql</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>When</th>
+<th>What</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Fill the placeholders</td>
+<td>–</td>
+<td>Project, changed tables, old / new version, year tags, cutover date</td>
+</tr>
+<tr>
+<td>DBA</td>
+<td>Before Part 1</td>
+<td>Create the new staging, core and export tables</td>
+</tr>
+<tr>
+<td>Part 0</td>
+<td>First</td>
+<td>Preview only. Changes nothing</td>
+</tr>
+<tr>
+<td>Part 1</td>
+<td>Any day before the cutover</td>
+<td>New crosswalk rows from the cutover date, new file configs, new ID columns</td>
+</tr>
+<tr>
+<td>Part 2</td>
+<td>Cutover day, after the last old files are loaded and exported</td>
+<td>Switch file configs, query sources and export to the new tables</td>
+</tr>
+<tr>
+<td>Part 3</td>
+<td>After Part 2</td>
+<td>Check the configs and crosswalk windows</td>
+</tr>
+<tr>
+<td>Validate</td>
+<td>After Part 2</td>
+<td><code>validate-config</code></td>
+</tr>
+</tbody>
+</table>
+<p>A batch takes the version in effect on the day it is created, not on its report period.</p>
+<p><strong>Stop a source or table.</strong> Set <code>Active_Ind = 0</code> on its crosswalk rows and file / query config. To stop one run type of a source, remove it from the row's list, or add a row for that run type with <code>Include_Ind = 0</code>.</p>
+<p><strong>Add a run type to a source.</strong> Add it to the <code>Run_Ty</code> list of the source's crosswalk row, and add a <code>GOVT_RGLTRY_RunTypePeriod</code> row if the run type is new for the project. Run <code>validate-config</code>.</p>
+<p><strong>Change the report dates of a run type.</strong> Update <code>Rpt_Period_Cd</code> on its <code>GOVT_RGLTRY_RunTypePeriod</code> row. Batches already created keep their dates.</p>
+<p><strong>Load a large file faster.</strong> In the FILE_LOAD Variable's <code>settings</code>, set <code>LOAD_ENGINE</code> to <code>AUTO</code> (FastLoad from 100 MB) and raise <code>INSERT_BATCH_ROWS</code> / <code>INSERT_BATCH_BYTES</code> (e.g. <code>10000</code> / <code>4000000</code>).
+- FastLoad needs CREATE TABLE and DROP TABLE rights in the staging database, and a free FastLoad slot.
+- Without them the file still loads with batched inserts, and the log gives the reason.</p>
+<p><strong>Copy a file to the NAS safely.</strong> Copy it into a subfolder of the inbound folder first, then move it up when the copy is complete. Or raise <code>NAS_MIN_AGE_SECONDS</code> above the longest pause in a copy. A <code>TRAILER</code> check with a row count catches a cut-off file.</p>
+<p><strong>Move or copy files between folders.</strong> Set up the FILE_MOVE DAG and its Variable with jobs. To feed FILE_LOAD, make the last target a <code>move</code> into the inbound folder and put FILE_LOAD in <code>trigger_dags</code>.</p>
+<p><strong>An alert email arrived.</strong> Look up the event in the alert events list, then look at the batch and its timeline (section 11).</p>
+<hr />
+<h2>11. Monitoring queries</h2>
+<p><strong>Batches of the last 7 days</strong></p>
+<pre><code class="language-sql">SELECT Btch_ID, Src_ID, Run_Ty, Rpt_Start_Dt_Key, Rpt_End_Dt_Key, Req_Dt_Key, Req_Stat, Resolution_Ty, Batch_Close_Ind
+FROM HSABC_DEV.GOVT_RGLTRY_RequestControl
+WHERE Project_Cd = 'CMSUNIV' AND Req_Dt_Key &gt;= CURRENT_DATE - 7
+ORDER BY Req_Dt_Key, Btch_ID, Src_ID;
+</code></pre>
+<p><strong>Timeline of a batch</strong></p>
+<pre><code class="language-sql">SELECT c.Src_ID, d.Event_Dtts, d.Event_Ty, d.Actor, d.Load_ID, d.Event_Txt
+FROM HSABC_DEV.GOVT_RGLTRY_RequestFileDetail d JOIN HSABC_DEV.GOVT_RGLTRY_RequestControl c ON c.Req_ID = d.Req_ID
+WHERE c.Btch_ID = '20261019_CMSUNIV_ODAG3_DLY'
+ORDER BY c.Src_ID, d.Detail_ID;
+</code></pre>
+<p><strong>Rejected or failed loads (last 7 days)</strong></p>
+<pre><code class="language-sql">SELECT Load_ID, File_Path, Btch_ID, Load_Stat, Reject_Rsn_Cd, Error_Txt, LastUpdt_Dtts
+FROM HSABC_DEV.GOVT_RGLTRY_FileLoad
+WHERE Load_Stat IN ('REJECTED', 'PROCESS_FAILURE') AND LastUpdt_Dtts &gt;= CURRENT_TIMESTAMP - INTERVAL '7' DAY
+ORDER BY LastUpdt_Dtts DESC;
+</code></pre>
+<p><strong>Open batches past their close date</strong></p>
+<pre><code class="language-sql">SELECT c.Btch_ID, c.Src_ID, c.Run_Ty, c.Req_Dt_Key, c.Req_Dt_Key + (r.SLA_Days - 1) AS Close_Dt, c.Req_Stat
+FROM HSABC_DEV.GOVT_RGLTRY_RequestControl c JOIN HSABC_DEV.GOVT_RGLTRY_RunType r ON r.Run_Ty = c.Run_Ty
+WHERE c.Batch_Close_Ind = 0 AND c.Req_Dt_Key + (r.SLA_Days - 1) &lt; CURRENT_DATE
+ORDER BY Close_Dt;
+</code></pre>
+<p><strong>Sources missing at close (last 30 days)</strong></p>
+<pre><code class="language-sql">SELECT Event_Dtts, Project_Cd, Table_Nm, Src_ID, Run_Ty, Btch_ID, Event_Txt
+FROM HSABC_DEV.CMS_GOVT_RGLTRY_ExceptionsAudit
+WHERE Event_Ty = 'SOURCE_MISSING_AT_CLOSE' AND Event_Dtts &gt;= CURRENT_TIMESTAMP - INTERVAL '30' DAY
+ORDER BY Event_Dtts DESC;
+</code></pre>
+<p><strong>Unsent alerts</strong> (NOTIFY not running, or email failing)</p>
+<pre><code class="language-sql">SELECT Event_ID, Event_Ty, Sevrty, Project_Cd, Btch_ID, Event_Dtts FROM HSABC_DEV.CMS_GOVT_RGLTRY_ExceptionsAudit
+WHERE Notified_Ind = 0 ORDER BY Event_Dtts;
+</code></pre>
+<p><strong>Overrides and their state</strong></p>
+<pre><code class="language-sql">SELECT o.Ovrd_ID, o.Override_Ty, o.Btch_ID, c.Src_ID, o.Apprvl_Stat, o.Valid_Thru_Dt_Key, o.Reviewed_By, o.Rsn_Txt
+FROM HSABC_DEV.GOVT_RGLTRY_BatchOverride o JOIN HSABC_DEV.GOVT_RGLTRY_RequestControl c ON c.Req_ID = o.Req_ID
+ORDER BY o.Ovrd_ID DESC;
+</code></pre>
+<p><strong>Internal sources waiting for data</strong></p>
+<pre><code class="language-sql">SELECT c.Btch_ID, c.Src_ID, d.Event_Dtts, d.Event_Txt
+FROM HSABC_DEV.GOVT_RGLTRY_RequestFileDetail d JOIN HSABC_DEV.GOVT_RGLTRY_RequestControl c ON c.Req_ID = d.Req_ID
+WHERE d.Event_Ty = 'SOURCE_NO_DATA_YET' AND c.Req_Stat = 'REQUEST_CREATED'
+ORDER BY d.Event_Dtts DESC;
+</code></pre>
+<p><strong>Locks held now</strong></p>
+<pre><code class="language-sql">SELECT Lock_Key, Owner_ID, Acquired_Dtts, Expires_Dtts FROM HSABC_DEV.GOVT_RGLTRY_Lock ORDER BY Acquired_Dtts;
+</code></pre>
+<hr />
+<h2>12. Troubleshooting</h2>
+<p>Every configured SQL is written to the task log as it runs: internal source queries, <code>SQL</code> columns, report date and schedule SQL, and export procedure calls. Each entry shows the SQL as sent, every parameter with its value, and the statement with the values filled in, so it can be copied and run by hand.</p>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely cause</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FILE_REJECTED_UNPARSEABLE</code></td>
+<td>Name does not match <code>Src_File_Nm_Tmplt</code></td>
+<td>Compare the name with the template. Fix the template or ask for the right name</td>
+</tr>
+<tr>
+<td><code>FILE_REJECTED_NO_BATCH</code></td>
+<td>No batch for that run type and report dates</td>
+<td>Check the crosswalk and schedule. Create the batch with <code>as_of</code> / <code>period</code> or a request</td>
+</tr>
+<tr>
+<td><code>FILE_REJECTED_BATCH_CLOSED</code></td>
+<td>Batch already closed</td>
+<td><code>LATE_ARRIVAL</code>, <code>CORRECTION</code> or <code>REOPEN</code> override, then resend</td>
+</tr>
+<tr>
+<td>Version error in the name</td>
+<td><code>{VERSION}</code> differs from <code>File_Vrsn_Cd</code></td>
+<td>Fix <code>File_Vrsn_Cd</code> or the file name</td>
+</tr>
+<tr>
+<td>Column count or header problems</td>
+<td>File layout changed</td>
+<td>Check <code>HEADER_NAMES</code>, <code>COLUMN_COUNT</code>, <code>TARGET_COLUMNS</code></td>
+</tr>
+<tr>
+<td><code>CORE_TYPE_MISMATCH</code></td>
+<td>A value does not convert to its core column's type or <code>FORMAT</code>, or a NOT NULL core column is empty</td>
+<td>Fix the file, or the core column's type / <code>FORMAT</code>, then resend</td>
+</tr>
+<tr>
+<td><code>PROCESS_FAILURE</code>, "Object '…' does not exist" (3807)</td>
+<td>A framework, staging or core table is missing, or no rights</td>
+<td>Create the table or grant rights. The next run loads the file</td>
+</tr>
+<tr>
+<td><code>FILE_PARSE_ERROR</code> "Invalid date" / "Invalid timestamp"</td>
+<td>A typed staging column cannot take the value</td>
+<td>Make the staging column text, or fix the file</td>
+</tr>
+<tr>
+<td><code>MALFORMED</code> "field larger than field limit (131072)"</td>
+<td>The file copy was cut off, or a quote is never closed</td>
+<td>Copy the file again. If the data has unmatched <code>"</code>, set <code>QUOTE_CHAR</code> to empty</td>
+</tr>
+<tr>
+<td>"must return one row" (SQL column)</td>
+<td><code>{btch_id}</code> lookup returns one row per source</td>
+<td>Add <code>AND Src_ID = {src_id}</code> or use <code>{req_id}</code></td>
+</tr>
+<tr>
+<td>"needs a column mapped to SOURCE_ID"</td>
+<td>Staging, core or export table has no source column</td>
+<td>Add the column and a <code>SOURCE_ID</code> row</td>
+</tr>
+<tr>
+<td><code>SOURCE_QUERY_FAILED</code> "could not connect"</td>
+<td><code>Can't open lib 'ODBC Driver 18…'</code> = driver not installed. <code>[08001]</code> / <code>[HYT00]</code> = server, port, firewall or certificate. <code>[28000]</code> = login</td>
+<td>Fix the worker or the Connection. The next run pulls again</td>
+</tr>
+<tr>
+<td><code>SOURCE_QUERY_FAILED</code> "the query on … failed"</td>
+<td><code>Src_Sql_Txt</code> fails on the source</td>
+<td>Run the query from the log by hand and fix it</td>
+</tr>
+<tr>
+<td>Teradata pull fails "Object '…_$ENV_V…' does not exist"</td>
+<td><code>$env</code> is not replaced inside <code>Src_Sql_Txt</code></td>
+<td>Name the environment's database in the query</td>
+</tr>
+<tr>
+<td>Internal source <code>WAITING</code></td>
+<td>No rows yet before the close date</td>
+<td>Normal. Tried again each run</td>
+</tr>
+<tr>
+<td><code>LOAD_INCOMPLETE</code>, <code>STAGING_TABLE_BUSY</code></td>
+<td>Another run is loading into the same staging table</td>
+<td>Nothing. The next run loads it. For <code>STAGING_LOCK_STALE</code> see the lock procedure</td>
+</tr>
+<tr>
+<td><code>LockTimeout … REQ:&lt;Req_ID&gt;</code></td>
+<td>Another run is on that batch row, or a killed run left the lock</td>
+<td>Wait for the next run. For a left lock see the lock procedure</td>
+</tr>
+<tr>
+<td><code>EXPORT_LOAD_FAILED</code> <code>LockTimeout … BTCH:EXPORT …</code></td>
+<td>Another export into that table took longer than <code>LOCK_TIMEOUT_SECONDS</code>, or a killed run left the lock</td>
+<td>See "An export takes long". The next run exports the batch again</td>
+</tr>
+<tr>
+<td>Later runs say "locked" after a task ran past its timeout</td>
+<td>The killed task could not remove its locks</td>
+<td>See the lock procedure. Raise <code>execution_timeout_minutes</code></td>
+</tr>
+<tr>
+<td><code>BATCH_CLOSE_DEFERRED_LOCKED</code></td>
+<td>Batch was being loaded at the close run</td>
+<td>Nothing. The next BATCH_CLOSE closes it</td>
+</tr>
+<tr>
+<td>Batch not exported</td>
+<td>Not due yet, or held</td>
+<td>See <code>held</code> in the step report. Release or wait</td>
+</tr>
+<tr>
+<td>EXPORT_LOAD says <code>NO BATCHES TO EXPORT</code></td>
+<td>No open batch in the scope, the run type is held, or the scope matches nothing</td>
+<td>Check the open batches and the Variable's scope</td>
+</tr>
+<tr>
+<td>Export by procedure writes 0 rows</td>
+<td>The procedure reads a table nobody fills, or filters on values the batch does not have</td>
+<td>Run the CALL from the log by hand. Fix <code>Exp_Proc_Parm_Txt</code></td>
+</tr>
+<tr>
+<td>Export runs for hours</td>
+<td>Every open batch is exported each run, and the procedure repeats its work for every source</td>
+<td>See "An export takes long"</td>
+</tr>
+<tr>
+<td>Export DAG starts minutes after its trigger</td>
+<td>It waits for its previous run or for a pool slot</td>
+<td>Expected</td>
+</tr>
+<tr>
+<td>Ad-hoc batch with data stays open</td>
+<td>Not released</td>
+<td>Release on BATCH_CLOSE</td>
+</tr>
+<tr>
+<td>Batch closed <code>DATA_NOT_PROVIDED</code> / <code>MISSING</code></td>
+<td>Nothing arrived by the close date</td>
+<td>Expected. For late data use <code>LATE_ARRIVAL</code> or <code>REOPEN</code></td>
+</tr>
+<tr>
+<td>Carry-forward refused</td>
+<td>Batch closed, run type without <code>Carry_Fwd_Ind</code>, or no earlier batch with data</td>
+<td>Apply before the close run. Read the <code>OVERRIDE_INVALID_DETECTED</code> text</td>
+</tr>
+<tr>
+<td>Rules never run</td>
+<td>Table has an export and the batch is not exported yet</td>
+<td>Normal. Rules wait for the export</td>
+</tr>
+<tr>
+<td>Rules not run again after a trigger</td>
+<td>The batch's rules already ended</td>
+<td>Reset <code>Rules_Stat</code> to <code>NOT_RUN</code> (see "Run the rules by hand")</td>
+</tr>
+<tr>
+<td>Rules <code>FAILED</code> but the batch closed and was exported</td>
+<td>Rules do not hold the close or the export</td>
+<td>Expected. Fix the data. Rules run again after the re-export</td>
+</tr>
+<tr>
+<td>FILE_RULES did not start after EXPORT_LOAD</td>
+<td>A batch failed to export, so the DAG failed before its triggers</td>
+<td>Fix the export. The next EXPORT_LOAD starts FILE_RULES</td>
+</tr>
+<tr>
+<td>FILE_RULES checks other batches too</td>
+<td>Only a trigger's scope is passed on, not a Variable's</td>
+<td>Expected, or set the scope in the FILE_RULES Variable</td>
+</tr>
+<tr>
+<td><code>not taken from the trigger: batch</code> (FILE_RULES)</td>
+<td>FILE_RULES has no <code>batch</code> key</td>
+<td>Narrow with <code>table</code>, <code>run_type</code>, <code>source</code></td>
+</tr>
+<tr>
+<td>FILE_RULES "left for the next run: another run is evaluating it"</td>
+<td>Another FILE_RULES run is on that batch</td>
+<td>Nothing</td>
+</tr>
+<tr>
+<td>FILE_CHECK failed but FILE_LOAD started</td>
+<td>At least one file passed. The failed file is in <code>Error/</code></td>
+<td>Expected. Fix and resend the failed file</td>
+</tr>
+<tr>
+<td>FILE_CHECK failed and FILE_LOAD did not start</td>
+<td>No file passed</td>
+<td>Fix and resend the files</td>
+</tr>
+<tr>
+<td>File listed in <code>skipped_files</code></td>
+<td>Reason is in the log</td>
+<td>Expected for most reasons. Otherwise fix the name or template, or wait for the copy</td>
+</tr>
+<tr>
+<td>Large file stages slowly</td>
+<td>Batched inserts</td>
+<td><code>LOAD_ENGINE</code> <code>AUTO</code> / <code>FASTLOAD</code> and larger insert batches</td>
+</tr>
+<tr>
+<td>WARNING "FastLoad not used"</td>
+<td>No CREATE / DROP TABLE right, or no FastLoad slot</td>
+<td>The file still loads. Ask the DBA</td>
+</tr>
+<tr>
+<td>No alert emails</td>
+<td>NOTIFY not scheduled, no <code>email_recipient</code>, or no <code>smtp_default</code></td>
+<td>Check unsent alerts and the NOTIFY Variable</td>
+</tr>
+<tr>
+<td><code>'&lt;key&gt;' is required in Airflow Variable</code></td>
+<td><code>meta_db</code>, <code>td_conn_var</code>, <code>load_env</code> or <code>wdc_comp_oper_nas_var</code> missing</td>
+<td>Add the key to the Variable</td>
+</tr>
+<tr>
+<td>"ENVIRONMENT is required" (command line)</td>
+<td><code>FRAMEWORK_ENVIRONMENT</code> not set</td>
+<td>Export it in the shell</td>
+</tr>
+<tr>
+<td>FILE_MOVE "already in … (on_exists fail)"</td>
+<td>Target has a file of that name with other content</td>
+<td>Decide which file is right. Rename or remove the old one, or set <code>on_exists</code></td>
+</tr>
+<tr>
+<td>FILE_MOVE <code>COULD NOT RUN</code>, "could not list"</td>
+<td>Folder missing, wrong <code>$env</code>, or no access</td>
+<td>Check the folder and the Connection</td>
+</tr>
+<tr>
+<td>FILE_MOVE "0 of n file(s) match"</td>
+<td>Pattern does not fit, or files still arriving</td>
+<td>Compare the names with <code>patterns</code>. Wait for the next run</td>
+</tr>
+<tr>
+<td>FILE_MOVE "in every target, but not removed from the source"</td>
+<td>NAS login cannot delete in the source folder</td>
+<td>Grant the right. The next run removes the file</td>
+</tr>
+<tr>
+<td><code>_file_move_tmp</code> folder left in a target</td>
+<td>A run stopped during a copy</td>
+<td>When no FILE_MOVE is running, delete the folder</td>
+</tr>
+</tbody>
+</table></body></html>
