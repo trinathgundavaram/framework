@@ -1,0 +1,116 @@
+# Project onboarding template
+# Required keys are marked (required). Everything else can be left out and takes the default shown.
+# Existing project: keep only project.code and add the new rows under the sections you need.
+# Run the ONBOARD DAG with mode = validate, check the report, then mode = apply on the same file.
+
+project:
+  code: CMSUNIV                      # (required) max 30 characters
+  description: CMS Universe submissions   # new project only
+  compliance_version: "2200"         # (required) written on every batch
+  file_version: "22"                 # default for sources
+  effective_from: 1900-01-01
+  file_folder: nas://chs_dms/Dev/OSS_Inbound/External/CMSUNIV   # inbound folder of FILE sources
+  file_staging_db: CMSUNIV_FILELAND_$ENV_T     # $ENV = environment
+  query_staging_db: CMSUNIV_STAGE_$ENV_T
+  core_db: CMSUNIV_CORE_$ENV_T       # (required)
+  export_db: EXPORT_FEED_$ENV_T      # needed if any table is exported
+  delimiter: "|"
+  header: Y
+  trailer: Y
+
+# One entry per table of the project
+tables:
+  - table: ODAG1                     # (required) name used in the other sections
+    group: ODAG                      # (required)
+    description: ODAG table 1
+    staging_table: ODAG_DE_TABLE1_2022   # (required)
+    core_table: ODAG_DE_TABLE1_2022      # (required)
+    export_table: SDO_CMSUNIV_ODAG1_2022 # leave out = not exported
+    active: Y
+
+# One entry per table + source (+ file version). New source IDs are added automatically.
+sources:
+  - table: ODAG1                     # (required)
+    source_id: "101"                 # (required)
+    source_name: ADVOCATE            # (required) also the <source> in file names
+    type: FILE                       # (required) FILE | QUERY
+    run_types: DLY,MNT               # (required) comma separated
+    file_version: "22"               # FILE only, default project.file_version
+    file_name: CMSAUTH_ADVOCATE_OD_{VERSION}_{RUNTY}_{RPTSTART}_{RPTEND}_{TS}.txt
+    active: Y
+
+  - table: ODAG3
+    source_id: "210"
+    source_name: FACETS
+    type: QUERY
+    run_types: DLY,MNT
+    query_db: TERADATA               # TERADATA | SQLSERVER
+    connection:                      # Airflow Connection name, blank = Teradata
+    query: |
+      SELECT ... FROM ... WHERE ... BETWEEN '{rpt_start}' AND '{rpt_end}'
+    staging_table: ODAG_CSF_TABLE3_2022   # only if different from tables
+    core_table: ODAG_CSF_TABLE3_2022      # only if different from tables
+    staging_db:                           # only if different from project
+    active: Y
+
+# Checks on the files. table "*" = every table, source "*" = every source
+file_checks:
+  - table: ODAG1                     # (required)
+    source: "*"                      # (required)
+    check: HEADER_NAMES              # (required) HEADER_NAMES TARGET_COLUMNS RECORD_TYPE COLUMN_COUNT TRAILER
+                                     # CHARACTER_SET COLUMN_VALUES MIN_ROWS MAX_ROWS MIN/MAX_RECORD_LENGTH
+                                     # MIN/MAX_LENGTH MIN/MAX_VALUE VALUE_IN PATTERN DATE_FORMAT
+    field: "*"
+    value: EnrolleeFirstName|EnrolleeLastName|EnrolleeID|ContractID
+    active: Y
+
+# Columns the framework fills. table "*" = every table
+column_values:
+  - table: "*"                       # (required)
+    column: Source_ID                # (required)
+    fill_with: SOURCE_ID             # (required) BATCH_ID RUN_TYPE VERSION SOURCE_ID FILE_NAME LOAD_TIMESTAMP
+                                     # LOAD_DATE ROW_SEQUENCE LOAD_ID REQ_ID PROJECT TABLE RPT_START RPT_END
+                                     # CURRENT_FLAG END_TIMESTAMP CONSTANT SQL
+    value:                           # CONSTANT or SQL only
+    active: Y
+
+# Report dates of a batch per run type. table "*" = project default
+report_periods:
+  - table: "*"                       # (required)
+    run_type: DLY                    # (required)
+    period: PREV_DAY                 # (required) SAME_DAY PREV_DAY PREV_N_DAYS PREV_WEEK_SAME_DAY PREV_CALENDAR_WEEK
+                                     # CURRENT_CALENDAR_MONTH PREV_CALENDAR_MONTH ROLLING_1_MONTH
+                                     # PREV_CALENDAR_QUARTER PREV_CALENDAR_YEAR or RANGE(unit,back,length)
+    active: Y
+
+# ---- Optional sections: leave out if not needed ----
+
+# Only a new run type or a change to one. Shared by all projects.
+run_types:
+  - run_type: QTR                    # (required)
+    description: Quarterly           # (required)
+    category: SCHEDULED              # (required) SCHEDULED | ADHOC
+    sla_days: 5                      # (required)
+    schedule: MONTHLY                # DAILY | WEEKLY | MONTHLY
+    day: "1"                         # MON..SUN, 1..31, LAST
+    week:                            # 1..4, LAST
+    months: 1,4,7,10
+    offset_days: 0
+    carry_forward: N
+
+# Only for an export that is not a plain copy
+export_options:
+  - table: ODAG1                     # (required)
+    batch_column:
+    procedure:
+    custom_select:
+    sql_before:                      # once per batch
+    sql_after:                       # once per batch
+
+# Batches on fixed dates
+calendar:
+  - table: "*"                       # (required)
+    run_type: MNT                    # (required)
+    create_on: 2026-11-05            # (required)
+    report_start: 2026-10-01         # (required)
+    report_end: 2026-10-31           # (required)
