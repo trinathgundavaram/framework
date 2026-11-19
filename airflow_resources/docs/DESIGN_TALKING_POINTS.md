@@ -393,7 +393,7 @@ writes it (read only).
 | `GOVT_RGLTRY_RequestControl` | The batches: one row per batch + source, status and resolution | `Req_ID`, `Btch_ID` |
 | `GOVT_RGLTRY_FileLoad` | One row per load or pull: file, counts, status, reject reason | `Load_ID` → `Req_ID` |
 | `GOVT_RGLTRY_RequestFileDetail` | The timeline of each batch row | `Req_ID` |
-| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Problems and approvals; what NOTIFY emails | event, batch |
+| `GOVT_RGLTRY_ExceptionsAudit` | Problems and approvals; what NOTIFY emails | event, batch |
 | `GOVT_RGLTRY_Lock` | Work in progress (batch, staging table, event); expires after a crashed run | lock key |
 
 **How they connect, in one sentence each:**

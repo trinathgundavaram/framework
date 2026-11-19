@@ -165,7 +165,7 @@
 </tr>
 <tr>
 <td>Alerts</td>
-<td>Problems and approvals, emailed by NOTIFY (<code>CMS_GOVT_RGLTRY_ExceptionsAudit</code>)</td>
+<td>Problems and approvals, emailed by NOTIFY (<code>GOVT_RGLTRY_ExceptionsAudit</code>)</td>
 </tr>
 <tr>
 <td>Step report</td>
@@ -389,7 +389,7 @@
 </tr>
 <tr>
 <td>Framework tables</td>
-<td><code>GOVT_RGLTRY_RequestControl</code>, <code>GOVT_RGLTRY_FileLoad</code>, <code>GOVT_RGLTRY_RequestFileDetail</code>, <code>CMS_GOVT_RGLTRY_ExceptionsAudit</code>, <code>GOVT_RGLTRY_Lock</code> are written by the framework only. Do not change them by hand unless a runbook procedure says so</td>
+<td><code>GOVT_RGLTRY_RequestControl</code>, <code>GOVT_RGLTRY_FileLoad</code>, <code>GOVT_RGLTRY_RequestFileDetail</code>, <code>GOVT_RGLTRY_ExceptionsAudit</code>, <code>GOVT_RGLTRY_Lock</code> are written by the framework only. Do not change them by hand unless a runbook procedure says so</td>
 </tr>
 </tbody>
 </table>
@@ -504,7 +504,7 @@
 <td><code>BATCH_CREATED</code> event</td>
 </tr>
 <tr>
-<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td><code>GOVT_RGLTRY_ExceptionsAudit</code></td>
 <td>Write</td>
 <td><code>INTAKE_FAILED</code>, configuration errors</td>
 </tr>
@@ -1096,7 +1096,7 @@
 <td>The source must exist and be active</td>
 </tr>
 <tr>
-<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td><code>GOVT_RGLTRY_ExceptionsAudit</code></td>
 <td>Write</td>
 <td><code>FILE_CHECK_PASSED</code> (not emailed), <code>FILE_CHECK_FAILED</code> (emailed). One row per file and result</td>
 </tr>
@@ -1518,7 +1518,7 @@
 <td><code>FILE_RECEIVED</code>, <code>FILE_LOADED</code>, <code>FILE_REPLACED_BEFORE_CLOSE</code>, <code>LATE_ARRIVAL_LOADED</code>, <code>CORRECTION_LOADED</code></td>
 </tr>
 <tr>
-<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td><code>GOVT_RGLTRY_ExceptionsAudit</code></td>
 <td>Write</td>
 <td>Rejections and load problems</td>
 </tr>
@@ -1885,7 +1885,7 @@
 </tr>
 </tbody>
 </table>
-<h4>CMS_GOVT_RGLTRY_ExceptionsAudit (alerts)</h4>
+<h4>GOVT_RGLTRY_ExceptionsAudit (alerts)</h4>
 <p>One row per problem or approval. Written by every step. Emailed by NOTIFY.</p>
 <table>
 <thead>
@@ -1992,7 +1992,7 @@
 <td><code>FILE_RECEIVED</code>, <code>FILE_LOADED</code>, <code>SOURCE_NO_DATA_YET</code></td>
 </tr>
 <tr>
-<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td><code>GOVT_RGLTRY_ExceptionsAudit</code></td>
 <td>Write</td>
 <td><code>SOURCE_QUERY_FAILED</code>, <code>SOURCE_DATA_REJECTED</code>, <code>CORE_TYPE_MISMATCH</code></td>
 </tr>
@@ -2145,7 +2145,7 @@
 <td><code>CARRY_FORWARD_APPLIED</code>, <code>CARRY_FORWARD_REMOVED</code>, <code>BATCH_REOPENED</code></td>
 </tr>
 <tr>
-<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td><code>GOVT_RGLTRY_ExceptionsAudit</code></td>
 <td>Write</td>
 <td><code>OVERRIDE_APPROVED</code>, <code>OVERRIDE_INVALID_DETECTED</code>, <code>OVERRIDE_EXPIRED</code>, <code>BATCH_REOPENED</code></td>
 </tr>
@@ -2301,7 +2301,7 @@
 <td>The source column and other derived columns</td>
 </tr>
 <tr>
-<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td><code>GOVT_RGLTRY_ExceptionsAudit</code></td>
 <td>Write</td>
 <td><code>EXPORT_LOAD_FAILED</code></td>
 </tr>
@@ -2459,7 +2459,7 @@
 <td>Export time of the batch. Writes <code>FILE_RULES_PASSED</code> / <code>FILE_RULES_FAILED</code></td>
 </tr>
 <tr>
-<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td><code>GOVT_RGLTRY_ExceptionsAudit</code></td>
 <td>Write</td>
 <td><code>RULES_VALIDATION_FAILED</code>, <code>RULES_ENGINE_TECHNICAL_FAILURE</code></td>
 </tr>
@@ -2625,7 +2625,7 @@
 <td>Reopened batches waiting for data stay open</td>
 </tr>
 <tr>
-<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td><code>GOVT_RGLTRY_ExceptionsAudit</code></td>
 <td>Write</td>
 <td><code>SOURCE_MISSING_AT_CLOSE</code>, <code>BATCH_CLOSE_DEFERRED_LOCKED</code></td>
 </tr>
@@ -2697,7 +2697,7 @@
 </thead>
 <tbody>
 <tr>
-<td><code>CMS_GOVT_RGLTRY_ExceptionsAudit</code></td>
+<td><code>GOVT_RGLTRY_ExceptionsAudit</code></td>
 <td>Read / Write</td>
 <td>Rows with <code>Notified_Ind = 0</code>. Sets <code>Notified_Ind = 1</code> after sending</td>
 </tr>
@@ -3110,7 +3110,7 @@ WHERE Project_Cd = 'CMSUNIV' AND Table_Nm = 'ODAG3';
 </tr>
 </tbody>
 </table>
-<h3>Alert events (<code>CMS_GOVT_RGLTRY_ExceptionsAudit.Event_Ty</code>)</h3>
+<h3>Alert events (<code>GOVT_RGLTRY_ExceptionsAudit.Event_Ty</code>)</h3>
 <table>
 <thead>
 <tr>
@@ -4460,12 +4460,12 @@ ORDER BY Close_Dt;
 </code></pre>
 <p><strong>Sources missing at close (last 30 days)</strong></p>
 <pre><code class="language-sql">SELECT Event_Dtts, Project_Cd, Table_Nm, Src_ID, Run_Ty, Btch_ID, Event_Txt
-FROM HSABC_DEV.CMS_GOVT_RGLTRY_ExceptionsAudit
+FROM HSABC_DEV.GOVT_RGLTRY_ExceptionsAudit
 WHERE Event_Ty = 'SOURCE_MISSING_AT_CLOSE' AND Event_Dtts &gt;= CURRENT_TIMESTAMP - INTERVAL '30' DAY
 ORDER BY Event_Dtts DESC;
 </code></pre>
 <p><strong>Unsent alerts</strong> (NOTIFY not running, or email failing)</p>
-<pre><code class="language-sql">SELECT Event_ID, Event_Ty, Sevrty, Project_Cd, Btch_ID, Event_Dtts FROM HSABC_DEV.CMS_GOVT_RGLTRY_ExceptionsAudit
+<pre><code class="language-sql">SELECT Event_ID, Event_Ty, Sevrty, Project_Cd, Btch_ID, Event_Dtts FROM HSABC_DEV.GOVT_RGLTRY_ExceptionsAudit
 WHERE Notified_Ind = 0 ORDER BY Event_Dtts;
 </code></pre>
 <p><strong>Overrides and their state</strong></p>

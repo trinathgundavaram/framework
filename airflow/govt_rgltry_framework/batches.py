@@ -837,7 +837,7 @@ class DecisionProcessor:
         problem = self._reuse_problem(o, b, src, run_types.get(b["run_ty"]))
         if problem:
             if not self.conn.execute(
-                    "SELECT 1 AS ok FROM CMS_GOVT_RGLTRY_ExceptionsAudit WHERE Ovrd_ID=%s "
+                    "SELECT 1 AS ok FROM GOVT_RGLTRY_ExceptionsAudit WHERE Ovrd_ID=%s "
                     "AND Event_Ty='OVERRIDE_INVALID_DETECTED'", (o["ovrd_id"],)).fetchone():
                 self.logger.audit("OVERRIDE_INVALID_DETECTED", actor=o["reviewed_by"] or o["loaduser_id"],
                                   description=f"REUSE: {problem}", **ctx)

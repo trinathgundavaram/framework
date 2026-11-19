@@ -821,7 +821,7 @@ what the name resolved to: `config` (project / table / source), `run_type`, `ver
 `rpt_end`, `batch` and `req_id`. `notes` holds remarks that are not failures, such as a batch that already
 has data and would be replaced by the file. The step ends with exit code 1 when a file failed or a folder
 could not be read. Each file also gets one row in the framework's audit table,
-`CMS_GOVT_RGLTRY_ExceptionsAudit`: `FILE_CHECK_FAILED` (emailed by `NOTIFY` to `DEFAULT_NOTIFY_EMAILS`) or
+`GOVT_RGLTRY_ExceptionsAudit`: `FILE_CHECK_FAILED` (emailed by `NOTIFY` to `DEFAULT_NOTIFY_EMAILS`) or
 `FILE_CHECK_PASSED`. A run that finds the same result for the same
 file again adds no new row.
 

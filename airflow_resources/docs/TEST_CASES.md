@@ -1,6 +1,6 @@
 # Government Regulatory Batch Framework – Test Cases (Airflow / Teradata)
 
-**Version:** framework 0.3.84. **Environment:** CMSUNIV DEV (`HSABC_DEV`, `CMSUNIV_FILELAND_DEV_T`,
+**Version:** framework 0.3.85. **Environment:** CMSUNIV DEV (`HSABC_DEV`, `CMSUNIV_FILELAND_DEV_T`,
 `CMSUNIV_STAGE_DEV_T`, `CMSUNIV_CORE_DEV_T`, `EXPORT_FEED_DEV_T`, NAS `chs_dms/Dev/OSS_Inbound/External/CMSUNIV`).
 Run types `DLY`, `WKLY`, `MNT`, `IN1`, `CMS`. Replace dates, batch IDs and sources with the ones of your run.
 
@@ -45,7 +45,7 @@ Run types `DLY`, `WKLY`, `MNT`, `IN1`, `CMS`. Replace dates, batch IDs and sourc
 
 | # | Item | How to check |
 |---|---|---|
-| P1 | Framework 0.3.84 and `rules_engine` deployed in the DAGs folder; the 11 CMS Universe DAGs (`GOVT_RGLTRY_CMS_UNIVERSE_*`) visible, no import errors | Airflow UI → DAGs; Browse → DAG import errors empty |
+| P1 | Framework 0.3.85 and `rules_engine` deployed in the DAGs folder; the 11 CMS Universe DAGs (`GOVT_RGLTRY_CMS_UNIVERSE_*`) visible, no import errors | Airflow UI → DAGs; Browse → DAG import errors empty |
 | P2 | Metadata tables from `sql/schema.sql` exist in `HSABC_DEV` (20 tables) | Q12 |
 | P3 | CMSUNIV configuration loaded (`examples/cmsuniv_setup.sql`), run types `DLY` / `WKLY` | `SELECT Run_Ty, Sched_Cd, SLA_Days FROM HSABC_DEV.GOVT_RGLTRY_RunType;` |
 | P4 | Staging and core tables created; feed tables `EXPORT_FEED_DEV_T.SDO_CMSUNIV_*` exist with `Btch_ID` and `Src_Data_Key` | `SHOW TABLE` on a few |
@@ -95,7 +95,7 @@ FROM HSABC_DEV.GOVT_RGLTRY_FileLoad WHERE Btch_ID = '<batch>' ORDER BY Load_ID D
 
 -- Q5 alerts (audit) of a batch
 SELECT Event_ID, Event_Ty, Sevrty, Src_ID, Load_ID, Event_Txt, Notified_Ind, Event_Dtts
-FROM HSABC_DEV.CMS_GOVT_RGLTRY_ExceptionsAudit WHERE Btch_ID = '<batch>' ORDER BY Event_ID;
+FROM HSABC_DEV.GOVT_RGLTRY_ExceptionsAudit WHERE Btch_ID = '<batch>' ORDER BY Event_ID;
 
 -- Q6 staging rows by batch / source / run type / load
 SELECT Btch_ID, Src_Data_Key, Run_Ty, AuditDataID, COUNT(*) FROM <staging db>.<table> GROUP BY 1, 2, 3, 4 ORDER BY 1, 2;
@@ -114,10 +114,10 @@ SELECT rule_id, run_type, batch_schedule, COUNT(*) FROM HSABC_DEV.gre_exceptions
 SELECT Lock_Key, Owner_ID, Acquired_Dtts, Expires_Dtts FROM HSABC_DEV.GOVT_RGLTRY_Lock ORDER BY Acquired_Dtts;
 
 -- Q11 unsent alerts
-SELECT Event_ID, Event_Ty, Btch_ID, Event_Dtts FROM HSABC_DEV.CMS_GOVT_RGLTRY_ExceptionsAudit WHERE Notified_Ind = 0 ORDER BY Event_ID;
+SELECT Event_ID, Event_Ty, Btch_ID, Event_Dtts FROM HSABC_DEV.GOVT_RGLTRY_ExceptionsAudit WHERE Notified_Ind = 0 ORDER BY Event_ID;
 
 -- Q12 framework tables present
-SELECT TableName FROM DBC.TablesV WHERE DatabaseName = 'HSABC_DEV' AND (TableName LIKE 'GOVT_RGLTRY%' OR TableName = 'CMS_GOVT_RGLTRY_ExceptionsAudit') ORDER BY 1;
+SELECT TableName FROM DBC.TablesV WHERE DatabaseName = 'HSABC_DEV' AND TableName LIKE 'GOVT_RGLTRY%' ORDER BY 1;
 ```
 
 ---
@@ -463,6 +463,7 @@ For an installation created before the version shown (runbook section 16).
 | UP-05 | 0.3.67 | `GOVT_RGLTRY_ExportConfig` has `Exp_Sql_Txt`, `Exp_Pre_Sql_Txt`, `Exp_Post_Sql_Txt` |
 | UP-06 | Run type rename | Old `DAILY` / `WEEKLY` inactive; `DLY` / `WKLY` in periods and crosswalk; old batches closed under their old IDs |
 | UP-07 | 0.3.82 | `upgrade_0.3.82.sql` run with the DAGs paused: the row counts of step 0 and step 3 are the same; the 20 tables are `GOVT_RGLTRY_<Name>` / `CMS_GOVT_RGLTRY_ExceptionsAudit` (no `Compliance*` table left); `Rpt_Version` in `GOVT_RGLTRY_DataSetSourceXwalk`, `GOVT_RGLTRY_RequestInTake`, `GOVT_RGLTRY_RequestControl`; `schema_check.sql` returns no rows; the `GOVT_RGLTRY_CMS_UNIVERSE_*` / `GOVT_RGLTRY_UMCM_*` DAGs, tagged `Universe` / `UMCM`, run with the new Variables |
+| UP-08 | 0.3.85 | `upgrade_0.3.85.sql` run with the DAGs paused: the row counts of step 1 and step 3 are the same; only `GOVT_RGLTRY_ExceptionsAudit` exists; `schema_check.sql` returns no rows; NOTIFY sends the pending alerts and new alerts are written to `GOVT_RGLTRY_ExceptionsAudit` |
 
 ## 17. File move (FM)
 

@@ -1,7 +1,7 @@
 # Government Regulatory Batch Framework – Operational Runbook
 
 **Audience:** business analysts, operations and support staff who set up and run projects on the framework, without
-reading the code. **Version:** framework 0.3.84 (Airflow 3 / Teradata).
+reading the code. **Version:** framework 0.3.85 (Airflow 3 / Teradata).
 
 **How to use this page**
 
@@ -304,7 +304,7 @@ batches) and NOTIFY.
 
 ### 2.10 NOTIFY
 
-Emails every alert of `CMS_GOVT_RGLTRY_ExceptionsAudit` not sent yet (`Notified_Ind = 0`; the events marked "emailed"
+Emails every alert of `GOVT_RGLTRY_ExceptionsAudit` not sent yet (`Notified_Ind = 0`; the events marked "emailed"
 in 8.15), one email per event, to the Variable's `email_recipient`, then marks it sent; an email that fails stays
 for the next run. Without `project` it sends the events of every project and of none. The DAGs' success / failure
 emails do not replace it: many alerts (a rejected file, a missing source, a stuck lock) do not fail any DAG.
@@ -461,7 +461,7 @@ A batch is one table + run type + report period + request date. Every **source**
                      │ pull (Load_ID)     │  │ batch row                    │
                      └────────────────────┘  └──────────────────────────────┘
                      ┌──────────────────────────────┐  ┌────────────────┐
-                     │ CMS_GOVT_RGLTRY_ExceptionsAudit│  │ GOVT_RGLTRY_Lock │
+                     │ GOVT_RGLTRY_ExceptionsAudit│  │ GOVT_RGLTRY_Lock │
                      │ problems and approvals,      │  │ running work   │
                      │ emailed by NOTIFY            │  │ (technical)    │
                      └──────────────────────────────┘  └────────────────┘
@@ -487,7 +487,7 @@ A batch is one table + run type + report period + request date. Every **source**
 | `GOVT_RGLTRY_RequestControl` | Batches | Framework | Every run |
 | `GOVT_RGLTRY_FileLoad` | Loads and pulls | Framework | Every file / pull |
 | `GOVT_RGLTRY_RequestFileDetail` | Batch timeline | Framework | Every event |
-| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Exceptions and approvals | Framework | Every problem / approval |
+| `GOVT_RGLTRY_ExceptionsAudit` | Exceptions and approvals | Framework | Every problem / approval |
 | `GOVT_RGLTRY_Lock` | Locks | Framework | While work runs |
 
 ---
@@ -510,7 +510,7 @@ A batch is one table + run type + report period + request date. Every **source**
 | Switching off | `Active_Ind = 0` (configuration rows are not deleted); in the crosswalk also `Include_Ind = 0` with a start date to stop one run type from a day |
 | Changing a row | `UPDATE` it. A change applies from the next run, also to open batches (their report dates do not change). For a change from a given day use the crosswalk's effective dates |
 | Audit columns | `Load_Dtts`, `LoadUser_ID`, `LastUpdt_Dtts`, `LastUpdt_ID` are filled by the database: leave them out of an INSERT |
-| Framework tables | `GOVT_RGLTRY_RequestControl`, `GOVT_RGLTRY_FileLoad`, `GOVT_RGLTRY_RequestFileDetail`, `CMS_GOVT_RGLTRY_ExceptionsAudit`, `GOVT_RGLTRY_Lock`: not changed by hand, except as a procedure in section 11 says |
+| Framework tables | `GOVT_RGLTRY_RequestControl`, `GOVT_RGLTRY_FileLoad`, `GOVT_RGLTRY_RequestFileDetail`, `GOVT_RGLTRY_ExceptionsAudit`, `GOVT_RGLTRY_Lock`: not changed by hand, except as a procedure in section 11 says |
 | Staging / core / export tables | Yours (DBA). Staging can be all text; core can be typed (converted on the way, 5.7). Columns with the same name pair by name, the others by order |
 | After every change | Run `validate-config` (2.11) and fix every ERROR |
 
@@ -1045,7 +1045,7 @@ One row per file pickup or internal-source pull (`Load_ID`). `Load_Stat` and `Ru
 One row per event of a batch row (`Req_ID`): `Event_Ty` (section 8.14), `Actor`, `Event_Txt`, `Event_Dtts`
 (Central time), and the `Load_ID` / `Ovrd_ID` / `Intake_ID` involved.
 
-### 7.4 CMS_GOVT_RGLTRY_ExceptionsAudit – exceptions and approvals
+### 7.4 GOVT_RGLTRY_ExceptionsAudit – exceptions and approvals
 
 One row per problem or approval: `Event_Ty` (section 8.15), `Sevrty` (`ERROR`, `WARNING`, `INFO`), the project /
 table / source / run type / batch / load / override involved, `Event_Txt`, and `Notified_Ind` (`0` = not emailed
@@ -1325,7 +1325,7 @@ close date).
 | `FILE_RULES_PASSED`, `FILE_RULES_FAILED` | Rules result |
 | `BATCH_CLOSED` | Closed, with status / resolution |
 
-### 8.15 Audit events (`CMS_GOVT_RGLTRY_ExceptionsAudit.Event_Ty`)
+### 8.15 Audit events (`GOVT_RGLTRY_ExceptionsAudit.Event_Ty`)
 
 Emailed by NOTIFY unless marked "no".
 
@@ -1461,7 +1461,7 @@ the framework fills in everything else. A CMSUNIV DEV Variable (`airflow_resourc
 | `gre` | from the Variable | GRE rules engine settings (FILE_RULES only), all optional: `batch_column` (`Btch_ID`: the batch column of the rules' tables / views), `meta_db` (the GRE tables' database, default `meta_db`), `environment` (`load_env`, for `$env` in rules), `project_name` / `process_name` (the project), `log_level`, `max_parallel_rules` (1), `package_dir` (`<dags>/rules_engine`), `run_params` / `text_params` / `extra_filters` (added to the framework's) |
 
 **Success / failure emails and NOTIFY are different.** The success / failure emails (`email_recipient`) say whether
-the DAG run worked. NOTIFY emails the **business alerts** the steps record in `CMS_GOVT_RGLTRY_ExceptionsAudit`: which
+the DAG run worked. NOTIFY emails the **business alerts** the steps record in `GOVT_RGLTRY_ExceptionsAudit`: which
 file was rejected and why, a source missing at the close date, a carry-forward applied, a file that could not be
 moved, a stuck staging lock, a failed export (8.15). Many of these do not fail the DAG (the run itself worked), so
 only NOTIFY tells you about them. NOTIFY sends every alert not sent yet, then marks it sent: run it after
@@ -1993,7 +1993,7 @@ ORDER BY Close_Dt;
 
 ```sql
 SELECT Event_Dtts, Project_Cd, Table_Nm, Src_ID, Run_Ty, Btch_ID, Event_Txt
-FROM HSABC_DEV.CMS_GOVT_RGLTRY_ExceptionsAudit
+FROM HSABC_DEV.GOVT_RGLTRY_ExceptionsAudit
 WHERE Event_Ty = 'SOURCE_MISSING_AT_CLOSE' AND Event_Dtts >= CURRENT_TIMESTAMP - INTERVAL '30' DAY
 ORDER BY Event_Dtts DESC;
 ```
@@ -2001,7 +2001,7 @@ ORDER BY Event_Dtts DESC;
 **12.6 Unsent alerts** (NOTIFY not running or email failing)
 
 ```sql
-SELECT Event_ID, Event_Ty, Sevrty, Project_Cd, Btch_ID, Event_Dtts FROM HSABC_DEV.CMS_GOVT_RGLTRY_ExceptionsAudit
+SELECT Event_ID, Event_Ty, Sevrty, Project_Cd, Btch_ID, Event_Dtts FROM HSABC_DEV.GOVT_RGLTRY_ExceptionsAudit
 WHERE Notified_Ind = 0 ORDER BY Event_Dtts;
 ```
 
@@ -2110,7 +2110,7 @@ INFO - SOURCE_LOAD | 20261020_CMSUNIV_SNPCC1_DLY source 11 | Src_Sql_Txt on SQL_
 | Reopen | Opening a closed batch again |
 | Release / hold | Let a batch go before its date / keep a run type back |
 | Timeline | Every event of a batch (`GOVT_RGLTRY_RequestFileDetail`) |
-| Exceptions audit | Problems and approvals, emailed (`CMS_GOVT_RGLTRY_ExceptionsAudit`) |
+| Exceptions audit | Problems and approvals, emailed (`GOVT_RGLTRY_ExceptionsAudit`) |
 | Step report | The summary each step writes at the end of its Airflow log |
 
 ---
@@ -2168,9 +2168,10 @@ differs from `schema.sql` (no rows = up to date). A NOT NULL column that should 
 | 0.3.79 | No database change. `LOAD_ENGINE` takes `AUTO` (FastLoad from `FASTLOAD_MIN_BYTES`, default 100 MB). FastLoad is now required of the driver: when it cannot be used (work table not allowed, FastLoad refused) the file loads with batched inserts in the same run, with a log warning and the reason in the load message. The log line "staged into" names the method and its seconds |
 | 0.3.78 | No database change. A project's FILE_LOAD / FILE_CHECK identifies files with that project's file configs only and leaves another project's file (same template and folder) in place; runs without a project pick between projects by inbound folder, crosswalk run type and batch. `TEMPLATE_OVERLAP` across projects is now the warning `TEMPLATE_OVERLAP_PROJECTS`. `health` takes `--project` |
 | 0.3.77 | `ALTER TABLE HSABC_DEV.GOVT_RGLTRY_ExportConfig DROP Exp_Btch_Col_Nm;` The extra export batch column (`Exp_Btch_ID`) and the `{exp_btch_id}` placeholder are gone: export tables carry the batch in `Btch_ID` only. Rows whose `Exp_Proc_Parm_Txt` / `Exp_Pre_Sql_Txt` / `Exp_Post_Sql_Txt` use `{exp_btch_id}` change it to `{btch_id}` (`validate-config` lists them); an empty `Exp_Proc_Parm_Txt` now means `{btch_id}, {data_btch_id}` |
-| 0.3.71 | `airflow_resources/sql/upgrade_0.3.71.sql`: the audit columns of every framework table renamed (`Created_Dtts` → `Load_Dtts`, `Created_By` → `LoadUser_ID`, `Updated_Dtts` → `LastUpdt_Dtts`, `Updated_By` → `LastUpdt_ID`); six tables (`GOVT_RGLTRY_RunType`, `GOVT_RGLTRY_DataSetSourceXwalk`, `GOVT_RGLTRY_SourceFileConfig`, `GOVT_RGLTRY_RequestControl`, `GOVT_RGLTRY_FileLoad`, `CMS_GOVT_RGLTRY_ExceptionsAudit`) backed up, recreated in the new column order (audit columns last) and filled again, then the backups dropped; `GOVT_RGLTRY_RequestControl` and `GOVT_RGLTRY_FileLoad` get `LoadUser_ID` / `LastUpdt_ID`. Fill the four `{{NEXT_...}}` start values from step 2.0 first so the IDs are kept. Every framework update now sets `LastUpdt_ID` to the database user. Run it with the DAGs paused, then deploy the code |
+| 0.3.71 | `airflow_resources/sql/upgrade_0.3.71.sql`: the audit columns of every framework table renamed (`Created_Dtts` → `Load_Dtts`, `Created_By` → `LoadUser_ID`, `Updated_Dtts` → `LastUpdt_Dtts`, `Updated_By` → `LastUpdt_ID`); six tables (`GOVT_RGLTRY_RunType`, `GOVT_RGLTRY_DataSetSourceXwalk`, `GOVT_RGLTRY_SourceFileConfig`, `GOVT_RGLTRY_RequestControl`, `GOVT_RGLTRY_FileLoad`, `GOVT_RGLTRY_ExceptionsAudit`) backed up, recreated in the new column order (audit columns last) and filled again, then the backups dropped; `GOVT_RGLTRY_RequestControl` and `GOVT_RGLTRY_FileLoad` get `LoadUser_ID` / `LastUpdt_ID`. Fill the four `{{NEXT_...}}` start values from step 2.0 first so the IDs are kept. Every framework update now sets `LastUpdt_ID` to the database user. Run it with the DAGs paused, then deploy the code |
 | 0.3.82 | `airflow_resources/sql/upgrade_0.3.82.sql`: renames only, no data changes. The 20 framework tables `Compliance<Name>` → `GOVT_RGLTRY_<Name>` (`CMS_ComplianceExceptionsAudit` → `CMS_GOVT_RGLTRY_ExceptionsAudit`), and the column `Cmplnc_Vrsn` → `Rpt_Version` in `GOVT_RGLTRY_DataSetSourceXwalk`, `GOVT_RGLTRY_RequestInTake` and `GOVT_RGLTRY_RequestControl`; it lists the row counts before and after. The rows above name the tables by their new names: on an installation older than 0.3.82, run them against the `Compliance*` names first, then this script. Airflow cutover: (1) pause the DAGs; (2) run the script; (3) in the DAGs folder replace `compliance_framework/` with `govt_rgltry_framework/` and the DAG files `compliance_umcm_*.py` / `osstd_core_cms_compliance_*.py` with `govt_rgltry_umcm_*.py` / `govt_rgltry_cms_universe_*.py` (DAG ids `GOVT_RGLTRY_UMCM_*`, `GOVT_RGLTRY_CMS_UNIVERSE_*`); (4) create each Variable under its new key (`govt_rgltry_umcm_<step>_config_var`, `govt_rgltry_cms_universe_<step>_config_var`) with the old content, `trigger_dags` changed to the new DAG ids, and `snow_assignment_group` set (the code has no default: without it a failed task opens no ServiceNow incident); (5) unpause the new DAGs; (6) delete the old DAGs (their run history stays under the old ids until then) and the old Variables. Tags: the `Compliance` and `Compliance_Batch_Framework` tags are gone (no default tags in the code); each Variable sets its project's tag in `tags` (`Universe`, `UMCM`) and the step's name is still added. Variable keys: the Teradata Connection is read only from `td_conn_var` (no longer from `connection_id` or `gre.connection_id`) and the environment only from `load_env` (no longer from `environment` or `gre.environment`); move any such key to `td_conn_var` / `load_env`. The Connection `compliance_teradata` and the email subjects do not change |
 | 0.3.84 | No database change. New file check `INVALID_CHARACTERS` (8.6): `Check_Val_Txt` lists characters, comma separated (e.g. `<,>,~`); a file with any of them in its header, data rows or trailer fails FILE_CHECK and is rejected by FILE_LOAD, each line reported with the characters found. Nothing changes for files without such a row |
+| 0.3.85 | `airflow_resources/sql/upgrade_0.3.85.sql`: the alerts table `CMS_GOVT_RGLTRY_ExceptionsAudit` renamed to `GOVT_RGLTRY_ExceptionsAudit`, rename only. Run it with the DAGs paused before deploying 0.3.85 (skip it where the table already has the new name); the code reads and writes only the new name |
 | 0.3.83 | No database change. `td_conn_var` and `load_env` are required in every Variable, like `meta_db` (no `compliance_teradata` or `DEV` default): a Variable without one fails the task with `'<key>' is required in Airflow Variable '<variable>'`. The command line needs `FRAMEWORK_ENVIRONMENT` ("ENVIRONMENT is required" without it). `wdc_comp_oper_nas_var` is required in the FILE_CHECK, FILE_LOAD and FILE_MOVE Variables (no `comp_oper_creds` default): add `"wdc_comp_oper_nas_var": "comp_oper_creds"` (or your NAS Connection id) to those Variables before deploying. CMS Universe gets the ad-hoc export DAG `GOVT_RGLTRY_CMS_UNIVERSE_EXPORT_LOAD_ADHOC` (Variable `govt_rgltry_cms_universe_export_load_adhoc_config_var`, `run_type` `CMS`), like UMCM: copy the DAG file, create the Variable, and release CMS requests from that DAG; the scheduled export DAG is unchanged. `CONTROL_REPORT_FOLDER` and `ERROR_LOG_FOLDER` also take a full path (9.4); a folder name works as before. New standalone DAG FILE_MOVE (`GOVT_RGLTRY_<PROJECT>_FILE_MOVE`, 9.7 and 11.24): copies / moves files by name pattern from a folder to one or more folders; to use it copy the DAG file and create its Variable |
 
 ```sql

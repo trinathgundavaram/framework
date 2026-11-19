@@ -508,7 +508,7 @@ class FileChecker:
                 text += f"; details in {result['error_file']}"
         text = text[:TEXT_MAX]
         last = self.conn.execute(
-            """SELECT Event_Ty, Event_Txt FROM CMS_GOVT_RGLTRY_ExceptionsAudit WHERE File_Ref=%s
+            """SELECT Event_Ty, Event_Txt FROM GOVT_RGLTRY_ExceptionsAudit WHERE File_Ref=%s
                   AND Event_Ty IN ('FILE_CHECK_PASSED','FILE_CHECK_FAILED') ORDER BY Event_ID DESC""",
             (result["file"],)).fetchone()
         if last and last["event_ty"] == event and last["event_txt"] == text:

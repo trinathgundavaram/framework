@@ -14,7 +14,7 @@ This page lists, for each step (DAG), the tables it reads and writes, what each 
 | `$env` | Allowed in database names and NAS paths. Replaced by the environment (DEV, QA, PROD). Not replaced inside SQL text |
 | SQL text columns | One statement only. Placeholders like `{rpt_start}` are passed as values. Write `{rpt_start}`, not `'{rpt_start}'` |
 | Audit columns | `Load_Dtts`, `LoadUser_ID`, `LastUpdt_Dtts`, `LastUpdt_ID` are filled by the database. Leave them out of inserts |
-| Framework tables | `GOVT_RGLTRY_RequestControl`, `GOVT_RGLTRY_FileLoad`, `GOVT_RGLTRY_RequestFileDetail`, `CMS_GOVT_RGLTRY_ExceptionsAudit`, `GOVT_RGLTRY_Lock` are written by the framework only. Do not change them by hand unless a runbook procedure says so |
+| Framework tables | `GOVT_RGLTRY_RequestControl`, `GOVT_RGLTRY_FileLoad`, `GOVT_RGLTRY_RequestFileDetail`, `GOVT_RGLTRY_ExceptionsAudit`, `GOVT_RGLTRY_Lock` are written by the framework only. Do not change them by hand unless a runbook procedure says so |
 
 ## Order of steps
 
@@ -49,7 +49,7 @@ Creates one row per batch and source in `GOVT_RGLTRY_RequestControl`. Batches co
 | `GOVT_RGLTRY_SourceFileConfig`, `GOVT_RGLTRY_InternalSourceConfig` | Read | An ad-hoc request's source must have a file or query config |
 | `GOVT_RGLTRY_RequestControl` | Write | The batch rows |
 | `GOVT_RGLTRY_RequestFileDetail` | Write | `BATCH_CREATED` event |
-| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `INTAKE_FAILED`, configuration errors |
+| `GOVT_RGLTRY_ExceptionsAudit` | Write | `INTAKE_FAILED`, configuration errors |
 | `GOVT_RGLTRY_Lock` | Write | `SEQ:` lock while a batch ID is chosen, `INTAKE:` lock per request |
 
 ### GOVT_RGLTRY_Project
@@ -208,7 +208,7 @@ Checks the files waiting in the inbound folders. Loads nothing. A failed file ca
 | `GOVT_RGLTRY_FileCheckConfig` | Read | Which checks each file gets |
 | `GOVT_RGLTRY_RequestControl` | Read | The file must have an open batch |
 | `GOVT_RGLTRY_SourceSystem` | Read | The source must exist and be active |
-| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `FILE_CHECK_PASSED` (not emailed), `FILE_CHECK_FAILED` (emailed). One row per file and result |
+| `GOVT_RGLTRY_ExceptionsAudit` | Write | `FILE_CHECK_PASSED` (not emailed), `FILE_CHECK_FAILED` (emailed). One row per file and result |
 | `GOVT_RGLTRY_Lock` | Write | `OBJ:` lock while a file is checked |
 
 ### GOVT_RGLTRY_SourceFileConfig (file sources)
@@ -295,7 +295,7 @@ Loads every waiting file: name → batch → checks → staging → core. Then m
 | `GOVT_RGLTRY_BatchOverride` | Read | Approved `LATE_ARRIVAL` / `CORRECTION` lets a file into a closed batch |
 | `GOVT_RGLTRY_FileLoad` | Write | One row per file pickup |
 | `GOVT_RGLTRY_RequestFileDetail` | Write | `FILE_RECEIVED`, `FILE_LOADED`, `FILE_REPLACED_BEFORE_CLOSE`, `LATE_ARRIVAL_LOADED`, `CORRECTION_LOADED` |
-| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | Rejections and load problems |
+| `GOVT_RGLTRY_ExceptionsAudit` | Write | Rejections and load problems |
 | `GOVT_RGLTRY_Lock` | Write | `OBJ:` per file, `REQ:` per batch row, `BTCH:STAGE` per staging table |
 | Staging and core tables | Write | The data |
 
@@ -398,7 +398,7 @@ One row per event of a batch row. Written by every step.
 | `FILE_RULES_PASSED`, `FILE_RULES_FAILED` | Rules result |
 | `BATCH_CLOSED` | Closed |
 
-### CMS_GOVT_RGLTRY_ExceptionsAudit (alerts)
+### GOVT_RGLTRY_ExceptionsAudit (alerts)
 
 One row per problem or approval. Written by every step. Emailed by NOTIFY.
 
@@ -428,7 +428,7 @@ Pulls every open batch whose source has an internal source config, using its que
 | `GOVT_RGLTRY_RequestControl` | Read / Write | Open batches. Sets status and resolution |
 | `GOVT_RGLTRY_FileLoad` | Write | One row per pull |
 | `GOVT_RGLTRY_RequestFileDetail` | Write | `FILE_RECEIVED`, `FILE_LOADED`, `SOURCE_NO_DATA_YET` |
-| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `SOURCE_QUERY_FAILED`, `SOURCE_DATA_REJECTED`, `CORE_TYPE_MISMATCH` |
+| `GOVT_RGLTRY_ExceptionsAudit` | Write | `SOURCE_QUERY_FAILED`, `SOURCE_DATA_REJECTED`, `CORE_TYPE_MISMATCH` |
 | `GOVT_RGLTRY_Lock` | Write | `REQ:` per batch row, `BTCH:STAGE` per staging table |
 | Staging and core tables | Write | The data |
 
@@ -467,7 +467,7 @@ Applies approved `REUSE` (carry-forward) and `REOPEN` overrides. Reports expired
 | `GOVT_RGLTRY_RunType` | Read | `Carry_Fwd_Ind` must be 1 for `REUSE` |
 | `GOVT_RGLTRY_FileLoad` | Write | Earlier load becomes `RELOADED` when data is carried forward |
 | `GOVT_RGLTRY_RequestFileDetail` | Write | `CARRY_FORWARD_APPLIED`, `CARRY_FORWARD_REMOVED`, `BATCH_REOPENED` |
-| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `OVERRIDE_APPROVED`, `OVERRIDE_INVALID_DETECTED`, `OVERRIDE_EXPIRED`, `BATCH_REOPENED` |
+| `GOVT_RGLTRY_ExceptionsAudit` | Write | `OVERRIDE_APPROVED`, `OVERRIDE_INVALID_DETECTED`, `OVERRIDE_EXPIRED`, `BATCH_REOPENED` |
 | `GOVT_RGLTRY_Lock` | Write | `REQ:` per batch row (no wait) |
 
 ### GOVT_RGLTRY_BatchOverride (overrides)
@@ -506,7 +506,7 @@ Copies each due batch from core into the export table: by plain copy, by a custo
 | `GOVT_RGLTRY_RunType` | Read | Category, for held and released run types |
 | `GOVT_RGLTRY_SourceFileConfig`, `GOVT_RGLTRY_InternalSourceConfig` | Read | Core table of each source |
 | `GOVT_RGLTRY_TargetColumnConfig` | Read | The source column and other derived columns |
-| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `EXPORT_LOAD_FAILED` |
+| `GOVT_RGLTRY_ExceptionsAudit` | Write | `EXPORT_LOAD_FAILED` |
 | `GOVT_RGLTRY_Lock` | Write | `REQ:` per batch row, `BTCH:EXPORT` per export table |
 | Export tables | Write | The exported rows |
 
@@ -552,7 +552,7 @@ Runs the GRE data quality rules on each batch whose loaded data has not had its 
 | `GOVT_RGLTRY_RuleBinding` | Read | Which GRE rule groups to run |
 | `GOVT_RGLTRY_ExportConfig` | Read | A table with an export waits for the batch's export |
 | `GOVT_RGLTRY_RequestFileDetail` | Read / Write | Export time of the batch. Writes `FILE_RULES_PASSED` / `FILE_RULES_FAILED` |
-| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `RULES_VALIDATION_FAILED`, `RULES_ENGINE_TECHNICAL_FAILURE` |
+| `GOVT_RGLTRY_ExceptionsAudit` | Write | `RULES_VALIDATION_FAILED`, `RULES_ENGINE_TECHNICAL_FAILURE` |
 | `GOVT_RGLTRY_Lock` | Write | `RULES:<Btch_ID>` |
 | GRE tables (`gre_results`, `gre_exceptions` …) | Write (by GRE) | Rule results per batch. `run_key` = `Btch_ID` |
 
@@ -599,7 +599,7 @@ Closes every open batch whose close date has come, with or without data.
 | `GOVT_RGLTRY_RunType` | Read | `SLA_Days` (close date), category (ad-hoc stays open until released) |
 | `GOVT_RGLTRY_RequestFileDetail` | Read / Write | Release and reopen events. Writes `BATCH_CLOSED`, `BATCH_RELEASED` |
 | `GOVT_RGLTRY_BatchOverride` | Read | Reopened batches waiting for data stay open |
-| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Write | `SOURCE_MISSING_AT_CLOSE`, `BATCH_CLOSE_DEFERRED_LOCKED` |
+| `GOVT_RGLTRY_ExceptionsAudit` | Write | `SOURCE_MISSING_AT_CLOSE`, `BATCH_CLOSE_DEFERRED_LOCKED` |
 | `GOVT_RGLTRY_Lock` | Read | A batch being loaded is closed by the next run |
 
 | Batch at close | `Req_Stat` | `Resolution_Ty` | Alert |
@@ -620,7 +620,7 @@ Emails every alert not sent yet, one email per alert, then marks it sent. A fail
 
 | Table | Read / Write | Used for |
 |---|---|---|
-| `CMS_GOVT_RGLTRY_ExceptionsAudit` | Read / Write | Rows with `Notified_Ind = 0`. Sets `Notified_Ind = 1` after sending |
+| `GOVT_RGLTRY_ExceptionsAudit` | Read / Write | Rows with `Notified_Ind = 0`. Sets `Notified_Ind = 1` after sending |
 | `GOVT_RGLTRY_Lock` | Write | `EVT:<Event_ID>` while an alert is sent |
 
 ---

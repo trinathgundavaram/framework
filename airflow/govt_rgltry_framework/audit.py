@@ -91,7 +91,7 @@ class EventLogger:
             raise ConfigError(f"{event_ty} is not an exceptions-audit event")
         sev = severity or et.severity
         self.conn.execute(
-            """INSERT INTO CMS_GOVT_RGLTRY_ExceptionsAudit (Event_Ty, Sevrty, Project_Cd, Table_Nm, Src_ID, Run_Ty,
+            """INSERT INTO GOVT_RGLTRY_ExceptionsAudit (Event_Ty, Sevrty, Project_Cd, Table_Nm, Src_ID, Run_Ty,
                  Req_ID, Load_ID, Ovrd_ID, Intake_ID, Btch_ID, File_Ref, Actor, Event_Txt, Event_Dtts, Notified_Ind)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (event_ty, sev, project_cd, table_nm, src_id, run_ty, req_id, load_id, ovrd_id, intake_id,
@@ -121,7 +121,7 @@ class NotificationDispatcher:
         sent, self.failed = 0, []
         cond, params = scope.sql("") if scope is not None else ("", [])
         where = "Notified_Ind = 0" + cond
-        pending = self.conn.execute(f"SELECT TOP {int(limit)} Event_ID FROM CMS_GOVT_RGLTRY_ExceptionsAudit "
+        pending = self.conn.execute(f"SELECT TOP {int(limit)} Event_ID FROM GOVT_RGLTRY_ExceptionsAudit "
                                     f"WHERE {where} ORDER BY Event_Dtts, Event_ID", params).fetchall()
         for p in pending:
             key = db.row_key("EVT", p["event_id"])
@@ -129,13 +129,13 @@ class NotificationDispatcher:
                 log.info("NOTIFY | event %s | skipped: being sent by another run", p["event_id"])
                 continue
             try:
-                r = self.conn.execute("SELECT * FROM CMS_GOVT_RGLTRY_ExceptionsAudit WHERE Event_ID=%s "
+                r = self.conn.execute("SELECT * FROM GOVT_RGLTRY_ExceptionsAudit WHERE Event_ID=%s "
                                       "AND Notified_Ind = 0", (p["event_id"],)).fetchone()
                 if r is None:
                     log.info("NOTIFY | event %s | skipped: already sent by another run", p["event_id"])
                     continue
                 if self._send(r):
-                    self.conn.execute("UPDATE CMS_GOVT_RGLTRY_ExceptionsAudit SET Notified_Ind = 1 WHERE Event_ID=%s",
+                    self.conn.execute("UPDATE GOVT_RGLTRY_ExceptionsAudit SET Notified_Ind = 1 WHERE Event_ID=%s",
                                       (r["event_id"],))
                     sent += 1
                 else:

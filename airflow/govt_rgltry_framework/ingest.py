@@ -366,7 +366,7 @@ class IngestPipeline:
         return self.conn.execute(
             f"""SELECT f.Load_ID, f.Load_Stat FROM GOVT_RGLTRY_FileLoad f
                  WHERE f.File_Share=%s AND f.File_Path=%s AND f.File_Version=%s AND f.Load_Stat IN ({marks})
-                   AND EXISTS (SELECT 1 FROM CMS_GOVT_RGLTRY_ExceptionsAudit a
+                   AND EXISTS (SELECT 1 FROM GOVT_RGLTRY_ExceptionsAudit a
                                 WHERE a.Load_ID = f.Load_ID AND a.Event_Ty = 'FILE_MOVE_FAILED')
                  ORDER BY f.Load_ID DESC""", [info.share, info.path, info.version, *terminal]).fetchone()
 
@@ -453,7 +453,7 @@ class IngestPipeline:
             if lock and lock["acquired_dtts"] and now - lock["acquired_dtts"] >= STALE_LOCK:
                 detail = (f"{busy} has been locked since {lock['acquired_dtts']} by {lock['owner_id']}; its files and "
                           f"pulls wait. If that run no longer exists: release-lock --key {key}")
-                if not self.conn.execute("SELECT 1 AS ok FROM CMS_GOVT_RGLTRY_ExceptionsAudit WHERE Event_Ty="
+                if not self.conn.execute("SELECT 1 AS ok FROM GOVT_RGLTRY_ExceptionsAudit WHERE Event_Ty="
                                          "'STAGING_LOCK_STALE' AND Event_Txt=%s", (detail,)).fetchone():
                     self.logger.audit("STAGING_LOCK_STALE", load_id=load_id, description=detail)
         log.warning("load %s deferred: %s (lock held by %s since %s)", load_id, text,
@@ -671,7 +671,7 @@ class IngestPipeline:
             log.info("FILE_LOAD | %s | load %s | moved to %s", basename(info.path), load_id, self.store.uri(info.share, moved))
         except Exception as e:  # noqa: BLE001
             log.warning("moving %s to %s/ failed: %s", info.path, folder, e)
-            if self.conn.execute("SELECT 1 AS ok FROM CMS_GOVT_RGLTRY_ExceptionsAudit WHERE Load_ID=%s "
+            if self.conn.execute("SELECT 1 AS ok FROM GOVT_RGLTRY_ExceptionsAudit WHERE Load_ID=%s "
                                  "AND Event_Ty='FILE_MOVE_FAILED'", (load_id,)).fetchone():
                 return
             with self.conn.transaction():
@@ -695,7 +695,7 @@ class IngestPipeline:
 
     def _report_technical_failure(self, load_id: int, err: Exception) -> None:
         """One FILE_TECHNICAL_FAILURE event (emailed) per load."""
-        if self.conn.execute("SELECT 1 AS ok FROM CMS_GOVT_RGLTRY_ExceptionsAudit WHERE Load_ID=%s "
+        if self.conn.execute("SELECT 1 AS ok FROM GOVT_RGLTRY_ExceptionsAudit WHERE Load_ID=%s "
                              "AND Event_Ty='FILE_TECHNICAL_FAILURE'", (load_id,)).fetchone():
             return
         row = self.conn.execute(
